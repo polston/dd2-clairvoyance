@@ -23,6 +23,8 @@ $general = @(
 )
 $copyWord = [regex]::new('\b[Pp]ort(ed|ing)?\b', "IgnoreCase") # provenance-pattern
 foreach ($f in (& git ls-files)) {
+    # The places file is generated game data (names and coordinates), not authored text.
+    if ($f -eq "data/Clairvoyance_places.json") { continue }
     $path = Join-Path $root $f
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
     $isMd = $f -match '\.md$'
