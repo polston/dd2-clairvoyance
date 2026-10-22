@@ -66,10 +66,23 @@ after a game patch. CI and the release zip use the committed copy.
 
 ## Releasing
 
-1. Bump `version=` in `modinfo.ini` and commit.
-2. Tag the commit `v<version>`, for example `v0.1.0`.
-3. Push the tag. CI builds the zip and publishes it on the Releases page; it
-   fails if the tag does not equal `v` plus the `modinfo.ini` version.
+Releases are automatic. Every push to `master` is read by `scripts/next_version.py`,
+which looks at the commits since the latest `v<major>.<minor>.<patch>` tag and
+bumps the version from their Conventional Commit types:
+
+| Commits since the last tag | Bump |
+| --- | --- |
+| a `BREAKING CHANGE:` footer, or `type!:` / `type(scope)!:` | major |
+| otherwise any `feat` | minor |
+| otherwise any `fix` or `perf` | patch |
+| only `refactor`, `docs`, `test`, `build`, `ci`, `chore`, `style`, `revert` | no release |
+
+When a bump is due, CI builds the zip, creates the release `v<version>` on the
+Releases page with generated notes, and attaches the zip. Do not tag by hand.
+Pull requests fail CI if a commit subject is not `type(scope)?!?: description`.
+
+`modinfo.ini` keeps `version=1.0.0` as a placeholder; the release zip carries the
+real version.
 
 ## License
 

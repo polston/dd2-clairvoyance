@@ -10,5 +10,6 @@
    repo, gitignored here and never pushed; roadmap and spec edits are committed there.
 4. Third-party reference sources live in `reference/` (gitignored, never committed).
 5. CI (`.github/workflows/ci.yml`) runs `check.ps1 -SkipProvenance` and builds the zip
-   from the committed `data/Clairvoyance_places.json`; release = bump `version=` in
-   `modinfo.ini`, commit, tag `v<version>`, push the tag (the operator pushes).
+   from the committed `data/Clairvoyance_places.json`; releases are automatic from
+   Conventional Commit types on push to master (`scripts/next_version.py`), never hand-tagged.
+6. Commit titles must follow Conventional Commits: `type(scope)?!?: description` with type feat, fix, perf, refactor, docs, test, build, ci, chore, style or revert.

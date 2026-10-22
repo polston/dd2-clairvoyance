@@ -36,5 +36,6 @@ here and never pushed; roadmap and spec edits are committed there, not in this r
    gitignored `tools/pak_key.local.txt`; it is never printed, committed or
    zipped.
 6. CI (`.github/workflows/ci.yml`) runs `check.ps1 -SkipProvenance` and builds the zip
-   from the committed `data/Clairvoyance_places.json`; release = bump `version=` in
-   `modinfo.ini`, commit, tag `v<version>`, push the tag (the operator pushes).
+   from the committed `data/Clairvoyance_places.json`; releases are automatic from
+   Conventional Commit types on push to master (`scripts/next_version.py`), never hand-tagged.
+7. Commit titles must follow Conventional Commits: `type(scope)?!?: description` with type feat, fix, perf, refactor, docs, test, build, ci, chore, style or revert.
