@@ -1,0 +1,2844 @@
+-- tests/core_test.lua
+package.path = package.path .. ";./reframework/autorun/?.lua"
+local core = require("Clairvoyance.core")
+local SHOW_ALL = { startable=true, in_progress=true, completed=true, unavailable=true, locked=true }
+
+local function base_adapter(over)
+  local a = {
+    acceptable_ids = function() return {} end,
+    progressing_ids = function() return {} end,
+    is_side = function() return true end,
+    is_unavailable = function() return false end,
+    giver_hint = function() return nil end,
+    is_generic = function() return false end,
+    cast_ids = function() return nil end,
+    catalog_pos = function() return nil end,
+    static_pos = function() return nil end,
+    npc_alive = function() return true end,
+    npc_pos = function() return nil end,
+    quest_name = function(qid) return "Q" .. qid end,
+    quest_state = function() return nil end,
+    catalog_ids = function() return {} end,
+  }
+  for k, v in pairs(over or {}) do a[k] = v end
+  return a
+end
+
+-- Data-driven adapter for v2 cases: each key is a table; absent keys are empty.
+local function fake_adapter(o)
+  local a = {}
+  local function g(k) return o[k] or {} end
+  a.acceptable_ids = function() return g("acceptable") end
+  a.progressing_ids = function() return g("progressing") end
+  a.catalog_ids = function() return g("catalog") end
+  a.quest_state = function(q) return g("states")[q] end
+  a.npc_alive = function(c) return not g("dead")[c] end
+  a.cast_ids = function(q) return g("casts")[q] end
+  a.static_pos = function(q) return g("statics")[q] end
+  a.catalog_pos = function(q)
+    local p = g("catpos")[q]; if p then return p.x, p.y, p.z end
+  end
+  a.npc_pos = function(c)
+    local p = g("npc_pos")[c]; if p then return p.x, p.y, p.z end
+  end
+  a.giver_hint = function(q) return g("hints")[q] end
+  a.quest_name = function(q) return g("names")[q] end
+  a.is_side = function() return true end
+  a.is_generic = function() return false end
+  a.is_unavailable = function(q) return a.quest_state(q) ~= nil end
+  a.objective_cids = function(q) return g("objectives")[q] end
+  if o.gates then
+    a.gate_qids = function(q)
+      if o.gate_calls then o.gate_calls[#o.gate_calls + 1] = q end
+      return o.gates[q]
+    end
+  end
+  if o.regions then
+    a.quest_region = function(q)
+      if o.region_calls then o.region_calls[#o.region_calls + 1] = q end
+      return o.regions[q]
+    end
+  end
+  if o.tgates then
+    a.tree_gate_qids = function(q)
+      if o.tgate_calls then o.tgate_calls[#o.tgate_calls + 1] = q end
+      return o.tgates[q]
+    end
+  end
+  if o.name_calls then
+    local base = a.quest_name
+    a.quest_name = function(q) o.name_calls[#o.name_calls + 1] = q; return base(q) end
+  end
+  if o.seen then a.seen_quest_name = function(q) return o.seen[q] end end
+  if o.item_needs then
+    a.item_needs = function() return o.item_needs end
+    a.item_locations = function() return o.item_locs or {} end
+    a.item_name = function(id)
+      if o.item_name_calls then o.item_name_calls[#o.item_name_calls + 1] = id end
+      return (o.item_names or {})[id]
+    end
+  end
+  a.npc_name = function(c) return g("npc_names")[c] end
+  a.objective_pos = function(c)
+    local p = g("objective_pos")[c]; if p then return p.x, p.y, p.z end
+  end
+  return a
+end
+
+local failures = 0
+local function check(name, cond)
+  if not cond then failures = failures + 1; print("FAIL: " .. name) end
+end
+
+-- 1. unavailable game state
+check("nil acceptable -> nil result",
+  core.compute(base_adapter({ acceptable_ids = function() return nil end }), SHOW_ALL) == nil)
+check("nil progressing -> nil result",
+  core.compute(base_adapter({ progressing_ids = function() return nil end }), SHOW_ALL) == nil)
+
+-- 2. empty world
+local r = core.compute(base_adapter(), SHOW_ALL)
+check("empty: no markers", r ~= nil and #r.markers == 0 and r.counts.startable == 0)
+
+-- 3. filters
+r = core.compute(base_adapter({
+  acceptable_ids = function() return {10, 20, 30, 40} end,
+  progressing_ids = function() return {20} end,
+  is_side = function(q) return q ~= 30 end,
+  quest_state = function(q) if q == 40 then return "completed" end end,
+  giver_hint = function(q) return q == 10 and 5 or nil end,
+  npc_pos = function(c) if c == 5 then return 1, 2, 3 end end,
+}), SHOW_ALL)
+check("filters: only qid 10 survives", #r.markers == 1 and r.markers[1].qids[1] == 10)
+check("npc marker key", r.markers[1].key == "c:5")
+check("filters: 40 counted completed", r.counts.completed == 1)
+
+-- 4. dead hint: v1 skip is gone by design (SPEC 9.2f): giver_dead, resolves via static
+r = core.compute(base_adapter({
+  acceptable_ids = function() return {10} end,
+  giver_hint = function() return 5 end,
+  npc_alive = function() return false end,
+  static_pos = function() return {x=1,y=1,z=1} end,
+}), SHOW_ALL)
+check("dead hint: giver_dead, resolves via static",
+  #r.markers == 1 and r.markers[1].cat == "unavailable"
+  and r.counts.giver_dead == 1 and r.counts.startable == 0)
+
+-- 5. absent hint falls through: catalog, then static
+r = core.compute(base_adapter({
+  acceptable_ids = function() return {10} end,
+  giver_hint = function() return 5 end,
+  npc_pos = function() return nil end,
+  catalog_pos = function() return 7, 8, 9 end,
+}), SHOW_ALL)
+check("absent hint -> catalog pos", #r.markers == 1 and r.markers[1].pos.x == 7)
+r = core.compute(base_adapter({
+  acceptable_ids = function() return {10} end,
+  giver_hint = function() return 5 end,
+  static_pos = function() return {x=4,y=4,z=4} end,
+}), SHOW_ALL)
+check("absent hint, no catalog -> static", #r.markers == 1 and r.markers[1].pos.x == 4)
+
+-- 6. can_use_cast: multi-cast with a static fallback -> static wins
+r = core.compute(base_adapter({
+  acceptable_ids = function() return {10} end,
+  cast_ids = function() return {6, 7} end,
+  npc_pos = function(c) return 100 + c, 0, 0 end,
+  static_pos = function() return {x=4,y=4,z=4} end,
+}), SHOW_ALL)
+check("multi-cast + static -> static", r.markers[1].pos.x == 4)
+-- multi-cast WITHOUT static -> first live cast NPC
+r = core.compute(base_adapter({
+  acceptable_ids = function() return {10} end,
+  cast_ids = function() return {6, 7} end,
+  npc_pos = function(c) return 100 + c, 0, 0 end,
+}), SHOW_ALL)
+check("multi-cast, no static -> cast NPC", r.markers[1].pos.x == 106)
+
+-- 7. generic NPCs excluded from cast
+r = core.compute(base_adapter({
+  acceptable_ids = function() return {10} end,
+  cast_ids = function() return {6, 7} end,
+  is_generic = function(c) return c == 6 end,
+  npc_pos = function(c) return 100 + c, 0, 0 end,
+  static_pos = function() return {x=4,y=4,z=4} end,
+}), SHOW_ALL)
+check("generic excluded leaves 1 cand -> cast usable", r.markers[1].pos.x == 107)
+
+-- 8. unresolvable -> unresolved list (with the quest's name when known)
+r = core.compute(base_adapter({ acceptable_ids = function() return {10} end }), SHOW_ALL)
+check("no sources -> unresolved", #r.markers == 0 and r.unresolved[10] ~= nil)
+check("unresolved carries name", r.unresolved[10].name == "Q10")
+-- 8b. hint ALIVE but position unresolvable and no catalog/static -> unresolved
+r = core.compute(base_adapter({
+  acceptable_ids = function() return {10} end,
+  giver_hint = function() return 5 end,
+}), SHOW_ALL)
+check("alive hint, nothing resolves -> unresolved",
+  #r.markers == 0 and r.unresolved[10] ~= nil and r.counts.startable == 1)
+
+-- 9. grouping + label order + name fallback
+r = core.compute(base_adapter({
+  acceptable_ids = function() return {30, 10} end,
+  giver_hint = function() return 5 end,
+  npc_pos = function() return 1, 2, 3 end,
+  quest_name = function(q) if q == 10 then return "Alpha" end return nil end,
+}), SHOW_ALL)
+check("shared giver groups", #r.markers == 1 and #r.markers[1].qids == 2)
+check("qids ascending", r.markers[1].qids[1] == 10 and r.markers[1].qids[2] == 30)
+check("label join + fallback", r.markers[1].label == "Alpha - startable / Quest 30 - startable")
+check("fallback qid recorded as unnamed", r.unnamed[30] == true and r.unnamed[10] == nil)
+
+-- 10. signature hysteresis
+local m = { { key = "c:5", pos = {x=0,y=0,z=0}, qids = {10}, label = "Alpha" } }
+local sig1, committed = core.signature(m, {})
+m[1].pos = {x=3,y=0,z=0}  -- < 5 units
+local sig2, committed2 = core.signature(m, committed)
+check("<5 units: stable sig", sig1 == sig2)
+check("<5 units: pos rewritten to committed", m[1].pos.x == 0)
+m[1].pos = {x=6,y=0,z=0}  -- > 5 units
+local sig3 = core.signature(m, committed2)
+check(">5 units: sig changes", sig3 ~= sig1)
+
+-- 11. quest-set change changes signature
+local mA = { { key = "c:5", pos = {x=0,y=0,z=0}, qids = {10, 30}, label = "x" } }
+local mB = { { key = "c:5", pos = {x=0,y=0,z=0}, qids = {10}, label = "x" } }
+local sA = core.signature(mA, {})
+local sB = core.signature(mB, {})
+check("qid set in sig", sA ~= sB)
+
+-- 12. label change changes signature (a name resolving later must rebuild)
+local mC = { { key = "c:5", pos = {x=0,y=0,z=0}, qids = {10}, label = "Quest 10" } }
+local mD = { { key = "c:5", pos = {x=0,y=0,z=0}, qids = {10}, label = "Alpha" } }
+check("label in sig", core.signature(mC, {}) ~= core.signature(mD, {}))
+
+-- category assignment and precedence: failed beats completed-shaped quests
+do
+  local a = fake_adapter({
+    acceptable = {}, progressing = {},
+    catalog = { 101, 102, 103, 104 },
+    states = { [101]="failed", [102]="canceled", [103]="completed" },
+    -- 104: no state, not acceptable -> locked
+  })
+  local r = core.compute(a, SHOW_ALL)
+  assert(r.counts.failed == 1 and r.counts.canceled == 1)
+  assert(r.counts.completed == 1 and r.counts.locked == 1)
+  assert(r.counts.startable == 0)
+end
+
+-- acceptable with no hint is startable; in_progress beats state
+do
+  local a = fake_adapter({ acceptable = { 201 }, progressing = { 202 },
+    catalog = {}, states = { [202]="completed" } })
+  local r = core.compute(a, SHOW_ALL)
+  assert(r.counts.startable == 1)
+  assert(r.counts.in_progress == 1)
+  assert(r.counts.completed == 0)
+end
+
+-- dead hinted giver -> giver_dead, still resolves via static
+do
+  local a = fake_adapter({ acceptable = { 301 }, hints = { [301] = 9001 },
+    dead = { [9001] = true }, statics = { [301] = {x=1,y=2,z=3} } })
+  local r = core.compute(a, SHOW_ALL)
+  assert(r.counts.giver_dead == 1)
+  assert(#r.markers == 1 and r.markers[1].cat == "unavailable")
+end
+
+-- no hint, exactly one cast candidate, dead -> giver_dead
+do
+  local a = fake_adapter({ acceptable = { 302 }, casts = { [302] = { 9002 } },
+    dead = { [9002] = true }, statics = { [302] = {x=1,y=2,z=3} } })
+  local r = core.compute(a, SHOW_ALL)
+  assert(r.counts.giver_dead == 1)
+end
+
+-- hidden categories: dropped before resolution, no leaks
+do
+  local a = fake_adapter({
+    acceptable = { 401 }, catalog = { 401, 402 },
+    hints = { [401] = 9100, [402] = 9100 },     -- shared giver
+    npc_pos = { [9100] = {x=10,y=0,z=10} },
+  })  -- 402 has no state, not acceptable -> locked
+  local show = { startable=true, in_progress=true, completed=true,
+    unavailable=true, locked=false }
+  local r = core.compute(a, show)
+  assert(r.counts.locked == 1)                 -- counted
+  assert(#r.markers == 1)
+  assert(r.markers[1].cat == "startable")
+  assert(not r.markers[1].label:find("402"))   -- not in label
+  assert(r.unresolved[402] == nil and r.unnamed[402] == nil)
+end
+
+-- shared position: startable outranks completed for marker color group
+do
+  local a = fake_adapter({ acceptable = { 501 }, catalog = { 501, 502 },
+    states = { [502]="completed" },
+    hints = { [501]=9200, [502]=9200 }, npc_pos = { [9200]={x=5,y=0,z=5} } })
+  local r = core.compute(a, SHOW_ALL)
+  assert(#r.markers == 1 and r.markers[1].cat == "startable")
+  assert(r.markers[1].label:find("completed"))  -- state text still in label
+end
+
+-- label format: "<name> - <state>"
+do
+  local a = fake_adapter({ acceptable = { 601 }, hints = { [601]=9300 },
+    npc_pos = { [9300]={x=1,y=1,z=1} }, names = { [601]="Alpha" } })
+  local r = core.compute(a, SHOW_ALL)
+  assert(r.markers[1].label == "Alpha - startable")
+end
+
+-- union universe: catalog nil must not hide acceptable quests
+do
+  local a = fake_adapter({ acceptable = { 701 }, hints = { [701]=9400 },
+    npc_pos = { [9400]={x=1,y=1,z=1} } })
+  a.catalog_ids = function() return nil end
+  local r = core.compute(a, SHOW_ALL)
+  assert(#r.markers == 1)
+end
+
+-- signature changes when cat changes with same label
+do
+  local m1 = { { key="c:1", pos={x=1,y=1,z=1}, qids={1}, label="L", cat="startable" } }
+  local m2 = { { key="c:1", pos={x=1,y=1,z=1}, qids={1}, label="L", cat="completed" } }
+  local s1 = core.signature(m1, {})
+  local s2 = core.signature(m2, {})
+  assert(s1 ~= s2)
+end
+
+-- color precedence must not be "first quest wins": startable has the HIGHER id
+do
+  local a = fake_adapter({ acceptable = { 502 }, catalog = { 501, 502 },
+    states = { [501] = "completed" },
+    hints = { [501] = 9200, [502] = 9200 }, npc_pos = { [9200] = {x=5,y=0,z=5} } })
+  local r = core.compute(a, SHOW_ALL)
+  assert(#r.markers == 1 and r.markers[1].cat == "startable")
+end
+-- and in_progress (higher id) beats a shown locked (lower id)
+do
+  local a = fake_adapter({ progressing = { 812 }, catalog = { 811, 812 },
+    hints = { [811] = 9210, [812] = 9210 }, npc_pos = { [9210] = {x=5,y=0,z=5} } })
+  local r = core.compute(a, SHOW_ALL)
+  assert(#r.markers == 1 and r.markers[1].cat == "in_progress")
+end
+
+-- hidden quest must not influence a shared marker's color (not just its label)
+do
+  local a = fake_adapter({ progressing = { 801 }, catalog = { 802 },
+    states = { [802] = "completed" },
+    hints = { [801] = 9500, [802] = 9500 }, npc_pos = { [9500] = {x=1,y=1,z=1} } })
+  local show = { startable=true, in_progress=false, completed=true,
+    unavailable=true, locked=true }
+  local r = core.compute(a, show)
+  assert(#r.markers == 1 and r.markers[1].cat == "completed")
+  assert(r.markers[1].label == "Quest 802 - completed")
+end
+
+-- visibility filter must run BEFORE resolution: a hidden quest that cannot
+-- resolve stays out of unresolved, and hidden quests pay no position calls
+do
+  local calls = { pos = 0, static = 0 }
+  local a = fake_adapter({
+    acceptable = { 401 }, catalog = { 401, 402, 403 },
+    hints = { [401] = 9100, [402] = 9100 },   -- 403: no hint/cast/static
+    npc_pos = { [9100] = {x=10,y=0,z=10} },
+  })
+  local real_pos, real_static = a.npc_pos, a.static_pos
+  a.npc_pos = function(c) calls.pos = calls.pos + 1; return real_pos(c) end
+  a.static_pos = function(q)
+    if q == 402 or q == 403 then calls.static = calls.static + 1 end
+    return real_static(q)
+  end
+  local show = { startable=true, in_progress=true, completed=true,
+    unavailable=true, locked=false }
+  local r = core.compute(a, show)
+  assert(r.counts.locked == 2)
+  assert(r.unresolved[403] == nil, "hidden unresolvable quest leaked")
+  assert(r.unresolved[402] == nil and r.unnamed[402] == nil)
+  assert(calls.static == 0, "hidden quests paid static_pos calls")
+  assert(calls.pos == 1, "hidden quests paid npc_pos calls")
+end
+
+-- dead hinted giver resolves via CATALOG position too (not only static)
+do
+  local a = fake_adapter({ acceptable = { 303 }, hints = { [303] = 9003 },
+    dead = { [9003] = true }, catpos = { [303] = {x=7,y=8,z=9} } })
+  local r = core.compute(a, SHOW_ALL)
+  assert(#r.markers == 1 and r.markers[1].pos.x == 7)
+end
+
+-- nameless quest falls back to "Quest <qid> - <state>"
+do
+  local a = fake_adapter({ acceptable = { 601 }, hints = { [601] = 9300 },
+    npc_pos = { [9300] = {x=1,y=1,z=1} } })
+  local r = core.compute(a, SHOW_ALL)
+  assert(r.markers[1].label == "Quest 601 - startable")
+  assert(r.unnamed[601] == true)
+end
+
+-- cut/unreleased content: a locked quest with no name from any source
+-- gets no marker (counted, but suppressed before resolution) and appears in
+-- neither unresolved nor unnamed
+do
+  local a = fake_adapter({ catalog = { 901, 902 },
+    hints = { [901] = 9900, [902] = 9900 },
+    npc_pos = { [9900] = {x=1,y=1,z=1} },
+    names = { [901] = "Real Future Quest" } })
+  local show = { startable=true, in_progress=true, completed=true,
+    unavailable=true, locked=true }
+  local r = core.compute(a, show)
+  check("suppress: both counted", r.counts.locked == 2)
+  check("suppress: unnamed locked dropped", #r.markers == 1)
+  check("suppress: label kept for named",
+    r.markers[1].label == "Real Future Quest - locked")
+  check("suppress: not in unresolved", r.unresolved[902] == nil)
+  check("suppress: not in unnamed", r.unnamed[902] == nil)
+end
+-- variant: the suppressed quest has no resolvable position at all
+do
+  local a = fake_adapter({ catalog = { 903 } })
+  local show = { startable=true, in_progress=true, completed=true,
+    unavailable=true, locked=true }
+  local r = core.compute(a, show)
+  check("suppress/no-pos: counted", r.counts.locked == 1)
+  check("suppress/no-pos: no marker", #r.markers == 0)
+  check("suppress/no-pos: not in unresolved", r.unresolved[903] == nil)
+  check("suppress/no-pos: not in unnamed", r.unnamed[903] == nil)
+end
+-- empty-string name is treated like nil
+do
+  local a = fake_adapter({ catalog = { 904 },
+    hints = { [904] = 9900 }, npc_pos = { [9900] = {x=1,y=1,z=1} },
+    names = { [904] = "" } })
+  local show = { startable=true, in_progress=true, completed=true,
+    unavailable=true, locked=true }
+  local r = core.compute(a, show)
+  check("suppress: empty-string name suppressed", #r.markers == 0)
+end
+
+-- v3: marker_cid
+assert(core.marker_cid({ key = "c:123" }) == 123, "marker_cid c-key")
+assert(core.marker_cid({ key = "p:1:2:3" }) == nil, "marker_cid p-key")
+assert(core.marker_cid({ key = "c:" }) == nil, "marker_cid empty")
+assert(core.marker_cid({ key = "c:-3" }) == nil, "marker_cid negative")
+assert(core.marker_cid({}) == nil, "marker_cid nil key")
+assert(core.marker_cid(nil) == nil, "marker_cid non-table")
+assert(core.marker_cid({ key = string.format("c:%d", 5.0) }) == 5,
+  "marker_cid float cid round-trip")
+
+-- v3: overhead_anchors. marker.pos is map-space, the camera transform-space
+-- (SPEC §10.8b): a cid with no prev_pos is ALWAYS selected regardless of
+-- marker.pos; the distance cull applies only to prev_pos entries.
+local mk = function(key, x) return { key = key, pos = { x = x, y = 0, z = 0 } } end
+local ms = { mk("c:1", 9999), mk("c:2", 9999), mk("p:9:9:9", 0) }
+local sel = core.overhead_anchors(ms, {}, { x = 0, y = 0, z = 0 }, 50)
+assert(#sel == 2, "overhead_anchors: unacquired cids never culled, p-keys excluded")
+sel = core.overhead_anchors(ms, { [2] = { x = 1000, y = 0, z = 0 } },
+  { x = 0, y = 0, z = 0 }, 50)
+assert(#sel == 1 and sel[1].cid == 1,
+  "overhead_anchors culls a far prev_pos, keeps the unacquired cid")
+sel = core.overhead_anchors(ms, { [2] = { x = 10, y = 0, z = 0 } },
+  { x = 0, y = 0, z = 0 }, 50)
+assert(#sel == 2, "overhead_anchors keeps a near prev_pos")
+sel = core.overhead_anchors({ mk("c:3", 9999) }, { [3] = { x = 50, y = 0, z = 0 } },
+  { x = 0, y = 0, z = 0 }, 50)
+assert(#sel == 1, "overhead_anchors boundary inclusive")
+sel = core.overhead_anchors({ mk("c:1", 9999) }, { [7] = { x = 0, y = 0, z = 0 } },
+  { x = 0, y = 0, z = 0 }, 50)
+assert(#sel == 1 and sel[1].cid == 1,
+  "overhead_anchors ignores prev_pos cids absent from markers")
+
+-- v3: compute keys a float-typed integer cid as c:<int> (not "c:5.0")
+do
+  local a = fake_adapter({ acceptable = { 10 }, hints = { [10] = 5.0 },
+    npc_pos = { [5] = {x=1,y=2,z=3} } })
+  local r = core.compute(a, SHOW_ALL)
+  assert(r and #r.markers == 1, "float cid: one marker")
+  assert(r.markers[1].key == "c:5", "float cid keys as c:5")
+end
+-- v4: minimap_markers
+local mmk = function(key, x, y, z)
+  return { key = key, pos = { x = x, y = y or 0, z = z or 0 } }
+end
+local mm = core.minimap_markers
+local lst, near = mm({ mmk("c:1", 10), mmk("p:0:0:0", 300), mmk("c:2", 50) },
+  { x = 0, y = 0, z = 0 }, 200, 12)
+check("mm: in-radius kept, far dropped", #lst == 2)
+check("mm: nearest-first", lst[1].key == "c:1" and lst[2].key == "c:2")
+check("mm: nearest distance", near == 10)
+lst = mm({ mmk("c:3", 0, 120, 160) }, { x = 0, y = 0, z = 0 }, 200, 12)
+check("mm: boundary inclusive, 3D", #lst == 1)
+lst = mm({ mmk("c:4", 0, 120, 161) }, { x = 0, y = 0, z = 0 }, 200, 12)
+check("mm: just outside, 3D", #lst == 0)
+lst = mm({ mmk("c:1", 30), mmk("c:2", 20), mmk("c:3", 10) },
+  { x = 0, y = 0, z = 0 }, 200, 2)
+check("mm: cap keeps closest", #lst == 2 and lst[1].key == "c:3" and lst[2].key == "c:2")
+lst = mm({ mmk("b", 10), mmk("a", 10) }, { x = 0, y = 0, z = 0 }, 200, 12)
+check("mm: stable tie order by key", lst[1].key == "a" and lst[2].key == "b")
+lst, near = mm({}, { x = 0, y = 0, z = 0 }, 200, 12)
+check("mm: empty markers", #lst == 0 and near == nil)
+lst = mm({ mmk("c:1", 10) }, nil, 200, 12)
+check("mm: nil origin", #lst == 0)
+lst = mm(nil, { x = 0, y = 0, z = 0 }, 200, 12)
+check("mm: nil markers", #lst == 0)
+-- v5: objective_table
+local T = core.objective_table
+local P = { [10] = true }
+local r1 = T({ {qid=10,cid=7,issued=false}, {qid=10,cid=5,issued=true},
+  {qid=10,cid=7,issued=false}, {qid=10,cid=9,issued=true} }, nil, P)
+check("ot: issued first, ascending, deduped",
+  #r1.cids[10] == 3 and r1.cids[10][1] == 5 and r1.cids[10][2] == 9
+  and r1.cids[10][3] == 7)
+local r1b = T({ {qid=10,cid=9,issued=true}, {qid=10,cid=7,issued=false},
+  {qid=10,cid=5,issued=true} }, nil, P)
+check("ot: order independent of record order",
+  r1b.cids[10][1] == 5 and r1b.cids[10][2] == 9 and r1b.cids[10][3] == 7)
+check("ot: cid issued in any record sorts issued",
+  T({ {qid=10,cid=7,issued=false}, {qid=10,cid=7,issued=true},
+      {qid=10,cid=3,issued=false} }, nil, P).cids[10][1] == 7)
+-- sticky within tier: 9 chosen first stays over 5
+local s0 = T({ {qid=10,cid=9,issued=true} }, nil, P)
+local s1 = T({ {qid=10,cid=9,issued=true}, {qid=10,cid=5,issued=true} }, s0, P)
+check("ot: sticky first survives same-tier newcomer", s1.cids[10][1] == 9)
+local s2 = T({ {qid=10,cid=9,issued=true}, {qid=10,cid=5,issued=true} }, s1, P)
+check("ot: sticky first survives two same-tier builds", s2.cids[10][1] == 9)
+-- debounce: non-issued sticky vs new issued cid
+local d0 = T({ {qid=10,cid=7,issued=false} }, nil, P)
+local d1 = T({ {qid=10,cid=7,issued=false}, {qid=10,cid=5,issued=true} }, d0, P)
+check("ot: one issued build does not displace", d1.cids[10][1] == 7)
+local d2 = T({ {qid=10,cid=7,issued=false}, {qid=10,cid=5,issued=true} }, d1, P)
+check("ot: second consecutive issued build displaces", d2.cids[10][1] == 5)
+local f1 = T({ {qid=10,cid=7,issued=false}, {qid=10,cid=5,issued=true} }, d0, P)
+local f2 = T({ {qid=10,cid=7,issued=false} }, f1, P)
+local f3 = T({ {qid=10,cid=7,issued=false}, {qid=10,cid=5,issued=true} }, f2, P)
+check("ot: flicker resets the streak", f3.cids[10][1] == 7)
+local g1 = T({ {qid=10,cid=7,issued=false}, {qid=10,cid=5,issued=true} }, d0, P)
+local g2 = T({ {qid=10,cid=7,issued=false}, {qid=10,cid=3,issued=true} }, g1, P)
+check("ot: streak is per top cid", g2.cids[10][1] == 7)
+-- retention
+local m0 = T({ {qid=10,cid=7,issued=false} }, nil, P)
+local m1 = T({}, m0, P)
+local m2 = T({}, m1, P)
+local m3 = T({}, m2, P)
+check("ot: absent qid retained 3 builds",
+  m1.cids[10] ~= nil and m2.cids[10] ~= nil and m3.cids[10] ~= nil)
+check("ot: dropped on 4th miss", T({}, m3, P).cids[10] == nil)
+check("ot: non-progressing drops at once", T({}, m0, {}).cids[10] == nil)
+check("ot: non-progressing record ignored",
+  T({ {qid=11,cid=7,issued=true} }, nil, P).cids[11] == nil)
+
+-- v5: resolution
+local function objadapter(over)
+  local base = {
+    acceptable_ids = function() return {} end,
+    progressing_ids = function() return {10} end,
+    giver_hint = function() return 5 end,
+    npc_pos = function(c) if c == 5 then return 1, 1, 1 end
+      if c == 77 then return 9, 9, 9 end end,
+    objective_cids = function(q) return q == 10 and {77} or nil end,
+  }
+  local a = base_adapter(base)
+  for k, v in pairs(over or {}) do a[k] = v end
+  return a
+end
+r = core.compute(objadapter(), SHOW_ALL)
+check("obj: objective wins over hint",
+  r.markers[1].key == "c:77" and r.markers[1].pos.x == 9)
+r = core.compute(objadapter({
+  giver_hint = function() return nil end,
+  cast_ids = function() return {6, 7} end,
+  static_pos = function() return {x=4,y=4,z=4} end,
+  npc_pos = function(c) return 100 + c, 0, 0 end,
+  objective_cids = function() return {77} end,
+}), SHOW_ALL)
+check("obj: wins over multi-cast+static (can_use_cast bypass)",
+  r.markers[1].key == "c:77")
+r = core.compute(objadapter({
+  is_generic = function(c) return c == 77 end,
+}), SHOW_ALL)
+check("obj: generic objective falls through to hint", r.markers[1].key == "c:5")
+r = core.compute(objadapter({
+  objective_cids = function() return {66, 77} end,
+  npc_alive = function(c) return c ~= 66 end,
+  npc_pos = function(c) if c == 66 then return 3, 3, 3 end
+    if c == 77 then return 9, 9, 9 end
+    if c == 5 then return 1, 1, 1 end end,
+}), SHOW_ALL)
+check("obj: dead first, live second wins", r.markers[1].key == "c:77")
+r = core.compute(objadapter({
+  npc_pos = function(c) if c == 5 then return 1, 1, 1 end end,
+}), SHOW_ALL)
+check("obj: all objectives miss -> hint fallback", r.markers[1].key == "c:5")
+local a_no = objadapter()
+a_no.objective_cids = nil   -- pairs(over) cannot remove a key; set nil after
+r = core.compute(a_no, SHOW_ALL)
+check("obj: adapter without objective_cids = v4", r.markers[1].key == "c:5")
+r = core.compute(objadapter({
+  acceptable_ids = function() return {10} end,
+  progressing_ids = function() return {} end,
+}), SHOW_ALL)
+check("obj: startable never consults objectives", r.markers[1].key == "c:5")
+r = core.compute(objadapter({
+  objective_pos = function(c) if c == 77 then return 2, 2, 2 end end,
+}), SHOW_ALL)
+check("obj: objective_pos preferred over npc_pos when present",
+  r.markers[1].key == "c:77" and r.markers[1].pos.x == 2)
+r = core.compute(objadapter({
+  giver_hint = function() return nil end,
+  npc_pos = function() return nil end,
+}), SHOW_ALL)
+check("obj: reason names objective misses",
+  r.unresolved[10] ~= nil
+  and r.unresolved[10].reason == "objective NPC position unavailable (1 cand)")
+r = core.compute(fake_adapter({ progressing = {10}, hints = {[10]=5},
+  npc_pos = {[5]={x=1,y=1,z=1}}, objectives = {[10]={77}},
+  objective_pos = {[77]={x=3,y=3,z=3}}, names = {[10]="Q"} }), SHOW_ALL)
+check("obj: fake_adapter objective path", r.markers[1].key == "c:77"
+  and r.markers[1].pos.x == 3)
+-- hidden in-progress never consults objectives (visibility break first)
+local consulted = 0
+r = core.compute(objadapter({
+  objective_cids = function() consulted = consulted + 1; return {77} end,
+}), { startable=true, in_progress=false, completed=true,
+  unavailable=true, locked=true })
+check("obj: hidden in-progress never consults", consulted == 0)
+
+-- gt: gate_table
+check("gt: dedup + ascending", (function()
+  local t = core.gate_table({ {qid=10, ref=30}, {qid=10, ref=20}, {qid=10, ref=30} })
+  return t[10][1] == 20 and t[10][2] == 30 and #t[10] == 2
+end)())
+check("gt: defensive drops leave the qid absent", (function()
+  local t = core.gate_table({ {qid=10, ref=0}, {qid=10, ref="x"}, {qid=10, ref=10} })
+  return t[10] == nil
+end)())
+
+-- hv: hover
+local function hv(o, show)
+  o.acceptable = o.acceptable or { 10 }
+  o.hints = o.hints or { [10] = 5 }
+  o.npc_pos = o.npc_pos or { [5] = { x=1, y=2, z=3 } }
+  local rr = core.compute(fake_adapter(o), show or SHOW_ALL)
+  return rr.markers[1]
+end
+local NAMES = { [10]="Ten", [20]="A", [30]="B", [40]="C", [50]="D" }
+check("hv: 0 refs -> hover absent", hv({ names=NAMES, gates={} }).hover == nil)
+check("hv: 1 seen ref", hv({ names=NAMES, gates={[10]={20}}, seen={[20]="Other"} }).hover
+  == "Ten - startable (waiting on: Other)")
+check("hv: 2 refs ascending", hv({ names=NAMES, gates={[10]={20,30}},
+  seen={[20]="A", [30]="B"} }).hover == "Ten - startable (waiting on: A, B)")
+check("hv: 3 distinct -> ellipsis", hv({ names=NAMES, gates={[10]={20,30,40}},
+  seen={[20]="A", [30]="B", [40]="C"} }).hover
+  == "Ten - startable (waiting on: A, B, ...)")
+check("hv: collapse then cap", hv({ names=NAMES, gates={[10]={20,30,40}},
+  seen={[40]="C"} }).hover
+  == "Ten - startable (waiting on: another quest, C)")
+check("hv: unseen + reveal off", hv({ names=NAMES, gates={[10]={20}} }).hover
+  == "Ten - startable (waiting on: another quest)")
+check("hv: unseen + reveal on -> real title", hv({ names=NAMES, gates={[10]={20}} },
+  { startable=true, in_progress=true, completed=true, unavailable=true,
+    locked=true, reveal_gate_names=true }).hover
+  == "Ten - startable (waiting on: A)")
+do
+  local m = hv({ acceptable={10,11}, hints={[10]=5,[11]=5}, names={[10]="Ten",[11]="Eleven",[20]="A"},
+    gates={[10]={20}}, seen={[20]="A"} })
+  check("hv: ungated part identical, label clean",
+    m.label == "Ten - startable / Eleven - startable"
+    and m.hover == "Ten - startable (waiting on: A) / Eleven - startable")
+end
+check("hv: signature differs when only hover differs", (function()
+  local a = hv({ names=NAMES, gates={[10]={20}}, seen={[20]="A"} })
+  local b = hv({ names=NAMES, gates={[10]={30}}, seen={[30]="B"} })
+  local c = hv({ names=NAMES })
+  local s1 = core.signature({a}, {}); local s2 = core.signature({b}, {})
+  local s3 = core.signature({c}, {})
+  return a.label == b.label and s1 ~= s2 and s1 ~= s3
+end)())
+do
+  local calls = {}
+  local m = hv({ names=NAMES, acceptable={}, progressing={10}, gates={[10]={20}},
+    gate_calls=calls })
+  check("hv: non-startable never consults gate_qids",
+    #calls == 0 and m.hover == nil)
+end
+check("hv: adapter without gate_qids -> hover nil", hv({ names=NAMES }).hover == nil)
+
+-- tr: tree records
+local TOPEN = { startable=true, in_progress=true, completed=false, unavailable=false,
+  locked=false, tree_open=true }
+local TCLOSED = { startable=true, in_progress=true, completed=false, unavailable=false,
+  locked=false, tree_open=false }
+local function trc(o, show) return core.compute(fake_adapter(o), show or TOPEN) end
+-- R1
+do
+  local c1, c2 = {}, {}
+  local function mk(c) return { acceptable={10}, catalog={10,11}, names={[10]="Ten",[11]="E"},
+    regions={[10]="Vern"}, name_calls=c } end
+  local a = core.compute(fake_adapter(mk(c1)), TCLOSED)
+  local b = core.compute(fake_adapter(mk(c2)), { startable=true, in_progress=true,
+    completed=false, unavailable=false, locked=false })
+  check("tr R1: closed/absent -> quests nil", a.quests == nil and b.quests == nil)
+  check("tr R1: name call count identical", #c1 == #c2 and #c1 > 0)
+end
+-- R2
+do
+  local ok2, r2 = pcall(trc, { acceptable={10}, progressing={12}, states={[11]="giver_dead"},
+    catalog={10,11,12,13}, names={[10]="Ten",[11]="Eleven",[12]="Twelve",[13]="Thirteen"},
+    regions={[10]="Vern", [11]="Battahl"} })
+  check("tr R2: compute non-nil (adapter lacks gate_qids)", ok2 and r2 ~= nil)
+  local q = (ok2 and r2 and r2.quests) or {}
+  check("tr R2: ascending, 4 records", #q == 4 and q[1].qid == 10 and q[2].qid == 11
+    and q[3].qid == 12 and q[4].qid == 13)
+  check("tr R2: startable shape", #q == 4 and q[1].cat == "startable" and q[1].state == "startable"
+    and q[1].grp == "startable" and q[1].name == "Ten" and q[1].region == "Vern")
+  check("tr R2: giver dead forms", #q == 4 and q[2].cat == "giver_dead" and q[2].state == "giver dead"
+    and q[2].grp == "unavailable")
+  check("tr R2: in progress forms", #q == 4 and q[3].state == "in progress" and q[3].grp == "in_progress")
+  check("tr R2: region fallback", #q == 4 and q[3].region == "Elsewhere")
+  local okn, rn = pcall(trc, { acceptable={10}, names={[10]="Ten"} })
+  check("tr R2: no quest_region compute non-nil", okn and rn ~= nil)
+  check("tr R2: no quest_region -> nil even when open", okn and rn ~= nil and rn.quests == nil)
+  check("tr R2: zero quests -> empty table",
+    (function() local x = trc({ regions={} }).quests; return type(x) == "table" and #x == 0 end)())
+end
+-- R3
+do
+  local q = trc({ catalog={20,21,22}, acceptable={21}, names={[22]="Named"}, regions={} }).quests
+  check("tr R3: locked nameless omitted, others kept", #q == 2 and q[1].qid == 21 and q[2].qid == 22)
+  check("tr R3: nameless startable placeholder", q[1].name == "Quest 21")
+  check("tr R3: locked named kept", q[2].name == "Named" and q[2].cat == "locked")
+end
+-- R4
+do
+  local gc, tc = {}, {}
+  local q = trc({ acceptable={30}, catalog={30,31}, progressing={32},
+    names={[30]="S",[31]="L",[32]="P",[40]="Fore"}, regions={},
+    gates={[30]={40},[31]={99},[32]={99}}, tgates={[31]={40},[30]={99},[32]={99}},
+    gate_calls=gc, tgate_calls=tc, seen={[40]="Fore"} }).quests
+  check("tr R4: startable uses gate_qids", q[1].waiting == " (waiting on: Fore)")
+  check("tr R4: locked uses tree_gate_qids", q[2].waiting == " (waiting on: Fore)")
+  check("tr R4: in progress no waiting", q[3].waiting == nil)
+  local gset, tset = {}, {}
+  for _, x in ipairs(gc) do gset[x] = true end
+  for _, x in ipairs(tc) do tset[x] = true end
+  check("tr R4: source split pinned", gset[30] and not gset[31] and not gset[32]
+    and tset[31] and not tset[30] and not tset[32])
+  local ok, r = pcall(trc, { acceptable={30}, names={[30]="S"}, regions={}, gates={} })
+  check("tr R4b: gate_qids nil compute non-nil", ok and r ~= nil)
+  check("tr R4b: gate_qids nil -> waiting nil",
+    ok and r ~= nil and r.quests[1] ~= nil and r.quests[1].waiting == nil)
+  ok, r = pcall(trc, { acceptable={30}, names={[30]="S"}, regions={}, gates={[30]={}} })
+  check("tr R4b: empty array compute non-nil", ok and r ~= nil)
+  check("tr R4b: empty array -> waiting nil",
+    ok and r ~= nil and r.quests[1] ~= nil and r.quests[1].waiting == nil)
+end
+-- R4b isolated: empty gate array on its own fixture
+do
+  local ok, r = pcall(trc, { acceptable={60}, catalog={60}, names={[60]="Solo"}, regions={},
+    gates={[60]={}} })
+  check("tr R4b-empty: compute non-nil", ok and r ~= nil)
+  check("tr R4b-empty: startable record, waiting nil",
+    ok and r ~= nil and r.quests[1] ~= nil and r.quests[1].cat == "startable"
+    and r.quests[1].waiting == nil)
+end
+-- R4b isolated: adapter lacks gate_qids and tree_gate_qids entirely
+do
+  local ok, r = pcall(trc, { acceptable={70}, catalog={70,71}, names={[70]="A",[71]="B"},
+    regions={} })
+  check("tr R4b-absent: compute non-nil", ok and r ~= nil)
+  check("tr R4b-absent: records present, waiting nil",
+    ok and r ~= nil and #r.quests == 2 and r.quests[1].waiting == nil
+    and r.quests[2].waiting == nil)
+end
+-- R5
+do
+  local q = trc({ states={[50]="completed"}, catalog={50}, names={[50]="Done"}, regions={} }).quests
+  check("tr R5: hidden category still yields record", #q == 1 and q[1].state == "completed"
+    and q[1].grp == "completed")
+end
+-- R6
+do
+  local function hov(show)
+    local rr = core.compute(fake_adapter({ acceptable={10,11}, hints={[10]=5,[11]=5},
+      npc_pos={[5]={x=1,y=2,z=3}}, names={[10]="Ten",[11]="Eleven",[20]="A"},
+      gates={[10]={20}}, seen={[20]="A"}, regions={[10]="V"} }), show)
+    return rr.markers[1].label, rr.markers[1].hover
+  end
+  local l1, h1 = hov({ startable=true, in_progress=true, tree_open=true })
+  local l2, h2 = hov({ startable=true, in_progress=true, tree_open=false })
+  check("tr R6: hover identical open/closed", l1 == l2 and h1 == h2 and h1 ~= nil)
+end
+-- R7
+check("tr R7: open", core.tree_wanted(10.5, 10.0) == true)
+check("tr R7: stale", core.tree_wanted(11.5, 10.0) == false)
+check("tr R7: nil open_at", core.tree_wanted(10, nil) == false)
+
+-- it: item_need_table (v8, SPEC 15.5a.1)
+do
+  local nt = core.item_need_table
+  local t, ign = nt({ { qid = 20090, id = 300, num = 1, op = "more" } }, {})
+  check("it N1: more 1 admitted, required 1", t[20090] ~= nil
+    and #t[20090] == 1 and t[20090][1].id == 300 and t[20090][1].num == 1
+    and ign == 0)
+  t = nt({ { qid = 1, id = 5, num = 1, op = "morethan" } }, {})
+  check("it N2: morethan 1 -> required 2", t[1] ~= nil and t[1][1].num == 2)
+  t = nt({ { qid = 1, id = 5, num = 0, op = "morethan" } }, {})
+  check("it N3: morethan 0 -> required 1 (a real need)",
+    t[1] ~= nil and t[1][1].num == 1)
+  t, ign = nt({ { qid = 1, id = 5, num = 0, op = "more" },
+    { qid = 1, id = 6, num = 0, op = "other" },     -- Equal 0
+    { qid = 1, id = 7, num = 1, op = "other" },     -- Equal 1
+    { qid = 1, id = 8, num = -1, op = "morethan" } }, {}) -- negative
+  check("it N4: more 0 and other rejected and counted",
+    next(t) == nil and ign == 4)
+  t, ign = nt({ { qid = 1, id = 5, num = 1, op = "more" },
+    { qid = 1, id = 5, num = 3, op = "more" },
+    { qid = 1, id = 5, num = 1, op = "morethan" } }, {})
+  check("it N5: dedupe per (qid, id) keeps the max required",
+    t[1] ~= nil and #t[1] == 1 and t[1][1].num == 3 and ign == 0)
+  t = nt({ { qid = 1, id = 5, num = 2, op = "more" } }, { [5] = 2 })
+  check("it N6: held >= required drops; empty qid absent",
+    t[1] == nil and next(t) == nil)
+  t = nt({ { qid = 1, id = 5, num = 2, op = "more" } }, { [5] = 1 })
+  check("it N7: held < required keeps", t[1] ~= nil and t[1][1].num == 2)
+  t = nt({ { qid = 1, id = 9, num = 1, op = "more" },
+    { qid = 1, id = 4, num = 1, op = "more" } }, nil)
+  check("it N8: held absent = 0; ids ascending", t[1] ~= nil and #t[1] == 2
+    and t[1][1].id == 4 and t[1][2].id == 9)
+  t = nt({ { qid = 1, id = 5, num = 1, op = "more" },
+    { qid = 2, id = 5, num = 1, op = "more" } }, {})
+  check("it N9: per-qid tables", t[1] ~= nil and t[2] ~= nil
+    and t[1][1].id == 5 and t[2][1].id == 5)
+  t, ign = nt(nil, nil)
+  check("it N10: nil input -> empty, nothing ignored",
+    next(t) == nil and ign == 0)
+  t, ign = nt({ { qid = 1, id = "x", num = 1, op = "more" },
+    { qid = "x", id = 5, num = 1, op = "more" },
+    { qid = 1, id = 5, num = "x", op = "more" } }, {})
+  check("it N11: non-number field rejected and counted",
+    next(t) == nil and ign == 3)
+end
+
+-- im: item markers (v8, SPEC 15.5a.2 + a.5)
+do
+  local IT = { startable = true, in_progress = true, quest_items = true }
+  local GARB = { id = 300, pos = { x = 1, y = 2, z = 3 },
+    live = { x = 7, y = 8, z = 9 }, src = "placed" }
+  local function iw(over, show)
+    local o = { progressing = { 10, 11 }, names = { [10] = "A", [11] = "B" },
+      item_needs = { [10] = { { id = 300, num = 1 } } },
+      item_locs = { GARB }, item_names = { [300] = "Beggar's Garb" } }
+    for k, v in pairs(over or {}) do o[k] = v end
+    return core.compute(fake_adapter(o), show or IT), o
+  end
+  local function items(r)
+    local out = {}
+    for _, m in ipairs(r.markers) do
+      if m.cat == "quest_item" then out[#out + 1] = m end
+    end
+    return out
+  end
+  -- IM1 gating
+  local r = iw()
+  check("im IM1: shown in-progress need with a location -> one marker",
+    #items(r) == 1)
+  check("im IM1: quest_items off -> none",
+    #items(iw(nil, { startable = true, in_progress = true, quest_items = false })) == 0)
+  check("im IM1: in_progress off -> none",
+    #items(iw(nil, { startable = true, in_progress = false, quest_items = true })) == 0)
+  r = iw({ item_needs = false })
+  check("im IM1: adapter without item_needs -> none, compute ok",
+    r ~= nil and #items(r) == 0)
+  -- IM2 needs only from shown in-progress quests
+  check("im IM2: startable quest's need -> none", #items(iw({ progressing = {},
+    acceptable = { 10 } })) == 0)
+  check("im IM2: locked quest's need -> none", #items(iw({ progressing = {},
+    catalog = { 10 } })) == 0)
+  check("im IM2: terminal quest's need -> none (even with completed shown)",
+    #items(iw({ progressing = {}, catalog = { 10 }, states = { [10] = "completed" } },
+      { startable = true, in_progress = true, completed = true, quest_items = true })) == 0)
+  check("im IM2: unknown qid's need -> none",
+    #items(iw({ item_needs = { [99] = { { id = 300, num = 1 } } } })) == 0)
+  -- IM3 key + 4 m grid on map-space x/z
+  local m = items(iw())[1]
+  check("im IM3: key shape", m.key == "i:300:0:0")
+  local function key_at(x, z)
+    return items(iw({ item_locs = { { id = 300, pos = { x = x, y = 0, z = z },
+      src = "placed" } } }))[1].key
+  end
+  check("im IM3: x 3.9 and 0.1 share a cell", key_at(3.9, 0) == key_at(0.1, 0))
+  check("im IM3: x 4.0 is the next cell", key_at(4.0, 0) ~= key_at(3.9, 0)
+    and key_at(4.0, 0) == "i:300:1:0")
+  check("im IM3: negative coordinates floor", key_at(-0.1, -4.1) == "i:300:-1:-2")
+  -- IM4 same-key merge + source order
+  r = iw({ item_locs = {
+    { id = 300, pos = { x = 0.1, y = 0, z = 0 }, src = "drop" },
+    { id = 300, pos = { x = 3.9, y = 0, z = 0 }, live = { x = 5, y = 5, z = 5 },
+      src = "placed" },
+    { id = 300, pos = { x = 2.0, y = 0, z = 0 }, src = "box" } } })
+  local ims = items(r)
+  check("im IM4: one marker per key", #ims == 1)
+  check("im IM4: placed < box < drop supplies pos/live",
+    ims[1].pos.x == 3.9 and ims[1].live.x == 5)
+  r = iw({ item_locs = {
+    { id = 300, pos = { x = 0.5, y = 0, z = 0 }, src = "drop" },
+    { id = 300, pos = { x = 2.0, y = 0, z = 0 }, src = "box" } } })
+  check("im IM4: box beats drop", items(r)[1].pos.x == 2.0)
+  r = iw({ item_locs = {
+    { id = 300, pos = { x = 2.5, y = 0, z = 0 }, src = "drop" },
+    { id = 300, pos = { x = 0.5, y = 0, z = 0 }, src = "drop" } } })
+  check("im IM4: same source -> lower position first", items(r)[1].pos.x == 0.5)
+  -- IM5 two quests, one item: one marker per location, ascending qids
+  r = iw({ item_needs = { [11] = { { id = 300, num = 1 } },
+    [10] = { { id = 300, num = 1 } } } })
+  ims = items(r)
+  check("im IM5: two quests share one marker", #ims == 1
+    and #ims[1].qids == 2 and ims[1].qids[1] == 10 and ims[1].qids[2] == 11)
+  check("im IM5: label", ims[1].label == "Beggar's Garb (for A / B)")
+  -- IM6 fallbacks
+  r = iw({ names = { [10] = "A" }, item_names = {},
+    item_needs = { [10] = { { id = 300, num = 1 } }, [11] = { { id = 300, num = 1 } } } })
+  check("im IM6: quest + item name fallbacks",
+    items(r)[1].label == "Item 300 (for A / Quest 11)")
+  local base = core.compute(fake_adapter({ progressing = { 10, 11 },
+    names = { [10] = "A" } }), IT)
+  check("im IM6: fallback names never enter unnamed",
+    next(r.unnamed) == nil and next(base.unnamed) == nil)
+  -- IM7 cap 32 + item_ord per id
+  local many = {}
+  for i = 1, 40 do
+    many[#many + 1] = { id = 300, pos = { x = i * 8, y = 0, z = 0 }, src = "placed" }
+  end
+  many[#many + 1] = { id = 200, pos = { x = 0, y = 0, z = 0 }, src = "placed" }
+  many[#many + 1] = { id = 200, pos = { x = 8, y = 0, z = 0 }, src = "placed" }
+  r = iw({ item_locs = many, item_names = { [200] = "X", [300] = "Y" },
+    item_needs = { [10] = { { id = 200, num = 1 }, { id = 300, num = 1 } } } })
+  ims = items(r)
+  check("im IM7: capped at 32, excess counted", #ims == 32 and r.item_capped == 10)
+  check("im IM7: sorted by item id, item_ord per id",
+    ims[1].item_id == 200 and ims[1].item_ord == 0 and ims[2].item_ord == 1
+    and ims[3].item_id == 300 and ims[3].item_ord == 0 and ims[32].item_ord == 29)
+  check("im IM7: item_capped 0 without items", base.item_capped == 0)
+  -- IM7b cap keeps the copies nearest show.origin (SPEC 15.3h.1, 15.7i)
+  do
+    local far = {}
+    for i = 1, 40 do
+      far[#far + 1] = { id = 300, pos = { x = i * 50, y = 0, z = 0 }, src = "placed" }
+    end
+    local function run(origin)
+      local sh = { startable = true, in_progress = true, quest_items = true,
+        origin = origin }
+      local rr = iw({ item_locs = far }, sh)
+      local xs = {}
+      for _, m in ipairs(items(rr)) do xs[m.pos.x] = true end
+      return rr, xs
+    end
+    local ro, xo = run({ x = 1900, y = 0, z = 0 })
+    local dropped_far = true
+    for x = 50, 400, 50 do if xo[x] then dropped_far = false end end
+    check("im IM7b: origin keeps the nearest copy under the cap",
+      #items(ro) == 32 and ro.item_capped == 8 and xo[1900] == true)
+    check("im IM7b: the 8 dropped are the 8 farthest", dropped_far)
+    local rn, xn = run(nil)
+    check("im IM7b: nil origin keeps (item_id, key) order",
+      #items(rn) == 32 and rn.item_capped == 8 and xn[1900] == nil)
+  end
+  -- IM8 appended after quest markers; shape
+  r = iw({ acceptable = { 20 }, hints = { [20] = 5 },
+    npc_pos = { [5] = { x = 1, y = 2, z = 3 } }, names = { [10] = "A", [20] = "S" } })
+  check("im IM8: item markers after quest markers", #r.markers == 2
+    and r.markers[1].cat == "startable" and r.markers[2].cat == "quest_item")
+  m = r.markers[2]
+  check("im IM8: marker shape", m.item_id == 300 and m.hover == nil
+    and m.pos.x == 1 and m.pos.z == 3 and m.live.x == 7 and m.pos ~= GARB.pos
+    and m.live ~= GARB.live)
+  -- IM9 nothing else changes with items present
+  local o_on = { progressing = { 10, 11 }, acceptable = { 20 }, names = { [10] = "A" },
+    hints = { [20] = 5 }, npc_pos = { [5] = { x = 1, y = 2, z = 3 } },
+    regions = { [10] = "V" } }
+  local o_off = {}
+  for k, v in pairs(o_on) do o_off[k] = v end
+  o_on.item_needs = { [10] = { { id = 300, num = 1 } } }
+  o_on.item_locs = { GARB }
+  local SH = { startable = true, in_progress = true, quest_items = true, tree_open = true }
+  local ron = core.compute(fake_adapter(o_on), SH)
+  local roff = core.compute(fake_adapter(o_off), SH)
+  local function same_keys(x, y)
+    for k, v in pairs(x) do if y[k] ~= v then return false end end
+    for k, v in pairs(y) do if x[k] ~= v then return false end end
+    return true
+  end
+  local function nkeys(t) local n = 0 for _ in pairs(t) do n = n + 1 end return n end
+  check("im IM9: counts, resolved_count, unresolved, unnamed, quests unchanged",
+    same_keys(ron.counts, roff.counts) and ron.resolved_count == roff.resolved_count
+    and nkeys(ron.unresolved) == nkeys(roff.unresolved) and nkeys(roff.unresolved) == 2
+    and same_keys(ron.unnamed, roff.unnamed) and ron.unnamed[20] == true
+    and #ron.quests == #roff.quests and #ron.markers == #roff.markers + 1)
+  -- IM10 one item_name call per id per compute
+  local calls = {}
+  iw({ item_name_calls = calls, item_locs = { GARB,
+    { id = 300, pos = { x = 50, y = 0, z = 50 }, src = "drop" } } })
+  check("im IM10: one item_name call per id", #calls == 1)
+  -- IM11 signature: label in, live out
+  local function one(lbl, lx)
+    return { key = "i:300:0:0", pos = { x = 1, y = 2, z = 3 },
+      live = { x = lx, y = 0, z = 0 }, qids = { 10 }, label = lbl,
+      cat = "quest_item", item_id = 300 }
+  end
+  check("im IM11: label change changes the signature",
+    core.signature({ one("a", 1) }, {}) ~= core.signature({ one("b", 1) }, {}))
+  check("im IM11: live change does not",
+    core.signature({ one("a", 1) }, {}) == core.signature({ one("a", 99) }, {}))
+end
+
+-- mo: item tier on the minimap, overhead points, item-walk decision (v8, SPEC 15.5a.3-4, 15.3a)
+do
+  local O = { x = 0, y = 0, z = 0 }
+  local function q(key, x) return { key = key, pos = { x = x, y = 0, z = 0 }, cat = "startable" } end
+  local function it(key, x, live)
+    return { key = key, pos = { x = x, y = 0, z = 0 }, cat = "quest_item", live = live }
+  end
+  -- MM1 item dots compete on distance with quest markers
+  local lst, near = core.minimap_markers({ it("i:1:0:0", 5), q("c:1", 50) }, O, 200, 1)
+  check("mo MM1: cap binds -> nearer item kept over a farther quest marker",
+    #lst == 1 and lst[1].key == "i:1:0:0")
+  check("mo MM1: nearest is the nearest of all in-radius markers", near == 5)
+  lst = core.minimap_markers({ it("i:1:0:0", 5), q("c:2", 60), q("c:1", 50) }, O, 200, 12)
+  check("mo MM1: one distance order across items and quests", #lst == 3
+    and lst[1].key == "i:1:0:0" and lst[2].key == "c:1" and lst[3].key == "c:2")
+  lst = core.minimap_markers({ it("i:2:0:0", 9), it("i:1:0:0", 5) }, O, 200, 12)
+  check("mo MM1: items among themselves by distance", #lst == 2
+    and lst[1].key == "i:1:0:0" and lst[2].key == "i:2:0:0")
+  -- OP1-OP6 overhead points
+  local cam = { x = 0, y = 0, z = 0 }
+  local near_item = it("i:1:0:0", 9999, { x = 3, y = 0, z = 4 })
+  local pts = core.overhead_points({ near_item }, cam, 50)
+  check("mo OP1: live in radius -> one point", #pts == 1 and pts[1].marker == near_item)
+  check("mo OP1: the point's pos is a plain copy of live (never pos)",
+    pts[1].pos ~= nil and pts[1].pos.x == 3 and pts[1].pos.z == 4
+    and pts[1].pos ~= near_item.live)
+  check("mo OP2: live nil -> none",
+    #core.overhead_points({ it("i:1:0:0", 0, nil) }, cam, 50) == 0)
+  check("mo OP3: never reads pos (pos at the camera, live far) -> none",
+    #core.overhead_points({ it("i:1:0:0", 0, { x = 1000, y = 0, z = 0 }) }, cam, 50) == 0)
+  local cm = { key = "c:5", pos = { x = 0, y = 0, z = 0 }, cat = "startable",
+    live = { x = 0, y = 0, z = 0 } }
+  local pm = { key = "p:0:0:0", pos = { x = 0, y = 0, z = 0 }, cat = "in_progress",
+    live = { x = 0, y = 0, z = 0 } }
+  check("mo OP4: c- and p-keyed markers -> none",
+    #core.overhead_points({ cm, pm }, cam, 50) == 0)
+  check("mo OP5: boundary inclusive",
+    #core.overhead_points({ it("i:1:0:0", 0, { x = 50, y = 0, z = 0 }) }, cam, 50) == 1)
+  check("mo OP5: nil markers -> none", #core.overhead_points(nil, cam, 50) == 0)
+  -- WW1 the tick's item-round decision (both toggles, never either)
+  check("mo WW1: both on -> walk", core.item_walk_wanted({ in_progress = true, quest_items = true }) == true)
+  check("mo WW1: quest_items off -> no walk", core.item_walk_wanted({ in_progress = true, quest_items = false }) == false)
+  check("mo WW1: in_progress off -> no walk", core.item_walk_wanted({ in_progress = false, quest_items = true }) == false)
+  check("mo WW1: both off / absent -> no walk", core.item_walk_wanted({}) == false
+    and core.item_walk_wanted(nil) == false)
+  local sel = core.overhead_anchors({ cm, near_item }, {}, cam, 50)
+  check("mo OP6: overhead_anchors ignores item markers",
+    #sel == 1 and sel[1].cid == 5)
+end
+
+-- jd: v9 quest-tree detail (SPEC 16.3b-e, 16.6a)
+do
+  local TO = { startable = true, in_progress = true, completed = false,
+    unavailable = false, locked = false, tree_open = true }
+  local function show(over)
+    local s = {}
+    for k, v in pairs(TO) do s[k] = v end
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  -- 10 startable (hint 5 at 3,0,4); 11 in progress (cast 6 at 30,0,40);
+  -- 12 locked named; 13 completed (hidden); 14 startable, static p-key
+  local function world(o)
+    local base = { acceptable = { 10, 14 }, progressing = { 11 },
+      catalog = { 10, 11, 12, 13, 14 }, states = { [13] = "completed" },
+      hints = { [10] = 5, [14] = 7 }, casts = { [11] = { 6 } },
+      npc_pos = { [5] = { x = 3, y = 0, z = 4 }, [6] = { x = 30, y = 0, z = 40 } },
+      statics = { [14] = { x = 100, y = 0, z = 0 } }, dead = { [7] = false },
+      names = { [10] = "Ten", [11] = "Eleven", [12] = "Twelve", [13] = "Thirteen",
+        [14] = "Fourteen" },
+      regions = { [10] = "Vern", [11] = "Vern", [12] = "Vern", [13] = "Vern", [14] = "Melve" } }
+    for k, v in pairs(o or {}) do base[k] = v end
+    return base
+  end
+  -- counting adapter: every v9 read is logged as "<reader>:<qid or cid>"
+  local function jad(o, j)
+    local a = fake_adapter(world(o))
+    j = j or {}
+    a.reads = {}
+    a.npc_pos = function(c)            -- 7 has no live position: p-key
+      local p = ({ [5] = { x = 3, y = 0, z = 4 }, [6] = { x = 30, y = 0, z = 40 } })[c]
+      if p then return p.x, p.y, p.z end
+    end
+    a.tracked_qid = function() a.reads[#a.reads + 1] = "tracked"; return j.tracked end
+    a.npc_name = function(cid) a.reads[#a.reads + 1] = "name:" .. cid; return (j.npc or {})[cid] end
+    a.journal_now = function(q)
+      a.reads[#a.reads + 1] = "now:" .. q
+      local v = (j.now or {})[q]
+      if v == nil then return nil end
+      local c = {}
+      for k, x in pairs(v) do c[k] = x end
+      return c
+    end
+    a.journal_all = function(q)
+      a.reads[#a.reads + 1] = "all:" .. q
+      return (j.all or {})[q]
+    end
+    return a
+  end
+  local function count(a, prefix)
+    local n = 0
+    for _, r in ipairs(a.reads) do if r:sub(1, #prefix) == prefix then n = n + 1 end end
+    return n
+  end
+  local function rec(r, qid)
+    for _, x in ipairs(r.quests or {}) do if x.qid == qid then return x end end
+  end
+
+  -- TO1 tree origin freshness
+  local o = { x = 1, y = 2, z = 3 }
+  check("jd TO1: 2.9 s old -> origin", core.tree_origin(o, 10.0, 12.9) == o)
+  check("jd TO1: 3.0 s old -> nil (under 3 s only)", core.tree_origin(o, 10.0, 13.0) == nil)
+  check("jd TO1: nil stamp / nil origin -> nil",
+    core.tree_origin(o, nil, 1) == nil and core.tree_origin(nil, 1, 1) == nil)
+
+  -- PS record pos / giver rules
+  local a = jad()
+  local r = core.compute(a, show())
+  local r10, r11, r12, r13, r14 = rec(r, 10), rec(r, 11), rec(r, 12), rec(r, 13), rec(r, 14)
+  check("jd PS1: startable pos = resolved raw position (copy)", r10.pos ~= nil
+    and r10.pos.x == 3 and r10.pos.z == 4 and r10.pos ~= r.markers[1].pos)
+  check("jd PS2: c-key giver = that cid", r10.giver == 5 and r11.giver == 6)
+  check("jd PS3: p-key (static) giver = the hint", r14.pos ~= nil and r14.pos.x == 100
+    and r14.giver == 7)
+  check("jd PS4: hidden categories get no pos, no giver",
+    r12.pos == nil and r12.giver == nil and r13.pos == nil and r13.giver == nil)
+  local ru = core.compute(jad({ npc_pos = {}, statics = {}, hints = {} ,
+    casts = { [11] = { 6 } } }), show())
+  check("jd PS5: unresolved quest has no pos", rec(ru, 10).pos == nil and rec(ru, 10).giver == nil)
+  local rl = core.compute(jad({ statics = { [12] = { x = 9, y = 9, z = 9 },
+    [14] = { x = 100, y = 0, z = 0 } } }), show({ locked = true }))
+  check("jd PS6: shown locked resolves a pos", rec(rl, 12).pos ~= nil and rec(rl, 12).pos.x == 9)
+
+  -- NR tracked / dist / nearest
+  a = jad(nil, { tracked = 11 })
+  r = core.compute(a, show({ tree_origin = { x = 0, y = 0, z = 0 } }))
+  check("jd NR1: tracked flag", rec(r, 11).tracked == true and rec(r, 10).tracked == false
+    and r.tracked_qid == 11)
+  check("jd NR2: dist is 3D distance from tree_origin", rec(r, 10).dist == 5
+    and rec(r, 11).dist == 50 and rec(r, 14).dist == 100)
+  check("jd NR3: nearest = smallest dist", r.nearest_qid == 10)
+  check("jd NR4: no dist without pos", rec(r, 12).dist == nil and rec(r, 13).dist == nil)
+  r = core.compute(jad(), show({ tree_origin = nil }))
+  check("jd NR5: origin nil -> no dist, no nearest", rec(r, 10).dist == nil and r.nearest_qid == nil)
+  check("jd NR6: tie -> lower qid", core.nearest({ { qid = 9, cat = "startable", dist = 1 },
+    { qid = 4, cat = "in_progress", dist = 1 } }).qid == 4)
+  check("jd NR7: only startable / in progress compete", core.nearest({
+    { qid = 1, cat = "completed", dist = 0 }, { qid = 2, cat = "locked", dist = 0 },
+    { qid = 3, cat = "startable", dist = 7 } }).qid == 3)
+  check("jd NR8: nil dist skipped; none -> nil", core.nearest({ { qid = 1, cat = "startable" } }) == nil)
+  check("jd NR9: tracked_qid nil -> nobody tracked", rec(core.compute(jad(), show()), 11).tracked == false)
+
+  -- GN giver names: startable records with a giver only
+  a = jad(nil, { npc = { [5] = "Brant" } })
+  r = core.compute(a, show())
+  check("jd GN1: startable giver name read and stored", rec(r, 10).giver_name == "Brant")
+  check("jd GN2: in progress / hidden never read a name",
+    count(a, "name:6") == 0 and rec(r, 11).giver_name == nil)
+  check("jd GN3: unresolved name -> nil", rec(r, 14).giver_name == nil and count(a, "name:7") == 1)
+
+  -- CL panel closed: no v9 reads of any kind
+  a = jad(nil, { tracked = 11 })
+  r = core.compute(a, show({ tree_open = false, expanded = { [10] = true } }))
+  check("jd CL1: closed -> zero v9 reads, no journal", #a.reads == 0 and r.journal == nil
+    and r.tracked_qid == nil)
+
+  -- SP spoilers and locked rows
+  a = jad(nil, { now = { [12] = { name = "Twelve" } }, all = { [12] = { steps = {} } } })
+  r = core.compute(a, show({ expanded = { [12] = true }, now = 1 }))
+  check("jd SP1: spoilers off + expanded locked -> zero reads of either kind",
+    count(a, "now:") == 0 and count(a, "all:") == 0 and r.journal_all == nil)
+  a = jad(nil, { now = { [12] = { name = "Twelve" } }, all = { [12] = { steps = {} } } })
+  r = core.compute(a, show({ expanded = { [12] = true }, journal_spoilers = true, now = 1 }))
+  check("jd SP2: spoilers on -> locked row read by both readers",
+    count(a, "now:12") == 1 and count(a, "all:12") == 1 and r.journal_all[12] ~= nil)
+  a = jad(nil, { tracked = 11 })
+  r = core.compute(a, show({ expanded = { [10] = true }, now = 1 }))
+  check("jd SP3: spoilers off -> journal_all never called", count(a, "all:") == 0)
+  check("jd SP4: tracked + expanded read once each", count(a, "now:11") == 1
+    and count(a, "now:10") == 1)
+
+  -- RD read set: tracked, nearest, expanded; nil read stored as missing
+  a = jad(nil, { tracked = 99, now = { [99] = { name = "Main" } } })
+  r = core.compute(a, show({ tree_origin = { x = 0, y = 0, z = 0 }, now = 7 }))
+  check("jd RD1: tracked qid with no record is read", count(a, "now:99") == 1
+    and r.journal[99].name == "Main" and r.journal[99].read_at == 7)
+  check("jd RD2: nearest read", count(a, "now:10") == 1)
+  check("jd RD3: nil read -> { missing } entry with read_at",
+    r.journal[10].missing == true and r.journal[10].read_at == 7)
+  check("jd RD4: expanded qid with no record is not read",
+    (function()
+      local b = jad()
+      core.compute(b, show({ expanded = { [555] = true }, now = 1 }))
+      return count(b, "now:") == 0
+    end)())
+  a = jad(nil, { tracked = nil })
+  r = core.compute(a, show({ tree_origin = { x = 0, y = 0, z = 0 }, now = 1 }))
+  check("jd RD5: nothing tracked -> nearest still read", r.tracked_qid == nil
+    and r.nearest_qid == 10 and count(a, "now:10") == 1)
+
+  -- CAP 12 reads per tick with carry-over and drop
+  local qs, names, regions = {}, {}, {}
+  for i = 1, 15 do qs[i] = 100 + i; names[100 + i] = "Q" .. i; regions[100 + i] = "Vern" end
+  local exp = {}
+  for _, q in ipairs(qs) do exp[q] = true end
+  local function cap_adapter()
+    return jad({ acceptable = qs, progressing = {}, catalog = qs, hints = {},
+      casts = {}, statics = {}, states = {}, names = names, regions = regions })
+  end
+  a = cap_adapter()
+  r = core.compute(a, show({ expanded = exp, now = 1 }))
+  check("jd CAP1: 15 expanded -> 12 reads", count(a, "now:") == 12)
+  check("jd CAP2: never-read first, ascending qid",
+    r.journal[101] ~= nil and r.journal[112] ~= nil and r.journal[113] == nil)
+  a = cap_adapter()
+  local prev = r.journal
+  prev[150] = { read_at = 0 }                       -- no longer wanted
+  local ok2, r2 = pcall(core.compute, a, show({ expanded = exp, now = 2, prev_journal = prev }))
+  check("jd CAP3a: ranking with a previous journal does not raise", ok2)
+  if not ok2 then r2 = { journal = {} } end
+  check("jd CAP3: unread qids (113-115) read before the oldest-read",
+    count(a, "now:113") == 1 and count(a, "now:114") == 1 and count(a, "now:115") == 1)
+  check("jd CAP4: then the oldest-read, by qid (101-109 read, 110-112 carried)",
+    count(a, "now:109") == 1 and count(a, "now:110") == 0)
+  check("jd CAP5: carried entry kept as-is", r2.journal[110] == prev[110]
+    and r2.journal[110].read_at == 1 and r2.journal[101].read_at == 2)
+  check("jd CAP6: entry for a qid no longer wanted dropped", r2.journal[150] == nil)
+  a = cap_adapter()
+  local ok3, r3 = pcall(core.compute, a, show({ expanded = exp, now = 3, prev_journal = r2.journal }))
+  check("jd CAP7a: second ranking tick does not raise", ok3)
+  if not ok3 then r3 = { journal = {} } end
+  check("jd CAP7: oldest-read (110-112, read_at 1) go first next tick",
+    count(a, "now:110") == 1 and count(a, "now:112") == 1 and r3.journal[112].read_at == 3)
+  a = cap_adapter()
+  core.compute(a, show({ expanded = exp, now = 1, journal_spoilers = true }))
+  check("jd CAP8: journal_all under the same cap", count(a, "all:") == 12)
+
+end
+
+-- dm: v9 row detail model (SPEC 16.3d, 16.3e, 16.3h, 16.10)
+do
+  -- RL row label
+  local R = { qid = 10, name = "Ten", state = "startable", waiting = " (waiting on: X)",
+    tracked = true }
+  check("jd RL1: text, tags, id", core.row_label(R, 10)
+    == "Ten - startable (waiting on: X) [tracked] [nearest]###qd_10")
+  check("jd RL2: no tags", core.row_label({ qid = 3, name = "A", state = "locked" }, nil)
+    == "A - locked###qd_3")
+
+  -- DM detail model per category
+  local d = core.row_detail({ cat = "startable", region = "Vern", waiting = " (waiting on: X)",
+    giver_name = "Brant", pos = { x = 1, y = 2, z = 3 } }, { summary = "Sum" }, nil, false)
+  check("jd DM1: startable lines", #d.lines == 4 and d.lines[1] == "To start: talk to Brant"
+    and d.lines[2] == "Region: Vern" and d.lines[3] == "Sum" and d.lines[4] == "(waiting on: X)")
+  check("jd DM1: startable jump = record pos", d.jump.x == 1 and d.jump.z == 3)
+  d = core.row_detail({ cat = "startable", region = "Vern" }, nil, nil, false)
+  check("jd DM2: no giver name -> the quest giver; no pos -> no jump",
+    d.lines[1] == "To start: talk to the quest giver" and #d.lines == 2 and d.jump == nil)
+  d = core.row_detail({ cat = "startable", giver_name = "Brant" }, nil, nil, false)
+  check("jd DM2b: no region -> no Region line", #d.lines == 1
+    and d.lines[1] == "To start: talk to Brant")
+  local J = { base = "Find him.", detail = "He is lost.", step_index = 1,
+    checks = { { text = "Ask", done = true }, { text = "Look", done = false } },
+    dest = { x = 9, y = 8, z = 7, caption = "Slums" } }
+  d = core.row_detail({ cat = "in_progress", pos = { x = 1, y = 1, z = 1 } }, J, nil, false)
+  check("jd DM3: in progress lines", #d.lines == 5 and d.lines[1] == "Now: Find him."
+    and d.lines[2] == "He is lost." and d.lines[3] == "[x] Ask" and d.lines[4] == "[ ] Look"
+    and d.lines[5] == "Destination: Slums")
+  check("jd DM3: in progress jump = dest", d.jump.x == 9 and d.jump.z == 7)
+  d = core.row_detail({ cat = "in_progress", pos = { x = 1, y = 1, z = 1 } }, { missing = true }, nil, false)
+  check("jd DM4: no journal data -> no lines, jump = pos", #d.lines == 0 and d.jump.x == 1)
+  d = core.row_detail({ cat = "locked", waiting = " (waiting on: X)", pos = { x = 1, y = 1, z = 1 } },
+    { summary = "S" }, nil, false)
+  check("jd DM5: locked = waiting only, no jump", #d.lines == 1
+    and d.lines[1] == "(waiting on: X)" and d.jump == nil)
+  for _, c in ipairs({ "completed", "failed", "canceled", "giver_dead" }) do
+    d = core.row_detail({ cat = c }, { summary = "S" }, nil, false)
+    check("jd DM6: " .. c .. " = summary", #d.lines == 1 and d.lines[1] == "S")
+  end
+  d = core.row_detail(nil, { base = "Go.", dest = { x = 1, y = 2, z = 3 } }, nil, false)
+  check("jd DM7: tracked without record: in-progress lines, jump = dest",
+    d.lines[1] == "Now: Go." and d.jump.y == 2)
+  check("jd DM7: tracked without record, no dest -> no jump",
+    core.row_detail(nil, { base = "Go." }, nil, false).jump == nil)
+
+  -- SM step markers (0-based step_index)
+  local ALL = { steps = { { base = "A" }, { base = "B" }, { base = "C" }, { base = "D" } } }
+  d = core.row_detail({ cat = "in_progress" }, { step_index = 1 }, ALL, true)
+  check("jd SM1: in progress markers", #d.steps == 4 and d.steps[1] == "done: A"
+    and d.steps[2] == "> B" and d.steps[3] == "C" and d.steps[4] == "D")
+  d = core.row_detail({ cat = "in_progress" }, { step_index = 0 }, ALL, true)
+  check("jd SM2: index 0 marks the first step", d.steps[1] == "> A" and d.steps[2] == "B")
+  d = core.row_detail({ cat = "completed" }, nil, ALL, true)
+  check("jd SM3: completed -> every step done", d.steps[1] == "done: A" and d.steps[4] == "done: D")
+  d = core.row_detail({ cat = "startable", region = "V" }, nil, ALL, true)
+  check("jd SM4: other categories: no markers", d.steps[1] == "A" and d.steps[4] == "D")
+  check("jd SM5: spoilers off -> no steps", core.row_detail({ cat = "in_progress" },
+    { step_index = 1 }, ALL, false).steps == nil)
+  check("jd SM6: no catalog entry -> no steps", core.row_detail({ cat = "in_progress" },
+    { step_index = 1 }, { missing = true }, true).steps == nil)
+
+  -- SN summary nodes
+  local res = { quests = { { qid = 10, name = "Ten", state = "startable", dist = 5.4 },
+    { qid = 11, name = "Eleven", state = "in progress", dist = 50 } },
+    tracked_qid = 11, nearest_qid = 10, journal = {} }
+  local sn = core.summary_nodes(res)
+  check("jd SN1: tracked + nearest nodes", #sn == 2
+    and sn[1].label == "Tracked: Eleven - in progress###qd_tracked"
+    and sn[2].label == "Nearest: Ten - startable, 5 m###qd_nearest")
+  res.tracked_qid = 10
+  sn = core.summary_nodes(res)
+  check("jd SN2: same quest -> one node", #sn == 1
+    and sn[1].label == "Tracked and nearest: Ten - startable, 5 m###qd_tracked")
+  res.tracked_qid, res.nearest_qid = 99, nil
+  res.journal = { [99] = { name = "Main Quest" } }
+  sn = core.summary_nodes(res)
+  check("jd SN3: tracked without record -> journal name, no state", #sn == 1
+    and sn[1].label == "Tracked: Main Quest###qd_tracked" and sn[1].rec == nil)
+  res.journal = { [99] = { missing = true } }
+  check("jd SN4: tracked without record or journal -> omitted", #core.summary_nodes(res) == 0)
+
+  -- ST state lines (debug entry point / dump)
+  res = { quests = { { qid = 10, cat = "startable", name = "Ten", state = "startable",
+    region = "Vern", giver_name = "Brant", pos = { x = 1, y = 2, z = 3 } } },
+    tracked_qid = nil, nearest_qid = nil, journal = {} }
+  local sl = core.state_lines(res, { [10] = true }, false)
+  check("jd ST1: expanded row lines", sl[1] == "[10] Ten - startable"
+    and sl[2] == "  To start: talk to Brant" and sl[3] == "  Region: Vern"
+    and sl[4] == "  jump 1.0, 2.0, 3.0")
+  local function empty_ok(f, ...)
+    local ok, v = pcall(f, ...)
+    return ok and type(v) == "table" and #v == 0
+  end
+  check("jd ST2: no snapshot / no records -> empty lists",
+    empty_ok(core.state_lines, nil, { [1] = true }, false)
+    and empty_ok(core.state_lines, { quests = nil }, { [1] = true }, false)
+    and empty_ok(core.summary_nodes, nil) and empty_ok(core.summary_nodes, {}))
+
+  -- JL readout line
+  check("jd JL1: journal line", core.journal_line({ read = 4, cached = 9, failed = 1,
+    tracked = 20120, on_target = 2, off_target = 1, timeout = 0, canceled = 1 })
+    == "Journal: 4 read, 9 text cached, 1 failed, tracked 20120; jumps 4: on target 2, off target 1, timed out 0, canceled 1")
+  check("jd JL2: nothing tracked", core.journal_line({ read = 0, cached = 0, failed = 0,
+    on_target = 0, off_target = 0, timeout = 0, canceled = 0 }):find("tracked none;", 1, true) ~= nil)
+end
+
+-- wd: world markers (v10, SPEC 17.4, 17.3b.1)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local SH = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_show_opened = false, world_undiscovered = false,
+    world_max_markers = 300 }
+  local function sh(over)
+    local s = {}
+    for k, v in pairs(SH) do s[k] = v end
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  local O = P(0, 0, 0)
+  local function by_key(ms)
+    local t = {}
+    for _, m in ipairs(ms) do t[m.key] = m end
+    return t
+  end
+  local function keys(ms)
+    local t = {}
+    for i, m in ipairs(ms) do t[i] = m.key end
+    return table.concat(t, ",")
+  end
+
+  -- WD1 labels
+  local w = {
+    chests = { { uid = "c1", pos = P(1), state = "unopened", item_name = "Fulminous Shield" },
+               { uid = "c2", pos = P(2), state = "unopened" } },
+    treasure = { { name = "Gimmick_Treasure_001", pos = P(30), checked = false, discovered = true } },
+    monsters = { { uid = "m1", cid = 5, name = "Ogre", pos = P(4), respawning = false } },
+    sellers = { { shop = 7, item = 9, item_name = "Fulminous Shield", cid = 100,
+                  npc = "Dudley", qids = { 30150 }, quest = "Spellbound",
+                  pos = P(5), maybe_locked = false, discovered = true },
+                { shop = 7, item = 10, item_name = "Fulminous Shield", cid = 101,
+                  npc = "Dudley", qids = { 30150 }, quest = "Spellbound",
+                  pos = P(6), maybe_locked = true, discovered = true } },
+  }
+  local ms, panel = core.world_markers(w, sh(), O, {})
+  local k = by_key(ms)
+  check("wd labels: chest with item", k["w:chest:c1"].label == "Chest - Fulminous Shield")
+  check("wd labels: chest plain", k["w:chest:c2"].label == "Chest")
+  check("wd labels: treasure", k["w:tre:Gimmick_Treasure_001"].label == "Treasure")
+  check("wd labels: monster", k["w:mon:m1"].label == "Ogre")
+  check("wd labels: seller", k["w:sell:7:9"].label
+    == "Fulminous Shield - sold by Dudley (for Spellbound)")
+  check("wd labels: seller maybe locked", k["w:sell:7:10"].label
+    == "Fulminous Shield - sold by Dudley (for Spellbound) (may be locked)")
+  -- WD2 keys and qids
+  check("wd keys: four prefixes", k["w:chest:c1"] and k["w:mon:m1"]
+    and k["w:tre:Gimmick_Treasure_001"] and k["w:sell:7:9"])
+  check("wd keys: qids empty except sellers", #k["w:chest:c1"].qids == 0
+    and #k["w:mon:m1"].qids == 0 and #k["w:tre:Gimmick_Treasure_001"].qids == 0
+    and #k["w:sell:7:9"].qids == 1 and k["w:sell:7:9"].qids[1] == 30150)
+  check("wd keys: cat names", k["w:chest:c1"].cat == "chest"
+    and k["w:mon:m1"].cat == "monster" and k["w:sell:7:9"].cat == "seller"
+    and k["w:tre:Gimmick_Treasure_001"].cat == "treasure")
+  check("wd panel: counts", panel.chest.shown == 2 and panel.chest.known == 2
+    and panel.seller.shown == 2 and panel.treasure.known == 1
+    and #panel.monster.entries == 1)
+  local mw = { monsters = { { uid = "m2", cid = 5, name = "Ogre", pos = P(1), respawning = true } } }
+  ms = core.world_markers(mw, sh(), O, {})
+  check("wd labels: respawning suffix", ms[1].label == "Ogre (respawning)")
+
+  -- WD3 opened / unknown / checked
+  w = { chests = { { uid = "o", pos = P(1), state = "opened" },
+                   { uid = "u", pos = P(2), state = "unknown" },
+                   { uid = "n", pos = P(3), state = "unopened" } },
+        treasure = { { name = "T1", pos = P(30), checked = true, discovered = true } } }
+  ms, panel = core.world_markers(w, sh(), O, {})
+  k = by_key(ms)
+  check("wd opened: opened chest hidden", k["w:chest:o"] == nil and panel.chest.known == 3
+    and panel.chest.shown == 2)
+  check("wd opened: unknown chest done=false", k["w:chest:u"] and k["w:chest:u"].done == false)
+  check("wd opened: checked treasure done=true", k["w:tre:T1"] and k["w:tre:T1"].done == true)
+  ms = core.world_markers(w, sh({ world_show_opened = true }), O, {})
+  k = by_key(ms)
+  check("wd opened: show_opened draws done", k["w:chest:o"] and k["w:chest:o"].done == true)
+
+  -- WD4 toggles off
+  local off = sh({ world_chests = false, world_treasure = false,
+    world_monsters = false, world_sellers = false, world_tokens = false,
+    world_beetles = false })
+  w = { chests = { { uid = "c", pos = P(1), state = "unopened" } },
+        treasure = { { name = "T", pos = P(30), checked = false, discovered = true } },
+        monsters = { { uid = "m", cid = 1, name = "Ogre", pos = P(3), respawning = false } },
+        tokens = { { uid = "k", pos = P(5), name = "Tok", state = "not" } },
+        beetles = { { uid = "b", pos = P(6), name = "Bee", state = "not" } },
+        sellers = { { shop = 1, item = 2, item_name = "X", cid = 5, npc = "N", qids = { 1 },
+                      quest = "Q", pos = P(4), maybe_locked = false, discovered = true } } }
+  ms, panel = core.world_markers(w, off, O, {})
+  check("wd toggles off: tokens and beetles known, not shown", #ms == 0
+    and panel.token.known == 1 and panel.token.shown == 0
+    and panel.beetle.known == 1 and panel.beetle.shown == 0)
+  check("wd toggles off: no markers, known counted", #ms == 0
+    and panel.chest.shown == 0 and panel.chest.known == 1
+    and panel.treasure.shown == 0 and panel.treasure.known == 1
+    and panel.monster.shown == 0 and panel.monster.known == 1
+    and panel.seller.shown == 0 and panel.seller.known == 1)
+
+  -- WD5 cap with mixed categories
+  w = { chests = { { uid = "a", pos = P(5), state = "unopened" },
+                   { uid = "b", pos = P(6), state = "unopened" } },
+        treasure = { { name = "T", pos = P(100), checked = false, discovered = true } } }
+  ms, panel = core.world_markers(w, sh({ world_max_markers = 2 }), O, {})
+  check("wd cap: two chests win over far treasure", keys(ms) == "w:chest:a,w:chest:b"
+    and panel.treasure.shown == 0 and panel.treasure.known == 1)
+  w.treasure[1].pos = P(1)
+  ms = core.world_markers(w, sh({ world_max_markers = 3 }), O, {})
+  check("wd cap: category order then distance", keys(ms) == "w:tre:T,w:chest:a,w:chest:b")
+  ms = core.world_markers(w, sh({ world_max_markers = 0 }), O, {})
+  check("wd cap: zero keeps none", #ms == 0)
+  w.treasure[1].pos = P(20)
+  ms = core.world_markers(w, sh({ world_max_markers = 3 }), O, {})
+  check("wd cap: category order beats distance in output",
+    keys(ms) == "w:tre:T,w:chest:a,w:chest:b")
+
+  -- WD6 no origin
+  w = { chests = { { uid = "b", pos = P(1), state = "unopened" },
+                   { uid = "a", pos = P(9), state = "unopened" } },
+        treasure = { { name = "T", pos = P(50), checked = false, discovered = true } } }
+  local ok
+  ok, ms = pcall(core.world_markers, w, sh(), nil, {})
+  check("wd no origin: category then key, no error", ok
+    and keys(ms) == "w:tre:T,w:chest:a,w:chest:b")
+  ok, ms = pcall(core.world_markers, w, sh({ world_max_markers = 1 }), nil, {})
+  check("wd no origin: cap selects by category first", ok and keys(ms) == "w:tre:T")
+
+  -- WD7 world_ord stable
+  w = { chests = { { uid = "a", pos = P(1), state = "unopened" },
+                  { uid = "b", pos = P(2), state = "unopened" },
+                  { uid = "c", pos = P(3), state = "unopened" } } }
+  local m1 = core.world_markers(w, sh(), P(0), {})
+  local m2 = core.world_markers(w, sh(), P(10), {})
+  local o1, o2, seen = by_key(m1), by_key(m2), {}
+  local distinct = true
+  for _, m in pairs(o1) do
+    if math.type(m.world_ord) ~= "integer" or seen[m.world_ord] then distinct = false end
+    seen[m.world_ord] = true
+  end
+  check("wd ord: distinct integers from 1", distinct and seen[1] and seen[2] and seen[3])
+  check("wd ord: distance order flipped", keys(m1) ~= keys(m2))
+  check("wd ord: unchanged when origin moves", o1["w:chest:a"].world_ord == o2["w:chest:a"].world_ord
+    and o1["w:chest:c"].world_ord == o2["w:chest:c"].world_ord
+    and o1["w:chest:a"].world_ord == 1 and o1["w:chest:c"].world_ord == 3)
+
+  -- WD8 compute appends world markers last
+  local function cw(world_over, show_over, ex)
+    local o = { acceptable = { 20 }, progressing = { 10 }, names = { [10] = "A", [20] = "B" },
+      statics = { [20] = P(500, 0, 500) }, casts = {},
+      item_needs = { [10] = { { id = 300, num = 1 } } },
+      item_locs = { { id = 300, pos = P(7, 2, 3), src = "placed" } },
+      item_names = { [300] = "Garb" } }
+    for kk, v in pairs(ex or {}) do o[kk] = v end
+    local show = sh({ startable = true, in_progress = true, quest_items = true,
+      world = world_over })
+    for kk, v in pairs(show_over or {}) do show[kk] = v end
+    return core.compute(fake_adapter(o), show)
+  end
+  local r = cw({ chests = { { uid = "z", pos = P(1), state = "unopened" } } })
+  local cats = {}
+  for _, m in ipairs(r.markers) do cats[#cats + 1] = m.cat end
+  local seq = table.concat(cats, ",")
+  check("wd compute: quest, item, world order", seq:match("quest_item,chest$") ~= nil
+    and r.world ~= nil and r.world.chest.shown == 1)
+  r = cw(nil)
+  local has_w = false
+  for _, m in ipairs(r.markers) do if m.key:sub(1, 2) == "w:" then has_w = true end end
+  check("wd compute: world nil -> no world markers, no snapshot.world",
+    r.world == nil and not has_w)
+
+  r = cw({ chests = { { uid = "n1", pos = P(1), state = "unopened" },
+                      { uid = "n49", pos = P(49), state = "unopened" } } },
+    { world_origin = P(50), world_max_markers = 1 })
+  local only = {}
+  for _, m in ipairs(r.markers) do
+    if m.key:sub(1, 2) == "w:" then only[#only + 1] = m.key end
+  end
+  check("wd compute: show.world_origin picks the nearest", #only == 1
+    and only[1] == "w:chest:n49")
+
+  -- WD10 dedupe against box records
+  r = cw({ chests = { { uid = "near", pos = P(7.5, 2, 3), state = "unopened" },
+                      { uid = "far", pos = P(50, 2, 3), state = "unopened" } } },
+    nil, { item_locs = { { id = 300, pos = P(7, 2, 3), src = "box" } } })
+  local seen_w = {}
+  for _, m in ipairs(r.markers) do seen_w[m.key] = true end
+  check("wd dedupe: chest within 1 unit of a box record not drawn",
+    not seen_w["w:chest:near"] and seen_w["w:chest:far"])
+
+  -- WD11 seller merge
+  local sell = { shop = 3, item = 4, item_name = "Grimoire", cid = 55, npc = "Dudley",
+    qids = { 10 }, quest = "A", pos = P(40), maybe_locked = false, discovered = true }
+  local sell2 = { shop = 3, item = 5, item_name = "Tome", cid = 66, npc = "Gil",
+    qids = { 10 }, quest = "A", pos = P(41), maybe_locked = false, discovered = true }
+  r = cw({ sellers = { sell, sell2 } }, nil,
+    { casts = { [20] = { 55 } }, npc_pos = { [55] = P(30, 0, 30) } })
+  local qm, sm = nil, 0
+  for _, m in ipairs(r.markers) do
+    if m.key == "c:55" then qm = m end
+    if m.key == "w:sell:3:4" then sm = sm + 1 end
+  end
+  local line = "Grimoire - sold by Dudley (for A)"
+  check("wd merge: no seller marker for a cid with a quest marker", qm ~= nil and sm == 0)
+  check("wd merge: hover ends with seller line", qm and qm.hover
+    and qm.hover:sub(-#line) == line and qm.hover:find("\n", 1, true) ~= nil)
+  check("wd merge: other seller still drawn, merged counts in known not shown",
+    r.world.seller.known == 2 and r.world.seller.shown == 1)
+  local merged_none = core.world_markers({ sellers = { sell } }, sh(), O, {}, { [55] = true })
+  check("wd merge: world_markers drops merged seller", #merged_none == 0)
+
+  -- WD12 signature includes done
+  local a = { key = "w:chest:q", pos = P(1), qids = {}, cat = "chest", label = "Chest", done = false }
+  local sig1 = core.signature({ a }, {})
+  a.done = true
+  local sig2 = core.signature({ a }, {})
+  check("wd sig: done flips signature", sig1 ~= sig2)
+
+  -- WD13 undiscovered
+  w = { treasure = { { name = "T", pos = P(30), checked = false, discovered = false } },
+        sellers = { { shop = 1, item = 2, item_name = "X", cid = 5, npc = "N", qids = { 1 },
+                      quest = "Q", pos = P(2), maybe_locked = false, discovered = false } },
+        chests = { { uid = "c", pos = P(3), state = "unopened" } } }
+  ms, panel = core.world_markers(w, sh(), O, {})
+  check("wd undiscovered: hidden by default", keys(ms) == "w:chest:c"
+    and panel.treasure.known == 1 and panel.treasure.shown == 0 and panel.seller.known == 1)
+  ms = core.world_markers(w, sh({ world_undiscovered = true }), O, {})
+  check("wd undiscovered: shown when on", #ms == 3)
+
+  -- WD14 giver fallback
+  local function giver(over, show_over)
+    local o = { acceptable = { 20 }, names = { [20] = "B" }, casts = { [20] = { 55, 77 } } }
+    for kk, v in pairs(over or {}) do o[kk] = v end
+    local show = sh({ startable = true, in_progress = true, world = {} })
+    for kk, v in pairs(show_over or {}) do show[kk] = v end
+    if show.world == "nil" then show.world = nil end
+    local res = core.compute(fake_adapter(o), show)
+    return res.markers[1]
+  end
+  local g = giver(nil, { world_givers = { [77] = P(1, 2, 3) } })
+  check("wd giver: fallback via cast", g and g.pos.x == 1 and g.pos.y == 2 and g.pos.z == 3)
+  g = giver({ npc_pos = { [55] = P(9, 9, 9) } }, { world_givers = { [77] = P(1, 2, 3) } })
+  check("wd giver: NPC position wins", g and g.pos.x == 9)
+  g = giver({ casts = {}, hints = { [20] = 77 } }, { world_givers = { [77] = P(1, 2, 3) } })
+  check("wd giver: hint resolves", g and g.pos.x == 1)
+  g = giver(nil, { world = "nil", world_givers = { [77] = P(1, 2, 3) } })
+  check("wd giver: resolves with show.world absent", g and g.pos.x == 1)
+  g = giver({ casts = { [20] = { 55 } } }, { world_givers = {} })
+  check("wd giver: nothing -> no marker", g == nil)
+
+  -- WD15 schedule
+  g = giver({ casts = { [20] = { 55 } } }, { world = { schedule = { [55] = P(4, 5, 6) } } })
+  check("wd schedule: position used", g and g.pos.x == 4 and g.pos.y == 5 and g.pos.z == 6)
+  g = giver({ casts = { [20] = { 55 } } }, { world = { schedule = { [55] = P(0, 0, 0.5) } } })
+  check("wd schedule: near-zero skipped", g == nil)
+  g = giver({ casts = { [20] = { 55 } } },
+    { world = { schedule = { [55] = P(0, 0, 0.5) } }, world_givers = { [55] = P(7, 8, 9) } })
+  check("wd schedule: skipped schedule falls to giver", g and g.pos.x == 7)
+
+  g = giver({ casts = { [20] = { 55 } } },
+    { world = { schedule = { [55] = P(4, 5, 6) } }, world_givers = { [55] = P(7, 8, 9) } })
+  check("wd schedule: schedule beats atlas giver", g and g.pos.x == 4)
+  g = giver({ hints = { [20] = 55 } }, { world_givers = { [77] = P(1, 2, 3) } })
+  check("wd giver: cast ids consulted beyond the hint", g and g.pos.x == 1)
+
+  -- WD16 item walk
+  check("wd walk: sellers alone wants the walk", core.item_walk_wanted({ world_sellers = true }) == true)
+  check("wd walk: nothing on -> no walk", core.item_walk_wanted({}) == false)
+
+  -- WD17 world_rows
+  local entries = {}
+  for i = 1, 12 do
+    entries[i] = { key = "w:chest:" .. i, label = "Chest", pos = P(i * 10, 0, 0) }
+  end
+  local rows = core.world_rows(entries, { { name = "Vernworth", pos = P(0, 0, 0) },
+    { name = "Melve", pos = P(5000, 0, 0) } }, P(35, 0, 0))
+  check("wd rows: ten rows nearest first", #rows == 10 and rows[1].key == "w:chest:3"
+    and rows[1].text == "Chest - near Vernworth" and rows[1].pos.x == 30)
+  rows = core.world_rows(entries, { { name = "Vernworth", pos = P(0, 0, 0) } }, nil)
+  check("wd rows: nil origin list order", #rows == 10 and rows[1].key == "w:chest:1"
+    and rows[10].key == "w:chest:10")
+
+  -- WD18 overhead ignores world
+  ms = core.world_markers({ chests = { { uid = "c", pos = P(1), state = "unopened" } } }, sh(), O, {})
+  check("wd overhead: w: keys give no anchors", #core.overhead_anchors(ms, {}, P(0), 50) == 0)
+
+  -- WD9 minimap: quest and item first
+  local mm = {}
+  for i = 1, 12 do
+    mm[#mm + 1] = { key = string.format("w:chest:%02d", i), cat = "chest", pos = P(5), qids = {} }
+  end
+  mm[#mm + 1] = { key = "c:1", cat = "startable", pos = P(40), qids = { 1 } }
+  mm[#mm + 1] = { key = "c:2", cat = "startable", pos = P(40), qids = { 2 } }
+  mm[#mm + 1] = { key = "i:300:0:0", cat = "quest_item", pos = P(40), qids = { 1 } }
+  local out = core.minimap_markers(mm, O, 100, 12)
+  local got = {}
+  for _, m in ipairs(out) do got[m.key] = true end
+  check("wd minimap: quest and item markers before world", #out == 12
+    and got["c:1"] and got["c:2"] and got["i:300:0:0"])
+end
+
+-- wd2: tokens, beetles, small monsters, chest label, dedupe, grid cull (Task 10)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local SH = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(over)
+    local s = {}
+    for k, v in pairs(SH) do s[k] = v end
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  local O = P(0, 0, 0)
+  local function keys(ms)
+    local t = {}
+    for i, m in ipairs(ms) do t[i] = m.key end
+    return table.concat(t, ",")
+  end
+  local function by_key(ms)
+    local t = {}
+    for _, m in ipairs(ms) do t[m.key] = m end
+    return t
+  end
+
+  -- world_six_order
+  local w = {
+    chests = { { uid = "c", pos = P(1), state = "unopened" } },
+    treasure = { { name = "T", pos = P(50), checked = false, discovered = true } },
+    tokens = { { uid = "k", pos = P(2), name = "Token A", state = "not" } },
+    beetles = { { uid = "b", pos = P(3), name = "Beetle A", state = "not" } },
+    monsters = { { uid = "m", cid = 1, name = "Ogre", pos = P(4), respawning = false } },
+    sellers = { { shop = 1, item = 2, item_name = "X", cid = 9, npc = "N", qids = {},
+                  quest = "", pos = P(5), maybe_locked = false, discovered = true } },
+  }
+  local ms, panel = core.world_markers(w, sh(), O, {})
+  check("wd2 six order", keys(ms) == "w:tre:T,w:tok:k,w:bee:b,w:sell:1:2,w:mon:m,w:chest:c")
+  check("wd2 seven cats", #core.WORLD_CATS == 7 and panel.token.shown == 1 and panel.beetle.shown == 1)
+  ms = core.world_markers(w, sh({ world_max_markers = 3 }), nil, {})
+  check("wd2 six order no origin", keys(ms) == "w:tre:T,w:tok:k,w:bee:b")
+
+  -- world_toggles_new
+  ms = core.world_markers(w, sh({ world_tokens = false }), O, {})
+  check("wd2 tokens off", keys(ms) == "w:tre:T,w:bee:b,w:sell:1:2,w:mon:m,w:chest:c")
+  ms = core.world_markers(w, sh({ world_beetles = false }), O, {})
+  check("wd2 beetles off", keys(ms) == "w:tre:T,w:tok:k,w:sell:1:2,w:mon:m,w:chest:c")
+
+  -- token_done_style
+  local tw = { tokens = { { uid = "n", pos = P(1), name = "Not", state = "not" },
+                          { uid = "d", pos = P(2), name = "Done", state = "collected" },
+                          { uid = "u", pos = P(3), name = "Unk", state = "unknown" } } }
+  ms, panel = core.world_markers(tw, sh(), O, {})
+  local k = by_key(ms)
+  check("wd2 token collected hidden", k["w:tok:d"] == nil and k["w:tok:n"] and panel.token.known == 3)
+  check("wd2 token labels", k["w:tok:n"].label == "Not" and k["w:tok:n"].done == false
+    and k["w:tok:u"].done == false)
+  ms = core.world_markers(tw, sh({ world_show_opened = true }), O, {})
+  k = by_key(ms)
+  check("wd2 token collected shown done", k["w:tok:d"] and k["w:tok:d"].done == true
+    and k["w:tok:d"].label == "Done")
+  ms = core.world_markers({ beetles = tw.tokens }, sh({ world_show_opened = true }), O, {})
+  check("wd2 beetle keys", by_key(ms)["w:bee:d"] and by_key(ms)["w:bee:d"].done == true)
+
+  -- small_monster_filter
+  local mw = { monsters = { { uid = "s", cid = 1, name = "Goblin", pos = P(1), small = true },
+                            { uid = "g", cid = 2, name = "Ogre", pos = P(2), small = false } } }
+  ms, panel = core.world_markers(mw, sh(), O, {})
+  check("wd2 small absent by default", keys(ms) == "w:mon:g" and panel.monster.known == 1)
+  ms, panel = core.world_markers(mw, sh({ world_small_monsters = true }), O, {})
+  check("wd2 small present when on", #ms == 2 and panel.monster.known == 2)
+  ms, panel = core.world_markers(mw, sh({ world_small_monsters = true, world_monsters = false }), O, {})
+  check("wd2 monsters off drops small too", #ms == 0)
+
+  -- chest_label_rules
+  local function lbl(c) return core.chest_label(c) end
+  check("wd2 label item_name", lbl({ item_name = "Ferrystone" }) == "Chest - Ferrystone")
+  check("wd2 label items", lbl({ items = { { name = "A", n = 2 }, { name = "B", n = 1 } } })
+    == "Chest - A x2, B")
+  check("wd2 label five", lbl({ items = { { name = "A", n = 1 }, { name = "B", n = 1 },
+    { name = "C", n = 1 }, { name = "D", n = 1 }, { name = "E", n = 1 } } }) == "Chest - A, B, C (+2)")
+  check("wd2 label none", lbl({}) == "Chest" and lbl({ items = {} }) == "Chest")
+  check("wd2 label item_name wins", lbl({ item_name = "Z", items = { { name = "A", n = 1 } } })
+    == "Chest - Z")
+  ms = core.world_markers({ chests = { { uid = "c", pos = P(1), state = "unopened",
+    items = { { name = "A", n = 3 } } } } }, sh(), O, {})
+  check("wd2 label in marker", ms[1].label == "Chest - A x3")
+
+  -- treasure_chest_dedupe
+  local function dd(dx, state)
+    local m = core.world_markers({
+      chests = { { uid = "c", pos = P(100), state = state or "unopened" } },
+      treasure = { { name = "T", pos = P(100 + dx), checked = false, discovered = true } } },
+      sh(), O, {})
+    return keys(m)
+  end
+  check("wd2 dedupe 2.9", dd(2.9) == "w:chest:c")
+  check("wd2 dedupe 3.1", dd(3.1) == "w:tre:T,w:chest:c")
+  check("wd2 dedupe exactly 3", dd(3) == "w:chest:c")
+  check("wd2 dedupe 3.01", dd(3.01) == "w:tre:T,w:chest:c")
+  check("wd2 dedupe opened chest", dd(1, "opened") == "")
+
+  -- grid_cull_equivalent
+  local stats = core.world_stats
+  local function sorted_keys(ms)
+    local t = {}
+    for i, m in ipairs(ms) do t[i] = m.key end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  local function panel_sig(p)
+    local t = {}
+    for _, cat in ipairs(core.WORLD_CATS) do
+      local ks = {}
+      for i, m in ipairs(p[cat].entries) do ks[i] = m.key end
+      t[#t + 1] = cat .. ":" .. p[cat].shown .. "/" .. p[cat].known .. ":" .. table.concat(ks, "+")
+    end
+    return table.concat(t, "|")
+  end
+  local function merged_sig(mg)
+    local t = {}
+    for i, m in ipairs(mg) do t[i] = m.cid .. "=" .. m.line end
+    table.sort(t)
+    return table.concat(t, ";")
+  end
+  -- ser: every marker field, for markers and for every category's panel
+  -- entries (sells_for joined by newline, stock as names, "!" after locked)
+  local function ser(ms)
+    local out = {}
+    for i, m in ipairs(ms) do
+      local ks = {}
+      for k in pairs(m) do ks[#ks + 1] = k end
+      table.sort(ks)
+      local parts = {}
+      for _, k in ipairs(ks) do
+        local v = m[k]
+        if k == "pos" then v = v.x .. "," .. v.y .. "," .. v.z
+        elseif k == "qids" then v = table.concat(v, ",")
+        elseif k == "sells_for" then v = table.concat(v, "\n")
+        elseif k == "stock" then
+          local names = {}
+          for j, st in ipairs(v) do names[j] = tostring(st.name) .. (st.locked and "!" or "") end
+          v = table.concat(names, ",")
+        end
+        parts[#parts + 1] = k .. "=" .. tostring(v)
+      end
+      out[i] = table.concat(parts, ";")
+    end
+    return table.concat(out, "|")
+  end
+  local function panel_ser(p)
+    local t = {}
+    for _, cat in ipairs(core.WORLD_CATS) do
+      t[#t + 1] = cat .. ":" .. p[cat].shown .. "/" .. p[cat].known .. ":" .. ser(p[cat].entries)
+    end
+    return table.concat(t, "#")
+  end
+  local shops_exercised = { merged = false, offmap = false, sells = false, stock = false }
+  local all_same, grid_ok, cull_ok = true, true, true
+  for seed = 1, 20 do
+    math.randomseed(seed)
+    local rw = { chests = {}, treasure = {}, tokens = {}, beetles = {}, monsters = {}, sellers = {} }
+    local function rp() return P(math.random() * 6000 - 3000, math.random() * 50, math.random() * 6000 - 3000) end
+    for i = 1, 3600 do
+      local r = math.random(1, 6)
+      if r == 1 then rw.chests[#rw.chests + 1] = { uid = "c" .. i, pos = rp(),
+        state = (math.random() < 0.2) and "opened" or "unopened" }
+      elseif r == 2 then rw.treasure[#rw.treasure + 1] = { name = "T" .. i, pos = rp(),
+        checked = false, discovered = math.random() < 0.8 }
+      elseif r == 3 then rw.tokens[#rw.tokens + 1] = { uid = "k" .. i, pos = rp(), name = "K" .. i,
+        state = (math.random() < 0.2) and "collected" or "not" }
+      elseif r == 4 then rw.beetles[#rw.beetles + 1] = { uid = "b" .. i, pos = rp(), name = "B" .. i,
+        state = "not" }
+      elseif r == 5 then rw.monsters[#rw.monsters + 1] = { uid = "m" .. i, cid = i, name = "M" .. i,
+        pos = rp(), small = math.random() < 0.3 }
+      else rw.sellers[#rw.sellers + 1] = { shop = i, item = i, item_name = "I" .. i, cid = i,
+        npc = "N", qids = {}, quest = "", pos = rp(), maybe_locked = false, discovered = true } end
+    end
+    -- a seller far from the origin, in quest_cids
+    rw.sellers[#rw.sellers + 1] = { shop = 9999, item = 1, item_name = "Far", cid = 99999, npc = "N",
+      qids = {}, quest = "", pos = P(2990, 0, 2990), maybe_locked = false, discovered = true }
+    -- about 60 shops: a third share a seller's shop id, two sit at quest
+    -- cids; half of those sellers carry a quest, some shops get a second seller
+    local first_sellers = #rw.sellers
+    rw.shops = {}
+    for j = 1, 60 do
+      local sid, cid = 100000 + j, 90000 + j
+      if j <= 20 then
+        local sl = rw.sellers[2 + (j - 1) * 3]
+        sid, cid = sl.shop, sl.cid
+        if j % 2 == 0 then sl.quest = "Q" .. j end
+        if j % 3 == 0 then
+          rw.sellers[#rw.sellers + 1] = { shop = sid, item = 70000 + j, item_name = "Extra" .. j,
+            cid = cid, npc = "N", qids = {}, quest = "X" .. j, pos = rp(),
+            maybe_locked = false, discovered = true }
+        end
+      end
+      if j == 58 then cid = 99999 elseif j == 59 then cid = rw.sellers[1].cid end
+      local items = {}
+      local n_items = (j % 6 == 0 and j < 58) and 0 or (1 + j % 5)
+      for k = 1, n_items do
+        items[k] = { name = ((k + j) % 4 == 0) and "Potion" or ("I" .. (j * 10 + k)),
+          locked = k % 2 == 0 }
+      end
+      rw.shops[#rw.shops + 1] = { shop = sid, cid = cid, npc = "S" .. j, pos = rp(),
+        discovered = (j >= 58) or math.random() < 0.8, items = items }
+    end
+    local shop_count = 0
+    for _, e in ipairs(rw.shops) do if #e.items > 0 then shop_count = shop_count + 1 end end
+    local origin = P(-2900, 0, -2900)
+    local boxes = { rw.chests[1] and rw.chests[1].pos }
+    local qc = { [99999] = true, [rw.sellers[1].cid] = true }
+    local small = (seed % 2 == 0)
+    local s = sh({ world_small_monsters = small })
+    local b0 = stats.grid_builds
+    local m1, p1, g1 = core.world_markers(rw, s, origin, boxes, qc)
+    local m2, p2, g2 = core.world_markers_cached(rw, s, origin, boxes, qc)
+    if keys(m1) ~= keys(m2) or panel_sig(p1) ~= panel_sig(p2)
+      or merged_sig(g1) ~= merged_sig(g2) then
+      all_same = false
+    end
+    if #m1 ~= 300 or not merged_sig(g2):find("99999", 1, true) then all_same = false end
+    -- warm call: the ring cull must stop early, well short of a full scan
+    local cb0 = stats.cand_builds
+    core.world_markers_cached(rw, s, origin, boxes, qc)
+    local built = stats.cand_builds - cb0
+    if built * 2 >= 3600 then cull_ok = false end
+    -- off-diagonal origins agree with the uncached path
+    for _, o2 in ipairs({ P(0, 0, 0), P(2500, 0, -1800), P(-1700, 0, 2600) }) do
+      local a1 = core.world_markers(rw, s, o2, boxes, qc)
+      local a2 = core.world_markers_cached(rw, s, o2, boxes, qc)
+      if keys(a1) ~= keys(a2) then all_same = false end
+    end
+    -- small-monster setting flipped on the same world table
+    for _, flag in ipairs({ not small, small }) do
+      local sf = sh({ world_small_monsters = flag })
+      local f1, fp1 = core.world_markers(rw, sf, origin, boxes, qc)
+      local f2, fp2 = core.world_markers_cached(rw, sf, origin, boxes, qc)
+      if keys(f1) ~= keys(f2) or panel_sig(fp1) ~= panel_sig(fp2) then all_same = false end
+    end
+    b0 = b0 + 2
+    if stats.grid_builds ~= b0 + 1 then grid_ok = false end
+    -- a different cap or toggle with the same world changes the result
+    local s10 = sh({ world_max_markers = 10, world_small_monsters = small })
+    local m3 = core.world_markers_cached(rw, s10, origin, boxes, qc)
+    if #m3 ~= 10 or keys(m3) ~= keys((core.world_markers(rw, s10, origin, boxes, qc))) then
+      all_same = false
+    end
+    local stk = sh({ world_tokens = false, world_small_monsters = small })
+    local t1 = core.world_markers_cached(rw, stk, origin, boxes, qc)
+    if keys(t1) ~= keys((core.world_markers(rw, stk, origin, boxes, qc))) or keys(t1) == keys(m2) then
+      all_same = false
+    end
+    -- nil origin
+    local n1 = core.world_markers(rw, s, nil, boxes, qc)
+    local n2 = core.world_markers_cached(rw, s, nil, boxes, qc)
+    if keys(n1) ~= keys(n2) then all_same = false end
+    if stats.grid_builds ~= b0 + 1 then grid_ok = false end
+    -- new world table rebuilds
+    local copy = {}
+    for kk, v in pairs(rw) do copy[kk] = v end
+    core.world_markers_cached(copy, s, origin, boxes, qc)
+    if stats.grid_builds ~= b0 + 2 then grid_ok = false end
+    -- shops on/off x search on/off x origin/none: both paths agree on every
+    -- marker field, every panel entry and the merged lines
+    for _, qtext in ipairs({ false, "potion, s3, i12" }) do
+      for _, son in ipairs({ true, false }) do
+        for _, org in ipairs({ origin, false }) do
+          local so = org or nil
+          local ss = sh({ world_small_monsters = small, world_shops = son,
+            search = qtext and core.parse_query(qtext) or nil })
+          local x1, xp1, xg1 = core.world_markers(rw, ss, so, boxes, qc)
+          local x2, xp2, xg2 = core.world_markers_cached(rw, ss, so, boxes, qc)
+          if ser(x1) ~= ser(x2) or panel_ser(xp1) ~= panel_ser(xp2)
+            or panel_sig(xp1) ~= panel_sig(xp2) or merged_sig(xg1) ~= merged_sig(xg2) then
+            all_same = false
+          end
+          for _, e in ipairs(xp1.shop.entries) do
+            if e.merged then shops_exercised.merged = true end
+            if e.offmap then shops_exercised.offmap = true end
+            if #e.sells_for > 0 then shops_exercised.sells = true end
+            if #e.stock > 0 then shops_exercised.stock = true end
+          end
+          if not qtext and son and org then
+            -- the shops-on bounds: cap reached, quest-cid merge, ring cull
+            if #x1 ~= 300 or not merged_sig(xg2):find("99999", 1, true) then all_same = false end
+            local cbs = stats.cand_builds
+            core.world_markers_cached(rw, ss, so, boxes, qc)
+            local built_on = stats.cand_builds - cbs
+            if built_on < shop_count or (built_on - shop_count) * 2 >= 3600 then
+              cull_ok = false
+            end
+          end
+        end
+      end
+    end
+    -- every toggle off: zero candidate builds
+    local off = sh({ world_chests = false, world_treasure = false, world_tokens = false,
+      world_beetles = false, world_monsters = false, world_sellers = false,
+      world_shops = false, world_small_monsters = small })
+    local c0 = stats.cand_builds
+    local mo, po, go = core.world_markers_cached(copy, off, origin, boxes, qc)
+    local _, pe = core.world_markers(copy, off, origin, boxes, qc)
+    if #mo ~= 0 or #go ~= 0 or stats.cand_builds ~= c0 or panel_sig(po) ~= panel_sig(pe) then
+      all_same = false
+    end
+  end
+  check("wd2 grid equivalent over 20 seeds", all_same)
+  check("wd2 grid reuse and rebuild counts", grid_ok)
+  check("wd2 ring cull stops early", cull_ok)
+  check("wd2 shops: differential exercised merged, off-map, sells_for and stock",
+    shops_exercised.merged and shops_exercised.offmap and shops_exercised.sells
+    and shops_exercised.stock)
+  local fc = core.world_markers_cached({ chests = { { uid = "c", pos = P(1), state = "unopened" },
+    { uid = "d", pos = P(2), state = "unopened" } } }, sh({ world_max_markers = 1.5 }), O, {})
+  check("wd2 fractional cap", #fc == 1)
+
+  -- SPEC 20.12.11.1: map_origin_step
+  do
+    local st = core.map_origin_step
+    local function same(a, b) return a ~= nil and b ~= nil and a.x == b.x and a.y == b.y and a.z == b.z end
+    check("map_origin_step: constants", core.MAP_REORIGIN == 50 and core.MAP_HOLD == 0.5)
+    do
+      local okn, on = pcall(st, P(10, 5, 10), P(500, 0, 500), 10, 5.0, nil)
+      check("map_origin_step: nil last_at with prev set does not raise", okn and on ~= nil and on.x == 500)
+    end
+    local prev = P(10, 5, 10)
+    local o, la = st(prev, nil, 0, 100, 3)
+    check("map_origin_step: nil cursor keeps prev", o == prev and la == 3)
+    o, la = st(prev, P(0.5, 0, 0.5), 0, 100, 3)
+    check("map_origin_step: unset reading keeps prev", o == prev and la == 3)
+    o, la = st(prev, P(0 / 0, 0, 500), 0, 100, 3)
+    check("map_origin_step: NaN x keeps prev", o == prev and la == 3)
+    o, la = st(nil, P(500, 0, 500), 120, 100, 3)
+    check("map_origin_step: y 0 takes player_y", o ~= nil and o.y == 120 and o.x == 500 and la == 100)
+    o = st(nil, P(500, 0, 500), nil, 100, 3)
+    check("map_origin_step: y 0 with player_y nil stays 0", o ~= nil and o.y == 0)
+    o, la = st(P(500, 9, 500), P(500, 0, 500), 120, 100, 3)
+    check("map_origin_step: x/z distance only, kept", same(o, P(500, 9, 500)) and la == 3)
+    o, la = st(nil, P(500, 7, 500), 0, 10, 10)
+    check("map_origin_step: prev nil taken despite hold", same(o, P(500, 7, 500)) and la == 10)
+    o, la = st(P(0, 0, 0), P(49, 0, 0), 0, 100, 0)
+    check("map_origin_step: 49 units kept", same(o, P(0, 0, 0)) and la == 0)
+    o, la = st(P(0, 0, 0), P(50, 3, 0), 0, 10.4, 10.0)
+    check("map_origin_step: 50 units inside hold kept", same(o, P(0, 0, 0)) and la == 10.0)
+    o, la = st(P(0, 0, 0), P(50, 3, 0), 0, 10.5, 10.0)
+    check("map_origin_step: 50 units after hold taken", same(o, P(50, 3, 0)) and la == 10.5)
+  end
+
+  -- SPEC 20.12.11.2: fullmap_world and fullmap_order's third argument
+  do
+    local function mkc(n)
+      local rw = { chests = {} }
+      for i = 1, n do
+        rw.chests[i] = { uid = "f" .. i, pos = P(i * 100, 0, 0), state = "unopened" }
+      end
+      return rw
+    end
+    local rw = mkc(10)
+    local function run(over)
+      local s = sh({ startable = true, in_progress = true, world = rw,
+        world_max_markers = 3, world_origin = P(0, 0, 0) })
+      for k, v in pairs(over or {}) do s[k] = v end
+      return core.compute(fake_adapter({}), s)
+    end
+    local ws = core.world_stats
+    run()   -- warm the grid cache so both measured computes see the same state
+    local g0, c0 = ws.grid_builds, ws.cand_builds
+    local base = run()
+    local g1, c1 = ws.grid_builds, ws.cand_builds
+    local far = run({ map_origin = P(1000, 0, 0) })
+    local g2, c2 = ws.grid_builds, ws.cand_builds
+    check("fullmap_world: nil without map_origin", base.fullmap_world == nil)
+    check("fullmap_world: markers and panel unchanged by map_origin",
+      ser(base.markers) == ser(far.markers) and panel_ser(base.world) == panel_ser(far.world))
+    check("fullmap_world: grid and candidate build deltas equal",
+      g2 - g1 == g1 - g0 and c2 - c1 == c1 - c0)
+    check("fullmap_world: markers near the player", keys(base.markers) == "w:chest:f1,w:chest:f2,w:chest:f3")
+    check("fullmap_world: holds the world markers nearest map_origin",
+      far.fullmap_world ~= nil and #far.fullmap_world == 3
+      and keys(far.fullmap_world) == "w:chest:f10,w:chest:f9,w:chest:f8")
+    local ra = run({ map_origin = P(1000, 0, 0) })
+    local rb = run({ map_origin = P(100, 0, 0) })
+    local function sig(r)
+      local all = {}
+      for _, m in ipairs(r.markers) do all[#all + 1] = m end
+      for _, m in ipairs(r.fullmap_world) do all[#all + 1] = m end
+      return (core.signature(all, {}))
+    end
+    check("fullmap_world: signature differs when only map_origin moves the set", sig(ra) ~= sig(rb))
+    -- a quest marker, a shop and a seller sharing one cid, with and without a search:
+    -- the second pass must leave markers and the quest hover (merge lines) untouched
+    do
+      local function runq(over)
+        local rwq = { chests = rw.chests,
+          shops = { { shop = 5, cid = 9001, npc = "Merchant Gil", pos = P(60), discovered = true,
+            items = { { name = "Rope", locked = false } } } },
+          sellers = { { shop = 5, item = 2, item_name = "Elixir", cid = 9001, npc = "Merchant Gil",
+            qids = {}, quest = "Bandage Run", pos = P(61), maybe_locked = false, discovered = true } } }
+        local s = sh({ startable = true, in_progress = true, world = rwq, world_shops = true,
+          world_sellers = true, world_max_markers = 3, world_origin = P(0, 0, 0) })
+        for k, v in pairs(over or {}) do s[k] = v end
+        return core.compute(fake_adapter({ acceptable = { 20 }, names = { [20] = "Quest B" },
+          hints = { [20] = 9001 }, npc_pos = { [9001] = P(50, 0, 50) },
+          npc_names = { [9001] = "Merchant Gil" } }), s)
+      end
+      local function hover_of(r)
+        for _, m in ipairs(r.markers) do if m.key == "c:9001" then return m.hover end end
+      end
+      local function count_for(s)
+        local n = 0
+        for _ in (s or ""):gmatch("%(for ") do n = n + 1 end
+        return n
+      end
+      for _, srch in ipairs({ "none", "gil" }) do
+        local q = srch == "gil" and core.parse_query("gil") or nil
+        local b0 = runq({ search = q })
+        local f0 = runq({ search = q, map_origin = P(1000, 0, 0) })
+        check("fullmap_world merge [" .. srch .. "]: quest hover has the seller line",
+          hover_of(b0) ~= nil and count_for(hover_of(b0)) == 1)
+        check("fullmap_world merge [" .. srch .. "]: markers and quest hover unchanged",
+          ser(b0.markers) == ser(f0.markers) and hover_of(b0) == hover_of(f0)
+          and count_for(hover_of(f0)) == 1 and panel_ser(b0.world) == panel_ser(f0.world))
+      end
+    end
+    local function mk(key, cat, pos) return { key = key, cat = cat, pos = pos } end
+    local cw1 = core.WORLD_CATS[1]
+    local q1 = mk("q1", "acceptable", P(900))
+    local input = { mk("w:a", cw1, P(1)), q1, mk("w:b", cw1, P(2)) }
+    local repl = { mk("w:z", cw1, P(300)), mk("w:y", cw1, P(5)) }
+    check("fullmap_order: third argument with a valid origin",
+      keys(core.fullmap_order(input, P(0, 0, 0), repl)) == "q1,w:y,w:z")
+    check("fullmap_order: third argument with no origin keeps its own order",
+      keys(core.fullmap_order(input, nil, repl)) == "q1,w:z,w:y")
+  end
+end
+
+-- minimap_markers: the bounded selection equals a full sort, and valid_pos
+-- rejects non-finite coordinates
+do
+  check("valid_pos rejects NaN", core.valid_pos({ x = 0 / 0, y = 0, z = 0 }) == false)
+  check("valid_pos rejects inf", core.valid_pos({ x = 0, y = math.huge, z = 0 }) == false)
+  check("valid_pos accepts numbers", core.valid_pos({ x = 1, y = -2, z = 3.5 }) == true)
+  math.randomseed(20261021)
+  local cats = { "startable", "chest", "monster", "quest_item", "token" }
+  local same = true
+  for trial = 1, 60 do
+    local ms = {}
+    for i = 1, math.random(0, 120) do
+      ms[i] = { key = string.format("k%04d", i), cat = cats[math.random(#cats)],
+        pos = { x = math.random(-30, 30), y = 0, z = math.random(-30, 30) } }
+    end
+    local cap = math.random(0, 14)
+    local origin = { x = 0, y = 0, z = 0 }
+    local got, gnear = core.minimap_markers(ms, origin, 25, cap)
+    local world_cat = { treasure = true, token = true, beetle = true, seller = true,
+      monster = true, chest = true }
+    local inside, best = {}, nil
+    for _, m in ipairs(ms) do
+      local d2 = m.pos.x ^ 2 + m.pos.y ^ 2 + m.pos.z ^ 2
+      if d2 <= 25 * 25 then
+        inside[#inside + 1] = { m = m, d2 = d2, w = world_cat[m.cat] and 1 or 0 }
+        if best == nil or d2 < best then best = d2 end
+      end
+    end
+    table.sort(inside, function(a, b)
+      if a.w ~= b.w then return a.w < b.w end
+      if a.d2 ~= b.d2 then return a.d2 < b.d2 end
+      return a.m.key < b.m.key
+    end)
+    local want = math.min(cap, #inside)
+    if #got ~= want then same = false end
+    for i = 1, want do if got[i] ~= inside[i].m then same = false end end
+    if (gnear == nil) ~= (best == nil) or (best and gnear ~= math.sqrt(best)) then
+      same = false
+    end
+  end
+  check("minimap_markers: bounded selection equals the full sort", same)
+end
+
+-- ms: map search (v11, SPEC 19)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local function Q(t) return core.parse_query(t) end
+  local function tset(q)
+    local s = {}
+    for _, t in ipairs(q.terms) do s[t] = true end
+    return s
+  end
+  local function keyset(ms)
+    local s = {}
+    for _, m in ipairs(ms) do s[m.key] = m end
+    return s
+  end
+  local function keylist(ms)
+    local t = {}
+    for i, m in ipairs(ms) do t[i] = m.key end
+    return table.concat(t, ",")
+  end
+
+  -- 1 parse and match
+  check("ms parse: empty and commas only", Q("") == nil and Q(" , ") == nil)
+  local q = Q("goblin, minotaur")
+  check("ms parse: terms trimmed", q ~= nil and tset(q).goblin and tset(q).minotaur)
+  check("ms match: plural", core.query_match(Q("minotaurs"), "minotaur"))
+  check("ms match: empty terms dropped", not core.query_match(Q("a, ,b"), "x y"))
+  check("ms match: comma OR", core.query_match(q, "a goblin") and core.query_match(q, "minotaur"))
+  check("ms match: no pattern magic", not core.query_match(Q("a.b"), "axb")
+    and core.query_match(Q("a.b"), "a.b"))
+  check("ms match: plural needs more than 3 chars", not core.query_match(Q("bus"), "bu"))
+  check("ms match: case folded term", core.query_match(Q("MINOTAUR"), "minotaur"))
+
+  local SHW = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_max_markers = 300, world_origin = P(0, 0, 0),
+    world_show_opened = false, world_undiscovered = false }
+  local function run(o, world, search, over)
+    local base = { acceptable = { 20 }, names = { [20] = "Quest B" },
+      hints = { [20] = 9001 }, npc_pos = { [9001] = P(50, 0, 50) },
+      npc_names = { [9001] = "Merchant Gil" } }
+    for k, v in pairs(o or {}) do base[k] = v end
+    local show = { startable = true, in_progress = true, quest_items = true,
+      world = world, search = search }
+    for k, v in pairs(SHW) do show[k] = v end
+    for k, v in pairs(over or {}) do show[k] = v end
+    return core.compute(fake_adapter(base), show)
+  end
+
+  -- 1 spaces after commas find both; case folded
+  local mw = { monsters = {
+    { uid = "g", cid = 1, name = "Goblin", pos = P(1) },
+    { uid = "m", cid = 2, name = "Minotaur", pos = P(2) },
+    { uid = "o", cid = 3, name = "Ogre", pos = P(3) } } }
+  local r = run({ acceptable = {} }, mw, Q("goblin, minotaur"))
+  local ks = keyset(r.markers)
+  check("ms world: both comma terms found", ks["w:mon:g"] and ks["w:mon:m"] and not ks["w:mon:o"])
+  r = run({ acceptable = {} }, mw, Q("MINOTAUR"))
+  check("ms world: case-insensitive", keylist(r.markers) == "w:mon:m")
+
+  -- 2 haystack join: parts do not combine across the newline
+  local cw = { chests = { { uid = "1", pos = P(1), state = "unopened",
+    items = { { name = "Ore" } } } } }
+  r = run({ acceptable = {} }, cw, Q("store"))
+  check("ms hay: chest + ore is not store", #r.markers == 0)
+  r = run({ acceptable = {} }, cw, Q("ore"))
+  check("ms hay: chest item found", #r.markers == 1)
+
+  -- 3 fourth item matches
+  cw = { chests = { { uid = "4", pos = P(1), state = "unopened",
+    items = { { name = "A1" }, { name = "B2" }, { name = "C3" }, { name = "Zircon" } } } } }
+  r = run({ acceptable = {} }, cw, Q("zircon"))
+  check("ms hay: fourth chest item matches", #r.markers == 1
+    and r.markers[1].label:find("Zircon", 1, true) == nil)
+
+  -- 4 quest markers: npc name, giver hint, no npc_name, quest-item by quest name
+  r = run(nil, nil, Q("merchant gil"))
+  check("ms quest: matches by npc name", #r.markers == 1 and r.markers[1].key == "c:9001")
+  r = run(nil, nil, Q("nobody"))
+  check("ms quest: no match drops marker", #r.markers == 0)
+  r = run({ hints = { [20] = 9002 }, npc_pos = {}, statics = { [20] = P(7, 0, 7) },
+    npc_names = { [9002] = "Aldric" } }, nil, Q("aldric"))
+  check("ms quest: giver hint when key is not c:", #r.markers == 1
+    and r.markers[1].key:sub(1, 2) ~= "c:")
+  local na = base_adapter({ acceptable_ids = function() return { 20 } end,
+    giver_hint = function() return 9001 end,
+    npc_pos = function() return 1, 2, 3 end })
+  local rn = core.compute(na, { startable = true, in_progress = true, search = Q("q20") })
+  check("ms quest: adapter without npc_name computes", rn ~= nil and #rn.markers == 1)
+  r = run({ acceptable = {}, progressing = { 10 }, names = { [10] = "Rescue Mission" },
+    item_needs = { [10] = { { id = 300, num = 1 } } },
+    item_locs = { { id = 300, pos = P(7, 2, 3), live = P(7, 2, 3), src = "placed" } },
+    item_names = { [300] = "Garb" } }, nil, Q("rescue"))
+  local qi = 0
+  for _, m in ipairs(r.markers) do if m.cat == "quest_item" then qi = qi + 1 end end
+  check("ms item: matches by needing quest name", qi == 1)
+
+  -- 5 filter across consumers
+  local fw = { chests = { { uid = "k", pos = P(5), state = "unopened",
+      items = { { name = "Ruby" } } },
+    { uid = "n", pos = P(6), state = "unopened", items = { { name = "Pebble" } } } },
+    sellers = { { shop = 1, item = 2, item_name = "Elixir", cid = 9001, npc = "Merchant Gil",
+      qids = {}, quest = "", pos = P(60), maybe_locked = false, discovered = true } } }
+  local fo = { acceptable = { 20 }, progressing = { 10 },
+    names = { [10] = "Alpha", [20] = "Quest B" },
+    item_needs = { [10] = { { id = 300, num = 1 } } },
+    item_locs = { { id = 300, pos = P(7, 2, 3), live = P(7, 2, 3), src = "placed" } },
+    item_names = { [300] = "Garb" } }
+  local full = run(fo, fw, nil)
+  local fk = keyset(full.markers)
+  check("ms filter: control, seller merged into the quest hover", fk["c:9001"]
+    and fk["c:9001"].hover and fk["c:9001"].hover:find("Elixir", 1, true)
+    and not fk["w:sell:1:2"])
+  local r = run(fo, fw, Q("ruby"))
+  fk = keyset(r.markers)
+  check("ms filter: only the matching chest remains", keylist(r.markers) == "w:chest:k")
+  local mm = core.minimap_markers(r.markers, P(0, 0, 0), 1e9, 99)
+  check("ms filter: minimap input filtered", #mm == 1 and mm[1].key == "w:chest:k")
+  check("ms filter: panel shown counts matches, known unchanged",
+    r.world.chest.shown == 1 and r.world.chest.known == 2)
+  r = run(fo, fw, Q("alpha"))
+  local anchors = core.overhead_anchors(r.markers, {}, P(0, 0, 0), 1e9)
+  local pts = core.overhead_points(r.markers, P(0, 0, 0), 1e9)
+  fk = keyset(r.markers)
+  check("ms filter: item marker kept, quest and world gone", fk["c:9001"] == nil
+    and #anchors == 0 and #pts == 1 and #r.markers == 1)
+  r = run(fo, fw, Q("elixir"))
+  fk = keyset(r.markers)
+  check("ms filter: seller of a filtered quest marker draws alone", fk["w:sell:1:2"]
+    and fk["c:9001"] == nil)
+
+  -- quest haystack cache stays bounded
+  local qs, statics, names = {}, {}, {}
+  for i = 1, 2100 do qs[i] = 1000 + i; statics[1000 + i] = P(i); names[1000 + i] = "Q" .. i end
+  core.compute(fake_adapter({ acceptable = qs, statics = statics, names = names }),
+    { startable = true, search = Q("zzz") })
+  check("ms cache: quest haystacks cleared past 2048",
+    core.search_stats.quest_hay_n > 0 and core.search_stats.quest_hay_n < 2048)
+
+  -- 6 cand_builds counts matches only
+  local big = { chests = {} }
+  for i = 1, 1000 do
+    big.chests[i] = { uid = "b" .. i, pos = P(i * 3, 0, 0), state = "unopened",
+      items = { { name = (i == 7 or i == 900) and "Moonstone" or ("Pebble" .. i) } } }
+  end
+  local before = core.world_stats.cand_builds
+  r = run({ acceptable = {} }, big, Q("moonstone"))
+  check("ms cand_builds: matches only", core.world_stats.cand_builds - before == 2
+    and #r.markers == 2)
+
+  -- 7 item cap counts matches only
+  local needs, locs, inames = {}, {}, {}
+  for i = 1, 40 do
+    needs[#needs + 1] = { id = 500 + i, num = 1 }
+    locs[#locs + 1] = { id = 500 + i, pos = P(i, 0, 0), src = "placed" }
+    inames[500 + i] = (i == 3 and "Iron Ore") or (i == 30 and "Gold Ore") or ("Thing " .. i)
+  end
+  r = run({ acceptable = {}, progressing = { 10 }, names = { [10] = "Alpha" },
+    item_needs = { [10] = needs }, item_locs = locs, item_names = inames }, nil, Q("ore"))
+  local n_items = 0
+  for _, m in ipairs(r.markers) do if m.cat == "quest_item" then n_items = n_items + 1 end end
+  check("ms item cap: 2 matches of 40 drawn, not capped", n_items == 2 and r.item_capped == 0)
+
+  -- 8 empty query identical to none
+  local a1 = run(fo, fw, nil)
+  local a2 = run(fo, fw, Q(""))
+  local same = #a1.markers == #a2.markers
+  for i = 1, #a1.markers do
+    local x, y = a1.markers[i], a2.markers[i]
+    if x.key ~= y.key or x.label ~= y.label or x.hover ~= y.hover then same = false end
+  end
+  check("ms empty query: identical output", same and #a1.markers > 0)
+
+  -- 9 shops
+  check("ms shop: seventh category last", #core.WORLD_CATS == 7 and core.WORLD_CATS[7] == "shop")
+  local function shop(id, npc, items, extra)
+    local s = { shop = id, cid = 9500 + id, npc = npc, pos = P(10 + id), discovered = true,
+      items = items }
+    for k, v in pairs(extra or {}) do s[k] = v end
+    return s
+  end
+  local function it(n, l) return { name = n, locked = l == true } end
+  local gil = shop(5, "Merchant Gil", { it("Healing Potion"), it("Antidote"), it("Rope"), it("Torch") })
+  local sw = { shops = { gil } }
+  r = run({ acceptable = {} }, sw, Q("gil"))
+  fk = keyset(r.markers)
+  check("ms shop: npc match lists first three", fk["w:shop:5"]
+    and fk["w:shop:5"].label == "Merchant Gil sells Healing Potion, Antidote, Rope (+1)"
+    and fk["w:shop:5"].cat == "shop")
+  r = run({ acceptable = {} }, sw, Q("antidote"))
+  fk = keyset(r.markers)
+  check("ms shop: item match lists matching items only",
+    fk["w:shop:5"] and fk["w:shop:5"].label == "Merchant Gil sells Antidote")
+  r = run({ acceptable = {} }, { shops = { shop(6, "Locky", { it("A1", true), it("B2", true) }) } },
+    Q("locky"))
+  check("ms shop: all locked suffix", r.markers[1]
+    and r.markers[1].label == "Locky sells A1, B2 (may be locked)")
+  r = run({ acceptable = {} }, { shops = { shop(6, "Locky", { it("A1", true), it("B2") }) } },
+    Q("locky"))
+  check("ms shop: mixed lock has no suffix", r.markers[1]
+    and r.markers[1].label == "Locky sells A1, B2")
+  local function lk4(a, b, c, d)
+    return { shops = { shop(8, "Fourway", { it("A1", a), it("B2", b), it("C3", c), it("D4", d) }) } }
+  end
+  r = run({ acceptable = {} }, lk4(true, true, true, false), Q("fourway"))
+  check("ms shop: fourth item unlocked, no suffix", r.markers[1]
+    and r.markers[1].label == "Fourway sells A1, B2, C3 (+1)")
+  r = run({ acceptable = {} }, lk4(true, true, true, true), Q("fourway"))
+  check("ms shop: all four locked, suffix", r.markers[1]
+    and r.markers[1].label == "Fourway sells A1, B2, C3 (+1) (may be locked)")
+  r = run({ acceptable = {} }, sw, Q("nomatch"))
+  check("ms shop: no match no marker", #r.markers == 0)
+  r = run({ acceptable = {} }, { shops = { shop(7, "Hidden", { it("Gem") }, { discovered = false }) } },
+    Q("gem"))
+  check("ms shop: undiscovered hidden", #r.markers == 0)
+  r = run({ acceptable = {} }, { shops = { shop(7, "Hidden", { it("Gem") }, { discovered = false }) } },
+    Q("gem"), { world_undiscovered = true })
+  check("ms shop: undiscovered shown when on", #r.markers == 1)
+
+  -- shop at a quest marker's cid merges into its hover
+  local qs1 = { shops = { shop(5, "Merchant Gil", { it("Rope") }, { cid = 9001 }) } }
+  r = run(nil, qs1, Q("gil"))
+  fk = keyset(r.markers)
+  check("ms shop: merges into the quest marker hover", fk["c:9001"] and fk["w:shop:5"] == nil
+    and fk["c:9001"].hover and fk["c:9001"].hover:find("sells Rope", 1, true))
+
+  -- seller dedupe into the shop marker
+  local seller = { shop = 5, item = 2, item_name = "Antidote", cid = 9505, npc = "Merchant Gil",
+    qids = {}, quest = "Bandage Run", pos = P(15), maybe_locked = false, discovered = true }
+  local dw = { shops = { gil }, sellers = { seller } }
+  r = run({ acceptable = {} }, dw, Q("antidote"))
+  fk = keyset(r.markers)
+  check("ms shop: seller not drawn, its quest text on the shop hover",
+    fk["w:shop:5"] and fk["w:sell:5:2"] == nil and fk["w:shop:5"].hover
+    and fk["w:shop:5"].hover:find("(for Bandage Run)", 1, true)
+    and fk["w:shop:5"].hover:find("Antidote (for Bandage Run)", 1, true)
+    and not fk["w:shop:5"].hover:find("sold by", 1, true))
+
+  -- a shop standing in for the nearest seller takes its place in the cap
+  local capw = { chests = { { uid = "c1", pos = P(100), state = "unopened",
+      items = { { name = "Antidote" } } },
+    { uid = "c2", pos = P(200), state = "unopened", items = { { name = "Antidote" } } } },
+    sellers = { { shop = 5, item = 2, item_name = "Antidote", cid = 9505,
+      npc = "Merchant Gil", qids = {}, quest = "", pos = P(5), maybe_locked = false,
+      discovered = true } } }
+  capw.shops = { shop(5, "Merchant Gil", { it("Antidote") }, { pos = P(5) }) }
+  r = run({ acceptable = {} }, capw, Q("antidote"), { world_max_markers = 2 })
+  check("ms cap: shop replaces the nearest seller in the cap",
+    keylist(r.markers):find("w:shop:5", 1, true) and not keyset(r.markers)["w:sell:5:2"]
+    and keyset(r.markers)["w:chest:c1"] and #r.markers == 2)
+
+  -- no origin: a shop standing in for its seller ranks as the seller
+  local noo = { chests = { { uid = "c1", pos = P(100), state = "unopened",
+      items = { { name = "Arrow" } } },
+    { uid = "c2", pos = P(200), state = "unopened", items = { { name = "Arrow" } } } },
+    shops = { shop(7, "Fletcher", { it("Arrow Bundle") }) },
+    sellers = { { shop = 7, item = 99, item_name = "Arrow Bundle", cid = 9507, npc = "Fletcher",
+      qids = {}, quest = "", pos = P(17), maybe_locked = false, discovered = true } } }
+  r = run({ acceptable = {} }, noo, Q("arrow"), { world_max_markers = 2, world_origin = false })
+  check("ms cap: no origin, promoted shop keeps its seller's rank",
+    keyset(r.markers)["w:shop:7"] and #r.markers == 2)
+
+  -- an npc name that resolves later is searchable on a later tick
+  local late = false
+  local lad = base_adapter({ acceptable_ids = function() return { 20 } end,
+    giver_hint = function() return 9001 end, npc_pos = function() return 1, 2, 3 end,
+    npc_name = function() return late and "Merchant Gil" or nil end })
+  local lshow = { startable = true, in_progress = true, search = Q("gil") }
+  local l1 = core.compute(lad, lshow)
+  late = true
+  local l2 = core.compute(lad, lshow)
+  check("ms quest: npc name resolving later is found", #l1.markers == 0 and #l2.markers == 1)
+
+  -- both merge into one quest marker: shop line only
+  local both = { shops = { shop(5, "Merchant Gil", { it("Antidote") }, { cid = 9001 }) },
+    sellers = { { shop = 5, item = 2, item_name = "Antidote", cid = 9001, npc = "Merchant Gil",
+      qids = {}, quest = "", pos = P(15), maybe_locked = false, discovered = true } } }
+  r = run(nil, both, Q("gil, antidote"))
+  fk = keyset(r.markers)
+  check("ms shop: quest hover gains only the shop line", fk["c:9001"] and fk["c:9001"].hover
+    and fk["c:9001"].hover:find("sells Antidote", 1, true)
+    and not fk["c:9001"].hover:find("sold by", 1, true))
+
+  -- 10 shared cap
+  local cs = { chests = { { uid = "c1", pos = P(5), state = "unopened" },
+      { uid = "c2", pos = P(6), state = "unopened" } },
+    shops = { shop(1, "Chester", { it("Rope") }) } }
+  r = run({ acceptable = {} }, cs, Q("chest"), { world_max_markers = 2 })
+  check("ms cap: chests keep the slots", keylist(r.markers) == "w:chest:c1,w:chest:c2")
+  r = run({ acceptable = {} }, cs, Q("chest"), { world_max_markers = 3 })
+  fk = keyset(r.markers)
+  check("ms cap: shop fills the remaining slot", fk["w:shop:1"] and #r.markers == 3
+    and type(fk["w:shop:1"].world_ord) == "number"
+    and fk["w:shop:1"].world_ord ~= fk["w:chest:c1"].world_ord
+    and fk["w:shop:1"].world_ord ~= fk["w:chest:c2"].world_ord)
+  local dd = { chests = { { uid = "cx", pos = P(300), state = "unopened",
+      items = { { name = "Antidote" } } } },
+    shops = { gil }, sellers = { seller } }
+  r = run({ acceptable = {} }, dd, Q("antidote"), { world_max_markers = 2 })
+  fk = keyset(r.markers)
+  check("ms cap: deduped seller frees its slot", fk["w:shop:5"] and fk["w:chest:cx"]
+    and fk["w:sell:5:2"] == nil)
+  local alloff = { world_chests = false, world_treasure = false, world_monsters = false,
+    world_sellers = false, world_tokens = false, world_beetles = false }
+  r = run({ acceptable = {} }, sw, Q("gil"), alloff)
+  check("ms shop: draws with every world toggle off", #r.markers == 1
+    and r.markers[1].key == "w:shop:5")
+  check("ms shop: panel known is a number", type(r.world.shop.known) == "number"
+    and r.world.shop.known == 1 and r.world.shop.shown == 1)
+  r = run({ acceptable = {} }, sw, nil)
+  check("ms shop: none without a search", #r.markers == 0
+    and type(r.world.shop.known) == "number" and r.world.shop.known == 0)
+
+  -- 11 clearing restores everything on the next call
+  r = run(fo, fw, Q("ruby"))
+  local r2 = run(fo, fw, nil)
+  check("ms clear: all markers return", #r2.markers == #full.markers and #r.markers < #r2.markers)
+end
+
+-- shops toggle: shops without a search (SPEC 20)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local Q = core.parse_query
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(over)
+    local s = {}
+    for k, v in pairs(SHB) do s[k] = v end
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  local function shop(id, npc, items, extra)
+    local s = { shop = id, cid = 9500 + id, npc = npc, pos = P(10 + id),
+      discovered = true, items = items }
+    for k, v in pairs(extra or {}) do s[k] = v end
+    return s
+  end
+  local function it(n, l) return { name = n, locked = l == true } end
+  local function seller(shop_id, item, name, quest, extra)
+    local s = { shop = shop_id, item = item, item_name = name, cid = 9700 + shop_id,
+      npc = "N", qids = {}, quest = quest or "", pos = P(30 + item), maybe_locked = false,
+      discovered = true }
+    for k, v in pairs(extra or {}) do s[k] = v end
+    return s
+  end
+  -- runs fn(path_name, markers, panel, merged) through both entry points
+  local function each(world, over, origin, qc, fn)
+    local s = sh(over)
+    fn("uncached", core.world_markers(world, s, origin, {}, qc))
+    fn("cached", core.world_markers_cached(world, s, origin, {}, qc))
+  end
+  local function chk(name, path, cond) check(name .. " [" .. path .. "]", cond) end
+  local function keyset(ms)
+    local t = {}
+    for _, m in ipairs(ms) do t[m.key] = m end
+    return t
+  end
+  local function ends(s, suffix) return s:sub(-#suffix) == suffix end
+  local ON = { world_shops = true }
+
+  -- 1 every shop as <npc> (shop)
+  local w1 = { shops = { shop(1, "Gil", { it("Antidote") }), shop(2, "Roderick", { it("Rope") }) } }
+  each(w1, ON, O, nil, function(path, m, p)
+    local k = keyset(m)
+    chk("shops on: every shop as <npc> (shop)", path, #m == 2 and k["w:shop:1"]
+      and k["w:shop:2"] and k["w:shop:1"].label == "Gil (shop)"
+      and k["w:shop:2"].label == "Roderick (shop)" and k["w:shop:1"].why == nil
+      and k["w:shop:2"].why == nil and p.shop.known == 2 and p.shop.shown == 2)
+  end)
+
+  -- 2 shops off: no shop work
+  local acc = 0
+  local hid = { shop(1, "Gil", { it("Rope") }), shop(2, "Ann", { it("Gem") }) }
+  local proxy = setmetatable({}, {
+    __index = function(_, k) acc = acc + 1; return hid[k] end,
+    __len = function() acc = acc + 1; return #hid end })
+  local base = { chests = { { uid = "c", pos = P(5), state = "unopened" } } }
+  local withp = { chests = base.chests, shops = proxy }
+  local cb0 = core.world_stats.cand_builds
+  core.world_markers_cached(base, sh(), O, {})
+  local built_base = core.world_stats.cand_builds - cb0
+  cb0 = core.world_stats.cand_builds
+  each(withp, nil, O, nil, function(path, m, p)
+    chk("shops off: no shop work", path, #m == 1 and #p.shop.entries == 0
+      and p.shop.known == 0 and acc == 0)
+  end)
+  check("shops off: cached cand_builds match the world without shops",
+    core.world_stats.cand_builds - cb0 == built_base)
+  each(withp, { world_shops = false }, O, nil, function(path, m)
+    chk("shops explicitly false: no shop work", path, #m == 1 and acc == 0)
+  end)
+
+  -- 3 caps
+  local w3 = { chests = { { uid = "c", pos = P(500), state = "unopened" } },
+    shops = { shop(1, "Gil", { it("Rope") }) } }
+  each(w3, { world_shops = true, world_max_markers = 1 }, O, nil, function(path, m)
+    chk("near shop beats far chest at cap 1", path, #m == 1 and m[1].key == "w:shop:1")
+  end)
+  each(w3, { world_shops = true, world_max_markers = 1 }, nil, nil, function(path, m)
+    chk("no origin: chest beats a plain shop at cap 1", path, #m == 1 and m[1].key == "w:chest:c")
+  end)
+  local w3s = { chests = w3.chests, shops = w3.shops,
+    sellers = { seller(1, 2, "Rope", "") } }
+  each(w3s, { world_shops = true, world_max_markers = 1 }, nil, nil, function(path, m)
+    chk("no origin: seller-standing shop ranks as seller", path,
+      #m == 1 and m[1].key == "w:shop:1")
+  end)
+
+  -- 4 undiscovered
+  local w4 = { shops = { shop(1, "Gil", { it("Rope") }, { discovered = false }) } }
+  each(w4, ON, O, nil, function(path, m, p)
+    chk("undiscovered shop hidden", path, #m == 0 and p.shop.known == 1)
+    chk("undiscovered shop has no off-map row", path, #p.shop.entries == 0)
+  end)
+  each(w4, { world_shops = true, world_undiscovered = true }, O, nil, function(path, m)
+    chk("undiscovered shop draws when asked", path, #m == 1)
+  end)
+
+  -- 5 seller line
+  local w5 = { shops = { shop(1, "Gil", { it("Antidote") }) },
+    sellers = { seller(1, 2, "Antidote", "Bandage Run") } }
+  each(w5, ON, O, nil, function(path, m, p)
+    local k = keyset(m)
+    chk("seller line in sells_for and hover", path, #m == 1 and k["w:shop:1"]
+      and k["w:shop:1"].sells_for[1] == "Antidote (for Bandage Run)"
+      and k["w:shop:1"].hover == "Gil (shop)\nAntidote (for Bandage Run)"
+      and k["w:sell:1:2"] == nil and #p.seller.entries == 0)
+  end)
+
+  -- 6 quest-giver keeps the seller line
+  local w6 = { shops = { shop(1, "Gil", { it("Antidote") }, { cid = 9001 }) },
+    sellers = { seller(1, 2, "Antidote", "Bandage Run") } }
+  each(w6, ON, O, { [9001] = true }, function(path, m, p, g)
+    local e = p.shop.entries[1]
+    local rows = core.world_rows(p.shop.entries, { { name = "Vernworth", pos = P(0) } }, O)
+    chk("quest-giver keeps seller line", path, #g == 1 and g[1].cid == 9001
+      and g[1].line:find("(for Bandage Run)", 1, true) ~= nil
+      and g[1].line == "Gil (shop)\nAntidote (for Bandage Run)"
+      and #p.shop.entries == 1 and e.merged == true and e.offmap == nil
+      and #m == 0 and p.shop.shown == 0 and rows[1].merged == true
+      and ends(rows[1].text, " - quest marker") and rows[1].sells_for[1] == "Antidote (for Bandage Run)")
+  end)
+
+  -- 7 sells_for order independent
+  local w7 = { shops = { shop(1, "Gil", { it("Antidote"), it("Bandage") }, { cid = 9001 }),
+      shop(2, "Ann", { it("Gem") }) },
+    sellers = { seller(1, 2, "Antidote", "Bandage Run"), seller(1, 3, "Bandage", "Mend Up"),
+      seller(2, 4, "Gem", "Shine"), seller(2, 5, "Gem2", "Polish") } }
+  local lines, hovers = {}, {}
+  each(w7, ON, O, { [9001] = true }, function(path, m, p, g)
+    lines[path] = g[1] and g[1].line
+    hovers[path] = m[1] and m[1].hover
+  end)
+  check("sells_for order independent: merged line", lines.uncached ~= nil
+    and lines.uncached == lines.cached
+    and lines.uncached:find("Mend Up", 1, true) ~= nil)
+  check("sells_for order independent: hover", hovers.uncached ~= nil
+    and hovers.uncached == hovers.cached
+    and hovers.uncached:find("Polish", 1, true) ~= nil)
+
+  -- 8 stock
+  local items8 = { it("Healing Potion"), it("Antidote", true), it("Rope"), it("Torch") }
+  local w8 = { shops = { shop(1, "Gil", items8) } }
+  each(w8, ON, O, nil, function(path, m, p)
+    local rows = core.world_rows(p.shop.entries, {}, O)
+    chk("stock on marker, entry and row", path, m[1].stock == items8
+      and p.shop.entries[1].stock == items8 and rows[1].stock == items8
+      and m[1].stock[2].locked == true and #m[1].sells_for == 0
+      and rows[1].sells_for == p.shop.entries[1].sells_for)
+  end)
+  each(w8, { world_shops = true, search = Q("antidote") }, O, nil, function(path, m, p)
+    chk("stock is the full list under a search", path, #m == 1
+      and m[1].label == "Gil sells Antidote (may be locked)" and m[1].stock == items8 and #m[1].stock == 4)
+  end)
+
+  -- 9 world_rows limit
+  local es = {}
+  for i = 1, 12 do es[i] = { key = "w:chest:" .. i, label = "Chest", pos = P(i) } end
+  check("world_rows limit: default ten", #core.world_rows(es, {}, O) == 10
+    and #core.world_rows(es, {}, O, nil) == 10)
+  check("world_rows limit: huge lists all", #core.world_rows(es, {}, O, math.huge) == 12
+    and #core.world_rows(es, {}, O, 3) == 3)
+
+  -- 10 search keeps the 19.7.3 label with shops on
+  local w10 = { shops = { shop(1, "Gil", { it("Antidote") }), shop(2, "Roderick", { it("Rope") }) } }
+  each(w10, { world_shops = true, search = Q("antidote") }, O, nil, function(path, m, p)
+    local k = keyset(m)
+    chk("search keeps 19.7.3 label with shops on", path, #m == 1
+      and k["w:shop:1"].label == "Gil sells Antidote" and k["w:shop:2"] == nil
+      and p.shop.known == 2)
+  end)
+
+  -- 11 label follows search on the same input table
+  local lab = {}
+  local qa = Q("antidote")
+  for i, q in ipairs({ qa, false, qa }) do
+    local m = core.world_markers_cached(w10, sh({ world_shops = true, search = q or nil }), O, {})
+    local k = keyset(m)
+    lab[i] = (k["w:shop:1"] and k["w:shop:1"].label or "?") .. "|"
+      .. (k["w:shop:2"] and k["w:shop:2"].label or "-")
+  end
+  check("label follows search on same input", lab[1] == "Gil sells Antidote|-"
+    and lab[2] == "Gil (shop)|Roderick (shop)" and lab[3] == lab[1])
+
+  -- 12 empty or posless shop skipped
+  local w12 = { shops = { shop(1, "Empty", {}), shop(2, "Nowhere", { it("x") }, { pos = false }),
+    shop(3, "Nan", { it("x") }, { pos = P(0 / 0, 0, 0) }), shop(4, "Ok", { it("x") }) } }
+  each(w12, ON, O, nil, function(path, m, p)
+    chk("empty or posless shop skipped", path, #m == 1 and m[1].key == "w:shop:4"
+      and #p.shop.entries == 1 and p.shop.known == 4)
+  end)
+  each(w12, { world_shops = true, world_max_markers = 0 }, O, nil, function(path, m, p)
+    chk("empty or posless shop has no off-map row", path, #m == 0 and #p.shop.entries == 1)
+  end)
+
+  -- 13 cap 0
+  local w13 = { shops = { shop(1, "Gil", { it("Rope") }), shop(2, "Ann", { it("Gem") }, { cid = 9001 }),
+    shop(3, "Bo", { it("Pin") }) } }
+  each(w13, { world_shops = true, world_max_markers = 0 }, O, { [9001] = true }, function(path, m, p)
+    local rows = core.world_rows(p.shop.entries, {}, O, math.huge)
+    local by = {}
+    for _, r in ipairs(rows) do by[r.key] = r end
+    chk("cap 0 all off-map", path, #m == 0 and p.shop.shown == 0 and #p.shop.entries == 3
+      and by["w:shop:1"].offmap == true and ends(by["w:shop:1"].text, " (not on map)")
+      and by["w:shop:3"].offmap == true and ends(by["w:shop:3"].text, " (not on map)")
+      and by["w:shop:2"].merged == true and by["w:shop:2"].offmap == nil
+      and ends(by["w:shop:2"].text, " - quest marker"))
+    chk("cap 0 entry order: merged before off-map", path,
+      p.shop.entries[1].key == "w:shop:2" and p.shop.entries[2].key == "w:shop:1"
+      and p.shop.entries[3].key == "w:shop:3")
+  end)
+
+  -- 14 search with the toggle off
+  local w14 = { shops = { shop(1, "Gil", { it("Antidote") }),
+    shop(2, "Ann", { it("Antidote") }, { cid = 9001 }) } }
+  each(w14, { search = Q("antidote"), world_max_markers = 0 }, O, { [9001] = true },
+    function(path, m, p)
+      local n2, e2 = 0, nil
+      for _, e in ipairs(p.shop.entries) do
+        if e.key == "w:shop:2" then n2 = n2 + 1; e2 = e end
+      end
+      chk("search, toggle off: merged and off-map entries", path, #m == 0
+        and #p.shop.entries == 2 and n2 == 1 and e2.merged == true and e2.offmap == nil
+        and p.shop.entries[2].offmap == true and p.shop.entries[2].key == "w:shop:1")
+    end)
+
+  -- 15 sellers node
+  local w15 = { shops = { shop(1, "Gil", { it("Rope") }) },
+    sellers = { seller(1, 2, "Rope", ""), seller(99, 3, "Gem", "") } }
+  each(w15, ON, O, nil, function(path, m, p)
+    chk("sellers node with shops on", path, #p.seller.entries == 1
+      and p.seller.entries[1].key == "w:sell:99:3")
+  end)
+end
+
+-- drops: monsters match by their drops (SPEC 19.12)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local SH = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_show_opened = false, world_undiscovered = false,
+    world_max_markers = 300 }
+  local function sh(q, over)
+    local s = { search = q and core.parse_query(q) or nil }
+    for k, v in pairs(SH) do s[k] = v end
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  local O = P(0, 0, 0)
+  local function ogre(drops, extra)
+    local m = { uid = "m1", cid = 5, name = "Ogre", pos = P(4), respawning = false }
+    for k, v in pairs(extra or {}) do m[k] = v end
+    return { monsters = { m }, drops = drops }
+  end
+  local H = { [5] = { "Minotaur Horn", "Beast-Steak" } }
+
+  local ms = core.world_markers(ogre(H), sh("horn"), O, {})
+  check("drops: horn matches through a drop", #ms == 1 and ms[1].cat == "monster")
+  ms = core.world_markers(ogre(H), sh("horn"), O, {})
+  check("drops: hover is label then Drops line",
+    ms[1].hover == "Ogre\nDrops Minotaur Horn" and ms[1].why == "drops Minotaur Horn")
+  local five = { [5] = { "Horn A", "Horn B", "Horn C", "Horn D", "Horn E" } }
+  ms = core.world_markers(ogre(five), sh("horn"), O, {})
+  check("drops: three names and (+2)",
+    ms[1].hover == "Ogre\nDrops Horn A, Horn B, Horn C (+2)"
+    and ms[1].why == "drops Horn A, Horn B, Horn C (+2)")
+  ms = core.world_markers(ogre(H), sh("ogre, horn"), O, {})
+  check("drops: label and drop match both set the hover",
+    #ms == 1 and ms[1].hover == "Ogre\nDrops Minotaur Horn")
+  ms = core.world_markers(ogre(H), sh("ogre"), O, {})
+  check("drops: label-only match sets no hover",
+    #ms == 1 and ms[1].hover == nil and ms[1].why == nil)
+
+  local w = ogre(H)
+  ms = core.world_markers_cached(w, sh("horn"), O, {})
+  local first = ms[1] and ms[1].hover
+  ms = core.world_markers_cached(w, sh("steak"), O, {})
+  check("drops: hover follows the query on the same input table",
+    first == "Ogre\nDrops Minotaur Horn" and #ms == 1
+    and ms[1].hover == "Ogre\nDrops Beast-Steak")
+
+  local cl = { monsters = { { uid = "g", cid = 1, cids = { 1, 2 }, name = "Goblin",
+    pos = P(3), respawning = false } },
+    drops = { [1] = { "Goblin Horn" }, [2] = { "Goblin Horn", "Fang" } } }
+  ms = core.world_markers(cl, sh("goblin horn, fang"), O, {})
+  check("drops: cluster matches a non-seed drop, names once",
+    #ms == 1 and ms[1].hover == "Goblin\nDrops Goblin Horn, Fang")
+  ms = core.world_markers_cached(cl, sh("fang"), O, {})
+  check("drops: cluster non-seed drop through the cache",
+    #ms == 1 and ms[1].hover == "Goblin\nDrops Fang")
+
+  local mixed = { monsters = {
+      { uid = "a", cid = 5, name = "Ogre", pos = P(2), respawning = true },
+      { uid = "b", cid = 6, name = "Troll", pos = P(3), respawning = false } },
+    drops = { [5] = { "Horn A", "Steak" }, [6] = { "Horn B" } } }
+  local a = core.world_markers(mixed, sh("horn, steak"), O, {})
+  local b = core.world_markers_cached(mixed, sh("horn, steak"), O, {})
+  local function ser(ms)
+    local out = {}
+    for i, m in ipairs(ms) do
+      local ks = {}
+      for k in pairs(m) do ks[#ks + 1] = k end
+      table.sort(ks)
+      local parts = {}
+      for _, k in ipairs(ks) do
+        local v = m[k]
+        if k == "pos" then v = v.x .. "," .. v.y .. "," .. v.z
+        elseif k == "qids" then v = table.concat(v, ",") end
+        parts[#parts + 1] = k .. "=" .. tostring(v)
+      end
+      out[i] = table.concat(parts, ";")
+    end
+    return table.concat(out, "|")
+  end
+  check("drops: cached and uncached paths agree",
+    #a == 2 and #b == 2 and ser(a) == ser(b) and ser(a) ~= ""
+    and a[1].hover == "Ogre (respawning)\nDrops Horn A, Steak")
+
+  local capw = { monsters = { { uid = "m", cid = 5, name = "Ogre", pos = P(1),
+      respawning = false } },
+    chests = { { uid = "c", pos = P(500), state = "unopened",
+      items = { { name = "Horn Charm" } } } },
+    drops = { [5] = { "Horn A" } } }
+  local ms2, panel = core.world_markers(capw, sh("horn", { world_max_markers = 1 }), O, {})
+  check("drops: counts in the cap and in shown",
+    #ms2 == 1 and ms2[1].cat == "monster" and panel.monster.shown == 1
+    and panel.chest.shown == 0)
+  local _, panel_u = core.world_markers(capw, sh("horn"), O, {})
+  check("drops: the chest shows without the cap", panel_u.chest.shown == 1
+    and panel_u.monster.shown == 1)
+
+  ms = core.world_markers(ogre(nil), sh("horn"), O, {})
+  local ms_b = core.world_markers(ogre(nil), sh("ogre"), O, {})
+  check("drops: no drops table matches by label only",
+    #ms == 0 and #ms_b == 1 and ms_b[1].hover == nil)
+
+  ms = core.world_markers(ogre({ [5] = { "Minotaur Horn" } }), sh("horns"), O, {})
+  check("drops: plural matches and lists the singular name",
+    #ms == 1 and ms[1].hover == "Ogre\nDrops Minotaur Horn")
+  local okg, msg = pcall(core.world_markers, ogre({ [5] = { "1 G" } }), sh("g"), O, {})
+  check("drops: short term lists 1 G without error",
+    okg and #msg == 1 and msg[1].hover == "Ogre\nDrops 1 G")
+
+  local none = core.world_markers(ogre(H), sh(nil), O, {})
+  local none2 = core.world_markers(ogre(nil), sh(nil), O, {})
+  local nonec = core.world_markers_cached(ogre(H), sh(nil), O, {})
+  local idw = { monsters = {
+      { uid = "a", cid = 5, name = "Ogre", pos = P(2), respawning = true },
+      { uid = "b", cid = 6, cids = { 6, 7 }, name = "Troll", pos = P(3), respawning = false } },
+    chests = { { uid = "c", pos = P(5), state = "unopened", item_name = "Horn Charm" } } }
+  local idd = { monsters = idw.monsters, chests = idw.chests,
+    drops = { [5] = { "Horn A" }, [6] = { "Horn B" }, [7] = { "Fang" } } }
+  check("drops: no search, markers identical with and without drops",
+    ser(core.world_markers(idd, sh(nil), O, {})) == ser(core.world_markers(idw, sh(nil), O, {}))
+    and ser(core.world_markers_cached(idd, sh(nil), O, {}))
+      == ser(core.world_markers_cached(idw, sh(nil), O, {}))
+    and ser(core.world_markers(idd, sh(nil), O, {})) ~= "")
+  check("drops: no search ignores drops",
+    #none == 1 and none[1].hover == nil and none[1].why == nil
+    and none[1].key == none2[1].key and nonec[1].hover == nil and nonec[1].why == nil)
+
+  local reads = 0
+  local pw = { monsters = {}, drops = setmetatable({}, { __index = function() reads = reads + 1 end }) }
+  for i = 1, 20 do
+    pw.monsters[i] = { uid = "p" .. i, cid = 100 + i, name = "Imp", pos = P(i), respawning = false }
+  end
+  core.world_markers_cached(pw, sh("horn"), O, {})
+  local first_reads = reads
+  reads = 0
+  core.world_markers_cached(pw, sh("horn"), O, {})
+  check("drops: drop-less monsters read drops once, then never",
+    first_reads == 20 and reads == 0)
+
+  local rows = core.world_rows({
+    { key = "w:mon:m1", label = "Ogre", why = "drops Minotaur Horn", pos = P(1) },
+    { key = "w:mon:m2", label = "Troll", pos = P(2) } },
+    { { name = "Vernworth", pos = P(0) } }, O)
+  check("rows: why shown", rows[1].text == "Ogre - drops Minotaur Horn - near Vernworth"
+    and rows[2].text == "Troll - near Vernworth")
+end
+
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local function mk(key, cat, pos) return { key = key, cat = cat, pos = pos } end
+  local function keys(a)
+    local out = {}
+    for i, m in ipairs(a) do out[i] = m.key end
+    return table.concat(out, ",")
+  end
+  local O = P(0, 0, 0)
+  local cw = core.WORLD_CATS[1]
+  local chest = mk("w:chest", cw, P(100))
+  local shop = mk("w:shop", "shop", P(5))
+  local q1, q2 = mk("q1", "acceptable", P(900)), mk("q2", "progressing", P(-900))
+  local input = { chest, q1, shop, q2 }
+  local out = core.fullmap_order(input, O)
+  check("fullmap_order: quest first", keys(out) == "q1,q2,w:shop,w:chest")
+  local tie = core.fullmap_order({ mk("w:b", cw, P(7)), mk("w:a", cw, P(-7)) }, O)
+  check("fullmap_order: nearest world first, ties by key", keys(tie) == "w:a,w:b")
+  check("fullmap_order: no origin keeps order", keys(core.fullmap_order(input, nil)) == "w:chest,q1,w:shop,q2")
+  check("fullmap_order: input not mutated",
+    keys(input) == "w:chest,q1,w:shop,q2" and out ~= input
+    and out[3] == shop and out[4] == chest and out[1] == q1)
+end
+
+if failures > 0 then os.exit(1) end
+print("core_test: all OK")

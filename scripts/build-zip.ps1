@@ -1,0 +1,64 @@
+# Builds the release zip into dist/ (gitignored). Unless -NoPlaces it
+# first generates the places file from the game's pak with tools/extract_world.py
+# and stages it under reframework/data. The zip never contains tools/.
+param(
+    [string]$GameDir = "",
+    [string]$Python = "python",
+    [string]$KeyFile = "",
+    [string]$Root = "",
+    [string]$OutDir = "",
+    [switch]$NoPlaces
+)
+$ErrorActionPreference = "Stop"
+if ($Root -eq "") { $Root = Split-Path $PSScriptRoot -Parent }
+if ($OutDir -eq "") { $OutDir = Join-Path $Root "dist" }
+function Stop-Build([string]$msg) { Write-Host "build-zip: $msg"; exit 1 }
+
+if (-not $NoPlaces) {
+    if ($GameDir -eq "" -or -not (Test-Path (Join-Path $GameDir "re_chunk_000.pak"))) {
+        Stop-Build "re_chunk_000.pak not found in game folder '$GameDir'"
+    }
+    $ok = $false
+    try { & $Python --version | Out-Null; $ok = ($LASTEXITCODE -eq 0) } catch { $ok = $false }
+    if (-not $ok) { Stop-Build "Python not found ('$Python')" }
+    $v = ""
+    try { $v = (& $Python -c "import sys; print(sys.version_info >= (3,10))" | Out-String).Trim() } catch { $v = "" }
+    if ($v -ne "True") { Stop-Build "Python 3.10 or newer is required" }
+    $ok = $false
+    $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    & $Python -c "import zstandard" 2>$null
+    $ok = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $old
+    if (-not $ok) { Stop-Build "Python module zstandard is not installed" }
+    if ($KeyFile -eq "") {
+        # The key lives in the main checkout; key_check.py finds it from any worktree.
+        $KeyFile = (& $Python (Join-Path $Root "tools/key_check.py") --path | Out-String).Trim()
+    }
+    if (-not (Test-Path $KeyFile)) { Stop-Build "key: missing (key file not found)" }
+    Write-Host "key: present"
+}
+
+$stage = Join-Path $OutDir "stage"
+if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+New-Item -ItemType Directory -Force $stage | Out-Null
+Copy-Item (Join-Path $Root "modinfo.ini") $stage
+New-Item -ItemType Directory -Force (Join-Path $stage "reframework") | Out-Null
+Copy-Item (Join-Path $Root "reframework/autorun") (Join-Path $stage "reframework") -Recurse
+
+if ($NoPlaces) { $zip = Join-Path $OutDir "Clairvoyance-noplaces.zip" }
+else {
+    $zip = Join-Path $OutDir "Clairvoyance.zip"
+    $placesOut = Join-Path $stage "reframework/data/Clairvoyance_places.json"
+    & $Python (Join-Path $Root "tools/extract_world.py") --game $GameDir --out $placesOut --key $KeyFile
+    if ($LASTEXITCODE -ne 0) { Stop-Build "extractor failed (exit $LASTEXITCODE)" }
+    if (-not (Test-Path $placesOut)) { Stop-Build "extractor wrote no places file" }
+}
+if (Test-Path $zip) { Remove-Item $zip }
+# System32 tar writes forward-slash entry names; PS 5.1 Compress-Archive
+# writes backslashes, which mod managers may not handle.
+Push-Location $stage
+& "$env:SystemRoot\System32\tar.exe" -a -c -f $zip modinfo.ini reframework
+$tarCode = $LASTEXITCODE
+Pop-Location
+if ($tarCode -ne 0) { Stop-Build "tar failed" }
+Write-Host "built $zip"

@@ -1,0 +1,8 @@
+reference/
+dist/
+scripts/provenance.local.txt
+reframework/data/
+tools/pak_key.local.txt
+__pycache__/
+docs/
+ROADMAP.md

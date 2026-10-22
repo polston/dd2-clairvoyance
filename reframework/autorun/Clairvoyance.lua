@@ -1,0 +1,1707 @@
+-- Clairvoyance.lua — hooks, settings UI, snapshot tick, overhead draw layer, minimap layer.
+-- Map icons + hover labels for side quests by lifecycle state (docs/SPEC.md).
+local core = require("Clairvoyance.core")
+local A = require("Clairvoyance.adapter")
+local jump = require("Clairvoyance.jump")
+local su = require("Clairvoyance.settings_util")
+-- v10 world tracker: a missing or broken module must never stop the mod loading.
+local world = (function() local ok, m = pcall(require, "Clairvoyance.world"); return ok and m or nil end)()
+
+local MOD_NAME = "Clairvoyance"
+local SETTINGS_PATH = "Clairvoyance.json"
+local REFRESH_INTERVAL = 2.0
+
+local raw_settings = su.load_with_legacy(json.load_file, SETTINGS_PATH, "QuestNPCMapLabels.json")
+local settings = su.validate(raw_settings)
+local function save_settings()
+  pcall(json.dump_file, SETTINGS_PATH, settings)
+  pcall(A.save_learned_names)
+end
+re.on_config_save(save_settings)
+
+local adapter = A.make()
+A.set_debug(settings.debug)
+
+-- v10 world tracker instance (SPEC 17). Everything world-related lives in
+-- fields of wt (world_origin, q, line), so the main file gains no other
+-- chunk-level local. When the module is missing or world.new fails, wt is a
+-- stub whose methods do nothing.
+local wt
+do
+  local ok_w, inst = false, nil
+  if world ~= nil then
+    ok_w, inst = pcall(function()
+      return world.new(adapter, world.game_reads())
+    end)
+    if not ok_w then
+      log.error("[Clairvoyance] world tracker unavailable: " .. tostring(inst))
+    end
+  end
+  if not ok_w or type(inst) ~= "table" then
+    inst = {
+      refresh = function() return false end,
+      input = function() return nil end,
+      givers = function() return {} end,
+      places_state = function() return { state = "bad", stale = false } end,
+      reset = function() end,
+      save = function() return false end,
+      stats = function() return nil end,
+    }
+  end
+  wt = inst
+  wt.world_origin = nil   -- committed origin: a plain { x, y, z } copy, or nil
+  wt.map_retakes, wt.rebuild_ms, wt.rebuild_max = 0, 0, 0   -- SPEC 20.12.8-9
+  wt.ps_dflt = { state = "bad", stale = false }   -- places_state default, shared
+  -- Guarded method call: wt:name(...) under pcall, dflt on a raise or nil.
+  wt.q = function(name, dflt, ...)
+    local okc, r = pcall(wt[name], wt, ...)
+    if okc and r ~= nil then return r end
+    return dflt
+  end
+  -- The World: readout line (debug panel, Status node, 5 s dump).
+  -- Rebuilt at most once a second: it formats a long string.
+  wt.line = function()
+    local now = os.clock()
+    if wt.line_txt ~= nil and now - wt.line_at < 1 then return wt.line_txt end
+    local st = wt.q("stats", nil)
+    if st == nil then return "World: unavailable" end
+    local mk = {}
+    for k in pairs(st.ms or {}) do mk[#mk + 1] = k end
+    table.sort(mk)
+    local parts = {}
+    for _, k in ipairs(mk) do parts[#parts + 1] = string.format("%s %.1f", k, st.ms[k]) end
+    local kn = st.known or {}
+    wt.line_txt = string.format(
+      "World: atlas %d file/%d learned, places %s %d rows %.0f ms, unlisted %d, index %d hits/%d misses, known chests %d treasure %d tokens %d beetles %d monsters %d sellers %d, ms [%s], save %.1f ms",
+      st.atlas.file, st.atlas.learned, tostring(st.places.state), st.places.rows,
+      st.places.load_ms, st.unlisted, st.index.hits, st.index.misses,
+      kn.chests or 0, kn.treasure or 0, kn.tokens or 0, kn.beetles or 0,
+      kn.monsters or 0, kn.sellers or 0, table.concat(parts, ", "), st.save_ms)
+    wt.line_at = now
+    return wt.line_txt
+  end
+end
+re.on_config_save(function() pcall(wt.save, wt, "config") end)
+
+-- Snapshot: only re.on_frame writes it; map hooks only read it.
+local snapshot = nil      -- { markers, unresolved, unnamed, counts, resolved_count, sig }
+-- The World panel rows of one category, cached on the snapshot (the debug
+-- dump reads the same rows). Each row carries its "Show on map" button id.
+wt.rows = function(cat)
+  local p = snapshot ~= nil and snapshot.world ~= nil and snapshot.world[cat] or nil
+  if p == nil then return {} end
+  local cache = snapshot.world_rows
+  if cache == nil then cache = {}; snapshot.world_rows = cache end
+  local rows = cache[cat]
+  if rows == nil then
+    rows = core.world_rows(p.entries, (wt.q("input", nil) or {}).settlements,
+      wt.world_origin, cat == "shop" and math.huge or nil)
+    for _, r in ipairs(rows) do
+      r.jump_id = "Show on map##wj_" .. cat .. "_" .. tostring(r.key)
+      r.tree_id = r.text .. "###ws_" .. tostring(r.key)
+    end
+    cache[cat] = rows
+  end
+  return rows
+end
+local committed = {}
+local want_update = false
+-- Last player map-space position the minimap hook saw (ui.PlUPos); fed to
+-- compute as show.origin for the item-marker cap order (SPEC 15.7i). nil
+-- until the minimap has drawn once (or when that layer is unavailable).
+local player_origin = nil
+local player_origin_t = nil   -- v9: os.clock() of the last origin write (SPEC 16.3e)
+local tree_expanded = {}      -- v9: qid -> true, rows open in the last drawn frame
+local debug_expanded = {}     -- v9: qids added through QNML_DEBUG.expand
+local jump_pending = nil      -- v9: { x, y, z } queued by a button (SPEC 16.3g)
+local map_ctor_n = 0          -- v9: ui040205 .ctor count only (never setupMapIcon)
+local setup_icon_n = 0        -- v9: setupMapIcon fires (6b: counted after each jump)
+local jump_frame = 0
+local jump_log = {}           -- v9: last 8 jump results
+local jump_last_err = nil
+local last_add_sig = nil  -- see the setupMapIcon hook below
+local last_tick = 0.0
+-- The one writer of the map origin: seeds/clears it and forces the next tick.
+wt.set_map_origin = function(pos, at)
+  wt.map_origin = pos ~= nil and { x = pos.x, y = pos.y or 0, z = pos.z } or nil
+  wt.map_origin_at = at
+  last_tick = 0.0
+end
+local last_tick_ms = 0.0
+local last_walk_ms = 0.0   -- objective-walk share of the tick (v5 cost)
+local walk_ms_max = 0.0    -- max walk since the last 5 s log dump (catches
+                           -- the 60 s index-rebuild tick between dumps)
+
+-- Map state
+local ui_map = nil        -- captured ui040205
+local hover_labels = {}   -- icon address -> label
+local hover_stats = { fires = 0, hits = 0, misses = 0, sel_nil = 0,
+  same_fallback_n = 0 }
+local hover_last_miss = nil
+local saved_styles = {}   -- { {ref, scale, prio, color_ptr_value} }
+local dropped_count = 0
+local added_count = 0
+local pool_label = ""
+-- The game message "Seeker's Token" (resolved in game via via.gui.message.get).
+local hover_name_guid = A.guid_parse("e26516a9-39b1-4e5d-a814-34aba7c7e023")
+-- v4 minimap layer (SPEC §11)
+local MINIMAP_RADIUS = 200.0
+local MINIMAP_MAX = 12
+local minimap_renderer = nil
+local minimap_unavailable = nil  -- "unavailable: <piece>" or nil
+local minimap_logged_errs, minimap_logged_count = {}, 0
+local minimap_post_ms, minimap_post_ms_shown, minimap_ms_reset = 0.0, 0.0, 0.0
+local last_debug_dump = 0.0   -- readout lines to the REFramework log, 5 s
+-- v3 overhead layer (SPEC §10)
+local OVERHEAD_POS_INTERVAL = 0.5
+local OVERHEAD_Y_OFFSET = 2.1
+local OVERHEAD_NAME_DISTANCE = 12.0
+local overhead_anchors = {}   -- cid -> { marker, transform, pos }
+local overhead_points = {}    -- v8 item points: array of { marker, pos } (SPEC 15.3l)
+local overhead_last_pass = 0.0
+local overhead_snap = nil
+local overhead_gate = "disabled"
+local overhead_pass_ms, overhead_draw_ms = 0.0, 0.0
+local overhead_pass_ms_shown, overhead_draw_ms_shown = 0.0, 0.0
+local overhead_ms_reset = 0.0
+local overhead_logged_errs = {}      -- msg -> true, capped
+local overhead_logged_count = 0
+local overhead_fail_frames = 0
+local overhead_suspend_until = 0.0
+local overhead_live_hits, overhead_drawn = 0, 0
+local overhead_force_estimate = false  -- debug: force label-width fallback
+local tree_open_at = nil       -- os.clock() the Quest tree node last drew open
+local tree_live_last = false   -- previous tick's tree_live (read by the 5 s dump)
+local last_treedge_table = nil  -- dump: last committed tree table audited (by identity)
+
+local function tree_gates_line(ts)
+  return string.format(
+    "Tree gates: %d gated of %d tracked (%d refs, %d skipped, %d failed walks), walk %.1f ms",
+    ts.gated, ts.tracked, ts.refs, ts.skipped, ts.failed_total, ts.last_ms)
+end
+-- v8 (SPEC 15.3p): item readout lines (debug panel + 5 s dump)
+local function items_line(s)
+  return string.format("Items: %d needs (%d ids), %d located, walk %.1f ms, %d rounds",
+    s.needs, s.ids, s.located, s.last_ms, s.rounds)
+end
+local function items_detail_line(s, over_cap)
+  return string.format(
+    "Items detail: %d skipped, %d ignored rows, %d capped, %d failed rounds, logic %s, %d over marker cap",
+    s.skipped, s.ignored, s.capped, s.failed_total,
+    s.logic_ok and "ok" or "unresolved", over_cap)
+end
+local settings_dirty = false
+local label_widths = {}
+local proj_vec = Vector3f.new(0, 0, 0)
+-- SPEC §10.3c: reuse one Vector3f only if field writes stick.
+local proj_vec_reuse = (function()
+  local ok = pcall(function() proj_vec.x = 1.5 end)
+  return ok and proj_vec.x == 1.5
+end)()
+
+-- Boxed scratch objects (SPEC 5.12.6), created at load and kept for the
+-- script's life; payload offsets come from the adapter (SPEC 5.12.1).
+local int_t = sdk.find_type_definition("System.Int32")
+local uint_t = sdk.find_type_definition("System.UInt32")
+local idx_obj = int_t:create_instance():add_ref()
+local color_obj = uint_t:create_instance():add_ref()
+local INT_OFF, UINT_OFF = A.int_value_offset, A.uint_value_offset
+local function logmsg(s) log.info("[" .. MOD_NAME .. "] " .. tostring(s)) end
+local function logerr(s) log.error("[" .. MOD_NAME .. "] " .. tostring(s)) end
+
+local function catalog_side_count()
+  local side = 0
+  for _, q in ipairs(A.catalog_ids() or {}) do
+    if adapter.is_side(q) then side = side + 1 end
+  end
+  return side
+end
+
+-- One-shot giver audit (debug): every catalog side quest with no curated
+-- giver hint is logged with its cast candidates and CharacterID enum labels,
+-- so hints can be curated against the game's own character names.
+local giver_audit_done = false
+local function giver_audit()
+  if giver_audit_done then return end
+  local labels = nil
+  local function label_of(cid)
+    if labels == nil then
+      labels = {}
+      pcall(function()
+        local td = sdk.find_type_definition("app.CharacterID")
+        for _, f in ipairs(td:get_fields()) do
+          if f:is_static() then
+            local ok, v = pcall(function() return f:get_data(nil) end)
+            if ok and type(v) == "number" then
+              labels[v % 4294967296] = f:get_name()
+            end
+          end
+        end
+      end)
+    end
+    return labels[cid]
+  end
+  local done, audited = A.giver_audit_step(A.catalog_ids(), A.GIVER_HINTS,
+    adapter.is_side, A.get_runtime_cast_charaids, label_of, logmsg)
+  if not done then return end
+  giver_audit_done = true
+  logmsg(string.format("GiverAudit: done, %d hintless quests audited", audited))
+end
+
+-- v9 (SPEC 16.10): every expanded row (panel set + debug set); the tick, the
+-- 5 s dump and QNML_DEBUG.state all read this one rule.
+local function expanded_union()
+  local exp = {}
+  for q in pairs(tree_expanded) do exp[q] = true end
+  for q in pairs(debug_expanded) do exp[q] = true end
+  return exp
+end
+local function jump_line(r)
+  return string.format(
+    "Jump: %s via %s, target %.1f, %.1f, readback %s, setupMapIcon fires in 2 s %s",
+    r.result, r.branch or "none", r.target.x, r.target.z,
+    r.readback and string.format("%.1f, %.1f", r.readback.x, r.readback.z) or "none",
+    r.setup_2s ~= nil and tostring(r.setup_2s) or "pending")
+end
+
+re.on_frame(function()
+  local now = os.clock()
+  if now - last_tick < REFRESH_INTERVAL then return end
+  last_tick = now
+  if settings_dirty then settings_dirty = false; save_settings() end
+  if not settings.enabled then return end
+  if settings.debug and now - last_debug_dump >= 5.0 then
+    last_debug_dump = now
+    -- Full debug-readout parity with the settings panel, so a test run can
+    -- be read back from the REFramework log instead of screenshots. Own
+    -- pcall: a format error here must never abort the tick below.
+    local okd, errd = pcall(function()
+      if snapshot ~= nil then
+        local c = snapshot.counts
+        logmsg(string.format(
+          "Quests: startable %d, in progress %d, completed %d, failed %d, canceled %d, giver dead %d, locked %d, resolved %d",
+          c.startable, c.in_progress, c.completed, c.failed, c.canceled,
+          c.giver_dead, c.locked, snapshot.resolved_count))
+        local ulines = {}
+        for qid, u in pairs(snapshot.unresolved) do
+          ulines[#ulines + 1] = string.format("[%d] %s: %s",
+            qid, u.name or "?", u.reason)
+        end
+        table.sort(ulines)
+        for _, line in ipairs(ulines) do logmsg("Unresolved: " .. line) end
+      end
+      local acount = 0
+      for _ in pairs(overhead_anchors) do acount = acount + 1 end
+      logmsg(string.format(
+        "Overhead: anchors %d, points %d, live hits %d, drawn %d, pass %.2f ms, draw %.2f ms, gate %s, vec reuse %s",
+        acount, #overhead_points, overhead_live_hits, overhead_drawn,
+        math.max(overhead_pass_ms_shown, overhead_pass_ms),
+        math.max(overhead_draw_ms_shown, overhead_draw_ms),
+        overhead_gate, tostring(proj_vec_reuse)))
+      if minimap_unavailable ~= nil then
+        logmsg("Minimap: " .. minimap_unavailable)
+      else
+        local mr = minimap_renderer
+        logmsg(string.format(
+          "Minimap: candidates %d, clipped %d, shown %d, dropped %d, pool %d, free %d, post %.2f ms, nearest %s, owned %d, hud changes %d, status %s",
+          mr.candidates_n, mr.clipped, mr.shown, mr.dropped, mr.pool_n, mr.free_n,
+          math.max(minimap_post_ms_shown, minimap_post_ms),
+          mr.nearest ~= nil and string.format("%.0f m", mr.nearest) or "-",
+          #mr.owned, mr.hud_changes, mr.status))
+      end
+      local cs = A.catalog_stats()
+      logmsg(string.format(
+        "Catalog: %d entries, %d skipped (%d cast), %d distinct side IDs (%d total)",
+        cs.entries, cs.skipped, cs.cast_skipped, catalog_side_count(), cs.distinct))
+      local os_ = adapter.objective_stats ~= nil and adapter.objective_stats() or nil
+      if os_ ~= nil then
+        logmsg(string.format(
+          "Objectives: %d quests from %d processors (%d kept, %d skipped, %d failed walks, %d builds), walk max %.1f ms",
+          os_.quests, os_.entries, os_.kept, os_.skipped, os_.failed_total,
+          os_.index_builds or 0, walk_ms_max))
+      end
+      local gs = adapter.gate_stats ~= nil and adapter.gate_stats() or nil
+      if gs ~= nil then
+        logmsg(string.format(
+          "Gates: %d gated of %d acceptable (%d refs, %d skipped, %d failed walks), walk %.1f ms",
+          gs.gated, gs.acceptable, gs.refs, gs.skipped, gs.failed_total,
+          gs.last_ms))
+      end
+      local is_ = adapter.item_stats ~= nil and adapter.item_stats() or nil
+      if is_ ~= nil then
+        logmsg(items_line(is_))
+        logmsg(items_detail_line(is_,
+          snapshot ~= nil and snapshot.item_capped or 0))
+      end
+      if tree_live_last and adapter.tree_gate_stats ~= nil then
+        local ts = adapter.tree_gate_stats()
+        logmsg(tree_gates_line(ts))
+        -- every commit installs a NEW table, so identity survives the
+        -- stats resets (collapse, owner change) that zero `commits`
+        local tt = adapter.tree_gate_table()
+        if tt ~= nil and tt ~= last_treedge_table then
+          last_treedge_table = tt
+          local tqids = {}
+          for qid in pairs(tt) do
+            tqids[#tqids + 1] = qid
+          end
+          table.sort(tqids)
+          for _, qid in ipairs(tqids) do
+            logmsg("TreeEdge: [" .. qid .. "] -> " .. table.concat(tt[qid], ", "))
+          end
+        end
+      end
+      logmsg(string.format("Tick: %.1f ms", last_tick_ms))
+      logmsg(string.format("Rebuild: ms=%.1f max=%.1f", wt.rebuild_ms, wt.rebuild_max))
+      logmsg(wt.line())
+      if snapshot ~= nil and adapter.journal_stats ~= nil then
+        logmsg(core.journal_line(adapter.journal_stats()))
+      end
+      if snapshot ~= nil then   -- no snapshot before the first compute / after a reset
+        for _, l in ipairs(core.state_lines(snapshot, expanded_union(),
+            settings.journal_spoilers)) do logmsg("Detail: " .. l) end
+      end
+      for _, r in ipairs(jump_log) do logmsg(jump_line(r)) end
+      giver_audit()
+    end)
+    walk_ms_max = 0.0
+    wt.rebuild_max = 0
+    if not okd then logerr("debug dump: " .. tostring(errd)) end
+  end
+  local ok, err = pcall(function()
+    if adapter.reset_session_caches() then
+      -- Save/session changed: old save's markers must not survive while the
+      -- new save's quest lists are still unavailable.
+      snapshot = nil
+      committed = {}
+      want_update = true
+      pcall(wt.reset, wt)
+      wt.world_origin = nil
+      wt.map_origin, wt.map_origin_at = nil, nil
+    end
+    -- v9: a debug-expanded qid keeps the tree live (QNML_DEBUG, SPEC 16.10)
+    local tree_live = core.tree_wanted(now, tree_open_at)
+      or (settings.debug and next(debug_expanded) ~= nil)
+    local expanded = tree_live and expanded_union() or nil
+    tree_live_last = tree_live
+    local show = {
+      tree_open = tree_live,
+      startable = settings.show_startable,
+      in_progress = settings.show_in_progress,
+      quest_items = settings.show_quest_items,
+      completed = settings.show_completed,
+      unavailable = settings.show_unavailable,
+      locked = settings.show_locked,
+      reveal_gate_names = settings.reveal_gate_names,
+      origin = player_origin,
+      -- v9 (SPEC 16.3b, 16.3e): tree detail inputs
+      tree_origin = core.tree_origin(player_origin, player_origin_t, now),
+      expanded = expanded,
+      journal_spoilers = settings.journal_spoilers,
+      prev_journal = snapshot and snapshot.journal,
+      prev_journal_all = snapshot and snapshot.journal_all,
+      now = now,
+      search = core.parse_query(settings.search_text),   -- SPEC 19.5; nil = no search
+    }
+    -- SPEC 19.4c: the first tick of a search asks the world for a round now
+    if show.search ~= nil and not wt.search_on then wt.q("poke", nil) end
+    wt.search_on = show.search ~= nil
+    -- SPEC 20.1.4: turning Shops on pokes the round the same way
+    if settings.world_shops == true and not wt.shops_on then wt.q("poke", nil) end
+    wt.shops_on = settings.world_shops == true
+    local t0 = os.clock()
+    -- v10 (SPEC 17.3a): world round, own pcall so a raise never skips compute;
+    -- inside the timed window. The gate (evaluated here) is: a snapshot from
+    -- before this tick exists and the minimap saw the player under 3 s ago.
+    local ok_w, err_w = pcall(function()
+      if world == nil then return end   -- the stub tracker has no round to run
+      local mr = minimap_renderer
+      local p = mr ~= nil and mr.pl_pos or nil
+      if p ~= nil then
+        local o = wt.world_origin
+        if o == nil or core.dist(p, o) >= world.K.REORIGIN then
+          wt.world_origin = { x = p.x, y = p.y, z = p.z }
+        end
+      end
+      local gate = snapshot ~= nil and mr ~= nil
+        and now - mr.pl_seen_at < world.K.PLAYER_SEEN_S
+      -- the round's toggle names are the setting names without "world_"
+      local tg = {}
+      for _, k in ipairs(su.WORLD_BOOLS) do tg[k:sub(7)] = settings[k] end
+      tg.search = show.search ~= nil
+      if wt:refresh(now, gate, tg) then wt.line_txt = nil end
+    end)
+    if not ok_w then logerr("world round: " .. tostring(err_w)) end
+    for _, k in ipairs(su.WORLD_BOOLS) do show[k] = settings[k] end
+    show.world_max_markers = settings.world_max_markers
+    show.world_origin = wt.world_origin
+    show.map_origin = wt.map_origin
+    show.world_givers = wt.q("givers", {})
+    show.world = wt.q("input", nil)
+    -- v5 (SPEC 12.3a): own pcall so a raised walk never skips compute;
+    -- inside the timed window so Tick ms includes it; skipped when the
+    -- category is hidden (SPEC 9.9).
+    if show.in_progress and adapter.refresh_objectives ~= nil then
+      local tw = os.clock()
+      local ok_o, err_o = pcall(adapter.refresh_objectives)
+      last_walk_ms = (os.clock() - tw) * 1000.0
+      if last_walk_ms > walk_ms_max then walk_ms_max = last_walk_ms end
+      if not ok_o then logerr("objective walk: " .. tostring(err_o)) end
+    else
+      last_walk_ms = 0.0
+    end
+    -- v6 (SPEC 13.3a.2): gate walk is self-throttled; while the startable
+    -- category is hidden every tick invalidates (stateless, no edge tracking).
+    if show.startable and adapter.refresh_gates ~= nil then
+      local ok_g, err_g = pcall(adapter.refresh_gates)
+      if not ok_g then logerr("gate walk: " .. tostring(err_g)) end
+    elseif adapter.invalidate_gates ~= nil then
+      pcall(adapter.invalidate_gates)
+    end
+    -- v8 (SPEC 15.3a): item round self-throttled (10 s) + per-call drop
+    -- scan; with either toggle off every tick invalidates (stateless, no
+    -- edge tracking) and no managed call runs.
+    if adapter.refresh_items ~= nil then
+      if core.item_walk_wanted(show) then
+        local ok_i, err_i = pcall(adapter.refresh_items)
+        if not ok_i then logerr("item walk: " .. tostring(err_i)) end
+      else
+        pcall(adapter.invalidate_items)
+      end
+    end
+    local result = core.compute(adapter, show)
+    -- v7 (SPEC 14.3e): tree walk only while the Quest tree node is open;
+    -- after compute so a reset tick's state cache is warm before the walk.
+    if tree_live and adapter.refresh_tree_gates ~= nil then
+      local ok_t, err_t = pcall(adapter.refresh_tree_gates)
+      if not ok_t then logerr("tree walk: " .. tostring(err_t)) end
+    elseif adapter.invalidate_tree_gates ~= nil then
+      pcall(adapter.invalidate_tree_gates)
+    end
+    last_tick_ms = (os.clock() - t0) * 1000.0
+    if result == nil then return end   -- game state unavailable: keep last snapshot
+    -- SPEC 20.12.2: one signature over the markers then the full-map world
+    -- markers, so committed positions are kept for both
+    local all = result.markers
+    local fw = result.fullmap_world
+    if fw ~= nil and #fw > 0 then
+      all = {}
+      for _, m in ipairs(result.markers) do all[#all + 1] = m end
+      for _, m in ipairs(fw) do all[#all + 1] = m end
+    end
+    local sig, new_committed = core.signature(all, committed)
+    committed = new_committed
+    local changed = snapshot == nil or sig ~= snapshot.sig
+    result.sig = sig
+    snapshot = result   -- always replace: counts/unresolved stay fresh
+    if changed and ui_map ~= nil then want_update = true end
+  end)
+  if not ok then logerr("tick error: " .. tostring(err)) end
+  -- Learn names of quests regardless of visibility (budgeted), then save.
+  -- Save is a no-op unless a new name was learned.
+  pcall(A.learn_names, 32)
+  pcall(A.save_learned_names)
+end)
+
+local function restore_styles()
+  for _, rec in ipairs(saved_styles) do
+    pcall(function()
+      rec.ref:set_Scale(rec.scale)
+      rec.ref:set_Prio(rec.prio)
+      if rec.color ~= nil then rec.ref:set_Color(rec.color) end
+    end)
+  end
+  saved_styles = {}
+end
+
+local native_max_prio = 0   -- highest Prio among NATIVE icons, set per rebuild
+local pool_used, pool_limit = 0, 0
+
+local add_markers
+do
+  -- Kept (project-owned) pieces of add_markers: the resets and guards, the
+  -- readout fields, the counts, the icon and color per category, the unique
+  -- id per marker, the hover label and the debug line.
+  local function begin_rebuild()
+    hover_labels = {}
+    added_count, dropped_count = 0, 0
+    return settings.enabled and snapshot ~= nil
+  end
+  local function note_pool(pool, used, limit)
+    pool_label = pool and pool.label or "none"
+    if pool ~= nil then pool_used, pool_limit = used, limit end
+  end
+  local function note_dropped() dropped_count = dropped_count + 1 end
+  local function marker_icon_type(m)
+    return su.icon_of(settings, m.cat)
+  end
+  local function marker_unique_id(m)
+    -- v8 (SPEC 15.3j): the prefix per marker is chosen in the adapter
+    return A.new_unique_id(A.map_marker_guid(m))
+  end
+  local function note_added(icon, m)
+    added_count = added_count + 1
+    hover_labels[icon:get_address()] = m.hover or m.label
+  end
+  local function marker_argb(m)
+    return su.marker_color(settings, m)
+  end
+  local function log_rebuild()
+    if settings.debug then
+      local sample = next(hover_labels)
+      logmsg(string.format(
+        "rebuild: added=%d dropped=%d pool=%s native_used=%d limit=%d sample_icon=%s ms=%.1f",
+        added_count, dropped_count, pool_label, pool_used, pool_limit,
+        tostring(sample), wt.rebuild_ms))
+    end
+  end
+
+  -- SPEC 5.13.1
+  local function build(this)
+    if not begin_rebuild() then return end
+    local pool, used, limit, native_refs = A.get_icon_pool(this)
+    note_pool(pool, used, limit)
+    if pool == nil then return end
+    local top = 0
+    for _, r in ipairs(native_refs) do
+      local p = r:get_Prio()
+      if p > top then top = p end
+    end
+    native_max_prio = top
+    local cursor = used
+    idx_obj:write_dword(INT_OFF, cursor)
+    for _, m in ipairs(core.fullmap_order(snapshot.markers,
+      wt.map_origin or wt.world_origin, snapshot.fullmap_world)) do
+      local pos = Vector3f.new(m.pos.x, m.pos.y, m.pos.z)
+      if this:isInDispRange(pos) then
+        if cursor >= limit then
+          note_dropped()
+        else
+          local info = A.new_map_icon_info()
+          info.IconType = marker_icon_type(m)
+          info.Pos = pos
+          info.UniqId = marker_unique_id(m)
+          local icon = pool.add(this, info, 0, idx_obj:get_address() + INT_OFF,
+            -1, hover_name_guid, false)
+          if icon == nil then break end
+          cursor = idx_obj:read_dword(INT_OFF)
+          note_added(icon, m)
+          local ref = icon[pool.ref]
+          if ref ~= nil then
+            local okc, col = pcall(function() return ref:get_Color() end)
+            saved_styles[#saved_styles + 1] = {
+              ref = ref, scale = ref:get_Scale(), prio = ref:get_Prio(),
+              color = okc and col or nil }
+            color_obj:write_dword(UINT_OFF, A.argb_to_abgr(marker_argb(m)))
+            ref:set_Color(color_obj:get_address() + UINT_OFF)
+          end
+        end
+      end
+    end
+    return true
+  end
+
+  -- SPEC 20.12.8: timed around every call, early returns included;
+  -- the debug line only for a rebuild that ran, as before
+  add_markers = function(this)
+    local t0 = os.clock()
+    local ok, ran = pcall(build, this)
+    wt.rebuild_ms = (os.clock() - t0) * 1000
+    wt.rebuild_max = math.max(wt.rebuild_max, wt.rebuild_ms)
+    if ok and ran then log_rebuild() end
+    if not ok then error(ran, 0) end
+  end
+end
+
+local hooked_this = nil
+do
+  -- Kept (project-owned) pieces of the .ctor pre hook.
+  -- v9: .ctor only; the setupMapIcon re-capture never counts
+  local function note_ctor() map_ctor_n = map_ctor_n + 1 end
+
+  -- SPEC 5.13.4.1 (.ctor pre) and 5.13.4.2 (onDestroy pre)
+  A.hook_method("app.ui040205", ".ctor", function(args)
+    ui_map = sdk.to_managed_object(args[2])
+    note_ctor()
+    hover_labels = {}
+    saved_styles = {}
+    -- deliberate rebuilds get exactly one updateMapIcon; the refire stops on the unchanged sig
+    last_add_sig = nil
+  end)
+  A.hook_method("app.ui040205", "onDestroy", function(args)
+    hover_labels = {}
+    saved_styles = {}
+    ui_map = nil
+    wt.set_map_origin(nil, nil)   -- SPEC 20.12.7
+  end)
+end
+
+-- v9 (SPEC 16.3g): the jump machine; every decision lives in jump.lua.
+local jump_machine = jump.new({
+  open = adapter.map_open,
+  apply = adapter.map_jump_apply,
+  ui = function() return ui_map end,
+  is_live = sdk.is_managed_object,
+  ctor_count = function() return map_ctor_n end,
+  menu_open = adapter.map_menu_open,
+  close_menu = adapter.map_close_menu,
+})
+
+-- SPEC 20.12.5: while the full map is open, follow the map cursor. The
+-- cursor only moves when the jump applies, so the driver waits for the machine.
+-- Defined once, so no closure is built per frame.
+do
+  local function map_follow()
+    if ui_map == nil or jump_machine:busy() then return end
+    local now = os.clock()
+    local o, at = core.map_origin_step(wt.map_origin, adapter.map_cursor(ui_map),
+      wt.world_origin and wt.world_origin.y, now, wt.map_origin_at or 0)
+    if at ~= (wt.map_origin_at or 0) then
+      wt.set_map_origin(o, at)
+      wt.map_retakes = wt.map_retakes + 1
+    end
+  end
+  re.on_frame(function()
+    local ok, err = pcall(map_follow)
+    if not ok and tostring(err) ~= wt.map_last_err then
+      wt.map_last_err = tostring(err)
+      logerr("map cursor: " .. wt.map_last_err)
+    end
+  end)
+end
+
+local function apply_styles(this)
+  local scale = this.IconScale
+  for _, rec in ipairs(saved_styles) do
+    rec.ref:set_Scale(scale)
+    rec.ref:set_Prio(native_max_prio + 1)
+  end
+end
+
+-- ===== v4 minimap layer (SPEC §11) =====
+do
+local minimap_color_obj = uint_t:create_instance():add_ref()  -- SPEC 5.14.1
+minimap_renderer = require("Clairvoyance.minimap").create({
+  settings = settings,
+  clock = os.clock,
+  vector = function(x, y, z) return Vector3f.new(x, y, z) end,
+  set_color = function(ref, argb)
+    minimap_color_obj:write_dword(UINT_OFF, A.argb_to_abgr(argb))
+    ref:set_Color(minimap_color_obj:get_address() + UINT_OFF)
+  end,
+  icon_for = function(m)
+    return su.icon_of(settings, m.cat)
+  end,
+  color_for = function(m)
+    return su.marker_color(settings, m)
+  end,
+  snapshot = function() return snapshot end,
+  candidates = function(snap, origin)
+    if origin ~= nil then
+      local po = player_origin
+      if po == nil then po = {}; player_origin = po end
+      po.x, po.y, po.z = origin.x, origin.y, origin.z
+      player_origin_t = os.clock()
+    end
+    return core.minimap_markers(snap.markers, origin, MINIMAP_RADIUS, MINIMAP_MAX)
+  end,
+  is_live = function(ref) return sdk.is_managed_object(ref) end,
+})
+end
+
+local function minimap_log(err)
+  local msg = tostring(err)
+  if not minimap_logged_errs[msg] and minimap_logged_count < 16 then
+    minimap_logged_errs[msg] = true
+    minimap_logged_count = minimap_logged_count + 1
+    logerr("minimap error: " .. msg)
+  end
+end
+
+-- Install gate (SPEC §11.2.0).
+local ui020301_t = sdk.find_type_definition("app.ui020301")
+local mm_update = ui020301_t and ui020301_t:get_method("updateIcon") or nil
+if ui020301_t == nil then
+  minimap_unavailable = "unavailable: app.ui020301"
+elseif mm_update == nil then
+  minimap_unavailable = "unavailable: updateIcon"
+elseif thread == nil or thread.get_hook_storage == nil then
+  minimap_unavailable = "unavailable: thread.get_hook_storage"
+end
+if minimap_unavailable ~= nil then
+  logmsg("minimap layer " .. minimap_unavailable)
+else
+  do
+    -- Kept (project-owned) pieces of the updateIcon post hook: the POST
+    -- timing and the report to the renderer's suspension counter.
+    local function post_start() return os.clock() end
+    local function post_stop(t0)
+      local nowc = os.clock()
+      local ms = (nowc - t0) * 1000.0
+      if ms > minimap_post_ms then minimap_post_ms = ms end
+      if nowc - minimap_ms_reset >= 2.0 then
+        minimap_ms_reset = nowc
+        minimap_post_ms_shown = minimap_post_ms
+        minimap_post_ms = 0.0
+      end
+      return nowc
+    end
+    local function post_report(ok, err, nowc)
+      minimap_renderer:record_post(ok, err, nowc)
+    end
+
+    -- PRE: never gated, never suspended; failures log but never
+    -- count toward suspension (SPEC §11.3).
+    -- SPEC 5.14.2
+    sdk.hook(mm_update, function(args)
+      local this = sdk.to_managed_object(args[2])
+      if this == nil then return end
+      thread.get_hook_storage().qnml_minimap = this
+      local ok, err = pcall(minimap_renderer.before, minimap_renderer, this)
+      if not ok then minimap_log(err) end
+    end, function(retval)
+      local store = thread.get_hook_storage()
+      local this = store.qnml_minimap
+      if this ~= nil then
+        store.qnml_minimap = nil
+        local t0 = post_start()
+        local ok, err = pcall(minimap_renderer.after, minimap_renderer, this)
+        local nowc = post_stop(t0)
+        if not ok then minimap_log(err) end
+        post_report(ok, err, nowc)
+      end
+      return retval
+    end)
+    local mm_destroy = ui020301_t:get_method("onDestroy")
+    if mm_destroy ~= nil then
+      sdk.hook(mm_destroy, function(args)
+        local ok, err = pcall(minimap_renderer.destroy, minimap_renderer,
+          sdk.to_managed_object(args[2]))
+        if not ok then minimap_log(err) end
+      end)
+    end
+  end
+end
+
+-- ===== v3 overhead layer (SPEC §10) =====
+local function camera_pos()
+  local cam = sdk.get_primary_camera()
+  if cam == nil then return nil end
+  local go = cam:call("get_GameObject")
+  if go == nil then return nil end
+  local tr = go:call("get_Transform")
+  if tr == nil then return nil end
+  local p = tr:call("get_Position")
+  if p == nil then return nil end
+  return p.x, p.y, p.z
+end
+
+-- Hoisted so the per-anchor pcall allocates no closure (SPEC §10.5).
+local function read_tr_pos(tr)
+  local p = tr:call("get_Position")
+  return p.x, p.y, p.z
+end
+
+local function overhead_pass(cx, cy, cz)
+  local prev = {}
+  for cid, a in pairs(overhead_anchors) do prev[cid] = a.pos end
+  local cam = { x = cx, y = cy, z = cz }
+  local radius = settings.overhead_distance + 20
+  local cands = core.overhead_anchors(snapshot.markers, prev, cam, radius)
+  local new_anchors, hits = {}, 0
+  for _, cand in ipairs(cands) do
+    local live = A.npc_live_pos(cand.cid)
+    if live ~= nil then
+      hits = hits + 1
+      new_anchors[cand.cid] = { marker = cand.marker,
+        transform = live.transform,
+        pos = { x = live.x, y = live.y, z = live.z } }
+    end
+  end
+  overhead_anchors = new_anchors
+  -- v8 (SPEC 15.3l.2): item points rebuilt from scratch each pass, stored
+  -- as core returns them (pos = a plain copy of the transform-space live)
+  overhead_points = core.overhead_points(snapshot.markers, cam, radius)
+  overhead_live_hits = hits
+  overhead_snap = snapshot
+  overhead_last_pass = os.clock()
+end
+
+local function label_width(label)
+  local w = label_widths[label]
+  if w ~= nil then return w end
+  if not overhead_force_estimate then
+    local ok, size = pcall(imgui.calc_text_size, label)
+    if ok and size ~= nil and size.x ~= nil then w = size.x end
+  end
+  w = w or (#label * 7)
+  label_widths[label] = w
+  return w
+end
+
+-- Records why this frame drew nothing (shown in the debug line).
+local function overhead_idle(gate)
+  overhead_gate = gate
+  overhead_drawn = 0
+end
+
+-- One overhead dot (+ the name inside 12 m) at a transform-space point.
+-- Shared by the c-keyed anchors and the v8 item points; hoisted, so the
+-- per-frame loops allocate no closure. Returns 1 when drawn, else 0.
+local function overhead_draw_one(marker, px, py, pz, d2, name_d2)
+  local sp
+  if proj_vec_reuse then
+    proj_vec.x, proj_vec.y, proj_vec.z = px, py + OVERHEAD_Y_OFFSET, pz
+    sp = draw.world_to_screen(proj_vec)
+  else
+    sp = draw.world_to_screen(
+      Vector3f.new(px, py + OVERHEAD_Y_OFFSET, pz))
+  end
+  if sp == nil then return 0 end
+  local argb = su.color_of(settings, marker.cat)
+  draw.filled_circle(sp.x, sp.y, 8, 0xFF000000, 24)
+  draw.filled_circle(sp.x, sp.y, 6, A.argb_to_abgr(argb), 24)
+  if d2 <= name_d2 then
+    local label = marker.label or ""
+    local w = label_width(label)
+    local tx, ty = sp.x - w / 2, sp.y + 10
+    draw.text(label, tx + 1, ty + 1, 0xFF000000)
+    draw.text(label, tx, ty, 0xFFFFFFFF)
+  end
+  return 1
+end
+
+local function overhead_frame()
+  if not settings.enabled then return overhead_idle("disabled") end
+  if not settings.show_overhead then return overhead_idle("toggle") end
+  if snapshot == nil then
+    overhead_anchors = {}
+    overhead_points = {}
+    overhead_snap = nil
+    return overhead_idle("no snapshot")
+  end
+  if ui_map ~= nil then return overhead_idle("map open") end
+  local cx, cy, cz = camera_pos()
+  if cx == nil then return overhead_idle("no camera") end
+  overhead_gate = "drawing"
+
+  local now = os.clock()
+  if snapshot ~= overhead_snap
+    or now - overhead_last_pass >= OVERHEAD_POS_INTERVAL then
+    if snapshot ~= overhead_snap then label_widths = {} end
+    local t0 = os.clock()
+    overhead_pass(cx, cy, cz)
+    local ms = (os.clock() - t0) * 1000.0
+    if ms > overhead_pass_ms then overhead_pass_ms = ms end
+  end
+
+  local t0 = os.clock()
+  local max_d2 = settings.overhead_distance * settings.overhead_distance
+  local name_d2 = OVERHEAD_NAME_DISTANCE * OVERHEAD_NAME_DISTANCE
+  local drawn = 0
+  for cid, a in pairs(overhead_anchors) do
+    local alive = sdk.is_managed_object(a.transform)
+    local ok_pos, px, py, pz = false, nil, nil, nil
+    if alive then
+      ok_pos, px, py, pz = pcall(read_tr_pos, a.transform)
+    end
+    if not ok_pos or px == nil then
+      -- Freed/despawned/invalid: drop until the next pass re-resolves.
+      overhead_anchors[cid] = nil
+    else
+      a.pos.x, a.pos.y, a.pos.z = px, py, pz
+      local dx, dy, dz = px - cx, py - cy, pz - cz
+      local d2 = dx * dx + dy * dy + dz * dz
+      if d2 <= max_d2 then
+        drawn = drawn + overhead_draw_one(a.marker, px, py, pz, d2, name_d2)
+      end
+    end
+  end
+  -- v8 (SPEC 15.3l.3): item points - plain numbers from the last scan:
+  -- no managed call, no is_managed_object, no pcall'd read per point.
+  for _, pt in ipairs(overhead_points) do
+    local p = pt.pos
+    local dx, dy, dz = p.x - cx, p.y - cy, p.z - cz
+    local d2 = dx * dx + dy * dy + dz * dz
+    if d2 <= max_d2 then
+      drawn = drawn + overhead_draw_one(pt.marker, p.x, p.y, p.z, d2, name_d2)
+    end
+  end
+  overhead_drawn = drawn
+  local dms = (os.clock() - t0) * 1000.0
+  if dms > overhead_draw_ms then overhead_draw_ms = dms end
+  if now - overhead_ms_reset >= 2.0 then
+    overhead_ms_reset = now
+    overhead_pass_ms_shown = overhead_pass_ms
+    overhead_draw_ms_shown = overhead_draw_ms
+    overhead_pass_ms, overhead_draw_ms = 0.0, 0.0
+  end
+end
+
+local updating_this = nil
+local hover_this = nil
+do
+  -- Kept (project-owned) pieces of the setupMapIcon, update and
+  -- setupIconName hooks.
+  local function note_setup() setup_icon_n = setup_icon_n + 1 end
+  -- Feedback guard: our updateMapIcon call after an add re-triggers the native
+  -- setupMapIcon, which re-fires this hook — at 62 markers that loop ran ~50
+  -- rebuilds/s and crashed the game's icon code. Every native setup wipes our
+  -- icons, so the re-add must ALWAYS run (skipping it leaves the map bare —
+  -- that was the zoom-disappearance bug). The loop driver is the update call,
+  -- so only that is gated: it fires once per snapshot change, and the refire
+  -- it causes re-adds with an unchanged sig and goes quiet.
+  local function note_sig()
+    local sig = snapshot ~= nil and snapshot.sig or ""
+    local sig_changed = sig ~= last_add_sig
+    last_add_sig = sig
+    return sig_changed
+  end
+  local function refire_due(sig_changed)
+    return sig_changed and added_count > 0
+  end
+  local function hover_selected(this)
+    hover_stats.fires = hover_stats.fires + 1
+    local sel = this.SelectedIcon
+    if sel == nil then hover_stats.sel_nil = hover_stats.sel_nil + 1 end
+    return sel
+  end
+  local function hover_hit() hover_stats.hits = hover_stats.hits + 1 end
+  local function hover_miss(sel, addr)
+    hover_stats.misses = hover_stats.misses + 1
+    if settings.debug and hover_last_miss ~= addr then
+      hover_last_miss = addr
+      local n = 0
+      for _ in pairs(hover_labels) do n = n + 1 end
+      logmsg(string.format(
+        "hover miss: sel=0x%x type=%s ours=%d",
+        addr, tostring(sel:get_type_definition():get_full_name()), n))
+    end
+  end
+
+  -- SPEC 5.13.4.3 to 5.13.4.6
+  local function same(a, b)
+    if a == nil or b == nil then return false end
+    if a == b then return true end
+    local ok, eq = pcall(function() return a:get_address() == b:get_address() end)
+    -- debug-only: calls where == was false but the addresses matched
+    if ok and eq and settings.debug then
+      hover_stats.same_fallback_n = hover_stats.same_fallback_n + 1
+    end
+    return ok and eq
+  end
+  A.hook_method("app.ui040205", "setupMapIcon", function(args)
+    hooked_this = sdk.to_managed_object(args[2])
+    note_setup()
+    ui_map = hooked_this
+    restore_styles()
+  end, function(retval)
+    local this = hooked_this
+    if this ~= nil and same(this, ui_map) then
+      local sig_changed = note_sig()
+      local ok, err = pcall(add_markers, this)
+      if not ok then logerr("add_markers error: " .. tostring(err)) end
+      if refire_due(sig_changed) then
+        pcall(function() this:call("updateMapIcon") end)
+      end
+      pcall(apply_styles, this)
+    end
+    return retval
+  end)
+  A.hook_method("app.ui040205", "updateMapIcon", function(args)
+    updating_this = sdk.to_managed_object(args[2])
+  end, function(retval)
+    if same(updating_this, ui_map) and #saved_styles > 0 then
+      pcall(apply_styles, updating_this)
+    end
+    return retval
+  end)
+  A.hook_method("app.ui040205", "update", function(args)
+    if want_update and ui_map ~= nil then
+      want_update = false
+      -- deliberate rebuilds get exactly one updateMapIcon; the refire stops on the unchanged sig
+      last_add_sig = nil
+      local this = sdk.to_managed_object(args[2])
+      if same(this, ui_map) then
+        pcall(function() this:call("setMapScale", this.NowScale, true) end)
+      end
+    end
+  end)
+  A.hook_method("app.ui040205", "setupIconName", function(args)
+    hover_this = sdk.to_managed_object(args[2])
+  end, function(retval)
+    local this = hover_this
+    if this ~= nil then
+      pcall(function()
+        local sel = hover_selected(this)
+        if sel == nil then return end
+        local addr = sel:get_address()
+        local label = hover_labels[addr]
+        if label ~= nil then
+          hover_hit()
+          if this.TxtName ~= nil then this.TxtName:set_Message(label) end
+        else
+          hover_miss(sel, addr)
+        end
+      end)
+    end
+    return retval
+  end)
+end
+
+if re.on_script_reset then
+  re.on_script_reset(function()
+    pcall(wt.save, wt, "reset")
+    if minimap_renderer ~= nil then
+      pcall(minimap_renderer.clear, minimap_renderer)
+    end
+    pcall(restore_styles)
+  end)
+end
+
+-- v9 (SPEC 16.10): debug-only entry point; nil whenever debug is off.
+local function install_debug()
+  if settings.debug then
+    _G.QNML_DEBUG = {
+      jump = function(x, y, z) jump_pending = { x = x, y = y, z = z } end,
+      expand = function(qid) debug_expanded[qid] = true; last_tick = 0.0 end,
+      -- same effect as ticking the matching checkbox (keys: enabled,
+      -- journal_spoilers, debug), so the in-game checks need no clicks
+      set = function(key, v)
+        if key == "enabled" then
+          settings.enabled = v; want_update = true; last_tick = 0.0; save_settings()
+          minimap_renderer:clear_suspension()
+        elseif key == "journal_spoilers" then
+          settings.journal_spoilers = v; last_tick = 0.0; save_settings()
+        elseif key == "debug" then
+          settings.debug = v; A.set_debug(v); save_settings(); install_debug()
+        elseif key == "search_text" then
+          -- the typing path: no last_tick reset, the 2 s save throttle applies
+          settings.search_text = su.cut_search(v)
+          settings_dirty = true; want_update = true
+        elseif key == "world_max_markers" then
+          if type(v) == "number" then
+            settings.world_max_markers = su.clamp_int(v, 0, su.WORLD_MAX_MARKERS)
+            want_update = true; last_tick = 0.0; save_settings()
+          end
+        else
+          for _, k in ipairs(su.WORLD_BOOLS) do
+            if key == k then
+              settings[k] = v == true
+              want_update = true; last_tick = 0.0; save_settings()
+              break
+            end
+          end
+        end
+      end,
+      -- stats plus at most 20 rows (counts and labels); positions go to the log only
+      world = function()
+        local st = wt.q("stats", {})
+        local rows = {}
+        local sn = snapshot ~= nil and snapshot.world or nil
+        local max_rows = world ~= nil and world.K.DEBUG_ROWS or 0
+        if sn ~= nil then
+          for _, cat in ipairs(core.WORLD_CATS) do
+            if sn[cat] ~= nil and #rows < max_rows
+              and (cat ~= "shop" or wt.search_on or settings.world_shops) then
+              for _, r in ipairs(wt.rows(cat)) do
+                if #rows >= max_rows then break end
+                rows[#rows + 1] = { cat = cat, text = r.text }
+                logmsg(string.format("World row: %s %s at %.1f, %.1f, %.1f",
+                  cat, r.text, r.pos.x, r.pos.y, r.pos.z))
+              end
+            end
+          end
+        end
+        st.rows = rows
+        st.cursor = ui_map ~= nil and adapter.map_cursor ~= nil
+          and adapter.map_cursor(ui_map) or nil
+        st.map_origin, st.map_retakes = wt.map_origin, wt.map_retakes
+        st.rebuild_ms, st.rebuild_max = wt.rebuild_ms, wt.rebuild_max
+        -- SPEC 20.5.6: shop counts and cids that own two or more shop entries
+        local sp = sn ~= nil and sn.shop or nil
+        local per, two = {}, 0
+        for _, e in ipairs((wt.q("input", nil) or {}).shops or {}) do
+          if e.cid ~= nil then
+            per[e.cid] = (per[e.cid] or 0) + 1
+            if per[e.cid] == 2 then two = two + 1 end
+          end
+        end
+        st.shop = { shown = sp ~= nil and sp.shown or 0,
+          known = sp ~= nil and sp.known or 0, two_shop_npcs = two }
+        return st
+      end,
+      state = function()
+        local jumps = {}
+        for i, r in ipairs(jump_log) do jumps[i] = jump_line(r) end
+        return { lines = snapshot ~= nil and core.state_lines(snapshot,
+            expanded_union(), settings.journal_spoilers) or {}, jumps = jumps,
+          tracked_qid = snapshot and snapshot.tracked_qid or nil,
+          map_ctor_n = map_ctor_n, setup_icon_n = setup_icon_n,
+          same_fallback_n = hover_stats.same_fallback_n }
+      end,
+    }
+  else
+    _G.QNML_DEBUG = nil
+    debug_expanded = {}
+  end
+end
+install_debug()
+
+-- v9 (SPEC 16.3d): one expanded row (or summary node) from core's model.
+local JUMP_TIP = "Opens the map here"
+-- Opens the node itself; returns whether it was open. The detail model is
+-- built once per snapshot (its inputs only change when the snapshot does).
+local function draw_detail(label, rec, qid, j, ja, spoilers)
+  if not imgui.tree_node(label) then return false end
+  local ok, err = pcall(function()
+    local cache = snapshot.detail
+    if cache == nil then cache = {}; snapshot.detail = cache end
+    local key = tostring(qid) .. (spoilers and "s" or "")
+    local d = cache[key]
+    if d == nil then
+      d = core.row_detail(rec, j[qid], ja[qid], spoilers)
+      d.steps_id, d.jump_id = "All steps###qa_" .. qid, "Show on map##qj_" .. qid
+      cache[key] = d
+    end
+    for _, l in ipairs(d.lines) do imgui.text(l) end
+    if d.steps ~= nil and imgui.tree_node(d.steps_id) then
+      for _, s in ipairs(d.steps) do imgui.text(s) end
+      imgui.tree_pop()
+    end
+    if d.jump ~= nil then
+      if imgui.button(d.jump_id) then jump_pending = d.jump end
+      if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+    end
+  end)
+  if not ok then logerr("tree detail: " .. tostring(err)) end
+  imgui.tree_pop()
+  return true
+end
+
+local function draw_body()
+  local changed
+
+  changed, settings.enabled = imgui.checkbox("Enabled", settings.enabled)
+  if changed then
+    want_update = true; last_tick = 0.0; save_settings()
+    minimap_renderer:clear_suspension()
+  end
+
+  -- SPEC 19.4: map search. Typing never touches last_tick (one tick, one save per 2 s).
+  local sch, sval = imgui.input_text("Map search", settings.search_text)
+  if sch then
+    settings.search_text = su.cut_search(sval)
+    settings_dirty = true; want_update = true
+  end
+  imgui.same_line()
+  if imgui.button("Clear") then
+    settings.search_text = ""
+    settings_dirty = true; want_update = true; last_tick = 0.0
+  end
+  if wt.search_on then
+    local off = {}
+    for _, k in ipairs(su.WORLD_BOOLS) do
+      if k ~= "world_show_opened" and k ~= "world_undiscovered"
+        and k ~= "world_shops" and not settings[k] then
+        off[#off + 1] = string.lower(su.WORLD_BOOL_LABEL[k])
+      end
+    end
+    if #off > 0 then imgui.text("Not searched (off): " .. table.concat(off, ", ")) end
+    if snapshot == nil then
+      imgui.text("No results yet")
+    else
+      local nres = #snapshot.markers
+      if imgui.tree_node(string.format("Search results (%d)###qnml_sr", nres)) then
+        local srows = snapshot.search_rows
+        if srows == nil then
+          srows = core.world_rows(snapshot.markers,
+            (wt.q("input", nil) or {}).settlements, wt.world_origin)
+          for _, r in ipairs(srows) do
+            r.jump_id = "Show on map##sj_" .. tostring(r.key)
+          end
+          snapshot.search_rows = srows
+        end
+        for _, r in ipairs(srows) do
+          imgui.text(r.text)
+          if imgui.button(r.jump_id) then jump_pending = r.pos end
+          if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+        end
+        imgui.tree_pop()
+      end
+    end
+  end
+
+  if imgui.tree_node("Show categories") then
+    local toggles = {
+      { "show_startable", "Startable" },
+      { "show_in_progress", "In progress" },
+      { "show_quest_items", "Quest items (for in-progress quests)" },
+      { "show_completed", "Completed" },
+      { "show_unavailable", "Unavailable (failed/canceled/giver dead)" },
+      { "show_locked", "Locked (not yet reachable - spoilers)" },
+    }
+    for _, t in ipairs(toggles) do
+      changed, settings[t[1]] = imgui.checkbox(t[2], settings[t[1]])
+      -- last_tick = 0 forces the next frame's tick to recompute, so a
+      -- toggle takes effect immediately instead of after the 2 s interval.
+      if changed then want_update = true; last_tick = 0.0; save_settings() end
+    end
+    changed, settings.reveal_gate_names =
+      imgui.checkbox("Reveal gating quest names", settings.reveal_gate_names)
+    if changed then want_update = true; last_tick = 0.0; save_settings() end
+    -- v9 (SPEC 16.4): text only, so no map icon rebuild (no want_update)
+    changed, settings.journal_spoilers = imgui.checkbox(
+      "Show every journal step (spoilers)", settings.journal_spoilers)
+    if changed then last_tick = 0.0; save_settings() end
+    imgui.tree_pop()
+  end
+
+  -- v10: own top-level node, so the world filters are one click deep
+  if imgui.tree_node("World markers##wcfg") then
+    for _, k in ipairs(su.WORLD_BOOLS) do
+      changed, settings[k] = imgui.checkbox(su.WORLD_BOOL_LABEL[k], settings[k])
+      if changed then want_update = true; last_tick = 0.0; save_settings() end
+    end
+    local wc, wv = imgui.slider_int("Max world markers",
+      settings.world_max_markers, 0, su.WORLD_MAX_MARKERS)
+    if wc then
+      settings.world_max_markers = su.clamp_int(wv, 0, su.WORLD_MAX_MARKERS)
+      settings_dirty = true; want_update = true
+    end
+    imgui.tree_pop()
+  end
+
+  changed, settings.show_overhead =
+    imgui.checkbox("Overhead NPC indicators", settings.show_overhead)
+  if changed then save_settings() end
+  local sc, sv = imgui.slider_float("Overhead distance",
+    settings.overhead_distance, 10, 200)
+  if sc then
+    settings.overhead_distance = math.min(200, math.max(10, sv))
+    settings_dirty = true
+  end
+
+  changed, settings.show_minimap =
+    imgui.checkbox("Minimap indicators", settings.show_minimap)
+  if changed then
+    save_settings()
+    minimap_renderer:clear_suspension()
+  end
+  if imgui.tree_node("Icons and colors") then
+    -- One icon per category, the same on map and minimap (choices are
+    -- the types both atlases draw). Uses color_picker_argb:
+    -- plain color_picker takes/returns ABGR.
+    local rows = {
+      { "startable", "Startable" }, { "in_progress", "In progress" },
+      { "completed", "Completed" }, { "unavailable", "Unavailable" },
+      { "locked", "Locked" }, { "quest_item", "Quest items" },
+      { "chest", su.WORLD_LABEL.chest }, { "treasure", su.WORLD_LABEL.treasure },
+      { "token", su.WORLD_LABEL.token }, { "beetle", su.WORLD_LABEL.beetle },
+      { "monster", su.WORLD_LABEL.monster }, { "seller", su.WORLD_LABEL.seller },
+    }
+    for _, r in ipairs(rows) do
+      if imgui.tree_node(r[2] .. "##ic_" .. r[1]) then
+        local ik, ck = su.ICON_KEY[r[1]], su.COLOR_KEY[r[1]]
+        local ic, ni = imgui.combo("Icon##" .. r[1],
+          su.ICON_INDEX[settings[ik]] or 1, su.ICON_LABELS)
+        if ic and su.ICON_CHOICES[ni] then
+          settings[ik] = su.ICON_CHOICES[ni][1]; want_update = true; save_settings()
+        end
+        local pc, nv = imgui.color_picker_argb("Color##" .. r[1], settings[ck])
+        if pc then settings[ck] = nv; want_update = true; save_settings() end
+        imgui.tree_pop()
+      end
+    end
+    imgui.tree_pop()
+  end
+
+  changed, settings.debug = imgui.checkbox("Debug logging", settings.debug)
+  if changed then A.set_debug(settings.debug); install_debug(); save_settings() end
+
+  if imgui.button("Force refresh") then
+    committed = {}
+    snapshot = nil
+    want_update = true
+    last_tick = 0.0
+  end
+
+  if snapshot ~= nil then
+    local c = snapshot.counts
+    imgui.text(string.format(
+      "Quests - startable %d  in progress %d  completed %d",
+      c.startable, c.in_progress, c.completed))
+    imgui.text(string.format(
+      "  failed %d  canceled %d  giver dead %d  locked %d",
+      c.failed, c.canceled, c.giver_dead, c.locked))
+    if imgui.tree_node("Status") then
+      imgui.text(string.format("Resolved positions: %d", snapshot.resolved_count))
+      imgui.text(string.format("Markers added: %d  dropped (pool full): %d",
+        added_count, dropped_count))
+      imgui.text(string.format("Pool: %s  used %d / limit %d",
+        pool_label, pool_used, pool_limit))
+      local lines = {}
+      for qid, u in pairs(snapshot.unresolved) do
+        lines[#lines + 1] = string.format("[%d] %s: %s",
+          qid, u.name or "?", u.reason)
+      end
+      table.sort(lines)
+      if #lines > 0 and imgui.tree_node("Unresolved quests") then
+        for _, line in ipairs(lines) do imgui.text(line) end
+        imgui.tree_pop()
+      end
+      local unnamed_ids = {}
+      for qid in pairs(snapshot.unnamed) do unnamed_ids[#unnamed_ids + 1] = qid end
+      table.sort(unnamed_ids)
+      if #unnamed_ids > 0 then
+        imgui.text("Unnamed quest IDs: " .. table.concat(unnamed_ids, ", "))
+      end
+      if adapter.journal_stats ~= nil then
+        imgui.text(core.journal_line(adapter.journal_stats()))
+      end
+      imgui.text(wt.line())
+      imgui.tree_pop()
+    end
+  else
+    imgui.text("Waiting for game / save data")
+  end
+  if snapshot ~= nil and A.QUEST_REGION ~= nil then
+    local exp = {}   -- v9 (SPEC 16.3c): rows open this frame
+    if imgui.tree_node("Quest tree") then
+      tree_open_at = os.clock()
+      if snapshot.quests == nil then
+        imgui.text("Building (next refresh)...")
+      else
+        local spoilers = settings.journal_spoilers
+        local jt, jat = snapshot.journal or {}, snapshot.journal_all or {}
+        snapshot.summary = snapshot.summary or core.summary_nodes(snapshot)
+        for _, s in ipairs(snapshot.summary) do
+          draw_detail(s.label, s.rec, s.qid, jt, jat, spoilers)
+        end
+        local order = { "Melve", "Vernworth", "Checkpoint Rest Town",
+          "Harve", "Bakbattahl", "Sacred Arbor", "Volcanic Island",
+          "Unmoored", "Elsewhere" }
+        local by = {}
+        for _, r in ipairs(snapshot.quests) do
+          if r.cat ~= "locked" or settings.show_locked then
+            local t = by[r.region]
+            if t == nil then t = {} by[r.region] = t end
+            t[#t + 1] = r
+          end
+        end
+        for _, reg in ipairs(order) do
+          local list = by[reg]
+          if list ~= nil and #list > 0 then
+            local done = 0
+            for _, r in ipairs(list) do
+              if r.cat == "completed" or r.cat == "failed"
+                or r.cat == "canceled" then done = done + 1 end
+            end
+            if imgui.tree_node(string.format("%s (%d/%d)###qt_%s",
+                reg, done, #list, reg)) then
+              for _, r in ipairs(list) do
+                imgui.text_colored("*", A.argb_to_abgr(
+                  su.color_of(settings, r.grp)))
+                imgui.same_line()
+                r.row_label = r.row_label or core.row_label(r, snapshot.nearest_qid)
+                if draw_detail(r.row_label, r, r.qid, jt, jat, spoilers) then
+                  exp[r.qid] = true
+                end
+              end
+              imgui.tree_pop()
+            end
+          end
+        end
+        local ts = adapter.tree_gate_stats ~= nil
+          and adapter.tree_gate_stats() or nil
+        if ts ~= nil then
+          imgui.text(tree_gates_line(ts))
+        end
+      end
+      imgui.tree_pop()
+    end
+    for q in pairs(exp) do
+      if not tree_expanded[q] then last_tick = 0.0; break end   -- detail within a frame or two
+    end
+    tree_expanded = exp
+    -- v10 (SPEC 17.4g): World panel, after the quest tree, same snapshot gate.
+    if imgui.tree_node("World") then
+      local okp, errp = pcall(function()
+        -- read every frame: shown even before the first committed round
+        local ps = wt.q("places_state", wt.ps_dflt)
+        if ps.state ~= "ok" then
+          imgui.text("World data file missing: reinstall the mod")
+        end
+        if ps.stale then imgui.text("World data may be out of date") end
+        local sw = snapshot.world
+        if sw == nil then
+          imgui.text("No world data yet")
+          return
+        end
+        for _, cat in ipairs(core.WORLD_CATS) do
+          local p = sw[cat]
+          local title = su.WORLD_LABEL[cat] or cat
+          if cat == "shop" and not wt.search_on then title = su.WORLD_LABEL.shops end
+          if p ~= nil and (cat ~= "shop" or wt.search_on or settings.world_shops)
+            and imgui.tree_node(string.format("%s (%d/%d)###wcat_%s",
+              title, p.shown, p.known, cat)) then
+            local rows = wt.rows(cat)
+            if #rows == 0 then imgui.text("Nothing shown") end
+            for _, r in ipairs(rows) do
+              local open = true
+              if cat == "shop" then
+                open = imgui.tree_node(r.tree_id)
+                if open then
+                  for _, l in ipairs(r.sells_for or {}) do imgui.text(l) end
+                  if r.stock == nil or #r.stock == 0 then
+                    imgui.text("No stock listed")
+                  else
+                    for _, it in ipairs(r.stock) do
+                      imgui.text(tostring(it.name) .. (it.locked and " (may be locked)" or ""))
+                    end
+                  end
+                end
+              else
+                imgui.text(r.text)
+              end
+              if open then
+                if imgui.button(r.jump_id) then
+                  jump_pending = r.pos
+                end
+                if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+                if cat == "shop" then imgui.tree_pop() end
+              end
+            end
+            imgui.tree_pop()
+          end
+        end
+      end)
+      if not okp then logerr("world panel: " .. tostring(errp)) end
+      imgui.tree_pop()
+    end
+  end
+  if settings.debug then
+    imgui.text("Collection path: " .. A.debug_probe())
+    imgui.text(string.format("Hover: fires %d  hits %d  misses %d  sel_nil %d",
+      hover_stats.fires, hover_stats.hits, hover_stats.misses,
+      hover_stats.sel_nil))
+    if imgui.button("Probe NPC scan") then pcall(A.rebuild_npc_pos_cache) end
+    local acount = 0
+    for _ in pairs(overhead_anchors) do acount = acount + 1 end
+    imgui.text(string.format(
+      "Overhead: anchors %d, points %d, live hits %d, drawn %d, pass %.2f ms, draw %.2f ms, gate %s, vec reuse %s",
+      acount, #overhead_points, overhead_live_hits, overhead_drawn,
+      math.max(overhead_pass_ms_shown, overhead_pass_ms),
+      math.max(overhead_draw_ms_shown, overhead_draw_ms),
+      overhead_gate, tostring(proj_vec_reuse)))
+    if minimap_unavailable ~= nil then
+      imgui.text("Minimap: " .. minimap_unavailable)
+    else
+      local mr = minimap_renderer
+      imgui.text(string.format(
+        "Minimap: candidates %d, clipped %d, shown %d, dropped %d, pool %d, free %d, post %.2f ms, nearest %s, owned %d, hud changes %d, status %s",
+        mr.candidates_n, mr.clipped, mr.shown, mr.dropped,
+        mr.pool_n, mr.free_n,
+        math.max(minimap_post_ms_shown, minimap_post_ms),
+        mr.nearest ~= nil and string.format("%.0f m", mr.nearest) or "-",
+        #mr.owned, mr.hud_changes, mr.status))
+    end
+    changed, overhead_force_estimate =
+      imgui.checkbox("Overhead: force width estimate", overhead_force_estimate)
+    if changed then label_widths = {} end
+    if imgui.button("Probe overhead lookup") then
+      local markers = snapshot ~= nil and snapshot.markers or {}
+      local coord_logged = false
+      for _, m in ipairs(markers) do
+        local cid = core.marker_cid(m)
+        if cid ~= nil then
+          local m_pos, m_live, live, hstate = A.probe_lookup(cid)
+          if live ~= nil then
+            logmsg(string.format(
+              "overhead probe cid=%d method(extract)=%s method(transform)=%s pos=%.1f,%.1f,%.1f",
+              cid, tostring(m_pos), tostring(m_live), live.x, live.y, live.z))
+            if not coord_logged then
+              coord_logged = true
+              local nx, ny, nz = adapter.npc_pos(cid)
+              logmsg(string.format(
+                "overhead coord check cid=%d npc_pos=%s,%s,%s live=%.1f,%.1f,%.1f",
+                cid, tostring(nx), tostring(ny), tostring(nz),
+                live.x, live.y, live.z))
+            end
+          else
+            logmsg(string.format(
+              "overhead probe cid=%d live MISS (extract method=%s, holder=%s)",
+              cid, tostring(m_pos), tostring(hstate)))
+          end
+        end
+      end
+      -- Reflection dump: what this build actually offers for a live
+      -- character lookup (the four guessed method names all miss).
+      pcall(function()
+        local cm_td = sdk.find_type_definition("app.CharacterManager")
+        if cm_td ~= nil then
+          for _, meth in ipairs(cm_td:get_methods()) do
+            local nm = meth:get_name()
+            local l = nm:lower()
+            if l:find("chara", 1, true) or l:find("find", 1, true) then
+              logmsg(string.format("cm method: %s/%d -> %s", nm,
+                meth:get_num_params(),
+                tostring(meth:get_return_type():get_full_name())))
+            end
+          end
+          for _, f in ipairs(cm_td:get_fields()) do
+            logmsg(string.format("cm field: %s : %s", f:get_name(),
+              f:get_type():get_full_name()))
+          end
+        end
+      end)
+      local dumped = 0
+      for _, m in ipairs(markers) do
+        local cid = core.marker_cid(m)
+        if cid ~= nil and dumped < 2 then
+          dumped = dumped + 1
+          pcall(A.debug_probe_holder, cid, logmsg)
+        end
+      end
+      logmsg(string.format("probe2 done: %d c-keyed markers dumped (of %d markers)",
+        dumped, #markers))
+    end
+    local cs = A.catalog_stats()
+    imgui.text(string.format(
+      "Catalog: %d entries, %d skipped (%d cast), %d distinct side IDs (%d total)",
+      cs.entries, cs.skipped, cs.cast_skipped, catalog_side_count(), cs.distinct))
+    local os_ = adapter.objective_stats ~= nil and adapter.objective_stats() or nil
+    if os_ ~= nil then
+      imgui.text(string.format(
+        "Objectives: %d quests from %d processors (%d kept, %d skipped, %d failed walks, %d builds), walk %.1f ms",
+        os_.quests, os_.entries, os_.kept, os_.skipped, os_.failed_total,
+        os_.index_builds or 0, last_walk_ms))
+    end
+    local gs = adapter.gate_stats ~= nil and adapter.gate_stats() or nil
+    if gs ~= nil then
+      imgui.text(string.format(
+        "Gates: %d gated of %d acceptable (%d refs, %d skipped, %d failed walks), walk %.1f ms",
+        gs.gated, gs.acceptable, gs.refs, gs.skipped, gs.failed_total,
+        gs.last_ms))
+    end
+    if adapter.item_stats ~= nil then
+      local ok_is, is_ = pcall(adapter.item_stats)
+      if ok_is and is_ ~= nil then imgui.text(items_line(is_)) end
+    end
+    imgui.text(string.format("Tick: %.1f ms", last_tick_ms))
+    if imgui.button("Probe quest states") then
+      local qm = sdk.get_managed_singleton("app.QuestManager")
+      local ids = A.catalog_ids() or {}
+      -- Every failed/canceled quest logs (those are the rare ones the gate
+      -- needs); completed quests cap at 20. All five predicates per line.
+      local logged, completed_logged, tally = 0, 0, {}
+      for _, qid in ipairs(ids) do
+        local st = adapter.quest_state(qid)
+        if st ~= nil then
+          tally[st] = (tally[st] or 0) + 1
+          if st ~= "completed" or completed_logged < 20 then
+            if st == "completed" then
+              completed_logged = completed_logged + 1
+            end
+            local raw = {}
+            for _, mname in ipairs({ "isFailedQuest", "isCanceledQuest",
+              "isClearedQuest", "isEndedQuest" }) do
+              local ok, res = false, nil
+              if qm ~= nil then
+                ok, res = pcall(function() return qm:call(mname, qid) end)
+              end
+              -- "err" distinguishes a failed call from a genuine false.
+              raw[#raw + 1] = mname .. "="
+                .. (ok and tostring(res) or "err")
+            end
+            raw[#raw + 1] = "isQuestLogEnd="
+              .. tostring(A.quest_log_is_end(qid))
+            logmsg(string.format("state probe qid=%d state=%s %s",
+              qid, st, table.concat(raw, " ")))
+            logged = logged + 1
+          end
+        end
+      end
+      logmsg(string.format(
+        "state probe: %d logged; failed %d canceled %d completed %d",
+        logged, tally.failed or 0, tally.canceled or 0,
+        tally.completed or 0))
+    end
+  end
+end
+
+re.on_draw_ui(function()
+  if imgui.tree_node(MOD_NAME) then
+    local ok, e = pcall(draw_body)
+    imgui.tree_pop()
+    if not ok then logerr(tostring(e)) end
+  end
+end)
+
+-- v9 (SPEC 16.3g): feeds the jump machine every frame; not the 2 s tick,
+-- not gated by `enabled`. Defined once, so no closure is built per frame.
+local function jump_feed()
+  -- Idle: nothing pending or running, and the newest logged jump (entries
+  -- resolve oldest first) already has its icon-rebuild count.
+  if jump_pending == nil and not jump_machine:busy()
+    and (jump_log[#jump_log] == nil or jump_log[#jump_log].setup_2s ~= nil) then
+    return
+  end
+  if jump_pending ~= nil then
+    -- SPEC 20.12.6: the target is the map origin from the first rebuild on
+    local p = jump_pending
+    wt.set_map_origin(p, os.clock())
+    jump_machine:request(jump_pending)
+    jump_pending = nil
+  end
+  local now = os.clock()
+  local res = jump_machine:step(jump_frame, now)
+  if res ~= nil then
+    local tg = res.target
+    if (res.result == "on_target" or res.result == "off_target") and tg ~= nil then
+      wt.set_map_origin(tg, now)
+    elseif ui_map == nil then
+      wt.set_map_origin(nil, nil)
+    end
+    if adapter.journal_note_jump ~= nil then pcall(adapter.journal_note_jump, res.result) end
+    res.t, res.setup_at = now, setup_icon_n
+    jump_log[#jump_log + 1] = res
+    if #jump_log > 8 then table.remove(jump_log, 1) end
+  end
+  for _, r in ipairs(jump_log) do
+    if r.setup_2s == nil and now - r.t >= 2.0 then
+      r.setup_2s = setup_icon_n - r.setup_at
+      if settings.debug then logmsg(jump_line(r)) end
+    end
+  end
+end
+re.on_frame(function()
+  jump_frame = jump_frame + 1
+  local ok, err = pcall(jump_feed)
+  if not ok and tostring(err) ~= jump_last_err then
+    jump_last_err = tostring(err)
+    logerr("jump: " .. jump_last_err)
+  end
+end)
+
+re.on_frame(function()
+  if os.clock() < overhead_suspend_until then return end
+  local ok, err = pcall(overhead_frame)
+  if ok then
+    overhead_fail_frames = 0
+  else
+    overhead_fail_frames = overhead_fail_frames + 1
+    local msg = tostring(err)
+    if not overhead_logged_errs[msg] and overhead_logged_count < 16 then
+      overhead_logged_errs[msg] = true
+      overhead_logged_count = overhead_logged_count + 1
+      logerr("overhead error: " .. msg)
+    end
+    if overhead_fail_frames >= 30 then
+      overhead_fail_frames = 0
+      overhead_suspend_until = os.clock() + 5.0
+    end
+  end
+end)
+
+logmsg("loaded")
