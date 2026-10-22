@@ -36,7 +36,7 @@ map and in your view.
 3. Start the game.
 
 The release zip includes the generated places file the world tracker reads
-(`reframework/data/Clairvoyance_places.json`). The `-noplaces` zip omits that file.
+(`reframework/data/Clairvoyance_places.json`).
 
 ## Settings
 
