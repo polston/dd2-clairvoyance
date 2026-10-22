@@ -88,6 +88,24 @@ $r = Invoke-Build $c @("-NoPlaces")
 $zip = Join-Path $c.Out "Clairvoyance-noplaces.zip"
 $e = @(); if (Test-Path $zip) { $e = Get-Entries $zip }
 Assert-True "noplaces_name" (($r.Code -eq 0) -and ($e.Count -gt 0) -and -not ($e | Where-Object { $_ -match $toolsRe })) "code $($r.Code)"
+# 8 -PlacesFile: no Python, game or key needed; the file is staged verbatim
+$c = New-Case "t8" "import sys`nsys.exit(1)"
+$pf = Join-Path $base "t8_places.json"
+[System.IO.File]::WriteAllBytes($pf, [System.Text.Encoding]::ASCII.GetBytes('{"places":[1,2,3]}'))
+$r = Invoke-Build $c @("-PlacesFile", $pf)
+$zip = Join-Path $c.Out "Clairvoyance.zip"
+$e = @(); $same = $false
+if (Test-Path $zip) {
+    $e = Get-Entries $zip
+    $x = Join-Path $base "t8_x"
+    New-Item -ItemType Directory -Force $x | Out-Null
+    Push-Location $x
+    & "$env:SystemRoot\System32\tar.exe" -x -f $zip "reframework/data/Clairvoyance_places.json"
+    Pop-Location
+    $got = Join-Path $x "reframework/data/Clairvoyance_places.json"
+    if (Test-Path $got) { $same = ([System.IO.File]::ReadAllText($got) -eq [System.IO.File]::ReadAllText($pf)) }
+}
+Assert-True "places_file_staged" (($r.Code -eq 0) -and ($e -contains "reframework/data/Clairvoyance_places.json") -and $same -and -not ($e | Where-Object { $_ -match $toolsRe })) "code $($r.Code) same $same entries $($e -join ',') text $($r.Text)"
 # 5
 $p = Join-Path $base "t5"
 New-Item -ItemType Directory -Force (Join-Path $p "scripts") | Out-Null

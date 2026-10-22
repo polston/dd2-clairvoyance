@@ -1,12 +1,15 @@
 # Builds the release zip into dist/ (gitignored). Unless -NoPlaces it
 # first generates the places file from the game's pak with tools/extract_world.py
-# and stages it under reframework/data. The zip never contains tools/.
+# and stages it under reframework/data. With -PlacesFile the extractor and its
+# Python/key/game checks are skipped and that file is staged instead (CI uses
+# this with the committed data/Clairvoyance_places.json). The zip never contains tools/.
 param(
     [string]$GameDir = "",
     [string]$Python = "python",
     [string]$KeyFile = "",
     [string]$Root = "",
     [string]$OutDir = "",
+    [string]$PlacesFile = "",
     [switch]$NoPlaces
 )
 $ErrorActionPreference = "Stop"
@@ -14,7 +17,10 @@ if ($Root -eq "") { $Root = Split-Path $PSScriptRoot -Parent }
 if ($OutDir -eq "") { $OutDir = Join-Path $Root "dist" }
 function Stop-Build([string]$msg) { Write-Host "build-zip: $msg"; exit 1 }
 
-if (-not $NoPlaces) {
+if ($PlacesFile -ne "" -and -not $NoPlaces -and -not (Test-Path $PlacesFile)) {
+    Stop-Build "places file not found '$PlacesFile'"
+}
+if (-not $NoPlaces -and $PlacesFile -eq "") {
     if ($GameDir -eq "" -or -not (Test-Path (Join-Path $GameDir "re_chunk_000.pak"))) {
         Stop-Build "re_chunk_000.pak not found in game folder '$GameDir'"
     }
@@ -49,9 +55,14 @@ if ($NoPlaces) { $zip = Join-Path $OutDir "Clairvoyance-noplaces.zip" }
 else {
     $zip = Join-Path $OutDir "Clairvoyance.zip"
     $placesOut = Join-Path $stage "reframework/data/Clairvoyance_places.json"
+    if ($PlacesFile -ne "") {
+        New-Item -ItemType Directory -Force (Split-Path $placesOut -Parent) | Out-Null
+        Copy-Item $PlacesFile $placesOut
+    } else {
     & $Python (Join-Path $Root "tools/extract_world.py") --game $GameDir --out $placesOut --key $KeyFile
     if ($LASTEXITCODE -ne 0) { Stop-Build "extractor failed (exit $LASTEXITCODE)" }
     if (-not (Test-Path $placesOut)) { Stop-Build "extractor wrote no places file" }
+    }
 }
 if (Test-Path $zip) { Remove-Item $zip }
 # System32 tar writes forward-slash entry names; PS 5.1 Compress-Archive
