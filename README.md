@@ -30,9 +30,9 @@ map and in your view.
 
 ## Install
 
-1. Download the release zip.
-2. Copy the `reframework` folder from the zip into the game folder, merging with
-   the existing `reframework` folder.
+1. Download `Clairvoyance.zip` from the GitHub Releases page.
+2. Add the zip in Fluffy Mod Manager, or extract the `reframework` folder from it
+   into the game folder by hand, merging with the existing `reframework` folder.
 3. Start the game.
 
 The release zip includes the generated places file the world tracker reads
@@ -57,6 +57,19 @@ the packaging tests. `scripts/build-zip.ps1` builds the release zips and
 The optional pak reader in `tools/` regenerates the places file from the game's
 archives. It needs your own key file, `tools/pak_key.local.txt`, which is not
 included in this repository.
+
+## Places file
+
+`data/Clairvoyance_places.json` is generated from the game files with
+`tools/extract_world.py` and your own key file. It is regenerated and committed
+after a game patch. CI and the release zip use the committed copy.
+
+## Releasing
+
+1. Bump `version=` in `modinfo.ini` and commit.
+2. Tag the commit `v<version>`, for example `v0.1.0`.
+3. Push the tag. CI builds the zip and publishes it on the Releases page; it
+   fails if the tag does not equal `v` plus the `modinfo.ini` version.
 
 ## License
 

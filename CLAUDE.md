@@ -35,3 +35,6 @@ here and never pushed; roadmap and spec edits are committed there, not in this r
    the extractor (`tools/`) or the pak key. The key lives only in the
    gitignored `tools/pak_key.local.txt`; it is never printed, committed or
    zipped.
+6. CI (`.github/workflows/ci.yml`) runs `check.ps1 -SkipProvenance` and builds the zip
+   from the committed `data/Clairvoyance_places.json`; release = bump `version=` in
+   `modinfo.ini`, commit, tag `v<version>`, push the tag (the operator pushes).

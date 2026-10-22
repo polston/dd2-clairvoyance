@@ -9,3 +9,6 @@
 3. Spec: `docs/SPEC.md`. `docs/` (SPEC.md, plans, ROADMAP.md) is a separate local git
    repo, gitignored here and never pushed; roadmap and spec edits are committed there.
 4. Third-party reference sources live in `reference/` (gitignored, never committed).
+5. CI (`.github/workflows/ci.yml`) runs `check.ps1 -SkipProvenance` and builds the zip
+   from the committed `data/Clairvoyance_places.json`; release = bump `version=` in
+   `modinfo.ini`, commit, tag `v<version>`, push the tag (the operator pushes).
