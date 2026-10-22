@@ -106,6 +106,28 @@ if (Test-Path $zip) {
     if (Test-Path $got) { $same = ([System.IO.File]::ReadAllText($got) -eq [System.IO.File]::ReadAllText($pf)) }
 }
 Assert-True "places_file_staged" (($r.Code -eq 0) -and ($e -contains "reframework/data/Clairvoyance_places.json") -and $same -and -not ($e | Where-Object { $_ -match $toolsRe })) "code $($r.Code) same $same entries $($e -join ',') text $($r.Text)"
+# 9 -Version: staged modinfo.ini carries the version; the repo file is untouched
+$c = New-Case "t9" "import sys`nsys.exit(1)"
+$pf = Join-Path $base "t9_places.json"
+[System.IO.File]::WriteAllBytes($pf, [System.Text.Encoding]::ASCII.GetBytes('{}'))
+$before = [System.IO.File]::ReadAllText((Join-Path $repo "modinfo.ini"))
+$r = Invoke-Build $c @("-PlacesFile", $pf, "-Version", "7.8.9")
+$zip = Join-Path $c.Out "Clairvoyance.zip"
+$ver = ""
+if (Test-Path $zip) {
+    $x = Join-Path $base "t9_x"
+    New-Item -ItemType Directory -Force $x | Out-Null
+    Push-Location $x
+    & "$env:SystemRoot\System32\tar.exe" -x -f $zip "modinfo.ini"
+    Pop-Location
+    $lines = @(Get-Content (Join-Path $x "modinfo.ini") | Where-Object { $_ -match '^version=' })
+    if ($lines.Count -eq 1) { $ver = $lines[0] }
+}
+$after = [System.IO.File]::ReadAllText((Join-Path $repo "modinfo.ini"))
+Assert-True "version_stamped" (($r.Code -eq 0) -and ($ver -eq "version=7.8.9") -and ($before -eq $after)) "code $($r.Code) ver '$ver' text $($r.Text)"
+# bad version is rejected
+$r = Invoke-Build $c @("-PlacesFile", $pf, "-Version", "banana")
+Assert-True "bad_version_fails" (($r.Code -ne 0) -and ($r.Text -match "version")) "code $($r.Code)"
 # 5
 $p = Join-Path $base "t5"
 New-Item -ItemType Directory -Force (Join-Path $p "scripts") | Out-Null

@@ -2,7 +2,8 @@
 # first generates the places file from the game's pak with tools/extract_world.py
 # and stages it under reframework/data. With -PlacesFile the extractor and its
 # Python/key/game checks are skipped and that file is staged instead (CI uses
-# this with the committed data/Clairvoyance_places.json). The zip never contains tools/.
+# this with the committed data/Clairvoyance_places.json). With -Version x.y.z the staged
+# modinfo.ini gets version=x.y.z (the repo file is not modified). The zip never contains tools/.
 param(
     [string]$GameDir = "",
     [string]$Python = "python",
@@ -10,6 +11,7 @@ param(
     [string]$Root = "",
     [string]$OutDir = "",
     [string]$PlacesFile = "",
+    [string]$Version = "",
     [switch]$NoPlaces
 )
 $ErrorActionPreference = "Stop"
@@ -17,6 +19,9 @@ if ($Root -eq "") { $Root = Split-Path $PSScriptRoot -Parent }
 if ($OutDir -eq "") { $OutDir = Join-Path $Root "dist" }
 function Stop-Build([string]$msg) { Write-Host "build-zip: $msg"; exit 1 }
 
+if ($Version -ne "" -and $Version -notmatch '^\d+\.\d+\.\d+$') {
+    Stop-Build "version must look like 1.2.3, got '$Version'"
+}
 if ($PlacesFile -ne "" -and -not $NoPlaces -and -not (Test-Path $PlacesFile)) {
     Stop-Build "places file not found '$PlacesFile'"
 }
@@ -48,6 +53,12 @@ $stage = Join-Path $OutDir "stage"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item (Join-Path $Root "modinfo.ini") $stage
+if ($Version -ne "") {
+    $ini = Join-Path $stage "modinfo.ini"
+    $text = [System.IO.File]::ReadAllText($ini)
+    $text = [regex]::Replace($text, '(?m)^version=[^\r\n]*(\r?)$', "version=$Version`$1")
+    [System.IO.File]::WriteAllText($ini, $text)
+}
 New-Item -ItemType Directory -Force (Join-Path $stage "reframework") | Out-Null
 Copy-Item (Join-Path $Root "reframework/autorun") (Join-Path $stage "reframework") -Recurse
 
