@@ -127,6 +127,12 @@ else {
     & python -m unittest discover -s tools -p "test_*.py"
     if ($LASTEXITCODE -ne 0) { Write-Host "PYTHON TESTS FAIL"; $fail = $true }
 }
+# Release-version tests (tests/next_version_test.py); skipped when Python is missing.
+if (-not $pyOk) { Write-Host "version tests: skipped (no Python)" }
+else {
+    & python -m unittest discover -s tests -p "next_version_test.py"
+    if ($LASTEXITCODE -ne 0) { Write-Host "VERSION TESTS FAIL"; $fail = $true }
+}
 # Last check: no tracked line matches the provenance patterns (SPEC 18.8.1).
 if ($SkipProvenance) { Write-Host "provenance: skipped (-SkipProvenance)" }
 else {
