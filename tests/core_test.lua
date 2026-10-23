@@ -1727,6 +1727,31 @@ do
     items = { { name = "A", n = 3 } } } } }, sh(), O, {})
   check("wd2 label in marker", ms[1].label == "Chest - A x3")
 
+  -- treasure labels and search by item name
+  local function tl(items)
+    local m = core.world_markers({ treasure = { { name = "TL", pos = P(5), checked = false,
+      discovered = true, items = items } } }, sh(), O, {})
+    return m[1] and m[1].label
+  end
+  check("tl one item", tl({ { name = "Gold", n = 1100 } }) == "Treasure - Gold x1100")
+  check("tl four items", tl({ { name = "a", n = 1 }, { name = "b", n = 1 },
+    { name = "c", n = 1 }, { name = "d", n = 1 } }) == "Treasure - a, b, c (+1)")
+  check("tl none", tl(nil) == "Treasure")
+  check("tl nil name skipped", tl({ { name = nil, n = 1 } }) == "Treasure")
+  do
+    local w = { treasure = {
+      { name = "T1", pos = P(5), checked = false, discovered = true,
+        items = { { name = "Gold", n = 1100 } } },
+      { name = "T2", pos = P(60), checked = false, discovered = true },
+      { name = "T3", pos = P(120), checked = false, discovered = true,
+        items = { { name = nil, n = 1 } } } } }
+    local function cnt(q)
+      return #core.world_markers(w, sh({ search = core.parse_query(q) }), O, {})
+    end
+    check("tl search gold matches first only", cnt("gold") == 1)
+    check("tl search treasure matches all", cnt("treasure") == 3)
+  end
+
   -- treasure_chest_dedupe
   local function dd(dx, state)
     local m = core.world_markers({

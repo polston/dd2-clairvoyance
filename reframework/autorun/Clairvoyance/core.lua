@@ -441,6 +441,28 @@ local function top3(names, total)
   return out
 end
 
+-- Joined item list for a chest or treasure label: up to three names,
+-- "<name> x<n>" for n > 1, then " (+N)"; nil when there is nothing to list.
+-- skip_nil drops items without a name (treasure); chests keep tostring.
+local function items_text(items, skip_nil)
+  items = type(items) == "table" and items or {}
+  local names, total = {}, 0
+  for _, it in ipairs(items) do
+    if not (skip_nil and it.name == nil) then
+      total = total + 1
+      if total <= 3 then
+        local n = tostring(it.name)
+        if type(it.n) == "number" and it.n > 1 then
+          n = n .. " x" .. tostring(math.floor(it.n))
+        end
+        names[#names + 1] = n
+      end
+    end
+  end
+  if #names == 0 then return nil end
+  return top3(names, total)
+end
+
 -- Chest label (SPEC 17.10.11): item_name wins; else up to three item names,
 -- "<name> x<n>" for n > 1, then " (+N)" for the rest; no items: "Chest".
 function M.chest_label(chest)
@@ -448,18 +470,9 @@ function M.chest_label(chest)
   if type(e.item_name) == "string" and e.item_name ~= "" then
     return "Chest - " .. e.item_name
   end
-  local items = type(e.items) == "table" and e.items or {}
-  local names = {}
-  for i, it in ipairs(items) do
-    if i > 3 then break end
-    local n = tostring(it.name)
-    if type(it.n) == "number" and it.n > 1 then
-      n = n .. " x" .. tostring(math.floor(it.n))
-    end
-    names[#names + 1] = n
-  end
-  if #names == 0 then return "Chest" end
-  return "Chest - " .. top3(names, #items)
+  local text = items_text(e.items, false)
+  if text == nil then return "Chest" end
+  return "Chest - " .. text
 end
 
 -- Treasure nodes within 3 units of any chest are the chest's own marker
@@ -570,7 +583,11 @@ local function entry_hay(cat, e, drops, md)
     end
     return hay_join(parts)
   elseif cat == "treasure" then
-    return hay_join({ "Treasure" })
+    local parts = { "Treasure" }
+    for _, it in ipairs(type(e.items) == "table" and e.items or {}) do
+      if it.name ~= nil then parts[#parts + 1] = it.name end
+    end
+    return hay_join(parts)
   elseif cat == "monster" then
     local parts = { monster_label(e) }
     if md == nil then md = monster_drops_of(e, drops) end   -- false: none
@@ -654,7 +671,8 @@ local function make_cand(cat, e, ctx)
     c.hidden = near_box or (c.done and not ctx.show_opened)
   elseif cat == "treasure" then
     c.key = "w:tre:" .. tostring(e.name)
-    c.label = "Treasure"
+    local text = items_text(e.items, true)
+    c.label = text and ("Treasure - " .. text) or "Treasure"
     c.done = e.checked == true
     c.hidden = (e.discovered == false) and not ctx.undisc
   elseif cat == "token" or cat == "beetle" then
