@@ -2,6 +2,7 @@
 -- (SPEC 22.10.2-22.10.6).
 -- No host globals: the sdk, draw table, clock and every game fact arrive
 -- through opt.
+local style = require("Clairvoyance.style")
 local M = {}
 
 local TYPE_NAME = "app.ui060301_00"
@@ -119,6 +120,11 @@ function M.create(opt)
     local k = opt.screen_h() / 1080
     local radius = DOT_RADIUS * k
     local color = opt.color_abgr()
+    local on, ocolor, owidth = false, 0xFF000000, 1
+    if opt.style then on, ocolor, owidth = opt.style() end
+    ocolor = ocolor or 0xFF000000
+    local o = style.offset(owidth or 1, k)
+    local dot_a = ((color >> 24) & 0xFF) / 255
     local related = opt.related() or {}
     local n = 0
     for i = 0, nslots - 1 do
@@ -134,7 +140,8 @@ function M.create(opt)
             if p == nil then error("no global position") end
             -- the top-right corner (the position is the center), inset by the radius
             local sx, sy = to_screen(p.x + SLOT_SIZE / 2, p.y - SLOT_SIZE / 2, k)
-            opt.draw.filled_circle(sx - radius, sy + radius, radius, color, DOT_SEGMENTS)
+            style.circle(opt.draw, sx - radius, sy + radius, radius, color, on,
+              ocolor, o, DOT_SEGMENTS, dot_a)
             n = n + 1
           end
         end
@@ -153,8 +160,9 @@ function M.create(opt)
           local font = opt.font and opt.font() or nil
           local pushed = font ~= nil and pcall(opt.imgui.push_font, font)
           local ok, err = pcall(function()
-            opt.draw.text(label, sx + 1, sy + 1, 0xFF000000)
-            opt.draw.text(label, sx, sy, opt.label_color())
+            local lc = opt.label_color()
+            style.text(opt.draw, label, sx, sy, lc, on, ocolor, o,
+              ((lc >> 24) & 0xFF) / 255)
           end)
           if pushed then pcall(opt.imgui.pop_font) end
           if not ok then error(err, 0) end
