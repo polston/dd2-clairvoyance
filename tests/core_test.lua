@@ -3064,6 +3064,27 @@ do
     #r.npc_rows == 5 and r.npc_rows[1].cid == 102 and r.npc_rows[1].marker_key == "w:npc:102"
     and r.npc_rows[2].marker_key == nil)
 
+  -- shops and NPCs share one leftover slot by distance
+  local function slot(shop_d, npc_d)
+    local sw = { chests = { { uid = "a", pos = P(1), state = "unopened",
+        items = { { name = "Brandy" } } } },
+      npcs = { npc(61, "Brant", P(npc_d)) },
+      shops = { { shop = 4, npc = "Brandt", cid = 62, pos = P(shop_d), discovered = true,
+        items = { { name = "Rope" } } } } }
+    local rr = run(sw, Q("bran"), { world_max_markers = 2 })
+    return has(rr.markers, "w:npc:61") ~= nil, has(rr.markers, "w:shop:4") ~= nil
+  end
+  local got_npc, got_shop = slot(30, 20)
+  check("npc 8c: nearer NPC takes the one leftover slot", got_npc and not got_shop)
+  got_npc, got_shop = slot(20, 30)
+  check("npc 8d: nearer shop takes the one leftover slot", got_shop and not got_npc)
+
+  -- memo: the same list and query reuse the result
+  local ml = { npc(1, "Bran", P(1)) }
+  local m1 = core.npc_matches(ml, Q("bran"))
+  check("npc 8e: second call reuses the matches", core.npc_matches(ml, Q("bran")) == m1)
+  check("npc 8f: another query recomputes", core.npc_matches(ml, Q("zzz")) ~= m1)
+
   -- not in the overhead list
   local anchors = core.overhead_anchors(r.markers, {}, P(0), 1000)
   local bad = false

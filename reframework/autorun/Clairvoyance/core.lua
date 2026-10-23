@@ -383,7 +383,8 @@ end
 
 -- v10 (SPEC 17.4): world markers. Categories in output order; WORLD_DEF.toggle
 -- names the show field that switches each one and WORLD_DEF.src the world
--- table list that feeds it.
+-- table list that feeds it (shop and npc_search have none: they are fed by
+-- their own candidate builders).
 M.WORLD_CATS = { "treasure", "token", "beetle", "seller", "monster", "chest",
   "shop", "npc_search" }
 local WORLD_DEF = {
@@ -398,7 +399,7 @@ local WORLD_DEF = {
   shop = { src = "shops" },
   -- v14: NPC name matches. No toggle; candidates exist only while a query
   -- does, and fill the leftover slots together with shops.
-  npc_search = { src = "npcs" },
+  npc_search = {},
 }
 -- Categories whose candidates are built outside the generic per-src loops.
 local function special_cat(cat) return cat == "shop" or cat == "npc_search" end
@@ -703,9 +704,16 @@ local function npc_low(e)
   return h.low
 end
 
+-- One memo entry: the same list (and size) with the same query returns the
+-- same result table, so a tick scans and sorts the name list once. Callers
+-- must not modify the result.
+local npc_memo = {}
 function M.npc_matches(npcs, q)
+  if q == nil or type(npcs) ~= "table" then return {} end
+  if npc_memo.npcs == npcs and npc_memo.n == #npcs and npc_memo.key == q.key then
+    return npc_memo.out
+  end
   local out = {}
-  if q == nil or type(npcs) ~= "table" then return out end
   for _, e in ipairs(npcs) do
     if type(e) == "table" and type(e.name) == "string"
       and type(e.cid) == "number" and query_match(q, npc_low(e)) then
@@ -717,6 +725,7 @@ function M.npc_matches(npcs, q)
     if la ~= lb then return la < lb end
     return a.cid < b.cid
   end)
+  npc_memo.npcs, npc_memo.n, npc_memo.key, npc_memo.out = npcs, #npcs, q.key, out
   return out
 end
 
@@ -850,7 +859,7 @@ local function world_candidates(world, show, boxes, q)
   for _, c in ipairs(sc) do cands[#cands + 1] = c end
   if q ~= nil then
     local matches = M.npc_matches(world.npcs, q)
-    known.npc_search = type(world.npcs) == "table" and #world.npcs or 0
+    known.npc_search = #matches
     for _, c in ipairs(npc_cands(matches, ctx)) do cands[#cands + 1] = c end
   end
   return cands, known, shop_of
@@ -1172,8 +1181,9 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   if q ~= nil then
     -- v14 (SPEC 22.7.3): the NPC matches, after the shops; not grid-bound,
     -- they number at most the name list.
-    panel.npc_search.known = type(world.npcs) == "table" and #world.npcs or 0
-    for _, c in ipairs(npc_cands(M.npc_matches(world.npcs, q), ctx)) do
+    local matches = M.npc_matches(world.npcs, q)
+    panel.npc_search.known = #matches
+    for _, c in ipairs(npc_cands(matches, ctx)) do
       stats.cand_builds = stats.cand_builds + 1
       if not c.hidden then
         world_accept(c, has_origin, origin, quest_cids, kept, merged, shops,
