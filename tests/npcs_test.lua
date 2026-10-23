@@ -442,6 +442,40 @@ do
   check("polyline clears tail", n == 4 and #out == 4 and out[5] == nil)
 end
 
+-- review fixes: stale pops, freed finished jobs, cleared failed fits
+do
+  local g = { n = 3, x = { 0, 1, 2 }, y = { 0, 0, 0 }, z = { 0, 0, 0 },
+    ls = { 1, 2, 3 }, lc = { 1, 1, 0 }, lt = { 2, 3 } }
+  local t = 0
+  local clk = function() t = t + 0.001; return t end
+  local j = N.path_new(g, 1, 3)
+  check("stale: first step running", N.path_step(j, 0.5, clk) == "running" and j.expanded == 1)
+  -- node 1 is closed; put a stale entry for it on top of the heap
+  j.hk = { 0.5, 5 }; j.hv = { 1, 2 }; j.hn = 2
+  check("stale: still expands one", N.path_step(j, 0.5, clk) == "running" and j.expanded == 2)
+  local done = N.path_new(g, 1, 3)
+  check("freed done", N.path_step(done, 1e9, function() return 0 end) == "done"
+    and done.gs == nil and done.parent == nil and done.closed == nil
+    and done.hk == nil and done.hv == nil and #done.path == 3)
+  local same = N.path_new(g, 2, 2)
+  check("freed a==b", same.gs == nil and same.hk == nil and same.path[1] == 2)
+  local fail = N.path_new(g, 3, 1)
+  check("freed failed", N.path_step(fail, 1e9, function() return 0 end) == "failed"
+    and fail.gs == nil and fail.parent == nil and fail.closed == nil
+    and fail.hk == nil and fail.hv == nil)
+  local capj = N.path_new(g, 1, 3, { cap = 1 })
+  check("freed cap", N.path_step(capj, 1e9, function() return 0 end) == "failed"
+    and capj.gs == nil and capj.hv == nil)
+  local out = {}
+  local ok = N.fit({ { 0, 0, 100, 0 }, { 100, 0, 300, 0 } }, 2, nil, out)
+  check("fit ok before clear", ok == out and out.a ~= nil)
+  check("fit nil clears (close)", N.fit({ { 0, 0, 0, 0 }, { 100, 0, 10, 0 } }, 2, nil, out) == nil
+    and out.a == nil and out.s == nil and out.residual == nil and out.ox == nil)
+  N.fit({ { 0, 0, 100, 0 }, { 100, 0, 300, 0 } }, 2, nil, out)
+  check("fit nil clears (one point)", N.fit({ { 0, 0, 0, 0 } }, 1, nil, out) == nil and out.a == nil)
+  check("fit nil without out", N.fit({ { 0, 0, 0, 0 } }, 1, nil) == nil)
+end
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)

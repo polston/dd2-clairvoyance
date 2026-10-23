@@ -362,6 +362,7 @@ function M.path_new(g, a, b, opt)
   if a == b then
     job.path = { a }
     job.status = "done"
+    job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
   else
     local dx, dy, dz = g.x[a] - g.x[b], g.y[a] - g.y[b], g.z[a] - g.z[b]
     heap_push(job, job.weight * sqrt(dx * dx + dy * dy + dz * dz), a)
@@ -379,7 +380,11 @@ function M.path_step(job, budget_ms, clock)
   local limit = (budget_ms or 0) / 1000
   local t0 = clock()
   while true do
-    if job.hn == 0 then job.status = "failed"; return "failed" end
+    if job.hn == 0 then
+      job.status = "failed"
+      job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+      return "failed"
+    end
     local u = heap_pop(job)
     if not closed[u] then
       if u == b then
@@ -389,12 +394,17 @@ function M.path_step(job, budget_ms, clock)
         for i = 1, k // 2 do path[i], path[k + 1 - i] = path[k + 1 - i], path[i] end
         job.path = path
         job.status = "done"
+        job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
         return "done"
       end
       closed[u] = true
       local ex = job.expanded + 1
       job.expanded = ex
-      if ex > cap then job.status = "failed"; return "failed" end
+      if ex > cap then
+        job.status = "failed"
+        job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+        return "failed"
+      end
       local ux, uy, uz, gu = gx[u], gy[u], gz[u], gs[u]
       local s = ls[u]
       for slot = s, s + lc[u] - 1 do
@@ -411,8 +421,8 @@ function M.path_step(job, budget_ms, clock)
           heap_push(job, ng + w * sqrt(dx * dx + dy * dy + dz * dz), t)
         end
       end
+      if clock() - t0 >= limit then return "running" end
     end
-    if clock() - t0 >= limit then return "running" end
   end
 end
 
@@ -438,8 +448,15 @@ end
 -- Fit lx = a*mx + b*mz + ox, ly = c*mx + d*mz + oy over the first n points
 -- { mx, mz, lx, ly }: uniform scale s with signs sx, sz (lower residual wins);
 -- opt.similarity adds a rotation. Result written into out.
+local function clear_fit(out)
+  if out then
+    out.s, out.sx, out.sz, out.a, out.b, out.c, out.d = nil, nil, nil, nil, nil, nil, nil
+    out.ox, out.oy, out.residual = nil, nil, nil
+  end
+end
+
 function M.fit(points, n, opt, out)
-  if type(n) ~= "number" or n < 2 then return nil end
+  if type(n) ~= "number" or n < 2 then clear_fit(out); return nil end
   local far = false
   for i = 1, n - 1 do
     local p = points[i]
@@ -450,7 +467,7 @@ function M.fit(points, n, opt, out)
     end
     if far then break end
   end
-  if not far then return nil end
+  if not far then clear_fit(out); return nil end
   local cmx, cmz, clx, cly = 0, 0, 0, 0
   for i = 1, n do
     local p = points[i]
@@ -504,7 +521,7 @@ function M.fit(points, n, opt, out)
       end
     end
   end
-  if not ba then return nil end
+  if not ba then clear_fit(out); return nil end
   out = out or {}
   out.s, out.sx, out.sz = bs, bsx, bsz
   out.a, out.b, out.c, out.d = ba, bb, bc, bd
