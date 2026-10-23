@@ -686,7 +686,8 @@ re.on_frame(function()
     if wt.route_cid ~= nil then
       local keep = false
       if show.search ~= nil then
-        if snapshot == nil then
+        -- a snapshot built without world input matched nothing: not a "no"
+        if snapshot == nil or snapshot.world == nil then
           keep = true
         else
           for _, c in ipairs(snapshot.npc_match_cids or {}) do
