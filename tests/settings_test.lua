@@ -269,7 +269,7 @@ do
   check("V12_ICON keys are ICON_KEYS", ni == 15 and #su.ICON_KEYS == 15)
   check("V12_COLOR keys are COLOR_KEYS", nc == 12 and #su.COLOR_KEYS == 15)
 
-  -- reset_icons
+  -- reset_appearance
   local S = {}
   for k, v in pairs(D) do S[k] = v end
   for _, k in ipairs(su.ICON_KEYS) do S[k] = 9 end
@@ -480,7 +480,7 @@ do
   same("route_number_size")
   check("reset_appearance resets appearance keys", ok)
   check("reset_appearance leaves the rest", R.route_path == 0 and R.route_world_path == true and R.show_overhead == false)
-  check("reset_icons alias", su.reset_icons == su.reset_appearance)
+  check("reset_icons alias is gone", su.reset_icons == nil)
 
   -- key lists cover every 23.4 key except route_path / route_world_path
   local listed = {}

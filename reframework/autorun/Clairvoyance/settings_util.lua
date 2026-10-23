@@ -424,7 +424,6 @@ function M.reset_appearance(settings)
   for k in pairs(STYLE_INT_RANGE) do settings[k] = d[k] end
   settings.route_number_size = d.route_number_size
 end
-M.reset_icons = M.reset_appearance   -- alias until the panel rewrite drops it
 
 -- Marker color: the category color, alpha byte halved when the marker
 -- is done (opened / looted).
