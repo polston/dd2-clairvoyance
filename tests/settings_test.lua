@@ -133,7 +133,8 @@ check("journal_spoilers stored false kept",
   su.validate({ journal_spoilers = false }).journal_spoilers == false)
 
 -- exact defaults key count (24 after the per-category icon keys, plus
--- journal_spoilers, plus 23 world-tracker keys (SPEC 17.5, 17.10.13))
+-- journal_spoilers, plus 23 world-tracker keys (SPEC 17.5, 17.10.13),
+-- plus 8 v14 keys (SPEC 22.6))
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
@@ -297,7 +298,9 @@ do
   local kept = m.palette == 13
   for _, k in ipairs(su.ICON_KEYS) do if m[k] ~= su.V12_ICON[k] then kept = false end end
   for _, k in ipairs(su.COLOR_KEYS) do
-    if su.V12_COLOR[k] and m[k] ~= su.V12_COLOR[k] then kept = false end
+    if su.V12_COLOR[k] then
+      if m[k] ~= su.V12_COLOR[k] then kept = false end
+    elseif m[k] ~= D[k] then kept = false end
   end
   check("migration: palette 13 keeps v12 values", kept)
   raw.palette = "x"
