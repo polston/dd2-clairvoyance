@@ -106,6 +106,9 @@ Get-ChildItem -Filter *_test.lua -Path (Join-Path $root "tests") -ErrorAction Si
     $code = $LASTEXITCODE
     $out | ForEach-Object { Write-Host $_ }
     if ($code -ne 0) { Write-Host "TEST FAIL: $($_.FullName)"; $script:fail = $true }
+    elseif ($out | Where-Object { "$_" -match "^FAIL" }) {
+        Write-Host "TEST FAIL: $name printed a FAIL line"; $script:fail = $true
+    }
     elseif (-not ($out | Where-Object { "$_" -match "^$name`: (all OK|all passed|OK)\s*$" })) {
         Write-Host "TEST FAIL: $name printed no all OK line"; $script:fail = $true
     }
