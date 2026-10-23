@@ -2974,7 +2974,7 @@ do
       and r.stops[1].from == 6 and r.stops[2].from == 18 and r.stops[3].from == 20
       and r.stops[4].from == 22 and r.stops[4].to == 6)
     check("real route: albert stop 3 at the live position, no off_schedule",
-      r ~= nil and r.stops[3].pos.x == 576.0 and r.stops[3].key == 2309
+      r ~= nil and r.err == nil and r.stops ~= nil and r.stops[3] ~= nil and r.stops[3].pos.x == 576.0 and r.stops[3].key == 2309
       and r.off_schedule == nil)
   end
 
@@ -3024,7 +3024,7 @@ do
     w:refresh(1, true, tg)
     local r = w:input().route
     check("real route: key stops get their own discovery answers",
-      r ~= nil and #r.stops == 2 and r.stops[1].discovered == false
+      r ~= nil and r.err == nil and r.stops ~= nil and #r.stops == 2 and r.stops[1].discovered == false
       and r.stops[2].discovered == true)
   end
 
