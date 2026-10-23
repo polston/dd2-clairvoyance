@@ -27,8 +27,20 @@ local function applies_today(r, today)
     and in_range(today.weekday, r.start_day, r.end_day)
 end
 
+-- A key location id: a number > 0, else -1 (missing reads as -1).
+local function key_of(t)
+  local k = type(t) == "table" and t.key or nil
+  if type(k) == "number" and k > 0 then return k end
+  return -1
+end
+
+-- SPEC 25.3: when either side has a key, both must have the same key;
+-- otherwise area and location are equal and not both -1.
 local function same_place(r, cur)
+  local kr, kc = key_of(r), key_of(cur)
+  if kr > 0 or kc > 0 then return kr > 0 and kc > 0 and kr == kc end
   return r.area == cur.area and r.location == cur.location
+    and not (r.area == -1 and r.location == -1)
 end
 
 -- The hour h is covered by a stop {from, to}: to <= from wraps midnight.
@@ -38,7 +50,7 @@ local function stop_covers(s, h)
 end
 
 -- Ruling 2: the route level is the lowest priority P > 0 with an applicable
--- row at the current hour matching cur's area and location; else 0.
+-- base row at the current hour matching cur (SPEC 25.3); else 0.
 local function pick_level(rows, today, cur)
   if type(cur) ~= "table" then return 0 end
   local best
@@ -52,12 +64,21 @@ local function pick_level(rows, today, cur)
   return best or 0
 end
 
+-- SPEC 25.4: returns stops, unplaced, matched.
 function M.route_stops(rows, today, area_pos, cur)
   local level = pick_level(rows, today, cur)
-  -- Per hour: the level's row, else level 0's row.
+  local overwrite = type(cur) == "table" and type(cur.overwrite) == "table"
+    and cur.overwrite or {}
+  -- Per hour: the first applicable overwrite row, else the level's row,
+  -- else level 0's row.
   local per_hour = {}
   for h = 0, 23 do
-    local pick, base
+    local pick, base, over
+    for _, r in ipairs(overwrite) do
+      if not over and applies_today(r, today) and in_hours(h, r.start_hour, r.end_hour) then
+        over = r
+      end
+    end
     for _, r in ipairs(rows) do
       if applies_today(r, today) and in_hours(h, r.start_hour, r.end_hour) then
         local p = r.priority or 0
@@ -65,7 +86,7 @@ function M.route_stops(rows, today, area_pos, cur)
         if p == 0 and not base then base = r end
       end
     end
-    per_hour[h] = pick or base
+    per_hour[h] = over or pick or base
   end
 
   -- Runs of consecutive hours in the same place.
@@ -73,12 +94,14 @@ function M.route_stops(rows, today, area_pos, cur)
   for h = 0, 23 do
     local r = per_hour[h]
     if r then
+      local k = key_of(r)
       local last = runs[#runs]
-      if last and last.to == h and last.area == r.area and last.location == r.location then
+      if last and last.to == h and last.area == r.area and last.location == r.location
+          and last.key == k then
         last.to = h + 1
       else
         runs[#runs + 1] = { from = h, to = h + 1, area = r.area,
-          location = r.location, row = r }
+          location = r.location, key = k, row = r }
       end
     end
   end
@@ -87,7 +110,7 @@ function M.route_stops(rows, today, area_pos, cur)
   if #runs > 1 then
     local first, last = runs[1], runs[#runs]
     if first.from == 0 and last.to == 24 and first.area == last.area
-        and first.location == last.location then
+        and first.location == last.location and first.key == last.key then
       last.to = first.to
       table.remove(runs, 1)
     end
@@ -107,12 +130,18 @@ function M.route_stops(rows, today, area_pos, cur)
     end
     if pos then
       stops[#stops + 1] = { from = s.from, to = s.to, area = s.area,
-        location = s.location, pos = pos }
+        location = s.location, key = s.key, pos = pos }
     else
       unplaced = unplaced + 1
     end
   end
-  return stops, unplaced
+
+  local matched = true
+  if type(cur) == "table" then
+    local picked = per_hour[today.hour]
+    matched = picked ~= nil and same_place(picked, cur)
+  end
+  return stops, unplaced, matched
 end
 
 -- The position nearest the mean of the list.
