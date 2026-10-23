@@ -174,7 +174,7 @@ function M.new(a, reads, io)
     for k, v in pairs(given) do io[k] = v end
   end
   local clock = io.clock or os.clock
-  local w = {}
+  local w = { route_gen = 0 }
 
   local places = { state = "missing", rows = 0, dropped = 0, load_ms = 0,
     slow = false, pak = nil }
@@ -1313,6 +1313,13 @@ function M.new(a, reads, io)
     return false
   end
 
+  -- a round result whose route is on: no error, the current cid, a stop
+  local function published_on(res)
+    local r = res and res.route
+    return type(r) == "table" and r.err == nil and r.cid == S.route_cid
+      and type(r.stops) == "table" and #r.stops > 0
+  end
+
   -- ----- public -----
   function w:refresh(now, gate, toggles)
     if not gate or type(toggles) ~= "table" then return false end
@@ -1332,6 +1339,7 @@ function M.new(a, reads, io)
     local ok, res = pcall(round, now, tg)
     stats.round_ms = (clock() - rt0) * 1000
     if not ok or type(res) ~= "table" then return false end
+    if published_on(res) and not published_on(input_tbl) then w.route_gen = w.route_gen + 1 end
     input_tbl = res
     committed = true
     if rerun then rerun = false; last_round = nil end
@@ -1349,13 +1357,14 @@ function M.new(a, reads, io)
 
   -- SPEC 22.8: the route NPC; the next refresh builds it
   function w:set_route(cid, name)
-    if cid ~= S.route_cid then w.path_job = nil end
+    if cid ~= S.route_cid then w.path_job = nil; w.route_gen = w.route_gen + 1 end
     S.route_cid, S.route_name, S.route_cache = cid, name, nil
     last_round = nil
   end
 
   function w:clear_route()
     w.path_job = nil
+    w.route_gen = w.route_gen + 1
     S.route_cid, S.route_name, S.route_cache = nil, nil, nil
     if input_tbl ~= nil then input_tbl.route = nil end
   end
@@ -1469,9 +1478,10 @@ function M.new(a, reads, io)
   -- The game graph is copied into flat arrays across frames; route paths
   -- are searched over the copy (never through a game path query).
   w.paths, w.near, w.copy_tries, w.pver = {}, {}, 0, 0
-  w.route_was_on, w.copy_ms_max, w.search_ms_max = false, 0, 0
+  w.copy_ms_max, w.search_ms_max = 0, 0
   local PATH_CAP = 64
-  local path_order, path_head, path_n = {}, 1, 0
+  local path_order = {}        -- w.paths keys, oldest first
+  local fail_gen = nil         -- w.route_gen when the copy last failed
   local blockbuf = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {} }
   local copy_failed = false
   local rp = nil               -- cached route pairs, keys and drawn list
@@ -1479,15 +1489,12 @@ function M.new(a, reads, io)
 
   -- the published route stops, or nil when no route is on
   local function route_stops()
-    local r = input_tbl and input_tbl.route
-    if type(r) ~= "table" or r.err ~= nil or r.cid ~= S.route_cid then return nil end
-    local st = r.stops
-    if type(st) ~= "table" or #st == 0 then return nil end
-    return st
+    if not published_on(input_tbl) then return nil end
+    return input_tbl.route.stops
   end
 
   local function copy_fail(err)
-    w.copy, copy_failed = nil, true
+    w.copy, copy_failed, fail_gen = nil, true, w.route_gen
     w.copy_tries = w.copy_tries + 1
     pcall(io.log, "graph copy failed: " .. tostring(err))
   end
@@ -1503,6 +1510,7 @@ function M.new(a, reads, io)
     end
     local nb = c.nb
     while c.b < nb do
+      local tb = clock()
       local n = reads.graph_block(c.b, blockbuf)
       if type(n) ~= "number" or n < 0 then error("bad graph block") end
       local x, y, z, lc, lb, ln = c.x, c.y, c.z, c.lc, c.lb, c.ln
@@ -1523,7 +1531,10 @@ function M.new(a, reads, io)
       end
       c.nn, c.nl = nn, nl + tl
       c.b = c.b + 1
-      if clock() - t0 >= limit then return end
+      local now = clock()
+      c.tsum = (c.tsum or 0) + (now - tb)
+      -- stop before a block that would likely overrun the budget
+      if now - t0 + c.tsum / c.b >= limit then return end
     end
     if c.ri == nil then
       c.ri, c.rslot, c.wslot, c.ls, c.lt = 1, 1, 0, {}, {}
@@ -1618,15 +1629,26 @@ function M.new(a, reads, io)
     return nil
   end
 
+  -- never evicts a path of the shown route; evicts the oldest others
   local function store_path(pk, entry)
     w.paths[pk] = entry
-    path_n = path_n + 1
-    path_order[path_head + path_n - 1] = pk
-    if path_n > PATH_CAP then
-      w.paths[path_order[path_head]] = nil
-      path_order[path_head] = nil
-      path_head = path_head + 1
-      path_n = path_n - 1
+    path_order[#path_order + 1] = pk
+    if #path_order > PATH_CAP and rp ~= nil then
+      local keep = {}
+      for _, pr in ipairs(rp.pairs) do
+        local a, b = w.near[rp.keys[pr[1]]], w.near[rp.keys[pr[2]]]
+        if a and b then keep[a * 1048576 + b] = true end
+      end
+      local i = 1
+      while #path_order > PATH_CAP and i <= #path_order do
+        local k = path_order[i]
+        if keep[k] then
+          i = i + 1
+        else
+          w.paths[k] = nil
+          table.remove(path_order, i)
+        end
+      end
     end
     w.pver = w.pver + 1
   end
@@ -1671,7 +1693,7 @@ function M.new(a, reads, io)
     local on = stops ~= nil
     local want = on and route_path == 1
     if want and w.copy == nil and w.graph == nil and w.copy_tries < 3
-      and (not copy_failed or not w.route_was_on) then
+      and (not copy_failed or w.route_gen ~= fail_gen) then
       w.copy, copy_failed = {}, false
     end
     if w.copy ~= nil then
@@ -1683,7 +1705,6 @@ function M.new(a, reads, io)
     elseif want and w.graph ~= nil then
       search_slice(stops, budget_ms, undisc)
     end
-    w.route_was_on = on
   end
 
   function w:path_busy() return w.copy ~= nil end
@@ -1700,7 +1721,9 @@ function M.new(a, reads, io)
       if copy_failed then return "path unavailable" end
       return "path: copying 0%"
     end
-    if rp == nil or next_target(rp) ~= nil then return "path: finding" end
+    if rp == nil or not same_route(rp, route_stops(), rp.undisc) or next_target(rp) ~= nil then
+      return "path: finding"
+    end
     return "path ready"
   end
 

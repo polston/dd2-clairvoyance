@@ -2365,27 +2365,31 @@ do
     check("copy: not busy when done", wa:path_busy() == false)
   end
 
-  -- a failing block read
+  -- a failing block read; frames go through the main file gate
   do
     local f, d = gfix()
     local w = with_route(f, R3)
+    local route_on = true
+    local function frame()
+      if (route_on and true) or w:path_busy() then w:path_step(1e6, 1, true) end
+    end
     d.graph_fail_at = 1
-    w:path_step(1e6, 1, true)
+    frame()
     check("fail: status unavailable", w:path_status(1) == "path unavailable")
     check("fail: no graph, not busy", w.graph == nil and w:path_busy() == false)
     check("fail: logged once", #f.logs == 1)
-    w:path_step(1e6, 1, true)
-    w:path_step(1e6, 1, true)
+    frame(); frame()
     check("fail: route still on does not restart", #f.logs == 1 and w.copy_tries == 1
       and w.graph == nil)
     local function bounce()
-      fixed_stops = {}
+      route_on = false
       w:clear_route()
-      w:path_step(1e6, 1, true)
-      w:set_route(2001, "Aa")
+      frame(); frame()
       fixed_stops = R3
+      w:set_route(2001, "Aa")
       w:refresh(1, true, on("search"))
-      w:path_step(1e6, 1, true)
+      route_on = true
+      frame()
     end
     bounce()
     check("fail: off then on restarts (second failure)", w.copy_tries == 2 and #f.logs == 2)
@@ -2397,6 +2401,38 @@ do
     d.graph_fail_at = nil
     bounce()
     check("fail: still no restart once healthy", w.graph == nil and w.copy_tries == 3)
+  end
+
+  -- a retry after one failure succeeds on the next route-on
+  do
+    local f, d = gfix()
+    local w = with_route(f, R3)
+    d.graph_fail_at = 2
+    w:path_step(1e6, 1, true)
+    d.graph_fail_at = nil
+    w:clear_route()
+    w:set_route(2001, "Aa")
+    w:refresh(1, true, on("search"))
+    w:path_step(1e6, 1, true)
+    check("retry: healthy copy after the next route-on", w.graph ~= nil and w.graph.n == 6)
+  end
+
+  -- N% reaches 100 while links resolve (more than 256 nodes)
+  do
+    local nodes = {}
+    for k = 1, 300 do
+      nodes[k] = { k, 0, 0, k < 300 and { { 0, k } } or {} }
+    end
+    local f = gfix({ nodes })
+    f.tick = 0.001
+    local w = with_route(f, { P(1, 0, 0), P(5, 0, 0) })
+    local seen100 = false
+    for _ = 1, 10 do
+      w:path_step(0.5, 1, true)
+      if w.graph == nil and pct(w:path_status(1)) == 100 then seen100 = true end
+    end
+    check("copy: 100% shown during link resolution", seen100 and w.graph ~= nil
+      and w.graph.n == 300 and w.graph.lc[299] == 1 and w.graph.lt[w.graph.ls[299]] == 300)
   end
 
   -- route off mid-copy keeps copying; turning it on does not restart
@@ -2492,29 +2528,42 @@ do
     check("cancel: set_route to another cid", w.path_job == nil)
   end
 
-  -- the 64-path cap drops the oldest
+  -- the 64-path cap never evicts the shown route
   do
     local big, nodes = {}, {}
-    for k = 1, 70 do
+    for k = 1, 80 do
       local ls = {}
-      if k < 70 then ls[#ls + 1] = { 0, k } end
+      if k < 80 then ls[#ls + 1] = { 0, k } end
       if k > 1 then ls[#ls + 1] = { 0, k - 2 } end
       nodes[k] = { (k - 1) * 10, 0, 0, ls }
     end
     big[1] = nodes
+    local function run(w, n)
+      for _ = 1, n do
+        if w:path_status(1) == "path ready" then break end
+        w:path_step(1e6, 1, true)
+      end
+    end
     local f = gfix(big)
     local pts = {}
-    for k = 1, 67 do pts[k] = P((k - 1) * 10, 0, 0) end
+    for k = 1, 71 do pts[k] = P((k - 1) * 10, 0, 0) end
     local w = with_route(f, pts)
-    for _ = 1, 400 do
-      if w.pver >= 65 then break end
-      w:path_step(1e6, 1, true)
-    end
+    run(w, 600)
     local np = 0
     for _ in pairs(w.paths) do np = np + 1 end
-    check("cap: at most 64 paths", np == 64)
-    check("cap: oldest dropped, newest kept", w.paths[1 * 1048576 + 2] == nil
-      and w.paths[65 * 1048576 + 66] ~= nil)
+    check("cap: 70 pairs all kept and ready", np == 70 and w:path_status(1) == "path ready")
+    local l = w:route_paths(true)
+    check("cap: every pair has points", #l == 70 and l[1].pts ~= nil and l[70].pts ~= nil)
+    -- a short route elsewhere: the oldest paths of the old route go first
+    fixed_stops = { P(710, 0, 0), P(720, 0, 0), P(730, 0, 0) }
+    w:set_route(2001, "Aa")
+    w:refresh(30, true, on("search"))
+    run(w, 100)
+    np = 0
+    for _ in pairs(w.paths) do np = np + 1 end
+    check("cap: back to 64, new pairs kept, oldest gone", np == 64 and w:path_status(1) == "path ready"
+      and w.paths[1 * 1048576 + 2] == nil
+      and w.paths[72 * 1048576 + 73] ~= nil and w.paths[73 * 1048576 + 74] ~= nil)
   end
 
   -- io: only log given
