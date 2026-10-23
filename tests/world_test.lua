@@ -2247,5 +2247,341 @@ do
   end
 end
 
+-- ===== v14 Task 4: graph copy and route paths (SPEC 23.6) =====
+do
+  -- the real npcs search code, with route_stops replaced by fixed stops
+  package.preload["Clairvoyance.npcs"] = nil
+  package.loaded["Clairvoyance.npcs"] = nil
+  local real = require("Clairvoyance.npcs")
+  local stub = setmetatable({}, { __index = real })
+  package.loaded["Clairvoyance.npcs"] = stub
+  local fixed_stops = {}
+  function stub.route_stops()
+    local out = {}
+    for i, p in ipairs(fixed_stops) do
+      out[i] = { from = 0, to = 24, area = i, location = 0, pos = p }
+    end
+    return out, 0
+  end
+  local calls = { scan = 0, search = 0, pairs = 0 }
+  function stub.nearest_new(...) calls.scan = calls.scan + 1; return real.nearest_new(...) end
+  function stub.path_new(...) calls.search = calls.search + 1; return real.path_new(...) end
+  function stub.route_pairs(...) calls.pairs = calls.pairs + 1; return real.route_pairs(...) end
+
+  -- 3 blocks, 6 nodes; global index = block start + position + 1.
+  -- Links are one-way where only one side lists the other; node 6 also
+  -- lists an invalid target, which the copy drops.
+  local BLOCKS = {
+    { { 0, 0, 0, { { 0, 1 } } },
+      { 10, 0, 0, { { 0, 0 }, { 1, 0 } } } },
+    { { 20, 0, 0, { { 1, 1 }, { 2, 0 } } },
+      { 30, 0, 0, { { 1, 0 } } } },
+    { { 40, 0, 0, { { 1, 1 } } },
+      { 50, 0, 0, { { 2, 0 }, { 9, 9 } } } },
+  }
+
+  local cur = BLOCKS
+  local function gfix(blocks)
+    cur = blocks or BLOCKS
+    local f = fixture()
+    local d = f.data
+    d.day, d.hour = 33, 7
+    f.tick, f.logs = 0, {}
+    f.io.clock = function() f.clock_t = f.clock_t + f.tick; return f.clock_t end
+    f.io.log = function(m) f.logs[#f.logs + 1] = m end
+    local function rdef(name, fn)
+      f.reads[name] = function(...)
+        f.reads_n[name] = (f.reads_n[name] or 0) + 1
+        return fn(...)
+      end
+    end
+    rdef("schedule_rows", function() return {} end)
+    rdef("schedule_now", function() return d.day, d.hour end)
+    rdef("current_row", function() return { area = 1, location = 1 } end)
+    rdef("area_nodes", function() return nil end)
+    rdef("graph_block_count", function() return #cur end)
+    rdef("graph_block", function(i, out)
+      if d.graph_fail_at == i then error("fake graph failure") end
+      local blk = cur[i + 1]
+      local nl = 0
+      for k, nd in ipairs(blk) do
+        out.x[k], out.y[k], out.z[k] = nd[1], nd[2], nd[3]
+        out.lc[k] = #nd[4]
+        for _, l in ipairs(nd[4]) do
+          nl = nl + 1
+          out.lb[nl], out.ln[nl] = l[1], l[2]
+        end
+      end
+      return #blk
+    end)
+    return f, d
+  end
+
+  local function with_route(f, pts)
+    fixed_stops = pts
+    local w = f.new()
+    w:set_route(2001, "Aa")
+    w:refresh(0, true, on("search"))
+    return w
+  end
+  local function pct(s) return tonumber(s and s:match("copying (%d+)%%")) end
+  local R3 = { P(0, 0, 0), P(31, 0, 0), P(41, 0, 0) }
+
+  -- copy over budgeted slices equals one big-budget copy; N% is monotone
+  do
+    local fa = gfix()
+    local wa = with_route(fa, R3)
+    wa:path_step(1e6, 1, true)
+    local fb = gfix()
+    fb.tick = 0.001
+    local wb = with_route(fb, R3)
+    local last, mono, calls_n = -1, true, 0
+    while wb.graph == nil and calls_n < 100 do
+      wb:path_step(0.5, 1, true)
+      calls_n = calls_n + 1
+      local p = pct(wb:path_status(1))
+      if p ~= nil then
+        if p < last then mono = false end
+        last = p
+      end
+    end
+    check("copy: big budget finishes in one call", wa.graph ~= nil and wa.graph.n == 6)
+    check("copy: slices finish", wb.graph ~= nil and calls_n > 1)
+    check("copy: N% never drops", mono and last >= 66)
+    local same = wb.graph ~= nil and wa.graph ~= nil and wa.graph.n == wb.graph.n
+    for _, key in ipairs({ "x", "y", "z", "ls", "lc" }) do
+      for i = 1, 6 do
+        if not same or wa.graph[key][i] ~= wb.graph[key][i] then same = false end
+      end
+    end
+    for i = 1, 8 do
+      if not same or wa.graph.lt[i] ~= wb.graph.lt[i] then same = false end
+    end
+    check("copy: sliced equals one slice", same)
+    local g = wa.graph
+    check("copy: links resolved, invalid one dropped",
+      g.lc[1] == 1 and g.lt[g.ls[1]] == 2 and g.lc[2] == 2 and g.lc[6] == 1
+      and g.lt[g.ls[6]] == 5)
+    check("copy: not busy when done", wa:path_busy() == false)
+  end
+
+  -- a failing block read
+  do
+    local f, d = gfix()
+    local w = with_route(f, R3)
+    d.graph_fail_at = 1
+    w:path_step(1e6, 1, true)
+    check("fail: status unavailable", w:path_status(1) == "path unavailable")
+    check("fail: no graph, not busy", w.graph == nil and w:path_busy() == false)
+    check("fail: logged once", #f.logs == 1)
+    w:path_step(1e6, 1, true)
+    w:path_step(1e6, 1, true)
+    check("fail: route still on does not restart", #f.logs == 1 and w.copy_tries == 1
+      and w.graph == nil)
+    local function bounce()
+      fixed_stops = {}
+      w:clear_route()
+      w:path_step(1e6, 1, true)
+      w:set_route(2001, "Aa")
+      fixed_stops = R3
+      w:refresh(1, true, on("search"))
+      w:path_step(1e6, 1, true)
+    end
+    bounce()
+    check("fail: off then on restarts (second failure)", w.copy_tries == 2 and #f.logs == 2)
+    bounce()
+    check("fail: third failure", w.copy_tries == 3 and #f.logs == 3)
+    bounce()
+    check("fail: no restart after the third", w.copy_tries == 3 and #f.logs == 3
+      and w:path_busy() == false)
+    d.graph_fail_at = nil
+    bounce()
+    check("fail: still no restart once healthy", w.graph == nil and w.copy_tries == 3)
+  end
+
+  -- route off mid-copy keeps copying; turning it on does not restart
+  do
+    local f = gfix()
+    f.tick = 0.001
+    local w = with_route(f, R3)
+    w:path_step(0.5, 1, true)
+    check("mid: copy started", w:path_busy() == true and w.graph == nil)
+    w:clear_route()
+    w:path_step(0.5, 1, false)
+    check("mid: keeps copying with no route", f.reads_n.graph_block == 2
+      and w:path_busy() == true)
+    w:set_route(2001, "Aa")
+    w:refresh(2, true, on("search"))
+    w:path_step(0.5, 1, false)
+    check("mid: route on again continues the same copy", f.reads_n.graph_block == 3
+      and f.reads_n.graph_block_count == 1 and w:path_busy() == true)
+    w:path_step(0.5, 1, false)
+    check("mid: finished", w.graph ~= nil and w:path_busy() == false)
+    check("mid: no restart", f.reads_n.graph_block == 3 and f.reads_n.graph_block_count == 1)
+  end
+
+  -- search over the finished copy
+  do
+    local f = gfix()
+    local w = with_route(f, R3)
+    w:path_step(1e6, 1, true)
+    check("route: pairs listed before steps", #w:route_paths(true) == 2
+      and w:route_paths(true)[1].pts == nil)
+    check("route: status finding", w:path_status(1) == "path: finding")
+    check("route: status nil when route_path is 0", w:path_status(0) == nil)
+    local n = 0
+    while w:path_status(1) ~= "path ready" and n < 50 do
+      w:path_step(1e6, 1, true)
+      n = n + 1
+    end
+    local l = w:route_paths(true)
+    check("route: both pairs found", #l == 2 and l[1].pts ~= nil and l[2].pts ~= nil)
+    check("route: pair 1 runs node 1 to 4", l[1].i == 1 and l[1].j == 2 and #l[1].pts == 12
+      and l[1].pts[1] == 0 and l[1].pts[10] == 30 and l[1].pts[12] == 0)
+    check("route: pair 2 runs node 4 to 5", l[2].pts ~= nil and l[2].pts[1] == 30
+      and l[2].pts[#l[2].pts - 2] == 40)
+    check("route: status ready", w:path_status(1) == "path ready")
+    check("route: list is cached", w:route_paths(true) == l)
+    check("route: stats", w.last_expanded ~= nil and w.search_ms_max >= 0 and w.last_pair ~= nil)
+    local np = 0
+    for _ in pairs(w.paths) do np = np + 1 end
+    check("route: two paths cached", np == 2)
+
+    -- reset keeps the graph and caches, cancels the job
+    local saved_graph, saved_paths, saved_near = w.graph, w.paths, w.near
+    w.path_job = { kind = "near" }
+    w:reset()
+    check("reset: keeps graph, paths, near", w.graph == saved_graph and w.paths == saved_paths
+      and w.near == saved_near and next(w.near) ~= nil)
+    check("reset: cancels the job", w.path_job == nil)
+
+    -- an hour change rebuilds the route with the same stop pair
+    calls.scan, calls.search = 0, 0
+    local pairs_before = calls.pairs
+    f.data.hour = 8
+    w:set_route(2001, "Aa")
+    w:refresh(20, true, on("search"))
+    for _ = 1, 5 do w:path_step(1e6, 1, true) end
+    check("hour: no new scan or search", calls.scan == 0 and calls.search == 0
+      and calls.pairs == pairs_before)
+    check("hour: still ready", w:path_status(1) == "path ready"
+      and w:route_paths(true)[1].pts ~= nil)
+  end
+
+  -- cancellation of a running search
+  do
+    local f = gfix()
+    f.tick = 0.001
+    local w = with_route(f, R3)
+    for _ = 1, 40 do
+      w:path_step(0.5, 1, true)
+      if w.graph ~= nil then break end
+    end
+    w:path_step(0.5, 1, true)
+    check("cancel: a job is running", w.path_job ~= nil)
+    w:clear_route()
+    check("cancel: clear_route", w.path_job == nil)
+    w:set_route(2001, "Aa")
+    fixed_stops = R3
+    w:refresh(30, true, on("search"))
+    w:path_step(0.5, 1, true)
+    check("cancel: job running again", w.path_job ~= nil)
+    w:set_route(2001, "Aa")
+    check("cancel: same cid keeps the job", w.path_job ~= nil)
+    w:set_route(2002, "Bb")
+    check("cancel: set_route to another cid", w.path_job == nil)
+  end
+
+  -- the 64-path cap drops the oldest
+  do
+    local big, nodes = {}, {}
+    for k = 1, 70 do
+      local ls = {}
+      if k < 70 then ls[#ls + 1] = { 0, k } end
+      if k > 1 then ls[#ls + 1] = { 0, k - 2 } end
+      nodes[k] = { (k - 1) * 10, 0, 0, ls }
+    end
+    big[1] = nodes
+    local f = gfix(big)
+    local pts = {}
+    for k = 1, 67 do pts[k] = P((k - 1) * 10, 0, 0) end
+    local w = with_route(f, pts)
+    for _ = 1, 400 do
+      if w.pver >= 65 then break end
+      w:path_step(1e6, 1, true)
+    end
+    local np = 0
+    for _ in pairs(w.paths) do np = np + 1 end
+    check("cap: at most 64 paths", np == 64)
+    check("cap: oldest dropped, newest kept", w.paths[1 * 1048576 + 2] == nil
+      and w.paths[65 * 1048576 + 66] ~= nil)
+  end
+
+  -- io: only log given
+  do
+    local saved = json
+    json = { load_file = function() return nil end, dump_file = function() return true end }
+    local ok, wio = pcall(world.new, {}, {}, { log = function() end })
+    check("io: only log still loads", ok and wio ~= nil)
+    json = saved
+  end
+end
+
+-- reads: the walking graph over fake managed objects
+do
+  local function obj(fields, methods)
+    local o = {}
+    function o:get_field(n) return fields and fields[n] end
+    function o:call(n, ...)
+      local m = methods and methods[n]
+      if m then return m(...) end
+      return nil
+    end
+    return o
+  end
+  local function list(items)
+    return obj(nil, { get_Count = function() return #items end,
+      get_Item = function(i) return items[i + 1] end })
+  end
+  local bad = {}
+  local function node(x, y, z, links)
+    local ls = {}
+    for i, l in ipairs(links) do ls[i] = obj({ blockId = l[1], indexId = l[2] }) end
+    return obj({ _Pos = P(x, y, z), Links = list(ls) })
+  end
+  local blk0 = obj({ Nodes = list({ node(1, 2, 3, { { 0, 1 } }), node(4, 5, 6, {}) }) })
+  local blk1 = obj({ Nodes = list({ node(7, 8, 9, { { 0, 0 }, { 1, 0 } }) }) })
+  local graph = obj({ Nodes = list({ blk0, blk1 }) })
+  local mgr = obj({ AIWorldGraphDatas = list({ obj({ ["<GraphData>k__BackingField"] =
+    obj({ AIWorldGraph = graph }) }) }) })
+  local singletons, fetches = { ["app.AIWorldGraphManager"] = mgr }, 0
+  local saved_sdk = sdk
+  sdk = {
+    get_managed_singleton = function(n) fetches = fetches + 1; return singletons[n] end,
+    is_managed_object = function(o) return not bad[o] end,
+    find_type_definition = function() return nil end,
+  }
+  local R = world.game_reads()
+  check("graph reads: block count", R.graph_block_count() == 2)
+  local out = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {} }
+  local n = R.graph_block(1, out)
+  check("graph reads: block 1 as plain tables", n == 1 and out.x[1] == 7 and out.y[1] == 8
+    and out.z[1] == 9 and out.lc[1] == 2 and out.lb[1] == 0 and out.ln[1] == 0
+    and out.lb[2] == 1 and out.ln[2] == 0 and type(out.x) == "table")
+  local n0 = R.graph_block(0, out)
+  check("graph reads: block 0", n0 == 2 and out.x[2] == 4 and out.lc[1] == 1
+    and out.lc[2] == 0 and out.ln[1] == 1)
+  check("graph reads: chain re-acquired each call", fetches == 3)
+  bad[blk0] = true
+  check("graph reads: failed managed check raises", not pcall(R.graph_block, 0, out))
+  bad[blk0] = nil
+  bad[graph] = true
+  check("graph reads: failed check up the chain raises", not pcall(R.graph_block_count))
+  bad[graph] = nil
+  singletons["app.AIWorldGraphManager"] = nil
+  check("graph reads: no manager raises", not pcall(R.graph_block_count))
+  sdk = saved_sdk
+end
+
 if failures > 0 then os.exit(1) end
 print("world_test: all OK")
