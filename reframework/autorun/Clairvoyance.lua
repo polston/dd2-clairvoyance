@@ -1887,8 +1887,18 @@ do
           snapshot.search_n = nres
         end
         if imgui.tree_node(string.format("Search results (%d)###qnml_sr", snapshot.search_n)) then
+          local okp, ptr = pcall(wt.player_tr)
+          local pp = okp and ptr ~= nil and ptr:call("get_Position") or nil
+          if pp ~= nil then
+            imgui.text(string.format("You: %.0f, %.0f", pp.x, pp.z))
+          end
           for _, r in ipairs(srows) do
-            imgui.text(r.text)
+            if r.pos ~= nil and pp ~= nil then
+              imgui.text(string.format("%s - at %.0f, %.0f - %.0f m", r.text,
+                r.pos.x, r.pos.z, math.sqrt((r.pos.x - pp.x) ^ 2 + (r.pos.z - pp.z) ^ 2)))
+            else
+              imgui.text(r.text)
+            end
             if imgui.button(r.jump_id) then jump_pending = r.pos end
             if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
           end
