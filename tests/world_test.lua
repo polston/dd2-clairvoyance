@@ -2009,9 +2009,25 @@ do
     w:set_route(2001, "Aa")
     w:refresh(2, true, tg)
     r = w:input().route
-    check("route err: -1/-1 is route unavailable", r.err == "route unavailable"
-      and r.stops == nil)
-    check("route err: -1/-1 never calls route_stops", stub.calls.route_stops == calls)
+    check("route off: -1/-1 with placeable rows publishes stops + off_schedule",
+      r.err == nil and #r.stops == 1 and r.off_schedule == true)
+    check("route off: route_stops called with no current row",
+      stub.calls.route_stops == calls + 1 and stub.last_cur == nil)
+    d.cur[2001] = { area = 49, location = 0 }
+    d.hour = 12
+    w:set_route(2001, "Aa")
+    w:refresh(2.5, true, tg)
+    check("route off: a matched current row has no off_schedule",
+      w:input().route.err == nil and w:input().route.off_schedule == nil)
+    d.cur[2001] = { area = -1, location = -1, pos = P(1, 1, 1) }
+    d.area_nodes[49] = nil
+    d.hour = 13
+    w:set_route(2001, "Aa")
+    w:refresh(2.6, true, tg)
+    r = w:input().route
+    check("route off: -1/-1 with nothing placeable is route unavailable",
+      r.err == "route unavailable" and r.stops == nil)
+    d.area_nodes[49] = { P(1, 0, 1) }
     -- raising route_stops leaves no partial stops
     d.cur[2001] = { area = 49, location = 0 }
     local orig = stub.route_stops

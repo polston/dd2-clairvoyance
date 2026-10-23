@@ -1936,6 +1936,9 @@ do
                 elseif (rt.unplaced or 0) > 0 then
                   imgui.text(string.format("%d stops unplaced", rt.unplaced))
                 end
+                if rt.err == nil and rt.off_schedule then
+                  imgui.text("not at a scheduled place right now")
+                end
                 local ps = wt.q("path_status", nil, settings.route_path)
                 if ps ~= nil then imgui.text(ps) end
               end

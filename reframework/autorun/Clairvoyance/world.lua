@@ -1024,9 +1024,9 @@ function M.new(a, reads, io)
   local function build_route(npcs, cid, day, hour)
     local ok, cur = pcall(reads.current_row, cid)
     if not ok then error("current_row failed") end
-    if type(cur) == "table" and cur.area == -1 and cur.location == -1 then
-      return nil
-    end
+    -- -1/-1 means "not at a scheduled place now", not "no schedule" (spec 25)
+    local off = type(cur) == "table" and cur.area == -1 and cur.location == -1
+    if off then cur = nil end
     local okr, rows = pcall(reads.schedule_rows, cid)
     if not okr or type(rows) ~= "table" then error("schedule_rows failed") end
     local function area_pos(row)
@@ -1037,7 +1037,8 @@ function M.new(a, reads, io)
     local stops, unplaced = npcs.route_stops(rows, npcs.today(day, hour), area_pos,
       type(cur) == "table" and cur or nil)
     if type(stops) ~= "table" then error("route_stops failed") end
-    return { stops = stops, unplaced = unplaced or 0 }
+    if off and #stops == 0 then return nil end
+    return { stops = stops, unplaced = unplaced or 0, off_schedule = off or nil }
   end
 
   local function route_round()
@@ -1066,7 +1067,8 @@ function M.new(a, reads, io)
       if valid_pos(st.pos) then n.discovered = discovered("r:" .. tostring(st.area) .. ":" .. tostring(st.location), st.pos) end
       stops[i] = n
     end
-    return { cid = cid, name = name, stops = stops, unplaced = c.value.unplaced }
+    return { cid = cid, name = name, stops = stops, unplaced = c.value.unplaced,
+             off_schedule = c.value.off_schedule }
   end
 
   -- ----- the round -----
