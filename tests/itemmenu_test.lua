@@ -47,7 +47,7 @@ local function clock() return now end
 local function make_world()
   local w = { scroll = 0, sel = 3, msg = "Potion\nHeals.", sets = 0,
     raise_data = {}, sdk_calls = 0, hooks = {}, logs = {}, screen_h = 1080,
-    enabled = true, opens = 0, circles = {}, draw_raise = false }
+    enabled = true, opens = 0, circles = {}, draw_raise = false, texts = {}, pushes = 0, pops = 0 }
   local infos = {}
   for i = 0, 24 do
     local row = i
@@ -81,9 +81,10 @@ local function make_world()
     get_Message = function() return w.msg end,
     set_Message = function(_, m) w.sets = w.sets + 1; w.msg = m end,
   })
+  w.panel = obj({}, { get_GlobalPosition = function() return { x = 1274, y = 168, z = 0 } end })
   w.comp = obj({
     ItemGrid = obj({ _ItemCtrl = w.ctrl }),
-    ItemWindow = obj({ _TxtInfo = w.txt }),
+    ItemWindow = obj({ _Pnl = w.panel }),
   })
   w.related = { [103] = { "Lost Ring", "Old Debt" } }
 
@@ -103,6 +104,8 @@ local function make_world()
   w.draw = { filled_circle = function(x, y, r, c, n)
     if w.draw_raise then error("draw raised") end
     w.circles[#w.circles + 1] = { x = x, y = y, r = r, c = c }
+  end, text = function(t, x, y, c)
+    w.texts[#w.texts + 1] = { t = t, x = x, y = y, c = c }
   end }
   w.r = itemmenu.create({
     sdk = w.sdk, draw = w.draw,
@@ -110,6 +113,10 @@ local function make_world()
     related = function() return w.related end,
     quest_flag = function(d) return d:get_field("_SubCategory") == 4 end,
     color_abgr = function() return 0xFF00FF00 end,
+    label_color = function() return 0xFF00FF00 end,
+    imgui = { push_font = function() w.pushes = w.pushes + 1 end,
+      pop_font = function() w.pops = w.pops + 1 end },
+    font = function() return "F" end,
     screen_h = function() return w.screen_h end,
     clock = clock,
     log = function(m) w.logs[#w.logs + 1] = m end,
@@ -152,7 +159,7 @@ do
   now = 20
   hook(w, "update").pre({ nil, w.comp })
   check("reopen fires on_open again", w.opens == 2 and w.r:open())
-  check("stats line", w.r:stats_line() == "menu open=true dots=0 appends=0 fails=0")
+  check("stats line", w.r:stats_line() == "menu open=true dots=0 labels=0 fails=0")
 end
 
 -- Dots: rows 3 (related) and 7 (subcategory 4) at the slots' top-right corners.
@@ -265,72 +272,127 @@ do
   check("no failure past the end", w.r:stats_line():find("fails=0", 1, true) ~= nil)
 end
 
--- Description line.
+-- Label above the item panel.
 do
   now = 0
   local w = make_world()
-  local base = "Potion\nHeals."
   tick(w)
-  local want = base .. "\nQuest: Lost Ring, Old Debt"
-  check("suffix appended once", w.msg == want and w.sets == 1)
-  tick(w)
-  check("second post-hook changes nothing", w.msg == want and w.sets == 1)
-  check("appends stat", w.r:stats_line():find("appends=1", 1, true) ~= nil)
-  -- reopen with the same message
-  now = 5
-  tick(w)
-  check("reopen with same message changes nothing", w.msg == want and w.sets == 1)
-  -- the game rewrites the text: a new message gets the suffix once
-  w.msg = "Potion\nHeals a lot."
-  tick(w)
-  check("new message gets the suffix", w.msg == "Potion\nHeals a lot.\nQuest: Lost Ring, Old Debt" and w.sets == 2)
-  tick(w)
-  check("and only once", w.sets == 2)
-  -- row 7: subcategory only
-  w.sel = 7
-  w.msg = "Quest thing"
-  tick(w)
-  check("subcategory-only suffix", w.msg == "Quest thing\nQuest item")
-  -- a suffix left by an earlier load (the panel outlives a script reset)
-  w.msg = "Quest thing 2\nQuest item"
-  tick(w)
-  check("stale suffix not doubled", w.msg == "Quest thing 2\nQuest item")
-  -- unrelated row leaves the message alone
-  local before = w.sets
-  w.sel = 1
-  w.msg = "Plain"
-  tick(w)
-  check("unrelated row untouched", w.msg == "Plain" and w.sets == before)
-  -- out of range selection
-  w.sel = 99
-  tick(w)
-  check("out of range selection untouched", w.msg == "Plain" and w.sets == before)
-  w.sel = -1
-  tick(w)
-  check("negative selection untouched", w.msg == "Plain" and w.sets == before)
-end
+  w.r:frame()
+  check("label: two texts", #w.texts == 2)
+  local sh, tx = w.texts[1], w.texts[2]
+  check("label: text", tx and tx.t == "Quest: Lost Ring, Old Debt")
+  check("label: position", tx and tx.x == 1274 + 24 and tx.y == 168 - 34)
+  check("label: color", tx and tx.c == 0xFF00FF00)
+  check("label: shadow", sh and sh.t == tx.t and sh.x == tx.x + 1 and sh.y == tx.y + 1 and sh.c == 0xFF000000)
+  check("label: font pushed and popped once", w.pushes == 1 and w.pops == 1)
+  check("labels stat", w.r:stats_line():find("labels=1", 1, true) ~= nil)
+  check("description never written", w.sets == 0)
 
--- The title list or the relation changes while the game's text does not.
-do
-  now = 0
-  local w = make_world()
-  local base = "Potion\nHeals."
-  tick(w)
-  check("first suffix", w.msg == base .. "\nQuest: Lost Ring, Old Debt")
+  -- scaled
+  w.texts = {}
+  w.screen_h = 2160
+  w.r:frame()
+  tx = w.texts[2]
+  check("label: scaled", tx and tx.x == (1274 + 24) * 2 and tx.y == (168 - 34) * 2)
+  w.screen_h = 1080
+
+  -- related changes to three titles
+  w.texts = {}
   w.related = { [103] = { "Lost Ring", "Old Debt", "Third" } }
   tick(w)
-  check("changed titles replace the line", w.msg == base .. "\nQuest: Lost Ring, Old Debt, Third")
-  tick(w)
-  check("and stay stable", w.msg == base .. "\nQuest: Lost Ring, Old Debt, Third" and w.sets == 2)
+  w.r:frame()
+  check("label: three titles", w.texts[2] and w.texts[2].t == "Quest: Lost Ring, Old Debt, Third")
+  w.texts = {}
   w.related = {}
   tick(w)
-  check("row no longer related: line removed", w.msg == base)
-  local sets = w.sets
+  w.r:frame()
+  check("label: no longer related draws nothing", #w.texts == 0 and w.sets == 0)
+end
+
+do
+  now = 0
+  local w = make_world()
+  w.sel = 7
   tick(w)
-  check("and nothing more is written", w.msg == base and w.sets == sets)
-  w.related = { [103] = { "Back" } }
+  w.r:frame()
+  check("label: subcategory only", w.texts[2] and w.texts[2].t == "Quest item")
+end
+
+do
+  now = 0
+  local w = make_world()
+  w.sel = 1
   tick(w)
-  check("related again: line returns", w.msg == base .. "\nQuest: Back")
+  w.r:frame()
+  check("label: unrelated row draws no text", #w.texts == 0)
+  w.sel = 99
+  tick(w)
+  w.r:frame()
+  check("label: out of range draws no text", #w.texts == 0)
+  w.sel = -1
+  tick(w)
+  w.r:frame()
+  check("label: negative draws no text", #w.texts == 0)
+  check("label: no failure", w.r:stats_line():find("fails=0", 1, true) ~= nil and w.sets == 0)
+end
+
+-- A stale label never shows on reopen.
+do
+  now = 0
+  local w = make_world()
+  tick(w)
+  now = 5
+  hook(w, "update").pre({ nil, w.comp })   -- reopen: label cleared before the post-hook
+  w.r:frame()
+  check("reopen: no stale label", #w.texts == 0)
+end
+
+-- A missing ItemWindow or panel draws no label and is not a failure.
+do
+  now = 0
+  local w = make_world()
+  w.comp.fields.ItemWindow = nil
+  tick(w)
+  w.r:frame()
+  check("no window: no text", #w.texts == 0)
+  check("no window: not a failure", w.r:stats_line():find("fails=0", 1, true) ~= nil)
+  w.comp.fields.ItemWindow = obj({})
+  w.r:frame()
+  check("no panel: no text", #w.texts == 0 and w.r:stats_line():find("fails=0", 1, true) ~= nil)
+end
+
+-- A panel without a position is a failure.
+do
+  now = 0
+  local w = make_world()
+  w.panel.methods.get_GlobalPosition = function() return nil end
+  tick(w)
+  w.r:frame()
+  check("no panel position: counted", w.r:stats_line():find("fails=1", 1, true) ~= nil and #w.texts == 0)
+end
+
+-- A font failure still draws, without the font.
+do
+  now = 0
+  local w = make_world()
+  w.r = nil
+  local pushes, pops = 0, 0
+  w.r = itemmenu.create({
+    sdk = w.sdk, draw = w.draw, enabled = function() return true end,
+    related = function() return w.related end,
+    quest_flag = function() return false end, color_abgr = function() return 1 end,
+    label_color = function() return 2 end,
+    imgui = { push_font = function() pushes = pushes + 1; error("font") end,
+      pop_font = function() pops = pops + 1 end },
+    font = function() return "F" end,
+    screen_h = function() return 1080 end, clock = clock,
+    log = function() end, on_open = function() end,
+  })
+  w.r:install()
+  tick(w)
+  w.r:frame()
+  check("font failure: label still drawn", #w.texts == 2 and pops == 0)
+  check("font failure: not a frame failure", w.r:stats_line():find("fails=0", 1, true) ~= nil)
 end
 
 -- A raising _ItemData read leaves the message untouched.
@@ -339,9 +401,8 @@ do
   local w = make_world()
   w.raise_data[7] = true
   w.sel = 7
-  w.msg = "Odd thing"
   tick(w)
-  check("raising item data: message untouched", w.msg == "Odd thing" and w.sets == 0)
+  check("raising item data: no label", #w.texts == 0 and w.sets == 0)
   check("raising item data counts a failure", w.r:stats_line():find("fails=1", 1, true) ~= nil)
   check("raising item data logged", #w.logs == 1)
   tick(w)
@@ -356,7 +417,7 @@ do
   tick(w)
   w.r:frame()
   check("disabled draws nothing", #w.circles == 0)
-  check("disabled writes nothing", w.sets == 0 and w.msg == "Potion\nHeals.")
+  check("disabled draws no label", #w.texts == 0 and w.sets == 0)
 end
 
 -- Closed: frame makes no sdk call and draws nothing.
@@ -369,11 +430,7 @@ do
   w.r:frame()
   check("closed: no sdk call", w.sdk_calls == before)
   check("closed: no draw", #w.circles == 0)
-  -- the post-hook while closed also does nothing
-  local sets = w.sets
-  w.msg = "Fresh text"
-  hook(w, "update").post(nil)
-  check("closed: post-hook writes nothing", w.sets == sets and w.msg == "Fresh text")
+  check("closed: no label", #w.texts == 0)
 end
 
 -- onDestroy clears the component; ctor captures it.
@@ -386,17 +443,7 @@ do
   w.r:frame()
   check("destroyed: no draw", #w.circles == 0)
   hook(w, "update").post(nil)
-  check("destroyed: no write", w.sets == 0)
-end
-
--- A freed description text or window is not written.
-do
-  now = 0
-  local w = make_world()
-  w.txt.slot = { freed = true }
-  tick(w)
-  check("freed text: no write", w.sets == 0)
-  check("freed text: not a failure", w.r:stats_line():find("fails=0", 1, true) ~= nil)
+  check("destroyed: no label", #w.texts == 0)
 end
 
 -- The update pre-hook is under pcall.

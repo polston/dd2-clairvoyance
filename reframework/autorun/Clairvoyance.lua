@@ -380,6 +380,21 @@ do
       screen_h = function() local sz = imgui.get_display_size(); return sz and sz.y or 1080 end,
       clock = os.clock, log = logmsg,
       on_open = adapter.reset_item_throttle,
+      imgui = imgui,
+      label_color = function() return A.argb_to_abgr(settings.color_quest_item) end,
+      -- the label font, loaded once on first use (a failure is cached as false)
+      font = (function()
+        local cached = nil
+        return function()
+          if cached == nil then
+            local sz = imgui.get_display_size()
+            local k = (sz and sz.y or 1080) / 1080
+            local okf, f = pcall(imgui.load_font, nil, math.floor(22 * k + 0.5))
+            cached = (okf and f) or false
+          end
+          return cached or nil
+        end
+      end)(),
     }
   end)
   if okm and im ~= nil then

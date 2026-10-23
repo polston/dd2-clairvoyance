@@ -1,4 +1,5 @@
--- itemmenu.lua: item-menu quest dots and description line (SPEC 22.10.2-22.10.6).
+-- itemmenu.lua: item-menu quest dots and the quest label above the item panel
+-- (SPEC 22.10.2-22.10.6).
 -- No host globals: the sdk, draw table, clock and every game fact arrive
 -- through opt.
 local M = {}
@@ -12,6 +13,10 @@ local DOT_SEGMENTS = 24
 local TRIP_AT = 30         -- consecutive failed frames before the dots suspend (10.3b)
 local TRIP_SECONDS = 5.0
 local LOG_CAP = 16         -- distinct messages logged per layer (10.3b)
+-- The quest label sits above the item panel's top-left corner (the panel's
+-- GlobalPosition, measured in game): offsets in GUI pixels at 1080 lines.
+local LABEL_DX = 24
+local LABEL_DY = 34
 
 -- One call that may raise (a missing method raises in the host): value or nil.
 local function try(o, name, ...)
@@ -59,9 +64,8 @@ function M.create(opt)
   local comp = nil          -- the app.ui060301_00 component (.ctor / update)
   local cur_this = nil      -- `this` of the update running now (pre -> post)
   local stamp = nil         -- opt.clock() at the last update pre-hook
-  local kept = nil          -- the message the game wrote, before our suffix
-  local written = nil       -- the text we last set (kept .. suffix), or nil
-  local dots, appends, fails = 0, 0, 0
+  local label = nil         -- the quest label of the selected row, or nil
+  local dots, labels, fails = 0, 0, 0
   local fail_frames, suspend_until = 0, 0.0
   local logged, logged_n = {}, 0
 
@@ -137,6 +141,26 @@ function M.create(opt)
       end
     end
     dots = n
+    if label ~= nil then
+      local win = comp:get_field("ItemWindow")
+      if win ~= nil and opt.sdk.is_managed_object(win) then
+        local panel = win:get_field("_Pnl")
+        -- a missing window or panel draws no label and is not a failure
+        if panel ~= nil and opt.sdk.is_managed_object(panel) then
+          local p = panel:call("get_GlobalPosition")
+          if p == nil then error("no panel position") end
+          local sx, sy = to_screen(p.x + LABEL_DX, p.y - LABEL_DY, k)
+          local font = opt.font and opt.font() or nil
+          local pushed = font ~= nil and pcall(opt.imgui.push_font, font)
+          local ok, err = pcall(function()
+            opt.draw.text(label, sx + 1, sy + 1, 0xFF000000)
+            opt.draw.text(label, sx, sy, opt.label_color())
+          end)
+          if pushed then pcall(opt.imgui.pop_font) end
+          if not ok then error(err, 0) end
+        end
+      end
+    end
   end
 
   function r:frame()
@@ -156,9 +180,10 @@ function M.create(opt)
     end
   end
 
-  -- The description append (update post-hook; set_Message only takes effect
-  -- here, Ruling 8). Raises on a failed read; nothing is written then.
-  local function append_body(this)
+  -- The label of the selected row (update post-hook). Raises on a failed
+  -- read; the label is nil then.
+  local function label_body(this)
+    label = nil
     local ctrl = item_ctrl(this)
     if ctrl == nil then return end
     local sel = ctrl:get_field("<SelectedIndex>k__BackingField")
@@ -166,44 +191,24 @@ function M.create(opt)
     local infos = ctrl:get_field("InfoList")
     if infos == nil or sel >= size_of(infos) then return end
     local titles = row_marks(infos, sel, opt.related() or {})
-    local suffix = nil
-    if titles ~= nil then
-      if #titles > 0 then
-        suffix = "\nQuest: " .. table.concat(titles, ", ")
-      else
-        suffix = "\nQuest item"
-      end
-    end
-    if suffix == nil and written == nil then return end
-    local win = this:get_field("ItemWindow")
-    if win == nil or not opt.sdk.is_managed_object(win) then return end
-    local txt = win:get_field("_TxtInfo")
-    if txt == nil or not opt.sdk.is_managed_object(txt) then return end
-    local msg = txt:call("get_Message")
-    if type(msg) ~= "string" then return end
-    local target
-    if msg == written then
-      -- the game has not rewritten the text: bring our line up to date
-      target = (suffix ~= nil) and (kept .. suffix) or kept
-      if target == msg then return end
+    if titles == nil then return end
+    if #titles > 0 then
+      label = "Quest: " .. table.concat(titles, ", ")
     else
-      -- the panel outlives a script reset (Ruling 6): drop a line an earlier
-      -- load wrote, so it is never taken for the game's own text
-      kept = (msg:gsub("\nQuest item$", ""):gsub("\nQuest: [^\n]*$", ""))
-      if suffix == nil then written = nil; return end
-      target = kept .. suffix
+      label = "Quest item"
     end
-    txt:call("set_Message", target)
-    written = (suffix ~= nil) and target or nil
-    appends = appends + 1
+    labels = labels + 1
   end
 
   local function on_update_post()
     local this = cur_this
     cur_this = nil
     if this == nil or not r:open() or not opt.enabled() then return end
-    local ok, err = pcall(append_body, this)
-    if not ok then note_fail("append", err) end
+    local ok, err = pcall(label_body, this)
+    if not ok then
+      label = nil
+      note_fail("label", err)
+    end
   end
 
   function r:install()
@@ -230,7 +235,10 @@ function M.create(opt)
         local this = sdk.to_managed_object(args[2])
         cur_this = this
         comp = this
-        if not was_open then opt.on_open() end
+        if not was_open then
+          label = nil
+          opt.on_open()
+        end
       end)
       if not ok then note_fail("update", err) end
     end, function(retval)
@@ -240,8 +248,8 @@ function M.create(opt)
   end
 
   function r:stats_line()
-    return string.format("menu open=%s dots=%d appends=%d fails=%d",
-      tostring(self:open()), dots, appends, fails)
+    return string.format("menu open=%s dots=%d labels=%d fails=%d",
+      tostring(self:open()), dots, labels, fails)
   end
 
   return r
