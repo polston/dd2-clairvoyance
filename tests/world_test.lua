@@ -1224,18 +1224,29 @@ do
   -- v14 reads: schedule rows, current row, area nodes, holders, sentiment
   do
     local R = world.game_reads()
-    local function rowobj(sw, ew, sd, ed, sh, eh, loc, area, pri)
+    local function rowobj(sw, ew, sd, ed, sh, eh, loc, area, pri, key)
       return obj({ StartWeek = sw, EndWeek = ew, StartDay = sd, EndDay = ed,
-        StartHour = sh, EndHour = eh, Location = loc, LocalArea = area, Priority = pri })
+        StartHour = sh, EndHour = eh, Location = loc, LocalArea = area, Priority = pri,
+        TargetKeyLocation = key })
     end
     local function dict(map)
       return obj(nil, { ContainsKey = function(k) return map[k] ~= nil end,
         get_Item = function(k) return map[k] end })
     end
     local curs = { [7] = obj({ LocalArea = 49, Location = 3, Pos = P(1, 2, 3) }),
-      [8] = obj({ LocalArea = -1, Location = -1, Pos = P(0, 0, 0) }) }
+      [8] = obj({ LocalArea = -1, Location = -1, Pos = P(0, 0, 0) }),
+      [9] = obj({ LocalArea = -1, Location = -1, KeyLocation = 2309, Pos = P(5, 5, 5),
+        OverwriteSchedule = list({ rowobj(1, 4, 0, 6, 20, 22, -1, -1, 0, 2309),
+          rowobj(1, 4, 0, 6, 22, 23, -1, -1, 0, 2310) }) }),
+      [10] = obj({ LocalArea = 49, Location = 3, KeyLocation = 0,
+        OverwriteSchedule = list({}) }) }
     local rowsd = { [7] = list({ rowobj(1, 4, 0, 6, 6, 18, 3, 49, 0),
-      rowobj(1, 4, 0, 6, 18, 6, 3, -1, 1) }) }
+      rowobj(1, 4, 0, 6, 18, 6, 3, -1, 1) }),
+      [11] = list({ rowobj(1, 4, 0, 6, 0, 24, -1, -1, 0, 2309),
+        rowobj(1, 4, 0, 6, 0, 24, -1, -1, 0, 0),
+        rowobj(1, 4, 0, 6, 0, 24, -1, -1, 0, -2) }) }
+    local keynodes = { [2309] = obj({ _Pos = P(576, 19, -1011) }) }
+    local keynodes_get = 0
     local nodes_by_area = { [49] = list({ obj(nil, { get_Pos = function() return P(1, 0, 1) end }),
       obj(nil, { get_Pos = function() return P(2, 0, 2) end }) }) }
     local listed = {}
@@ -1254,7 +1265,9 @@ do
           return nil
         end }) }, { get_CurrentScheduleDay = function() return 33 end,
         get_CurrentScheduleHour = function() return 7 end })
-    singletons["app.AIAreaManager"] = obj(nil, {
+    singletons["app.AIAreaManager"] = obj({
+      KeyLocationNodes = obj(nil, { ContainsKey = function(k) return keynodes[k] ~= nil end,
+        get_Item = function(k) keynodes_get = keynodes_get + 1; return keynodes[k] end }) }, {
       getKeyNodesInLocalArea = function(area) listed.area = area; return nodes_by_area[area] end,
       getNodeListInArea = function(loc, a2, flag)
         listed.loc, listed.a2, listed.flag = loc, a2, flag
@@ -1267,6 +1280,27 @@ do
       and rr[1].priority == 0 and rr[1].start_week == 1 and rr[1].end_day == 6
       and rr[2].area == -1 and rr[2].priority == 1)
     check("reads: schedule rows of an unknown cid fail", not pcall(R.schedule_rows, 99))
+    local r11 = R.schedule_rows(11)
+    check("reads: row key 2309 kept, 0 reads as -1", r11[1].key == 2309 and r11[2].key == -1
+      and r11[3].key == 4294967294
+      and rr[1].key == -1)
+    local c9, c10 = R.current_row(9), R.current_row(10)
+    check("reads: current row key and one overwrite row", c9.key == 2309 and #c9.overwrite == 2
+      and c9.overwrite[1].key == 2309 and c9.overwrite[1].start_hour == 20
+      and c9.overwrite[1].end_hour == 22 and c9.overwrite[1].area == -1
+      and c9.overwrite[1].priority == 0)
+    check("reads: current row key 0 reads as -1, empty overwrite", c10.key == -1
+      and type(c10.overwrite) == "table" and #c10.overwrite == 0)
+    check("reads: missing overwrite list gives {}", R.current_row(7).overwrite ~= nil
+      and #R.current_row(7).overwrite == 0 and R.current_row(7).key == -1)
+    local kp = R.key_pos(2309)
+    check("reads: key_pos is the node _Pos", kp and kp.x == 576 and kp.y == 19 and kp.z == -1011)
+    keynodes_get = 0
+    check("reads: absent key is nil without get_Item", R.key_pos(7) == nil and keynodes_get == 0)
+    local sa, sl, sk, so = R.current_sig(9)
+    check("reads: current_sig area, location, key, overwrite keys",
+      sa == -1 and sl == -1 and sk == 2309 and so == "2309,2310")
+    check("reads: current_sig of an absent cid is nil", R.current_sig(99) == nil)
     local okn, day, hour = pcall(R.schedule_now)
     check("reads: schedule now", okn and day == 33 and hour == 7)
     local cr = R.current_row(7)
@@ -1731,8 +1765,9 @@ do
           location = r.location, pos = p }
       end
     end
-    return stops, unplaced
+    return stops, unplaced, stub.matched
   end
+  stub.matched = true
   function stub.anchor_node(list) return list[1] end
   function stub.tier(rank)
     if type(rank) ~= "number" or rank == -501 then return nil end
@@ -1756,6 +1791,11 @@ do
     rdef("schedule_rows", function(cid) return d.rows[cid] end)
     rdef("schedule_now", function() return d.day, d.hour end)
     rdef("current_row", function(cid) return d.cur[cid] end)
+    rdef("current_sig", function(cid)
+      local e = d.cur[cid]
+      if e == nil then return nil end
+      return e.area, e.location, e.key or -1, d.sig or ""
+    end)
     rdef("area_nodes", function(row)
       return d.area_nodes[row.area .. ":" .. tostring(row.location)] or d.area_nodes[row.area]
     end)
@@ -2004,15 +2044,17 @@ do
       and #w:input().route.stops == 1)
     -- -1/-1 current row
     local calls = stub.calls.route_stops
-    d.cur[2001] = { area = -1, location = -1, pos = P(1, 1, 1) }
+    d.cur[2001] = { area = -1, location = -1, key = 2309, pos = P(1, 1, 1) }
+    stub.matched = false
     d.hour = 10
     w:set_route(2001, "Aa")
     w:refresh(2, true, tg)
     r = w:input().route
-    check("route off: -1/-1 with placeable rows publishes stops + off_schedule",
+    check("route off: unmatched key publishes stops + off_schedule",
       r.err == nil and #r.stops == 1 and r.off_schedule == true)
-    check("route off: route_stops called with no current row",
-      stub.calls.route_stops == calls + 1 and stub.last_cur == nil)
+    check("route off: route_stops called with the current row",
+      stub.calls.route_stops == calls + 1 and stub.last_cur.key == 2309)
+    stub.matched = true
     d.cur[2001] = { area = 49, location = 0 }
     d.hour = 12
     w:poke()
@@ -2037,6 +2079,39 @@ do
     check("route off: -1/-1 with nothing placeable is route unavailable",
       r.err == "route unavailable" and r.stops == nil)
     d.area_nodes[49] = { P(1, 0, 1) }
+    -- a nil entry: no current row passed, no off_schedule
+    d.cur[2001] = nil
+    stub.last_cur = "unset"
+    d.hour = 15
+    w:set_route(2001, "Aa")
+    w:refresh(2.62, true, tg)
+    check("route off: nil entry passes nil and has no off_schedule",
+      stub.last_cur == nil and w:input().route.err == nil
+      and w:input().route.off_schedule == nil)
+    -- an overwrite change inside the same hour rebuilds; a failed sig errs
+    d.cur[2001] = { area = 49, location = 0 }
+    d.sig = "a"
+    d.hour = 16
+    w:set_route(2001, "Aa")
+    w:refresh(2.64, true, tg)
+    local before = stub.calls.route_stops
+    w:refresh(2.65, true, tg)
+    check("route sig: unchanged signature reuses the cache", stub.calls.route_stops == before)
+    d.sig = "a,b"
+    w:poke()
+    w:refresh(2.66, true, tg)
+    check("route sig: a changed signature in the same hour rebuilds",
+      stub.calls.route_stops == before + 1 and w:input().route.err == nil)
+    f.fail.current_sig = true
+    w:poke()
+    w:refresh(2.67, true, tg)
+    check("route sig: a failed signature read shows route unavailable",
+      w:input().route.err == "route unavailable")
+    f.fail.current_sig = nil
+    d.sig = nil
+    w:poke()
+    w:refresh(2.68, true, tg)
+    check("route sig: recovers when the read works", w:input().route.err == nil)
     -- raising route_stops leaves no partial stops
     d.cur[2001] = { area = 49, location = 0 }
     local orig = stub.route_stops
@@ -2832,6 +2907,128 @@ do
   local ok, t4 = pcall(tr, tfix({ node("N1", 100, 100) }, nil, true))
   check("t3: no places file gives no items and no error",
     ok and t4[1] ~= nil and t4[1].items == nil)
+end
+
+-- ===== v14 Task 2b: routes through the real route builder (SPEC 25.6.2) =====
+do
+  local saved_loaded = package.loaded["Clairvoyance.npcs"]
+  package.preload["Clairvoyance.npcs"] = nil
+  package.loaded["Clairvoyance.npcs"] = nil
+  local real = require("Clairvoyance.npcs")
+  package.loaded["Clairvoyance.npcs"] = real
+
+  local function rfix()
+    local f = fixture()
+    local d = f.data
+    d.rows, d.day, d.hour, d.cur, d.keypos, d.area_nodes = {}, 33, 20, {}, {}, {}
+    d.holders, d.sent, d.generic, d.hcount, d.area_calls = {}, {}, {}, 0, {}
+    local function rdef(name, fn)
+      f.reads[name] = function(...)
+        f.reads_n[name] = (f.reads_n[name] or 0) + 1
+        return fn(...)
+      end
+    end
+    rdef("schedule_rows", function(cid) return d.rows[cid] end)
+    rdef("schedule_now", function() return d.day, d.hour end)
+    rdef("current_row", function(cid) return d.cur[cid] end)
+    rdef("current_sig", function(cid)
+      local e = d.cur[cid]
+      if e == nil then return nil end
+      return e.area, e.location, e.key or -1, #(e.overwrite or {})
+    end)
+    rdef("key_pos", function(key) return d.keypos[key] end)
+    rdef("area_nodes", function(row)
+      d.area_calls[#d.area_calls + 1] = row
+      return d.area_nodes[row.area .. ":" .. tostring(row.location)]
+    end)
+    rdef("holder_count", function() return d.hcount end)
+    rdef("holder_at", function(i) return d.holders[i] end)
+    rdef("sentiment", function() return nil end)
+    f.adapter.is_generic = function() return false end
+    return f, d
+  end
+  local function row(sh, eh, area, loc, key)
+    return { start_week = 1, end_week = 4, start_day = 0, end_day = 6,
+      start_hour = sh, end_hour = eh, area = area, location = loc, priority = 0,
+      key = key or -1 }
+  end
+
+  -- Albert: base 6-18 location 7, 18-6 area 42, overwrite 20-22 key 2309
+  do
+    local f, d = rfix()
+    d.sched_ids = { 2696 }
+    d.npcname[2696] = "Albert"
+    d.rows[2696] = { row(6, 18, -1, 7), row(18, 6, 42, -1) }
+    d.cur[2696] = { area = -1, location = -1, key = 2309, pos = P(576.0, 19.0, -1011.0),
+      overwrite = { row(20, 22, -1, -1, 2309) } }
+    d.keypos[2309] = P(576.3, 19.3, -1011.1)
+    d.area_nodes["-1:7"] = { P(100, 0, 100) }
+    d.area_nodes["42:-1"] = { P(300, 0, 300) }
+    local w = f.new()
+    local tg = on("search")
+    w:refresh(0, true, tg)
+    w:set_route(2696, "Albert")
+    w:refresh(1, true, tg)
+    local r = w:input().route
+    check("real route: albert publishes 4 stops", r ~= nil and r.err == nil and #r.stops == 4
+      and r.stops[1].from == 6 and r.stops[2].from == 18 and r.stops[3].from == 20
+      and r.stops[4].from == 22 and r.stops[4].to == 6)
+    check("real route: albert stop 3 at the live position, no off_schedule",
+      r ~= nil and r.err == nil and r.stops ~= nil and r.stops[3] ~= nil and r.stops[3].pos.x == 576.0 and r.stops[3].key == 2309
+      and r.off_schedule == nil)
+  end
+
+  -- a key that does not resolve is unplaced and never asks for area nodes
+  do
+    local f, d = rfix()
+    d.sched_ids = { 2697 }
+    d.npcname[2697] = "Bb"
+    d.hour = 7
+    d.rows[2697] = { row(6, 18, -1, -1, 99), row(18, 6, 49, 0) }
+    d.area_nodes["49:0"] = { P(1, 0, 1) }
+    local w = f.new()
+    local tg = on("search")
+    w:refresh(0, true, tg)
+    w:set_route(2697, "Bb")
+    w:refresh(1, true, tg)
+    local r = w:input().route
+    local bad = 0
+    for _, c in ipairs(d.area_calls) do
+      if c.area == -1 and c.location == -1 then bad = bad + 1 end
+    end
+    check("real route: unresolved key is counted unplaced",
+      r ~= nil and r.err == nil and r.unplaced == 1 and #r.stops == 1)
+    check("real route: unresolved key asks area_nodes zero times",
+      #d.area_calls >= 1 and bad == 0)
+  end
+
+  -- two key stops near two towns get their own discovery answers
+  do
+    local f, d = rfix()
+    d.sched_ids = { 2698 }
+    d.npcname[2698] = "Cc"
+    d.hour = 7
+    d.rows[2698] = { row(0, 12, -1, -1, 2309), row(12, 24, -1, -1, 2310) }
+    d.keypos[2309] = P(5, 0, 5)
+    d.keypos[2310] = P(995, 0, 995)
+    d.icons = {
+      { type = K.SETTLEMENT_TYPE, pos = P(0, 0, 0), disp_id = "a", icon_id = 1 },
+      { type = K.SETTLEMENT_TYPE, pos = P(1000, 0, 1000), disp_id = "b", icon_id = 2 } }
+    d.msgs = { a = "Town A", b = "Town B" }
+    d.icons_found = { [2] = true }
+    d.disc_n = 1
+    local w = f.new()
+    local tg = on("search")
+    w:refresh(0, true, tg)
+    w:set_route(2698, "Cc")
+    w:refresh(1, true, tg)
+    local r = w:input().route
+    check("real route: key stops get their own discovery answers",
+      r ~= nil and r.err == nil and r.stops ~= nil and #r.stops == 2 and r.stops[1].discovered == false
+      and r.stops[2].discovered == true)
+  end
+
+  package.loaded["Clairvoyance.npcs"] = saved_loaded
 end
 
 if failures > 0 then os.exit(1) end

@@ -1024,21 +1024,24 @@ function M.new(a, reads, io)
   local function build_route(npcs, cid, day, hour)
     local ok, cur = pcall(reads.current_row, cid)
     if not ok then error("current_row failed") end
-    -- -1/-1 means "not at a scheduled place now", not "no schedule" (spec 25)
-    local off = type(cur) == "table" and cur.area == -1 and cur.location == -1
-    if off then cur = nil end
     local okr, rows = pcall(reads.schedule_rows, cid)
     if not okr or type(rows) ~= "table" then error("schedule_rows failed") end
     local function area_pos(row)
+      -- a key location wins; a -1/-1 row without one has no place (spec 25.4.3)
+      if type(row.key) == "number" and row.key > 0 and type(reads.key_pos) == "function" then
+        local okk, kp = pcall(reads.key_pos, row.key)
+        if okk and kp ~= nil then return kp end
+      end
+      if row.area == -1 and row.location == -1 then return nil end
       local okn, list = pcall(reads.area_nodes, row)
       if not okn or type(list) ~= "table" then return nil end
       return npcs.anchor_node(list)
     end
-    local stops, unplaced = npcs.route_stops(rows, npcs.today(day, hour), area_pos,
+    local stops, unplaced, matched = npcs.route_stops(rows, npcs.today(day, hour), area_pos,
       type(cur) == "table" and cur or nil)
     if type(stops) ~= "table" then error("route_stops failed") end
     if #stops == 0 then return nil end
-    return { stops = stops, unplaced = unplaced or 0, off_schedule = off or nil }
+    return { stops = stops, unplaced = unplaced or 0, off_schedule = (matched == false) or nil }
   end
 
   local function route_round()
@@ -1048,14 +1051,26 @@ function M.new(a, reads, io)
     if type(reads.schedule_now) ~= "function" then return errt end
     local okn, day, hour = pcall(reads.schedule_now)
     if not okn or type(day) ~= "number" or type(hour) ~= "number" then return errt end
+    -- the current entry's signature, read once per round (spec 25.5); a
+    -- fixture without the read has none
+    local sig = ""
+    if type(reads.current_sig) == "function" then
+      local ts = clock()
+      local oks, a, l, k, o = pcall(reads.current_sig, cid)
+      stats.ms.route_sig = (clock() - ts) * 1000
+      if not oks then return errt end
+      sig = tostring(a) .. "|" .. tostring(l) .. "|" .. tostring(k) .. "|" .. tostring(o)
+    end
     local c = S.route_cache
-    if c == nil or c.cid ~= cid or c.hour ~= hour or c.day ~= day then
+    if c == nil or c.cid ~= cid or c.hour ~= hour or c.day ~= day or c.sig ~= sig then
+      local t0 = clock()
       local ok, built = pcall(function()
         return build_route(require("Clairvoyance.npcs"), cid, day, hour)
       end)
+      stats.ms.route = (clock() - t0) * 1000
       -- a failed build is not kept: the next round retries it
       if not ok then return errt end
-      c = { cid = cid, hour = hour, day = day, value = built }
+      c = { cid = cid, hour = hour, day = day, sig = sig, value = built }
       S.route_cache = c
     end
     if c.value == nil then return errt end
@@ -1064,7 +1079,11 @@ function M.new(a, reads, io)
     for i, st in ipairs(c.value.stops) do
       local n = {}
       for k, v in pairs(st) do n[k] = v end
-      if valid_pos(st.pos) then n.discovered = discovered("r:" .. tostring(st.area) .. ":" .. tostring(st.location), st.pos) end
+      if valid_pos(st.pos) then
+        local dkey = "r:" .. tostring(st.area) .. ":" .. tostring(st.location)
+        if type(st.key) == "number" and st.key > 0 then dkey = "r:k:" .. st.key end
+        n.discovered = discovered(dkey, st.pos)
+      end
       stops[i] = n
     end
     return { cid = cid, name = name, stops = stops, unplaced = c.value.unplaced,
@@ -2064,6 +2083,22 @@ function M.game_reads()
     return G(single("app.NPCManager"), field)
   end
 
+  -- A key location id: > 0 kept, else -1 (0 is None).
+  local function key_of(v)
+    local k = u32(int_value(v))
+    if k ~= nil and k > 0 then return k end
+    return -1
+  end
+
+  local function sched_row(r)
+    return { start_week = int_value(G(r, "StartWeek")),
+      end_week = int_value(G(r, "EndWeek")),
+      start_day = int_value(G(r, "StartDay")), end_day = int_value(G(r, "EndDay")),
+      start_hour = int_value(G(r, "StartHour")), end_hour = int_value(G(r, "EndHour")),
+      area = int_value(G(r, "LocalArea")), location = int_value(G(r, "Location")),
+      priority = int_value(G(r, "Priority")), key = key_of(G(r, "TargetKeyLocation")) }
+  end
+
   -- Rows of one cid's daily schedule (npcs.route_stops row shape).
   function R.schedule_rows(cid)
     local d = npc_dict("<NPCScheduleDict>k__BackingField")
@@ -2071,12 +2106,7 @@ function M.game_reads()
     local out = {}
     local ok = each(C(d, "get_Item", cid), function(r)
       if r == nil then return end
-      out[#out + 1] = { start_week = int_value(G(r, "StartWeek")),
-        end_week = int_value(G(r, "EndWeek")),
-        start_day = int_value(G(r, "StartDay")), end_day = int_value(G(r, "EndDay")),
-        start_hour = int_value(G(r, "StartHour")), end_hour = int_value(G(r, "EndHour")),
-        area = int_value(G(r, "LocalArea")), location = int_value(G(r, "Location")),
-        priority = int_value(G(r, "Priority")) }
+      out[#out + 1] = sched_row(r)
     end)
     if not ok then error("schedule rows unreadable") end
     return out
@@ -2097,8 +2127,35 @@ function M.game_reads()
     if C(d, "ContainsKey", cid) ~= true then return nil end
     local e = C(d, "get_Item", cid)
     if e == nil then return nil end
+    local overwrite = {}
+    each(G(e, "OverwriteSchedule"), function(r)
+      if r ~= nil then overwrite[#overwrite + 1] = sched_row(r) end
+    end)
     return { area = int_value(G(e, "LocalArea")), location = int_value(G(e, "Location")),
-      pos = xyz(G(e, "Pos")) }
+      key = key_of(G(e, "KeyLocation")), pos = xyz(G(e, "Pos")), overwrite = overwrite }
+  end
+
+  -- Map-space position of a key location; nil when absent. ContainsKey
+  -- first: get_Item on a missing key throws in the game.
+  function R.key_pos(key)
+    local nodes = G(single("app.AIAreaManager"), "KeyLocationNodes")
+    if C(nodes, "ContainsKey", key) ~= true then return nil end
+    return xyz(G(C(nodes, "get_Item", key), "_Pos"))
+  end
+
+  -- Signature of one cid's current entry: area, location, key and the
+  -- overwrite rows' keys joined by ","; nil for a cid with no entry.
+  function R.current_sig(cid)
+    local d = sched_dict()
+    if C(d, "ContainsKey", cid) ~= true then return nil end
+    local e = C(d, "get_Item", cid)
+    if e == nil then return nil end
+    local keys = {}
+    each(G(e, "OverwriteSchedule"), function(r)
+      if r ~= nil then keys[#keys + 1] = tostring(key_of(G(r, "TargetKeyLocation"))) end
+    end)
+    return int_value(G(e, "LocalArea")), int_value(G(e, "Location")),
+      key_of(G(e, "KeyLocation")), table.concat(keys, ",")
   end
 
   -- Node positions of a row's area (Ruling 4); nil when it has none.
