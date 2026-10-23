@@ -33,8 +33,10 @@ end
 
 local function array(items)
   return obj({}, {
+    get_size = function() return #items end,
     get_Length = function() return #items end,
-    get_Item = function(_, i) return items[i + 1] end,
+    get_element = function(_, i) return items[i + 1] end,
+    get_Item = function() return nil end,   -- measured: nil on the managed array
   })
 end
 
@@ -60,7 +62,9 @@ local function make_world()
   w.slots = {}
   for i = 0, 29 do
     local slot = i
-    local pnl = obj({}, { get_GlobalPosition = function()
+    local pnl = obj({}, { get_ActualVisible = function()
+      return not w.slots[slot + 1].hidden
+    end, get_GlobalPosition = function()
       local s = w.slots[slot + 1]
       return { x = s.x, y = s.y, z = 0 }
     end })
@@ -172,7 +176,7 @@ do
   w.r:frame()
   c1 = w.circles[1]
   check("scaled radius", c1 and c1.r == 8)
-  check("scaled corner", c1 and c1.x == 100 + 141 * 3 + 280 - 8 and c1.y == 200 + 8)
+  check("scaled corner", c1 and c1.x == (100 + 141 * 3 + 140) * 2 - 8 and c1.y == 200 * 2 + 8)
   w.screen_h = 1080
 
   -- a moved Pnl draws at the new corner
@@ -189,6 +193,53 @@ do
   w.r:frame()
   check("freed slot draws nothing", #w.circles == 1)
   check("freed slot is not a failure", w.r:stats_line():find("fails=0", 1, true) ~= nil)
+end
+
+-- A hidden slot (get_ActualVisible false) draws nothing and is not a failure.
+do
+  now = 0
+  local w = make_world()
+  w.slots[4].hidden = true
+  tick(w)
+  w.r:frame()
+  check("hidden slot draws nothing", #w.circles == 1)
+  check("hidden slot is not a failure", w.r:stats_line():find("fails=0", 1, true) ~= nil)
+end
+
+-- A failed game read inside the frame counts as a failure and skips the frame.
+do
+  now = 0
+  local w = make_world()
+  tick(w)
+  w.ctrl.fields.Scg = obj({}, { get_ScrollRow = function() error("scroll raised") end })
+  w.r:frame()
+  check("get_ScrollRow raise: no dots", #w.circles == 0)
+  check("get_ScrollRow raise: counted", w.r:stats_line():find("fails=1", 1, true) ~= nil)
+  check("get_ScrollRow raise: logged", #w.logs == 1)
+  for _ = 1, 29 do w.r:frame() end
+  w.ctrl.fields.Scg = obj({}, { get_ScrollRow = function() return 0 end })
+  now = 1
+  tick(w)
+  w.r:frame()
+  check("30 raising reads suspend the dots", #w.circles == 0)
+  now = 5.1
+  tick(w)
+  w.r:frame()
+  check("dots resume after 5 s", #w.circles == 2)
+end
+
+-- A nil slot inside the range is a failed read, not a skip.
+do
+  now = 0
+  local w = make_world()
+  tick(w)
+  w.ctrl.fields.ItemList = array({})   -- size 0: nothing to draw, no failure
+  w.r:frame()
+  check("empty slot array draws nothing", #w.circles == 0 and w.r:stats_line():find("fails=0", 1, true) ~= nil)
+  w.ctrl.fields.ItemList = obj({}, { get_size = function() return 30 end,
+    get_element = function() return nil end })
+  w.r:frame()
+  check("nil slot in range counts a failure", w.r:stats_line():find("fails=1", 1, true) ~= nil)
 end
 
 -- ScrollRow 1: slot 0 is row 5, so row 7 is slot 2 and row 3 is above the view.
@@ -255,6 +306,29 @@ do
   check("negative selection untouched", w.msg == "Plain" and w.sets == before)
 end
 
+-- The title list or the relation changes while the game's text does not.
+do
+  now = 0
+  local w = make_world()
+  local base = "Potion\nHeals."
+  tick(w)
+  check("first suffix", w.msg == base .. "\nQuest: Lost Ring, Old Debt")
+  w.related = { [103] = { "Lost Ring", "Old Debt", "Third" } }
+  tick(w)
+  check("changed titles replace the line", w.msg == base .. "\nQuest: Lost Ring, Old Debt, Third")
+  tick(w)
+  check("and stay stable", w.msg == base .. "\nQuest: Lost Ring, Old Debt, Third" and w.sets == 2)
+  w.related = {}
+  tick(w)
+  check("row no longer related: line removed", w.msg == base)
+  local sets = w.sets
+  tick(w)
+  check("and nothing more is written", w.msg == base and w.sets == sets)
+  w.related = { [103] = { "Back" } }
+  tick(w)
+  check("related again: line returns", w.msg == base .. "\nQuest: Back")
+end
+
 -- A raising _ItemData read leaves the message untouched.
 do
   now = 0
@@ -309,6 +383,35 @@ do
   check("destroyed: no draw", #w.circles == 0)
   hook(w, "update").post(nil)
   check("destroyed: no write", w.sets == 0)
+end
+
+-- A freed description text or window is not written.
+do
+  now = 0
+  local w = make_world()
+  w.txt.slot = { freed = true }
+  tick(w)
+  check("freed text: no write", w.sets == 0)
+  check("freed text: not a failure", w.r:stats_line():find("fails=0", 1, true) ~= nil)
+end
+
+-- The update pre-hook is under pcall.
+do
+  now = 0
+  local w = make_world()
+  w.sdk.to_managed_object = function() error("boom") end
+  hook(w, "update").pre({ nil, w.comp })
+  check("pre-hook raise counted, not propagated", w.r:stats_line():find("fails=1", 1, true) ~= nil)
+end
+
+-- update refreshes the captured component.
+do
+  now = 0
+  local w = make_world()
+  hook(w, ".ctor").pre({ nil, obj({}) })
+  tick(w)
+  w.r:frame()
+  check("update re-captures the component", #w.circles == 2)
 end
 
 -- Breaker: 30 consecutive failing frames suspend the dots for 5 s.

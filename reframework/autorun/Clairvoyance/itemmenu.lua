@@ -20,10 +20,25 @@ local function try(o, name, ...)
   return nil
 end
 
-local function count_of(l)
-  local n = try(l, "get_Count")
-  if n == nil then n = try(l, "get_Length") end
+-- Strict reads for the frame and the append: a failed or empty read raises,
+-- so the caller's pcall counts it (SPEC 22.10.6).
+local function size_of(coll)
+  local n = try(coll, "get_size")
+  if n == nil then n = try(coll, "get_Count") end
+  if type(n) ~= "number" then error("no size on collection") end
   return n
+end
+
+local function element_of(coll, i)
+  local e = try(coll, "get_element", i)
+  if e == nil then e = try(coll, "get_Item", i) end
+  if e == nil then error("no element " .. i) end
+  return e
+end
+
+-- GUI-to-screen conversion of one corner point; Task 11 fixes it here.
+local function to_screen(x, y, k)
+  return x * k, y * k
 end
 
 function M.create(opt)
@@ -32,6 +47,7 @@ function M.create(opt)
   local cur_this = nil      -- `this` of the update running now (pre -> post)
   local stamp = nil         -- opt.clock() at the last update pre-hook
   local kept = nil          -- the message the game wrote, before our suffix
+  local written = nil       -- the text we last set (kept .. suffix), or nil
   local dots, appends, fails = 0, 0, 0
   local fail_frames, suspend_until = 0, 0.0
   local logged, logged_n = {}, 0
@@ -61,10 +77,9 @@ function M.create(opt)
   -- Marked state of one row: titles (array, possibly empty) or nil when the
   -- row is not quest-related. Raises on a failed read.
   local function row_marks(infos, row, related)
-    local info = try(infos, "get_Item", row)
-    if info == nil then return nil end
+    local info = element_of(infos, row)
     local storage = info:get_field("Storage")
-    if storage == nil then return nil end
+    if storage == nil then error("row " .. row .. " has no Storage") end
     local id = storage:get_field("_ItemId")
     local titles = related[id]
     if titles ~= nil and #titles > 0 then return titles end
@@ -78,10 +93,12 @@ function M.create(opt)
     local infos = ctrl:get_field("InfoList")
     local slots = ctrl:get_field("ItemList")
     local scg = ctrl:get_field("Scg")
-    if infos == nil or slots == nil or scg == nil then dots = 0; return end
-    local total = count_of(infos) or 0
-    local nslots = count_of(slots) or 0
-    local scroll = math.floor(tonumber(try(scg, "get_ScrollRow")) or 0)
+    if infos == nil or slots == nil or scg == nil then error("grid fields missing") end
+    local total = size_of(infos)
+    local nslots = size_of(slots)
+    local scroll_raw = scg:call("get_ScrollRow")
+    if type(scroll_raw) ~= "number" then error("no scroll row") end
+    local scroll = math.floor(scroll_raw)
     local k = opt.screen_h() / 1080
     local radius = DOT_RADIUS * k
     local color = opt.color_abgr()
@@ -90,17 +107,18 @@ function M.create(opt)
     for i = 0, nslots - 1 do
       local row = scroll * COLUMNS + i
       if row >= 0 and row < total then
-        local slot = try(slots, "get_Item", i)
-        local pnl = slot ~= nil and slot:get_field("Pnl") or nil
-        if pnl ~= nil and opt.sdk.is_managed_object(pnl) then
+        local slot = element_of(slots, i)
+        local pnl = slot:get_field("Pnl")
+        -- a freed or hidden slot draws nothing and is not a failure
+        if pnl ~= nil and opt.sdk.is_managed_object(pnl)
+            and try(pnl, "get_ActualVisible") ~= false then
           if row_marks(infos, row, related) ~= nil then
             local p = pnl:call("get_GlobalPosition")
-            if p ~= nil then
-              -- the top-right corner, the dot inset by its radius
-              opt.draw.filled_circle(p.x + SLOT_SIZE * k - radius, p.y + radius,
-                radius, color, DOT_SEGMENTS)
-              n = n + 1
-            end
+            if p == nil then error("no global position") end
+            -- the top-right corner, the dot inset by its radius
+            local sx, sy = to_screen(p.x + SLOT_SIZE, p.y, k)
+            opt.draw.filled_circle(sx - radius, sy + radius, radius, color, DOT_SEGMENTS)
+            n = n + 1
           end
         end
       end
@@ -133,23 +151,35 @@ function M.create(opt)
     local sel = ctrl:get_field("<SelectedIndex>k__BackingField")
     if type(sel) ~= "number" or sel < 0 then return end
     local infos = ctrl:get_field("InfoList")
-    if infos == nil or sel >= (count_of(infos) or 0) then return end
+    if infos == nil or sel >= size_of(infos) then return end
     local titles = row_marks(infos, sel, opt.related() or {})
-    if titles == nil then return end
-    local suffix
-    if #titles > 0 then
-      suffix = "\nQuest: " .. table.concat(titles, ", ")
-    else
-      suffix = "\nQuest item"
+    local suffix = nil
+    if titles ~= nil then
+      if #titles > 0 then
+        suffix = "\nQuest: " .. table.concat(titles, ", ")
+      else
+        suffix = "\nQuest item"
+      end
     end
+    if suffix == nil and written == nil then return end
     local win = this:get_field("ItemWindow")
-    local txt = win ~= nil and win:get_field("_TxtInfo") or nil
-    if txt == nil then return end
+    if win == nil or not opt.sdk.is_managed_object(win) then return end
+    local txt = win:get_field("_TxtInfo")
+    if txt == nil or not opt.sdk.is_managed_object(txt) then return end
     local msg = txt:call("get_Message")
     if type(msg) ~= "string" then return end
-    if kept ~= nil and msg == kept .. suffix then return end
-    kept = msg
-    txt:call("set_Message", kept .. suffix)
+    local target
+    if msg == written then
+      -- the game has not rewritten the text: bring our line up to date
+      target = (suffix ~= nil) and (kept .. suffix) or kept
+      if target == msg then return end
+    else
+      kept = msg
+      if suffix == nil then written = nil; return end
+      target = kept .. suffix
+    end
+    txt:call("set_Message", target)
+    written = (suffix ~= nil) and target or nil
     appends = appends + 1
   end
 
@@ -178,13 +208,16 @@ function M.create(opt)
       cur_this = nil
     end)
     hook("update", function(args)
-      local now = opt.clock()
-      local was_open = stamp ~= nil and now - stamp < OPEN_WINDOW
-      stamp = now
-      local this = sdk.to_managed_object(args[2])
-      cur_this = this
-      if comp == nil then comp = this end
-      if not was_open then opt.on_open() end
+      local ok, err = pcall(function()
+        local now = opt.clock()
+        local was_open = stamp ~= nil and now - stamp < OPEN_WINDOW
+        stamp = now
+        local this = sdk.to_managed_object(args[2])
+        cur_this = this
+        comp = this
+        if not was_open then opt.on_open() end
+      end)
+      if not ok then note_fail("update", err) end
     end, function(retval)
       on_update_post()
       return retval
