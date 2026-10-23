@@ -13,7 +13,7 @@ $allowed = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread",
   "tonumber","pcall","xpcall","error","assert","select","print","package",
   "rawget","rawset","setmetatable","getmetatable","next","io","_G","coroutine","draw","d2dx")
 # Pure modules take every game access by injection: no host globals at all.
-$pure = @("core.lua","settings_util.lua","minimap.lua","jump.lua","icons.lua")
+$pure = @("core.lua","settings_util.lua","minimap.lua","jump.lua","icons.lua","npcs.lua")
 $hostGlobals = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread","draw","_G","d2dx")
 Get-ChildItem -Recurse -Filter *.lua -Path (Join-Path $root "reframework") | ForEach-Object {
     & $Lua -e "assert(loadfile([[$($_.FullName)]]))"
@@ -136,6 +136,11 @@ else {
 # Last check: no tracked line matches the provenance patterns (SPEC 18.8.1).
 if ($SkipProvenance) { Write-Host "provenance: skipped (-SkipProvenance)" }
 else {
+    # Hint text must not copy a fetched reference page (8-word run); skipped when Python is missing.
+    if ($pyOk) {
+        & python -I (Join-Path $root "tools/hints_check.py")
+        if ($LASTEXITCODE -ne 0) { Write-Host "HINTS CHECK FAIL"; $fail = $true }
+    }
     & powershell -NoProfile -File (Join-Path $root "scripts/provenance.ps1")
     if ($LASTEXITCODE -ne 0) { Write-Host "PROVENANCE FAIL"; $fail = $true }
 }

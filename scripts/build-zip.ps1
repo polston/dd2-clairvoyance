@@ -69,6 +69,13 @@ New-Item -ItemType Directory -Force (Join-Path $iconsDst "icons") | Out-Null
 Copy-Item (Join-Path $iconsSrc "icons/*.png") (Join-Path $iconsDst "icons") -Force
 Copy-Item (Join-Path $iconsSrc "icons/index.json") (Join-Path $iconsDst "icons") -Force
 
+# The hints file ships in both variants; a repo without it stops the build.
+$hintsSrc = Join-Path $Root "data/Clairvoyance_hints.json"
+if (-not (Test-Path -LiteralPath $hintsSrc -PathType Leaf)) { Stop-Build "hints file missing: data/Clairvoyance_hints.json" }
+$hintsDst = Join-Path $stage "reframework/data/Clairvoyance_hints.json"
+New-Item -ItemType Directory -Force (Split-Path $hintsDst -Parent) | Out-Null
+Copy-Item $hintsSrc $hintsDst
+
 if ($NoPlaces) { $zip = Join-Path $OutDir "Clairvoyance-noplaces.zip" }
 else {
     $zip = Join-Path $OutDir "Clairvoyance.zip"

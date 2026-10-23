@@ -24,4 +24,11 @@ if (Test-Path $places) {
     Copy-Item $places $data -Force
     Write-Host "deployed places file to $data"
 }
+$hints = Join-Path $root "data\Clairvoyance_hints.json"
+if (Test-Path $hints) {
+    $data = Join-Path $GameDir "reframework\data"
+    New-Item -ItemType Directory -Force $data | Out-Null
+    Copy-Item $hints $data -Force
+    Write-Host "deployed hints file to $data"
+}
 Write-Host "deployed to $dest"
