@@ -1737,6 +1737,8 @@ do
   check("tl four items", tl({ { name = "a", n = 1 }, { name = "b", n = 1 },
     { name = "c", n = 1 }, { name = "d", n = 1 } }) == "Treasure - a, b, c (+1)")
   check("tl none", tl(nil) == "Treasure")
+  check("tl nil mixed", tl({ { name = nil, n = 1 }, { name = "a", n = 1 }, { name = "b", n = 1 },
+    { name = "c", n = 1 }, { name = "d", n = 1 } }) == "Treasure - a, b, c (+1)")
   check("tl nil name skipped", tl({ { name = nil, n = 1 } }) == "Treasure")
   do
     local w = { treasure = {

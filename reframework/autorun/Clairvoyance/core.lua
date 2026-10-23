@@ -444,6 +444,7 @@ end
 -- Joined item list for a chest or treasure label: up to three names,
 -- "<name> x<n>" for n > 1, then " (+N)"; nil when there is nothing to list.
 -- skip_nil drops items without a name (treasure); chests keep tostring.
+-- Item lists are dense (built by append), so ipairs counts them all.
 local function items_text(items, skip_nil)
   items = type(items) == "table" and items or {}
   local names, total = {}, 0
