@@ -25,6 +25,8 @@ $copyWord = [regex]::new('\b[Pp]ort(ed|ing)?\b', "IgnoreCase") # provenance-patt
 foreach ($f in (& git ls-files)) {
     # The places file is generated game data (names and coordinates), not authored text.
     if ($f -eq "data/Clairvoyance_places.json") { continue }
+    # Generated game art: random compressed bytes match the two-letter pattern.
+    if ($f -like "reframework/images/*.png") { continue }
     $path = Join-Path $root $f
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
     $isMd = $f -match '\.md$'

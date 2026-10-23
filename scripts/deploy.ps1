@@ -11,6 +11,9 @@ foreach ($old in @("QuestNPCMapLabels.lua", "QuestNPCMapLabels")) {
 }
 Copy-Item (Join-Path $root "reframework\autorun\Clairvoyance.lua") $dest -Force
 Copy-Item (Join-Path $root "reframework\autorun\Clairvoyance") $dest -Recurse -Force
+$iconsDst = Join-Path $GameDir "reframework\images\Clairvoyance"
+New-Item -ItemType Directory -Force $iconsDst | Out-Null
+Copy-Item (Join-Path $root "reframework\images\Clairvoyance\*") $iconsDst -Recurse -Force
 $places = Join-Path $root "dist\stage\reframework\data\Clairvoyance_places.json"
 if (-not (Test-Path $places)) { $places = Join-Path $root "data\Clairvoyance_places.json" }
 if (Test-Path $places) {
