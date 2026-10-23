@@ -29,7 +29,8 @@ MIN_FILES = 2000
 
 LIST_FIELDS = (("_NormalTableList", "normal"), ("_SubQuestTableList", "subquest"),
                ("_MainQuestTableList", "mainquest"), ("_RandomNormalTableList", "random"))
-KIND_OF_GIMMICK = {167: "token", 161: "beetle", 10: "chest", 11: "chest", 692: "chest"}
+KIND_OF_GIMMICK = {167: "token", 161: "beetle", 10: "chest", 11: "chest", 12: "chest", 692: "chest",
+                   693: "chest", 694: "chest"}
 # the lowest gimmick id of each kind: the self-check needs rows for it
 FIRST_GIMMICK = {}
 for _gid in sorted(KIND_OF_GIMMICK):

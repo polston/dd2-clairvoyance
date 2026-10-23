@@ -139,6 +139,32 @@ class RowTests(unittest.TestCase):
                          ("chara", "g1", 5, "ch5", "normal"))
         self.assertEqual(rows[0]["x"], 1.0)
 
+    def test_third_chest_types(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        for gid in (12, 693, 694):
+            with self.subTest(gimmick=gid):
+                table = [
+                    inst(1, "app.GenerateTable", _GimmickSetInfo=R(2)),
+                    inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3)]),
+                    inst(3, "app.GenerateRowData", _GimmickID=gid, _ManualSetGuid="g1",
+                         _ManualPos=(1.0, 2.0, 3.0), _Container=R(4)),
+                    inst(4, "app.Container", _GimmickSetting=R(5)),
+                    inst(5, "app.GimmickSetting", _ParamId=1),
+                ]
+                lst = [inst(1, "app.GenerateTableData", path="t.user"),
+                       inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)], _SubQuestTableList=[],
+                            _MainQuestTableList=[], _RandomNormalTableList=[])]
+                rows, unjoined, _ids = ew.collect_rows({"t.user": table, "l.user": lst},
+                                                       {1: [(500, 2)]}, set(), {})
+                self.assertEqual(len(rows), 1)
+                self.assertEqual((rows[0]["k"], rows[0]["id"], rows[0]["items"]),
+                                 ("chest", gid, [{"id": 500, "n": 2}]))
+                self.assertEqual(unjoined, 0)
+
     def test_missing_key_fails(self):
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "out.json")
