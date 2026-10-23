@@ -134,6 +134,118 @@ local walk_ms_max = 0.0    -- max walk since the last 5 s log dump (catches
 
 -- Map state
 local ui_map = nil        -- captured ui040205
+
+-- v13 matching icons (SPEC 21). The picture renderer is this file's one new
+-- chunk-level local; everything else is a field of it or lives in a do-block.
+local icons = require("Clairvoyance.icons").create{
+  d2dx = d2dx,
+  clock = os.clock,
+  log = function(s) log.info("[" .. MOD_NAME .. "] " .. tostring(s)) end,
+  enabled = function() return settings.enabled and settings.matching_icons end,
+  request_rebuild = function() want_update = true end,
+  mini_ok = function() return ui_map == nil end,
+}
+do
+  -- Hoisted pieces, built once: no closure is created per frame (SPEC 21.2.5).
+  icons.never = function() return false end
+  icons.recs = {}      -- full-map records of the last rebuild (SPEC 21.4.2)
+  icons.ids = {}
+
+  -- Every picture the settings can draw (SPEC 21.2.4); a no-op when matching
+  -- icons are off, so off costs no image load.
+  function icons:preload_all()
+    if not settings.matching_icons then return end
+    local ids, n = self.ids, 0
+    for _, k in ipairs(su.ICON_KEYS) do
+      local a, b = settings[k], su.V12_ICON[k]
+      if a ~= nil then n = n + 1; ids[n] = a end
+      if b ~= nil then n = n + 1; ids[n] = b end
+    end
+    if settings.step_icons then
+      for i = 1, 5 do n = n + 1; ids[n] = i end
+    end
+    for i = #ids, n + 1, -1 do ids[i] = nil end
+    self:preload(ids)
+  end
+
+  -- Game methods, resolved once at load (SPEC 21.4.4, 21.5.1). A missing
+  -- method falls back to a dynamic call by name.
+  local function find_method(name, ...)
+    for i = 1, select("#", ...) do
+      local td = sdk.find_type_definition((select(i, ...)))
+      local m = td ~= nil and td:get_method(name) or nil
+      if m ~= nil then return m end
+    end
+    return nil
+  end
+  local m_visible = find_method("get_Visible", "via.gui.Control", "via.gui.TransformObject")
+  local m_position = find_method("get_Position", "via.gui.Control", "via.gui.TransformObject")
+  local m_size = find_method("get_Size", "via.gui.Control", "via.gui.TransformObject")
+  local m_gpos = find_method("get_GlobalPosition", "via.gui.TransformObject")
+  local m_cscale = find_method("get_ColorScale", "via.gui.Control")
+  local m_avisible = find_method("get_ActualVisible", "via.gui.Control", "via.gui.TransformObject")
+  local function call_m(m, obj, name)
+    if m ~= nil then return m:call(obj) end
+    return obj:call(name)
+  end
+
+  -- Sprite side in 1920x1080 units; 32 when the read fails or is <= 0.
+  local function size_read(sprite)
+    local sz = call_m(m_size, sprite, "get_Size")
+    local w = sz ~= nil and sz.w or nil
+    if type(w) == "number" and w > 0 then return w end
+    return 32
+  end
+  function icons.map_size(sprite)
+    local ok, w = pcall(size_read, sprite)
+    return ok and w or 32
+  end
+
+  -- The fill's reader (SPEC 21.4.4): nil skips the record, a raise is
+  -- caught by the fill's own pcall and also skips it.
+  function icons.read(rec)
+    local sprite, ref = rec.sprite, rec.ref
+    if not sdk.is_managed_object(sprite) or not sdk.is_managed_object(ref) then return nil end
+    if call_m(m_visible, ref, "get_Visible") ~= true then return nil end
+    if call_m(m_visible, sprite, "get_Visible") ~= true then return nil end
+    local p = call_m(m_position, sprite, "get_Position")
+    if p == nil then return nil end
+    return p.x, p.y
+  end
+
+  -- Minimap frame info (SPEC 21.5.1): the panel's global position, the
+  -- fade and the visible flag. Only PnlMapIconSpriteRoot is asked for a
+  -- position, never the texture node under it.
+  local function frame_read(ui)
+    local gp = call_m(m_gpos, ui.PnlMapIconSpriteRoot, "get_GlobalPosition")
+    local root = ui.Root
+    local cs = call_m(m_cscale, root, "get_ColorScale")
+    local vis = call_m(m_avisible, root, "get_ActualVisible")
+    return gp.x, gp.y, cs.w, vis == true and ui_map == nil
+  end
+  function icons.frame_info(ui)
+    local ok, px, py, fade, vis = pcall(frame_read, ui)
+    if ok then return px, py, fade, vis end
+    return nil
+  end
+  icons.mini_push = function(id, x, y, size, argb, fade)
+    icons:push("mini", id, x, y, size, argb, fade)
+  end
+  icons.mini_clear = function() icons:mini_replace() end
+  icons.picture_for = function(m)
+    return su.icon_for(settings, m, "head", m.step, icons.never)
+  end
+
+  -- The per-frame pass: fill the full-map layer from the records while the
+  -- map is up, then draw everything queued (SPEC 21.2.7, 21.4.4).
+  function icons.frame()
+    if ui_map ~= nil and os.clock() - icons.map_seen < 0.25 and icons:active() then
+      icons:fill(icons.recs, icons.read)
+    end
+    icons:draw()
+  end
+  icons:preload_all()
+end
 local hover_labels = {}   -- icon address -> label
 local hover_stats = { fires = 0, hits = 0, misses = 0, sel_nil = 0,
   same_fallback_n = 0 }
@@ -303,12 +415,15 @@ re.on_frame(function()
       else
         local mr = minimap_renderer
         logmsg(string.format(
-          "Minimap: candidates %d, clipped %d, shown %d, dropped %d, pool %d, free %d, post %.2f ms, nearest %s, owned %d, hud changes %d, status %s",
-          mr.candidates_n, mr.clipped, mr.shown, mr.dropped, mr.pool_n, mr.free_n,
+          "Minimap: candidates %d, clipped %d, shown %d, dropped %d, pool %s, free %s, post %.2f ms, nearest %s, owned %d, hud changes %d, status %s",
+          mr.candidates_n, mr.clipped, mr.shown, mr.dropped,
+          mr.icons_mode and "-" or tostring(mr.pool_n),
+          mr.icons_mode and "-" or tostring(mr.free_n),
           math.max(minimap_post_ms_shown, minimap_post_ms),
           mr.nearest ~= nil and string.format("%.0f m", mr.nearest) or "-",
           #mr.owned, mr.hud_changes, mr.status))
       end
+      logmsg(icons:stats_line())
       local cs = A.catalog_stats()
       logmsg(string.format(
         "Catalog: %d entries, %d skipped (%d cast), %d distinct side IDs (%d total)",
@@ -400,6 +515,8 @@ re.on_frame(function()
       journal_spoilers = settings.journal_spoilers,
       prev_journal = snapshot and snapshot.journal,
       prev_journal_all = snapshot and snapshot.journal_all,
+      step_icons = settings.step_icons,
+      prev_quest_steps = snapshot and snapshot.quest_steps,
       now = now,
       search = core.parse_query(settings.search_text),   -- SPEC 19.5; nil = no search
     }
@@ -524,6 +641,7 @@ do
   -- id per marker, the hover label and the debug line.
   local function begin_rebuild()
     hover_labels = {}
+    icons.recs = {}
     added_count, dropped_count = 0, 0
     return settings.enabled and snapshot ~= nil
   end
@@ -532,8 +650,10 @@ do
     if pool ~= nil then pool_used, pool_limit = used, limit end
   end
   local function note_dropped() dropped_count = dropped_count + 1 end
+  -- SPEC 21.4.2, Ruling 3: the game icon type written is always the id
+  -- that has full-map art, so the hidden glyph keeps its hover area.
   local function marker_icon_type(m)
-    return su.icon_of(settings, m.cat)
+    return su.icon_for(settings, m, "map", m.step, icons.never)
   end
   local function marker_unique_id(m)
     -- v8 (SPEC 15.3j): the prefix per marker is chosen in the adapter
@@ -545,6 +665,19 @@ do
   end
   local function marker_argb(m)
     return su.marker_color(settings, m)
+  end
+  -- Queues the marker's picture for the draw pass when it can be drawn;
+  -- true means the game glyph is hidden (alpha byte 0).
+  local function note_picture(pool, ref, m)
+    if pool.label ~= "sprite" then return false end
+    local pid = su.icon_for(settings, m, "head", m.step, icons.never)
+    if not icons:drawable(pid) then return false end
+    local sprite = ref.Sprite
+    if sprite == nil then return false end
+    local recs = icons.recs
+    recs[#recs + 1] = { marker = m, id = pid, ref = ref, sprite = sprite,
+      size = icons.map_size(sprite), argb = marker_argb(m) }
+    return true
   end
   local function log_rebuild()
     if settings.debug then
@@ -592,7 +725,10 @@ do
             saved_styles[#saved_styles + 1] = {
               ref = ref, scale = ref:get_Scale(), prio = ref:get_Prio(),
               color = okc and col or nil }
-            color_obj:write_dword(UINT_OFF, A.argb_to_abgr(marker_argb(m)))
+            local argb = marker_argb(m)
+            local okn, hidden = pcall(note_picture, pool, ref, m)
+            if okn and hidden then argb = argb & 0x00FFFFFF end
+            color_obj:write_dword(UINT_OFF, A.argb_to_abgr(argb))
             ref:set_Color(color_obj:get_address() + UINT_OFF)
           end
         end
@@ -625,12 +761,14 @@ do
     note_ctor()
     hover_labels = {}
     saved_styles = {}
+    icons.recs = {}
     -- deliberate rebuilds get exactly one updateMapIcon; the refire stops on the unchanged sig
     last_add_sig = nil
   end)
   A.hook_method("app.ui040205", "onDestroy", function(args)
     hover_labels = {}
     saved_styles = {}
+    icons.recs = {}
     ui_map = nil
     wt.set_map_origin(nil, nil)   -- SPEC 20.12.7
   end)
@@ -690,8 +828,14 @@ minimap_renderer = require("Clairvoyance.minimap").create({
     ref:set_Color(minimap_color_obj:get_address() + UINT_OFF)
   end,
   icon_for = function(m)
-    return su.icon_of(settings, m.cat)
+    return su.icon_for(settings, m, "mini", m.step, icons.drawable_fn)
   end,
+  icons_on = function() return icons:active() end,
+  frame_info = icons.frame_info,
+  push = icons.mini_push,
+  mini_replace = icons.mini_clear,
+  picture_for = icons.picture_for,
+  drawable = icons.drawable_fn,
   color_for = function(m)
     return su.marker_color(settings, m)
   end,
@@ -859,12 +1003,21 @@ local function overhead_draw_one(marker, px, py, pz, d2, name_d2)
   end
   if sp == nil then return 0 end
   local argb = su.color_of(settings, marker.cat)
-  draw.filled_circle(sp.x, sp.y, 8, 0xFF000000, 24)
-  draw.filled_circle(sp.x, sp.y, 6, A.argb_to_abgr(argb), 24)
+  -- SPEC 21.6: the category picture when it can be drawn, else the v12 dots.
+  local pid = su.icon_for(settings, marker, "head", marker.step, icons.drawable_fn)
+  local pic = icons:drawable(pid)
+  local label_dy = 10
+  if pic then
+    icons:push("head", pid, sp.x, sp.y, 24, argb, 1)
+    label_dy = 12 * icons:k() + 2
+  else
+    draw.filled_circle(sp.x, sp.y, 8, 0xFF000000, 24)
+    draw.filled_circle(sp.x, sp.y, 6, A.argb_to_abgr(argb), 24)
+  end
   if d2 <= name_d2 then
     local label = marker.label or ""
     local w = label_width(label)
-    local tx, ty = sp.x - w / 2, sp.y + 10
+    local tx, ty = sp.x - w / 2, sp.y + label_dy
     draw.text(label, tx + 1, ty + 1, 0xFF000000)
     draw.text(label, tx, ty, 0xFFFFFFFF)
   end
@@ -1017,6 +1170,7 @@ do
     return retval
   end)
   A.hook_method("app.ui040205", "update", function(args)
+    icons.map_seen = os.clock()   -- SPEC 21.4.4, Ruling 6
     if want_update and ui_map ~= nil then
       want_update = false
       -- deliberate rebuilds get exactly one updateMapIcon; the refire stops on the unchanged sig
@@ -1079,6 +1233,12 @@ local function install_debug()
           -- the typing path: no last_tick reset, the 2 s save throttle applies
           settings.search_text = su.cut_search(v)
           settings_dirty = true; want_update = true
+        elseif key == "matching_icons" then
+          settings.matching_icons = v == true
+          want_update = true; save_settings(); icons:preload_all()
+        elseif key == "step_icons" then
+          settings.step_icons = v == true
+          want_update = true; last_tick = 0.0; save_settings(); icons:preload_all()
         elseif key == "world_max_markers" then
           if type(v) == "number" then
             settings.world_max_markers = su.clamp_int(v, 0, su.WORLD_MAX_MARKERS)
@@ -1138,7 +1298,8 @@ local function install_debug()
             expanded_union(), settings.journal_spoilers) or {}, jumps = jumps,
           tracked_qid = snapshot and snapshot.tracked_qid or nil,
           map_ctor_n = map_ctor_n, setup_icon_n = setup_icon_n,
-          same_fallback_n = hover_stats.same_fallback_n }
+          same_fallback_n = hover_stats.same_fallback_n,
+          draw = icons:stats_line() }
       end,
     }
   else
@@ -1289,8 +1450,26 @@ local function draw_body()
     minimap_renderer:clear_suspension()
   end
   if imgui.tree_node("Icons and colors") then
-    -- One icon per category, the same on map and minimap (choices are
-    -- the types both atlases draw). Uses color_picker_argb:
+    if not icons:available() then
+      imgui.text("Matching icons need the D2DX plugin (Dragon's Dogma 2 mod 1261).")
+    end
+    changed, settings.matching_icons =
+      imgui.checkbox("Matching icons (D2DX)", settings.matching_icons)
+    if changed then
+      want_update = true; save_settings(); icons:preload_all()
+    end
+    changed, settings.step_icons =
+      imgui.checkbox("Numbered icons for in-progress quests", settings.step_icons)
+    if changed then
+      want_update = true; last_tick = 0.0; save_settings(); icons:preload_all()
+    end
+    if imgui.button("Reset icons and colors to defaults") then
+      su.reset_icons(settings)
+      save_settings(); icons:preload_all(); want_update = true
+    end
+    -- One icon per category, the same on every surface (choices are every
+    -- picture in the icon folder except the reserved type numbers and
+    -- None, SPEC 21.7.3). Uses color_picker_argb:
     -- plain color_picker takes/returns ABGR.
     local rows = {
       { "startable", "Startable" }, { "in_progress", "In progress" },
@@ -1307,6 +1486,7 @@ local function draw_body()
           su.ICON_INDEX[settings[ik]] or 1, su.ICON_LABELS)
         if ic and su.ICON_CHOICES[ni] then
           settings[ik] = su.ICON_CHOICES[ni][1]; want_update = true; save_settings()
+          icons:preload_all()
         end
         local pc, nv = imgui.color_picker_argb("Color##" .. r[1], settings[ck])
         if pc then settings[ck] = nv; want_update = true; save_settings() end
@@ -1499,9 +1679,10 @@ local function draw_body()
     else
       local mr = minimap_renderer
       imgui.text(string.format(
-        "Minimap: candidates %d, clipped %d, shown %d, dropped %d, pool %d, free %d, post %.2f ms, nearest %s, owned %d, hud changes %d, status %s",
+        "Minimap: candidates %d, clipped %d, shown %d, dropped %d, pool %s, free %s, post %.2f ms, nearest %s, owned %d, hud changes %d, status %s",
         mr.candidates_n, mr.clipped, mr.shown, mr.dropped,
-        mr.pool_n, mr.free_n,
+        mr.icons_mode and "-" or tostring(mr.pool_n),
+        mr.icons_mode and "-" or tostring(mr.free_n),
         math.max(minimap_post_ms_shown, minimap_post_ms),
         mr.nearest ~= nil and string.format("%.0f m", mr.nearest) or "-",
         #mr.owned, mr.hud_changes, mr.status))
@@ -1703,5 +1884,18 @@ re.on_frame(function()
     end
   end
 end)
+
+-- v13 (SPEC 21.2.7): after the overhead callback, so this frame's "head"
+-- records are queued before the draw pass. Defined once; no closure per frame.
+do
+  local icons_err
+  re.on_frame(function()
+    local ok, err = pcall(icons.frame)
+    if not ok and tostring(err) ~= icons_err then
+      icons_err = tostring(err)
+      logerr("icons: " .. icons_err)
+    end
+  end)
+end
 
 logmsg("loaded")
