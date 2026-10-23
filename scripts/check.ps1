@@ -11,10 +11,10 @@ $fail = $false
 $allowed = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread",
   "require","table","string","math","os","pairs","ipairs","type","tostring",
   "tonumber","pcall","xpcall","error","assert","select","print","package",
-  "rawget","rawset","setmetatable","getmetatable","next","io","_G","coroutine","draw")
+  "rawget","rawset","setmetatable","getmetatable","next","io","_G","coroutine","draw","d2dx")
 # Pure modules take every game access by injection: no host globals at all.
-$pure = @("core.lua","settings_util.lua","minimap.lua","jump.lua")
-$hostGlobals = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread","draw","_G")
+$pure = @("core.lua","settings_util.lua","minimap.lua","jump.lua","icons.lua")
+$hostGlobals = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread","draw","_G","d2dx")
 Get-ChildItem -Recurse -Filter *.lua -Path (Join-Path $root "reframework") | ForEach-Object {
     & $Lua -e "assert(loadfile([[$($_.FullName)]]))"
     if ($LASTEXITCODE -ne 0) { Write-Host "SYNTAX FAIL: $($_.FullName)"; $script:fail = $true }
