@@ -1510,15 +1510,27 @@ function M.new(a, reads, io)
     end
     local nb = c.nb
     while c.b < nb do
+      -- size the read from the running mean ms a node (first read 16 nodes)
+      local count = 16
+      if (c.tn or 0) > 0 then
+        count = math.floor((limit - (clock() - t0)) / (c.tsum / c.tn))
+        if count < 1 then
+          if c.did then return end
+          count = 1
+        end
+      end
+      local first = c.k or 1
       local tb = clock()
-      local n = reads.graph_block(c.b, blockbuf)
-      if type(n) ~= "number" or n < 0 then error("bad graph block") end
+      local n, filled = reads.graph_block(c.b, blockbuf, first, count)
+      if type(n) ~= "number" or n < 0 or type(filled) ~= "number" or filled < 0 then
+        error("bad graph block")
+      end
       local x, y, z, lc, lb, ln = c.x, c.y, c.z, c.lc, c.lb, c.ln
       local bx, by, bz, blc = blockbuf.x, blockbuf.y, blockbuf.z, blockbuf.lc
       local nn, nl = c.nn, c.nl
-      c.off[c.b + 1] = nn
+      if first == 1 then c.off[c.b + 1] = nn end
       local tl = 0
-      for k = 1, n do
+      for k = 1, filled do
         nn = nn + 1
         x[nn], y[nn], z[nn] = bx[k], by[k], bz[k]
         local m = blc[k]
@@ -1530,12 +1542,22 @@ function M.new(a, reads, io)
         lb[nl + k], ln[nl + k] = blb[k], bln[k]
       end
       c.nn, c.nl = nn, nl + tl
-      c.b = c.b + 1
+      if filled > 0 and first + filled - 1 < n then
+        c.k = first + filled
+      else
+        c.k = nil
+        c.b = c.b + 1
+      end
       local now = clock()
-      c.tsum = (c.tsum or 0) + (now - tb)
-      -- stop before a block that would likely overrun the budget
-      if now - t0 + c.tsum / c.b >= limit then return end
+      if filled > 0 then
+        c.tsum = (c.tsum or 0) + (now - tb)
+        c.tn = (c.tn or 0) + filled
+      end
+      c.did = true
+      -- stop before a read that would likely overrun the budget
+      if now - t0 >= limit then c.did = nil; return end
     end
+    c.did = nil
     if c.ri == nil then
       c.ri, c.rslot, c.wslot, c.ls, c.lt = 1, 1, 0, {}, {}
     end
@@ -2400,20 +2422,27 @@ function M.game_reads()
     return n
   end
 
-  -- Fills out.x, out.y, out.z, out.lc per node and out.lb, out.ln per link
-  -- (the links of node 1, then node 2, ...); returns the node count.
-  function R.graph_block(i, out)
+  -- Fills out.x, out.y, out.z, out.lc from index 1 for nodes first ..
+  -- first + count - 1 of block i (1-based, clamped to the block) and
+  -- out.lb, out.ln for those nodes' links in node order; returns the
+  -- block's node count and the number of nodes filled.
+  function R.graph_block(i, out, first, count)
     local block = managed(C(graph_blocks(), "get_Item", i), "no block")
     local list = managed(G(block, "Nodes"), "no node list")
     local n = C(list, "get_Count")
     if type(n) ~= "number" then error("graph: node count") end
+    local lo = first or 1
+    if lo < 1 then lo = 1 end
+    local hi = count ~= nil and lo + count - 1 or n
+    if hi > n then hi = n end
     local x, y, z, lc, lb, ln = out.x, out.y, out.z, out.lc, out.lb, out.ln
-    local nl = 0
-    for k = 1, n do
+    local nl, f = 0, 0
+    for k = lo, hi do
+      f = f + 1
       local node = managed(C(list, "get_Item", k - 1), "no node")
       local p = xyz(G(node, "_Pos"))
       if p == nil then error("graph: node position") end
-      x[k], y[k], z[k] = p.x, p.y, p.z
+      x[f], y[f], z[f] = p.x, p.y, p.z
       local links = managed(G(node, "Links"), "no links")
       local m = C(links, "get_Count")
       if type(m) ~= "number" then error("graph: link count") end
@@ -2424,9 +2453,9 @@ function M.game_reads()
         nl = nl + 1
         lb[nl], ln[nl] = b, ix
       end
-      lc[k] = m
+      lc[f] = m
     end
-    return n
+    return n, f
   end
 
   -- Drops every held game object (new save session).
