@@ -974,7 +974,8 @@ do
       return nil
     end
     function o:get_type_definition()
-      return { get_name = function() return tname end }
+      return { get_name = function() return tname end,
+        get_full_name = function() return tname end }
     end
     return o
   end
@@ -1323,6 +1324,193 @@ do
     local rk, vl = R.sentiment(h0.holder)
     check("reads: sentiment rank and value", rk == 100 and vl == 137)
     check("reads: unreadable sentiment raises", not pcall(R.sentiment, obj({})))
+  end
+
+  -- quest override rows (SPEC 26)
+  do
+    local R = world.game_reads()
+    local function qrow(sh, eh, key)
+      return obj({ StartWeek = 1, EndWeek = 4, StartDay = 0, EndDay = 6, StartHour = sh,
+        EndHour = eh, Location = -1, LocalArea = -1, Priority = 0, TargetKeyLocation = key })
+    end
+    local function qdict(map)
+      return obj(nil, { ContainsKey = function(k) return map[k] ~= nil end,
+        get_Item = function(k)
+          if map[k] == nil then error("fake missing key") end
+          return map[k]
+        end })
+    end
+    local function flag()
+      return obj({ _Entity = obj({ _ValueType = 1 }, { evaluate = function() return false end }) },
+        nil, "app.quest.condition.CheckVariable")
+    end
+    local function step(v)
+      return obj({ _Entity = obj({ _ValueType = 2 }, { evaluate = function()
+        if v == "raise" then error("fake evaluate failure") end
+        return v
+      end }) }, nil, "app.quest.condition.CheckVariable")
+    end
+    local function tod() return obj({}, nil, "app.quest.condition.CheckTimeOfDay") end
+    local function grp(op, nodes)
+      return obj({ _Operator = op, _Entity = array(nodes) }, nil,
+        "app.quest.condition.CheckCondiiton")
+    end
+    -- the top-level condition: array, operator, no-condition flag, own evaluate()
+    local function cond(op, nodes, noenable, ev)
+      return obj({ _Operator = op, _ConditionArray = array(nodes),
+        _IsNoConditonEnable = noenable }, { evaluate = function()
+          if ev == "raise" then error("fake evaluate failure") end
+          return ev
+        end }, "app.quest.condition.NpcOverrideConditionEntity")
+    end
+    -- an entry carrying one row keyed `key` (o.rows overrides the row list)
+    local function entry(addr, key, c, o)
+      o = o or {}
+      local rows = o.rows or { qrow(6, 15, key) }
+      local sched = obj({ _Schedule = o.badsched and obj() or list(rows) })
+      local e = obj({ QuestID = o.quest or 1, ConditionEntity = c, OverrideData = obj({
+        _Schedule = sched }, { checkEnableScheduleData = function()
+          return o.disabled ~= true end }) })
+      function e:get_address() return addr end
+      return e
+    end
+    local function setup(all, applied, inactive)
+      singletons["app.QuestManager"] = obj({ NpcOverrideDict = qdict(all),
+        CurrentNpcOverrideDict = qdict(applied) }, { checkActivated = function(q)
+          return not (inactive and inactive[q]) end })
+    end
+    -- the keys of the rows one read gives, in order
+    local function keys(rows)
+      if type(rows) ~= "table" then return tostring(rows) end
+      local t = {}
+      for i, r in ipairs(rows) do t[i] = r.key end
+      return table.concat(t, ",")
+    end
+    -- one entry for cid 1, applied (so the quest steers the NPC)
+    local function one(e, inactive)
+      setup({ [1] = list({ e }) }, { [1] = e }, inactive)
+      return keys(R.quest_overrides(1))
+    end
+
+    check("quest ov: flag leaf is unknown, entry kept",
+      one(entry(10, 101, cond(0, { flag() }, false))) == "101")
+    check("quest ov: step leaf false drops the entry",
+      one(entry(10, 101, cond(0, { step(false) }, false))) == "")
+    check("quest ov: step leaf true keeps the entry",
+      one(entry(10, 101, cond(0, { step(true) }, false))) == "101")
+    check("quest ov: all with a false step and a flag drops the entry",
+      one(entry(10, 101, cond(0, { flag(), step(false) }, false))) == "")
+    check("quest ov: any with a true step and a flag keeps the entry",
+      one(entry(10, 101, cond(1, { flag(), step(true) }, false))) == "101")
+    check("quest ov: any with a false step and a flag stays unknown, kept",
+      one(entry(10, 101, cond(1, { flag(), step(false) }, false))) == "101")
+    check("quest ov: any with only false steps drops the entry",
+      one(entry(10, 101, cond(1, { step(false), step(false) }, false))) == "")
+    check("quest ov: other node kinds are unknown, entry kept",
+      one(entry(10, 101, cond(0, { tod() }, false))) == "101")
+    check("quest ov: nested group true keeps the entry",
+      one(entry(10, 101, cond(0, { grp(1, { step(false), step(true) }), step(true) }, false)))
+        == "101")
+    check("quest ov: nested group false drops the entry",
+      one(entry(10, 101, cond(0, { grp(1, { step(false), step(false) }), step(true) }, false)))
+        == "")
+    check("quest ov: empty array with the no-condition flag is kept",
+      one(entry(10, 101, cond(0, {}, true))) == "101")
+    check("quest ov: empty array without the flag is dropped",
+      one(entry(10, 101, cond(0, {}, false))) == "")
+    check("quest ov: an empty nested group is unknown, entry kept",
+      one(entry(10, 101, cond(0, { grp(0, {}) }, false))) == "101")
+    check("quest ov: an empty nested group under any is unknown, entry kept",
+      one(entry(10, 101, cond(1, { grp(1, {}) }, false))) == "101")
+    check("quest ov: no ConditionEntity is unknown, entry kept",
+      one(entry(10, 101, nil)) == "101")
+    check("quest ov: no ConditionEntity is still gated by the schedule",
+      one(entry(10, 101, nil, { disabled = true })) == "")
+    check("quest ov: no ConditionEntity is still gated by the quest",
+      one(entry(10, 101, nil, { quest = 7 }), { [7] = true }) == "")
+    check("quest ov: a raised leaf evaluate is unknown, entry kept",
+      one(entry(10, 101, cond(0, { step("raise") }, false))) == "101")
+    check("quest ov: a raised leaf with a false sibling under all still drops",
+      one(entry(10, 101, cond(0, { step("raise"), step(false) }, false))) == "")
+    check("quest ov: schedule disabled drops the entry",
+      one(entry(10, 101, cond(0, { step(true) }, false), { disabled = true })) == "")
+    check("quest ov: quest not activated drops the entry",
+      one(entry(10, 101, cond(0, { step(true) }, false), { quest = 7 }), { [7] = true }) == "")
+    check("quest ov: own evaluate true is kept though the walk says false",
+      one(entry(10, 101, cond(0, { step(false) }, false, true))) == "101")
+    check("quest ov: own evaluate true is still dropped by a disabled schedule",
+      one(entry(10, 101, cond(0, { step(false) }, false, true), { disabled = true })) == "")
+    check("quest ov: a raised own evaluate falls back to the walk",
+      one(entry(10, 101, cond(0, { step(false) }, false, "raise"))) == "")
+    check("quest ov: an entry with no rows adds none",
+      one(entry(10, 101, cond(0, { step(true) }, false), { rows = {} })) == "")
+
+    -- ordering: applied (by address), then other "now" entries, then the rest
+    do
+      local e1 = entry(11, 201, cond(0, { flag() }, false))
+      local e2 = entry(12, 202, cond(0, { step(false) }, false, true))
+      local e3 = entry(13, 203, cond(0, { flag() }, false))
+      local e4 = entry(14, 204, cond(0, { flag() }, false))
+      local e5 = entry(15, 205, cond(0, { step(true) }, false), { rows = {} })
+      -- the applied object is another instance at the same address
+      local applied = entry(13, 203, cond(0, { flag() }, false))
+      setup({ [1] = list({ e1, e2, e3, e4, e5 }) }, { [1] = applied })
+      check("quest ov: applied entry first, then now entries, then the rest",
+        keys(R.quest_overrides(1)) == "203,202,201,204")
+      local multi = entry(16, 0, cond(0, { flag() }, false),
+        { rows = { qrow(1, 2, 301), qrow(2, 3, 302) } })
+      setup({ [1] = list({ e1, multi }) }, { [1] = e1 })
+      check("quest ov: an entry's rows keep their own order",
+        keys(R.quest_overrides(1)) == "201,301,302")
+    end
+
+    -- two entries that both hold now: the applied entry's rows come first
+    do
+      local a = entry(21, 401, cond(0, { step(true) }, false, true))
+      local b = entry(22, 402, cond(0, { step(true) }, false, true))
+      setup({ [1] = list({ b, a }) }, { [1] = a })
+      check("quest ov: two now entries, the applied entry's rows come first",
+        keys(R.quest_overrides(1)) == "401,402")
+    end
+
+    -- an unreadable schedule adds no rows, other entries still read
+    do
+      local bad = entry(31, 501, cond(0, { step(true) }, false), { badsched = true })
+      local good = entry(32, 502, cond(0, { step(true) }, false))
+      setup({ [1] = list({ bad, good }) }, { [1] = good })
+      check("quest ov: an unreadable schedule adds no rows, other entries still read",
+        keys(R.quest_overrides(1)) == "502")
+    end
+    -- a per-NPC list that is not an array gives {}
+    do
+      local good = entry(41, 601, cond(0, { step(true) }, false))
+      setup({ [1] = obj() }, { [1] = good })
+      local r = R.quest_overrides(1)
+      check("quest ov: an unreadable per-NPC list gives {}", type(r) == "table" and #r == 0)
+    end
+
+    do
+      local good = entry(51, 701, cond(0, { step(true) }, false))
+      setup({ [1] = list({}) }, { [1] = good })
+      local r = R.quest_overrides(1)
+      check("quest ov: no entries gives {}", type(r) == "table" and #r == 0)
+      setup({}, { [1] = good })
+      r = R.quest_overrides(1)
+      check("quest ov: a cid with no entry list gives {}", type(r) == "table" and #r == 0)
+      setup({ [1] = list({ good }) }, {})
+      r = R.quest_overrides(1)
+      check("quest ov: no applied entry gives {}", type(r) == "table" and #r == 0)
+      singletons["app.QuestManager"] = obj({ NpcOverrideDict = qdict({ [1] = list({ good }) }) },
+        { checkActivated = function() return true end })
+      r = R.quest_overrides(1)
+      check("quest ov: unreadable CurrentNpcOverrideDict gives {}",
+        type(r) == "table" and #r == 0)
+      singletons["app.QuestManager"] = nil
+      check("quest ov: unreadable QuestManager gives nil", R.quest_overrides(1) == nil)
+      singletons["app.QuestManager"] = obj({ CurrentNpcOverrideDict = qdict({}) })
+      check("quest ov: unreadable NpcOverrideDict gives nil", R.quest_overrides(1) == nil)
+    end
+    singletons["app.QuestManager"] = nil
   end
   sdk = saved_sdk
 end
@@ -2345,6 +2533,59 @@ do
     check("reset all: route gone", w:input().route == nil)
     check("reset all: spawned gone", #w.spawned == 0)
   end
+
+  -- quest override rows replace the live overwrite list in a copy (SPEC 26.4)
+  do
+    local function qrun(qfn, with_cur)
+      local f, d = nfix()
+      d.sched_ids = { 2001 }
+      d.npcname[2001] = "Aa"
+      d.rows[2001] = rows_of({ 6, 18, 49 })
+      d.area_nodes[49] = { P(1, 0, 1) }
+      local live = { { start_hour = 20, end_hour = 22, area = -1, location = -1,
+        priority = 0, key = 2309 } }
+      if with_cur ~= false then
+        d.cur[2001] = { area = 49, location = 0, overwrite = live }
+      end
+      if qfn ~= nil then
+        f.reads.quest_overrides = function(cid) return qfn(cid) end
+      end
+      local w = f.new()
+      local tg = on("search")
+      w:refresh(0, true, tg)
+      w:set_route(2001, "Aa")
+      w:refresh(1, true, tg)
+      return stub.last_cur, d, live, w
+    end
+    local qrows = { { start_hour = 6, end_hour = 15, area = -1, location = -1,
+      priority = 0, key = 2302 } }
+
+    local cur, _, live = qrun(function() return nil end)
+    check("quest ov stub: a nil read keeps the live list", cur ~= nil and cur.overwrite == live)
+    cur, _, live = qrun(function() return {} end)
+    check("quest ov stub: an empty read keeps the live list", cur ~= nil and cur.overwrite == live)
+    cur, _, live = qrun(function() error("fake quest read failure") end)
+    check("quest ov stub: a raising read keeps the live list", cur ~= nil and cur.overwrite == live)
+    cur, _, live = qrun(nil)
+    check("quest ov stub: a reads table without quest_overrides keeps the live list",
+      cur ~= nil and cur.overwrite == live)
+    cur, _, live = qrun(function() return "bad" end)
+    check("quest ov stub: a non-table read keeps the live list",
+      cur ~= nil and cur.overwrite == live)
+
+    local d, w
+    cur, d, live, w = qrun(function() return qrows end)
+    check("quest ov stub: the read is timed in stats.ms.quest_overrides",
+      type(w:stats().ms.quest_overrides) == "number")
+    check("quest ov stub: a non-empty read replaces the list in a copy",
+      cur ~= nil and cur.overwrite == qrows and cur ~= d.cur[2001] and cur.area == 49
+      and cur.location == 0)
+    check("quest ov stub: the stored current entry is unchanged",
+      d.cur[2001].overwrite == live and #live == 1 and live[1].key == 2309)
+
+    cur = qrun(function() return qrows end, false)
+    check("quest ov stub: a nil current entry with a non-empty read passes nil", cur == nil)
+  end
 end
 
 -- ===== v14 Task 4: graph copy and route paths (SPEC 23.6) =====
@@ -2922,6 +3163,7 @@ do
     local d = f.data
     d.rows, d.day, d.hour, d.cur, d.keypos, d.area_nodes = {}, 33, 20, {}, {}, {}
     d.holders, d.sent, d.generic, d.hcount, d.area_calls = {}, {}, {}, 0, {}
+    d.qov = {}
     local function rdef(name, fn)
       f.reads[name] = function(...)
         f.reads_n[name] = (f.reads_n[name] or 0) + 1
@@ -2937,6 +3179,7 @@ do
       return e.area, e.location, e.key or -1, #(e.overwrite or {})
     end)
     rdef("key_pos", function(key) return d.keypos[key] end)
+    rdef("quest_overrides", function(cid) return d.qov[cid] end)
     rdef("area_nodes", function(row)
       d.area_calls[#d.area_calls + 1] = row
       return d.area_nodes[row.area .. ":" .. tostring(row.location)]
@@ -3026,6 +3269,64 @@ do
     check("real route: key stops get their own discovery answers",
       r ~= nil and r.err == nil and r.stops ~= nil and #r.stops == 2 and r.stops[1].discovered == false
       and r.stops[2].discovered == true)
+  end
+
+
+  -- the quest stage's whole day (SPEC 26.6.2): Albert, qu020090
+  do
+    local stage_keys = { 2301, 2302, 2303, 2304, 2305 }
+    local function albert(hour)
+      local f, d = rfix()
+      d.sched_ids = { 2696 }
+      d.npcname[2696] = "Albert"
+      d.hour = hour
+      d.rows[2696] = { row(6, 18, -1, 7), row(18, 6, 42, -1) }
+      d.area_nodes["-1:7"] = { P(100, 0, 100) }
+      d.area_nodes["42:-1"] = { P(300, 0, 300) }
+      for i, k in ipairs(stage_keys) do d.keypos[k] = P(1000 * i, 0, 5) end
+      return f, d
+    end
+    local function route_of(f)
+      local w = f.new()
+      local tg = on("search")
+      w:refresh(0, true, tg)
+      w:set_route(2696, "Albert")
+      w:refresh(1, true, tg)
+      return w:input().route
+    end
+
+    do
+      local f, d = albert(8)
+      d.cur[2696] = { area = -1, location = -1, key = 2302, pos = P(6666, 0, 7),
+        overwrite = { row(6, 15, -1, -1, 2302), row(15, 20, -1, -1, 2303) } }
+      d.qov[2696] = { row(6, 15, -1, -1, 2302), row(15, 20, -1, -1, 2303),
+        row(20, 22, -1, -1, 2304), row(22, 3, -1, -1, 2305), row(3, 6, -1, -1, 2301) }
+      local r = route_of(f)
+      local froms, ok = {}, r ~= nil and r.err == nil and r.stops ~= nil
+      if ok then
+        for i, s in ipairs(r.stops) do
+          froms[i] = s.from
+          local want = (s.key == 2302) and 6666 or 1000 * (s.key - 2300)
+          if s.pos.x ~= want then ok = false end
+        end
+      end
+      check("quest ov real: five stops in order 3, 6, 15, 20, 22",
+        r ~= nil and r.stops ~= nil and #r.stops == 5 and table.concat(froms, ",") == "3,6,15,20,22")
+      check("quest ov real: key positions, the current stop at cur.pos, no off_schedule",
+        ok and r.off_schedule == nil)
+    end
+
+    -- the applied entry's place wins when two "now" entries differ at the hour
+    do
+      local f, d = albert(8)
+      d.cur[2696] = { area = -1, location = -1, key = 2302, pos = P(6666, 0, 7),
+        overwrite = { row(6, 15, -1, -1, 2302) } }
+      d.qov[2696] = { row(0, 24, -1, -1, 2302), row(0, 24, -1, -1, 2303) }
+      local r = route_of(f)
+      check("quest ov real: the applied entry's place wins",
+        r ~= nil and r.err == nil and #r.stops == 1 and r.stops[1].key == 2302
+        and r.stops[1].pos.x == 6666 and r.off_schedule == nil)
+    end
   end
 
   package.loaded["Clairvoyance.npcs"] = saved_loaded
