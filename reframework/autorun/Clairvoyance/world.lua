@@ -200,7 +200,7 @@ function M.new(a, reads, io)
       disc_cache = {}, need_sort = true, file_monsters = {}, held = {}, live = {},
       drop_ids = nil,
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
-      npc_list = {}, npc_next = 1, npc_done = false, npc_sig = "",
+      npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
       route_cid = nil, route_name = nil, route_cache = nil,
       sent = {}, walk_i = 0, walk_n = 0, walk_acc = {} }
   end
@@ -986,8 +986,11 @@ function M.new(a, reads, io)
   local function npc_round(tg)
     local t0 = clock()
     build_names()
+    local dt = (clock() - t0) * 1000
+    S.npc_ms = S.npc_ms + dt
+    if dt > (stats.npcs_max_slice_ms or 0) then stats.npcs_max_slice_ms = dt end
     if S.npc_done and stats.npcs_first_ms == nil then
-      stats.npcs_first_ms = (clock() - t0) * 1000
+      stats.npcs_first_ms = S.npc_ms
     end
     local want = cid_set(tg.npc_cids)
     local out = {}
@@ -996,12 +999,12 @@ function M.new(a, reads, io)
       if want[e.cid] then
         local ok, alive = pcall(a.npc_alive, e.cid)
         n.alive = ok and alive == true
-        n.pos = seller_pos(e.cid)
+        local okp, p = pcall(seller_pos, e.cid)
+        n.pos = okp and p or nil
         if n.pos ~= nil then n.discovered = discovered("n:" .. e.cid, n.pos) end
       end
       out[i] = n
     end
-    S.npc_sig = cid_signature(tg.npc_cids)
     return out
   end
 
@@ -1036,11 +1039,13 @@ function M.new(a, reads, io)
     local okn, day, hour = pcall(reads.schedule_now)
     if not okn or type(day) ~= "number" or type(hour) ~= "number" then return errt end
     local c = S.route_cache
-    if c == nil or c.cid ~= cid or c.hour ~= hour then
+    if c == nil or c.cid ~= cid or c.hour ~= hour or c.day ~= day then
       local ok, built = pcall(function()
         return build_route(require("Clairvoyance.npcs"), cid, day, hour)
       end)
-      c = { cid = cid, hour = hour, value = ok and built or nil }
+      -- a failed build is not kept: the next round retries it
+      if not ok then return errt end
+      c = { cid = cid, hour = hour, day = day, value = built }
       S.route_cache = c
     end
     if c.value == nil then return errt end
@@ -1049,7 +1054,7 @@ function M.new(a, reads, io)
     for i, st in ipairs(c.value.stops) do
       local n = {}
       for k, v in pairs(st) do n[k] = v end
-      if valid_pos(st.pos) then n.discovered = discovered("r:" .. tostring(st.area), st.pos) end
+      if valid_pos(st.pos) then n.discovered = discovered("r:" .. tostring(st.area) .. ":" .. tostring(st.location), st.pos) end
       stops[i] = n
     end
     return { cid = cid, name = name, stops = stops, unplaced = c.value.unplaced }
@@ -1313,6 +1318,7 @@ function M.new(a, reads, io)
     end
     last_round, last_now = now, now
     rerun = false
+    if tg.search then S.npc_sig = cid_signature(tg.npc_cids) end
     local rt0 = clock()
     local ok, res = pcall(round, now, tg)
     stats.round_ms = (clock() - rt0) * 1000
@@ -1409,7 +1415,7 @@ function M.new(a, reads, io)
     last_round = nil
     unlisted = 0
     stats.search_first_ms = nil
-    stats.npcs_first_ms = nil
+    stats.npcs_first_ms, stats.npcs_max_slice_ms = nil, nil
     stats.drops_first_ms, stats.drops = nil, nil
     w.spawned = {}
   end
@@ -1439,6 +1445,7 @@ function M.new(a, reads, io)
       index = { hits = stats.hits, misses = stats.misses },
       unlisted = unlisted, ms = ms, known = known, monster_ids = ids,
       search_first_ms = stats.search_first_ms, npcs_first_ms = stats.npcs_first_ms,
+      npcs_max_slice_ms = stats.npcs_max_slice_ms,
       round_ms = stats.round_ms,
       drops_first_ms = stats.drops_first_ms, drops = drops,
       rounds = stats.rounds, saves = stats.saves, save_ms = stats.save_ms,

@@ -1756,7 +1756,9 @@ do
     rdef("schedule_rows", function(cid) return d.rows[cid] end)
     rdef("schedule_now", function() return d.day, d.hour end)
     rdef("current_row", function(cid) return d.cur[cid] end)
-    rdef("area_nodes", function(row) return d.area_nodes[row.area] end)
+    rdef("area_nodes", function(row)
+      return d.area_nodes[row.area .. ":" .. tostring(row.location)] or d.area_nodes[row.area]
+    end)
     rdef("holder_count", function() return d.hcount end)
     rdef("holder_at", function(i) return d.holders[i] end)
     rdef("sentiment", function(h) return d.sent[h.cid] and d.sent[h.cid].rank,
@@ -1907,11 +1909,12 @@ do
     d.rows[2001] = rows_of({ 6, 18, 49 }, { 18, 6, 46 }, { 0, 1, 99 })
     d.cur[2001] = { area = 49, location = 0, pos = P(5, 5, 5) }
     d.area_nodes[49] = { P(1, 0, 1), P(2, 0, 2) }
-    d.area_nodes[46] = { P(3, 0, 3) }
+    d.area_nodes[46] = { P(990, 0, 990) }
     d.icons = {
-      { type = K.SETTLEMENT_TYPE, pos = P(0, 0, 0), disp_id = "a", icon_id = 1 } }
-    d.msgs = { a = "Town A" }
-    d.icons_found = {}
+      { type = K.SETTLEMENT_TYPE, pos = P(0, 0, 0), disp_id = "a", icon_id = 1 },
+      { type = K.SETTLEMENT_TYPE, pos = P(1000, 0, 1000), disp_id = "b", icon_id = 2 } }
+    d.msgs = { a = "Town A", b = "Town B" }
+    d.icons_found = { [2] = true }
     d.disc_n = 1
     local w = f.new()
     local tg = on("search")
@@ -1932,8 +1935,8 @@ do
       and stub.last_today.weekday == 5)
     check("route: stop discovered asked (undiscovered town)",
       r and r.stops[1].discovered == false)
-    -- same area key reuses the first answer: move the settlement answer
-    check("route: second stop discovered false too", r and r.stops[2].discovered == false)
+    check("route: each stop asks its own area key (second is in a discovered town)",
+      r and r.stops[2].discovered == true)
     check("route: one build", stub.calls.route_stops == 1)
     -- unchanged hour reuses cache
     w:poke()
@@ -1941,6 +1944,15 @@ do
     check("route: unchanged hour reuses the cache", stub.calls.route_stops == 1
       and w:input().route and #w:input().route.stops == 2)
     check("route: cache reads rows once", (f.reads_n.schedule_rows or 0) == 1)
+    -- a new day at the same hour rebuilds
+    d.day = 34
+    w:poke()
+    w:refresh(2.5, true, tg)
+    check("route: day change at the same hour rebuilds", stub.calls.route_stops == 2)
+    d.day = 33
+    w:poke()
+    w:refresh(2.6, true, tg)
+    stub.calls.route_stops = 1
     -- hour change rebuilds once
     d.hour = 8
     w:poke()
@@ -1981,6 +1993,10 @@ do
     check("route err: raising schedule_rows", r ~= nil and r.err == "route unavailable"
       and r.cid == 2001 and r.name == "Aa" and r.stops == nil)
     f.fail.schedule_rows = nil
+    w:poke()
+    w:refresh(0.5, true, tg)
+    check("route err: a failed build is retried the next round, same hour",
+      w:input().route.err == nil and #w:input().route.stops == 1)
     d.hour = 9
     w:set_route(2001, "Aa")
     w:refresh(1, true, tg)
@@ -2030,6 +2046,70 @@ do
     check("route: anchor_node picks the stop position", #r.stops == 1
       and r.stops[1].pos.x == 9)
     check("route: empty node list stays unplaced", r.unplaced == 1)
+  end
+
+  -- -1 stops are keyed by area and location
+  do
+    local f, d = nfix()
+    d.sched_ids = { 2001 }
+    d.npcname[2001] = "Aa"
+    d.rows[2001] = rows_of({ 6, 12, -1, 6 }, { 12, 18, -1, 7 })
+    d.cur[2001] = { area = 49, location = 0 }
+    d.area_nodes["-1:6"] = { P(5, 0, 5) }
+    d.area_nodes["-1:7"] = { P(995, 0, 995) }
+    d.icons = {
+      { type = K.SETTLEMENT_TYPE, pos = P(0, 0, 0), disp_id = "a", icon_id = 1 },
+      { type = K.SETTLEMENT_TYPE, pos = P(1000, 0, 1000), disp_id = "b", icon_id = 2 } }
+    d.msgs = { a = "Town A", b = "Town B" }
+    d.icons_found = { [2] = true }
+    d.disc_n = 1
+    local w = f.new()
+    w:set_route(2001, "Aa")
+    w:refresh(0, true, on("search"))
+    local r = w:input().route
+    check("route key: area -1 with different locations asked separately",
+      r and #r.stops == 2 and r.stops[1].discovered == false
+      and r.stops[2].discovered == true)
+  end
+
+  -- a failing position read does not lose the round
+  do
+    local f, d = nfix()
+    d.sched_ids = { 2001 }
+    d.npcname[2001] = "Aa"
+    f.afail.npc_alive = true
+    local w = f.new()
+    local tg = { search = true, npc_cids = { 2001 } }
+    check("npc pos: failing alive read keeps the round", w:refresh(0, true, tg) == true
+      and #w:input().npcs == 1 and w:input().npcs[1].pos == nil)
+    check("npc pos: signature recorded, no back-to-back rounds",
+      w:refresh(1, true, tg) == false)
+  end
+
+  -- npcs_first_ms spans the whole build
+  do
+    local f, d = nfix()
+    d.sched_ids = ids(450)
+    for _, c in ipairs(d.sched_ids) do d.npcname[c] = "N" .. c end
+    local base = f.adapter.npc_name
+    f.adapter.npc_name = function(cid)
+      f.clock_t = f.clock_t + 0.001
+      return base(cid)
+    end
+    local w = f.new()
+    local tg = on("search")
+    w:refresh(0, true, tg)
+    check("first ms: nil after round 1", w:stats().npcs_first_ms == nil)
+    w:refresh(0.1, true, tg)
+    w:refresh(0.2, true, tg)
+    local st = w:stats()
+    check("first ms: total spans all three rounds (450 reads of 1 ms)",
+      st.npcs_first_ms ~= nil and st.npcs_first_ms > 449 and st.npcs_first_ms < 451)
+    check("first ms: largest slice recorded (200 reads)",
+      st.npcs_max_slice_ms ~= nil and st.npcs_max_slice_ms > 199
+      and st.npcs_max_slice_ms < 201)
+    w:reset()
+    check("first ms: reset clears the slice maximum", w:stats().npcs_max_slice_ms == nil)
   end
 
   -- spawned holders
