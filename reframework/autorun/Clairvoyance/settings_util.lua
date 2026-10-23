@@ -24,6 +24,10 @@ function M.defaults()
     color_token = 0xFFC792EA, color_beetle = 0xFFB5E550,
     icon_token = 57, icon_beetle = 46,
     search_text = "",
+    overhead_names = 0, inventory_quest_marks = true,
+    color_npc_search = 0xFFF06292, color_route_stop = 0xFFF8BBD0,
+    color_hint_pin = 0xFF00E676,
+    icon_npc_search = 31, icon_route_stop = 25, icon_hint_pin = 58,
   }
 end
 
@@ -99,7 +103,8 @@ M.HAS_FULLMAP = {
 M.V12_ICON = { icon_startable = 52, icon_in_progress = 0, icon_completed = 42,
   icon_unavailable = 21, icon_locked = 41, icon_quest_item = 53,
   icon_chest = 31, icon_treasure = 58, icon_monster = 29, icon_seller = 13,
-  icon_token = 57, icon_beetle = 73 }
+  icon_token = 57, icon_beetle = 73,
+  icon_npc_search = 31, icon_route_stop = 25, icon_hint_pin = 58 }
 M.V12_COLOR = { icon_color = 0xFF960707, color_in_progress = 0xFFD7A500,
   color_completed = 0xFF2E8B57, color_unavailable = 0xFF787878,
   color_locked = 0xFF46468C, color_quest_item = 0xFF00C8FF,
@@ -161,7 +166,8 @@ M.WORLD_BOOLS = { "world_chests", "world_treasure", "world_tokens",
 M.WORLD_LABEL = { chest = "Chests", treasure = "Treasure spots",
   token = "Seeker's Tokens", beetle = "Golden Trove Beetles",
   monster = "Monsters", seller = "Quest-item sellers",
-  shop = "Shop stock", shops = "Shops" }
+  shop = "Shop stock", shops = "Shops",
+  npc_search = "NPCs", route_stop = "Route stops", hint_pin = "Hint pins" }
 M.WORLD_BOOL_LABEL = { world_chests = M.WORLD_LABEL.chest,
   world_treasure = M.WORLD_LABEL.treasure, world_tokens = M.WORLD_LABEL.token,
   world_beetles = M.WORLD_LABEL.beetle, world_monsters = "Large monsters",
@@ -173,16 +179,18 @@ M.WORLD_BOOL_LABEL = { world_chests = M.WORLD_LABEL.chest,
 local BOOL_KEYS = { "enabled", "debug", "show_startable", "show_in_progress",
   "show_completed", "show_unavailable", "show_locked", "show_overhead", "show_minimap",
   "reveal_gate_names", "show_quest_items", "journal_spoilers",
-  "matching_icons", "step_icons" }
+  "matching_icons", "step_icons", "inventory_quest_marks" }
 for _, k in ipairs(M.WORLD_BOOLS) do BOOL_KEYS[#BOOL_KEYS + 1] = k end
 local COLOR_KEYS = { "icon_color", "color_in_progress", "color_completed",
   "color_unavailable", "color_locked", "color_quest_item",
   "color_chest", "color_treasure", "color_monster", "color_seller",
-  "color_token", "color_beetle" }
+  "color_token", "color_beetle",
+  "color_npc_search", "color_route_stop", "color_hint_pin" }
 local ICON_KEYS = { "icon_startable", "icon_in_progress", "icon_completed",
   "icon_unavailable", "icon_locked", "icon_quest_item",
   "icon_chest", "icon_treasure", "icon_monster", "icon_seller",
-  "icon_token", "icon_beetle" }
+  "icon_token", "icon_beetle",
+  "icon_npc_search", "icon_route_stop", "icon_hint_pin" }
 M.ICON_KEYS, M.COLOR_KEYS = ICON_KEYS, COLOR_KEYS
 
 -- Search text: non-string -> ""; at most 64 bytes, cut back to the last
@@ -219,6 +227,7 @@ function M.validate(raw)
   out.overhead_distance = range_field(raw, "overhead_distance", d, 10, 200)
   out.world_max_markers = int_field(raw, "world_max_markers", d, 0, M.WORLD_MAX_MARKERS)
   out.search_text = M.cut_search(raw.search_text)
+  out.overhead_names = int_field(raw, "overhead_names", d, 0, 2)
   return out
 end
 
@@ -230,6 +239,8 @@ M.COLOR_KEY = {
   chest = "color_chest", treasure = "color_treasure",
   monster = "color_monster", seller = "color_seller", shop = "color_seller",
   token = "color_token", beetle = "color_beetle",
+  npc_search = "color_npc_search", route_stop = "color_route_stop",
+  hint_pin = "color_hint_pin",
 }
 M.ICON_KEY = {
   startable = "icon_startable", in_progress = "icon_in_progress",
@@ -238,6 +249,8 @@ M.ICON_KEY = {
   chest = "icon_chest", treasure = "icon_treasure",
   monster = "icon_monster", seller = "icon_seller", shop = "icon_seller",
   token = "icon_token", beetle = "icon_beetle",
+  npc_search = "icon_npc_search", route_stop = "icon_route_stop",
+  hint_pin = "icon_hint_pin",
 }
 function M.color_of(settings, cat)
   return settings[M.COLOR_KEY[cat]] or settings.icon_color
