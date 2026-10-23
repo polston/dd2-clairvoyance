@@ -123,8 +123,8 @@ local function fixture(o)
   return f
 end
 
-local function chest_row(uid, x, z, ix)
-  return { uid = uid, pos = P(x, 0, z), gimmick = 10, table_ix = ix or 1 }
+local function chest_row(uid, x, z, ix, gimmick)
+  return { uid = uid, pos = P(x, 0, z), gimmick = gimmick or 10, table_ix = ix or 1 }
 end
 
 local function find(list, uid)
@@ -2779,3 +2779,46 @@ end
 
 if failures > 0 then os.exit(1) end
 print("world_test: all OK")
+
+-- v14 Task 3: gimmick 12 chests and the treasure join (SPEC 24.2, 24.4)
+do
+  local f = fixture()
+  f.data.reserved = { chest_row("g12", 10, 10, 1, 12) }
+  local w = f.new()
+  w:refresh(0, true, on("chests"))
+  check("t3: gimmick 12 with no places row is learned as a chest",
+    find(w:input().chests, "g12") ~= nil)
+end
+
+do
+  local function tfix(nodes, rows, noplaces)
+    local files = nil
+    if not noplaces then files = { [K.PLACES] = places(rows) } end
+    local f = fixture({ files = files })
+    f.data.nodes = nodes
+    f.data.checked = {}
+    return f
+  end
+  local function crow(uid, x, z, id, n)
+    return prow("chest", uid, 10, x, z, { items = { { id = id, n = n } } })
+  end
+  local function node(name, x, z) return { name = name, pos = P(x, 0, z) } end
+  local function tr(f)
+    local w = f.new()
+    w:refresh(0, true, on("treasure"))
+    return w:input().treasure
+  end
+  local t1 = tr(tfix({ node("N1", 100, 100) }, { crow("c1", 100.5, 100, 500, 2) }))
+  check("t3: node within range carries the chest items, Chests off",
+    t1[1] ~= nil and t1[1].items ~= nil and #t1[1].items == 1 and t1[1].items[1].n == 2
+ and type(t1[1].items[1].name) == "string")
+  local t2 = tr(tfix({ node("N1", 100, 100) }, { crow("c1", 104, 100, 500, 2) }))
+  check("t3: node 4 units from every chest has no items", t2[1] ~= nil and t2[1].items == nil)
+  local t3 = tr(tfix({ node("N1", 100, 100) },
+    { crow("a", 102.4, 100, 600, 1), crow("b", 100.1, 100, 500, 2) }))
+  check("t3: of two rows in range the nearer one's items",
+    t3[1] ~= nil and t3[1].items ~= nil and #t3[1].items == 1 and t3[1].items[1].n == 2)
+  local ok, t4 = pcall(tr, tfix({ node("N1", 100, 100) }, nil, true))
+  check("t3: no places file gives no items and no error",
+    ok and t4[1] ~= nil and t4[1].items == nil)
+end
