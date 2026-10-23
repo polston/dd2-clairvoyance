@@ -3,57 +3,109 @@ local M = {}
 
 function M.defaults()
   return {
-    enabled = true, show_minimap = true, icon_color = 0xFF960707, debug = false,
-    icon_startable = 52, icon_in_progress = 0, icon_completed = 42,
-    icon_unavailable = 21, icon_locked = 41, icon_quest_item = 53,
+    enabled = true, show_minimap = true, icon_color = 0xFFFFD34D, debug = false,
+    matching_icons = true, step_icons = false, palette = 13,
+    icon_startable = 52, icon_in_progress = 52, icon_completed = 42,
+    icon_unavailable = 30, icon_locked = 41, icon_quest_item = 35,
     show_startable = true, show_in_progress = true,
     show_completed = false, show_unavailable = false, show_locked = false,
-    color_in_progress = 0xFFD7A500, color_completed = 0xFF2E8B57,
-    color_unavailable = 0xFF787878, color_locked = 0xFF46468C,
+    color_in_progress = 0xFFFF9A3C, color_completed = 0xFF7FA88A,
+    color_unavailable = 0xFF9A9A9A, color_locked = 0xFF7A88B0,
     show_overhead = true, overhead_distance = 50.0,
     reveal_gate_names = false, journal_spoilers = false,
-    show_quest_items = true, color_quest_item = 0xFF00C8FF,
+    show_quest_items = true, color_quest_item = 0xFF4FC3F7,
     world_chests = true, world_treasure = true, world_monsters = true,
     world_sellers = true, world_shops = false, world_show_opened = false, world_undiscovered = false,
-    color_chest = 0xFFC08040, color_treasure = 0xFFFFD700,
-    color_monster = 0xFFE04040, color_seller = 0xFF40C0E0,
-    icon_chest = 31, icon_treasure = 58, icon_monster = 29, icon_seller = 13,
+    color_chest = 0xFFC8A27A, color_treasure = 0xFFFFFFFF,
+    color_monster = 0xFFFF5A5A, color_seller = 0xFF4DD0C8,
+    icon_chest = 33, icon_treasure = 36, icon_monster = 10, icon_seller = 45,
     world_max_markers = 300,
     world_tokens = true, world_beetles = true, world_small_monsters = false,
-    color_token = 0xFFB080FF, color_beetle = 0xFF60E060,
-    icon_token = 57, icon_beetle = 73,
+    color_token = 0xFFC792EA, color_beetle = 0xFFB5E550,
+    icon_token = 57, icon_beetle = 46,
     search_text = "",
   }
 end
 
--- Icon types drawn by BOTH atlases (map UVS_map_01, minimap UVS_map_03)
--- at the same index, read from the game files 2026-10-19; the picker
--- offers only these, so a category's icon matches on map and minimap.
--- Excluded although both atlases draw them (SPEC 2.2): 6, 7, 23, 55
--- (another mod scans them as warp/camp types) and 76-80 (the
--- custom-artwork range).
+-- Picker choices: every icon type that has a picture on at least one
+-- atlas (full map UVS_map_01, minimap UVS_map_03; 21.3), read from the
+-- game files. A choice that is blank on one atlas is drawn there through
+-- the v12 fallback (icon_for). Excluded: 6, 7, 23, 55 (another mod reads
+-- them as warp and camp markers; SPEC 3.2 and 7.3), 61 (None) and 76-80
+-- (reserved, SPEC 3.2); 64 has no picture on either atlas.
 M.ICON_CHOICES = {
-  { 0, "Quest (gold cross)" }, { 1, "Hex I" }, { 2, "Hex II" },
-  { 3, "Hex III" }, { 4, "Hex IV" }, { 5, "Hex V" }, { 8, "Riftstone" }, { 9, "Inn" }, { 10, "Weapons" },
-  { 11, "Armor" }, { 12, "Apothecary" }, { 13, "Scrap store" },
-  { 14, "Vocation guild" }, { 15, "Ox" }, { 16, "Barber" }, { 17, "Rose" },
-  { 18, "Tavern" }, { 19, "Hot spring" }, { 20, "Dragonforged" },
-  { 21, "Coffin" }, { 22, "House" }, { 24, "Oracle" },
-  { 25, "Lantern" }, { 26, "Exit arrow" }, { 27, "Rooster" },
-  { 28, "Bench" }, { 29, "Red claw" }, { 31, "Small diamond" },
-  { 32, "Rock arch" }, { 37, "Rock" }, { 38, "Shrine door" },
-  { 39, "Red meat" }, { 41, "Archway" }, { 42, "Archway (check)" },
-  { 43, "Red swirl" }, { 49, "Purple swirl" }, { 51, "Statue" },
-  { 52, "Diamond flag" }, { 53, "Basket" }, { 54, "Anvil" },
-  { 57, "Triquetra" }, { 58, "Gold diamond" },
-  { 59, "Hammer" }, { 60, "Scepter" }, { 62, "Dark statue" },
-  { 73, "Red glow" },
+  { 0, "Gold cross" }, { 1, "Hex I" }, { 2, "Hex II" }, { 3, "Hex III" },
+  { 4, "Hex IV" }, { 5, "Hex V" }, { 8, "Riftstone" }, { 9, "Inn" },
+  { 10, "Weapons" }, { 11, "Armor" }, { 12, "Apothecary" },
+  { 13, "Scrap store" }, { 14, "Vocation guild" }, { 15, "Ox" },
+  { 16, "Barber" }, { 17, "Rose" }, { 18, "Tavern" }, { 19, "Hot spring" },
+  { 20, "Dragonforged" }, { 21, "Coffin" }, { 22, "House" },
+  { 24, "Oracle" }, { 25, "Lantern" }, { 26, "Exit arrow" },
+  { 27, "Rooster" }, { 28, "Bench" }, { 29, "Red claw" },
+  { 30, "Hollow diamond" }, { 31, "Small diamond" }, { 32, "Rock arch" },
+  { 33, "Treasure chest" }, { 34, "Exclamation" }, { 35, "Open hand" },
+  { 36, "Crystal cluster" }, { 37, "Rock" }, { 38, "Shrine door" },
+  { 39, "Red meat" }, { 40, "Glowing helm" }, { 41, "Archway" },
+  { 42, "Archway (check)" }, { 43, "Red swirl" }, { 44, "Wagon" },
+  { 45, "Cart" }, { 46, "Gold spark" }, { 47, "Red eye diamond" },
+  { 48, "Blue wisp" }, { 49, "Purple swirl" }, { 50, "Purple eye diamond" },
+  { 51, "Statue" }, { 52, "Diamond flag" }, { 53, "Basket" },
+  { 54, "Anvil" }, { 56, "Gold star diamond" }, { 57, "Triquetra" },
+  { 58, "Gold diamond" }, { 59, "Hammer" }, { 60, "Scepter" },
+  { 62, "Dark statue" }, { 63, "Cross mark" }, { 65, "Castle town" },
+  { 66, "Spires" }, { 67, "Town" }, { 68, "Village" }, { 69, "Camp" },
+  { 70, "Plank" }, { 71, "Slash" }, { 72, "Zigzag" }, { 73, "Red glow" },
+  { 74, "Ship" }, { 75, "Brown claw" },
 }
 M.ICON_LABELS, M.ICON_INDEX = {}, {}
 for i, c in ipairs(M.ICON_CHOICES) do
   M.ICON_LABELS[i] = string.format("%s (%d)", c[2], c[1])
   M.ICON_INDEX[c[1]] = i
 end
+
+M.HAS_MINIMAP = {
+  [0] = true, [1] = true, [2] = true, [3] = true, [4] = true, [5] = true,
+  [6] = true, [7] = true, [8] = true, [9] = true, [10] = true, [11] = true,
+  [12] = true, [13] = true, [14] = true, [15] = true, [16] = true,
+  [17] = true, [18] = true, [19] = true, [20] = true, [21] = true,
+  [22] = true, [23] = true, [24] = true, [25] = true, [26] = true,
+  [27] = true, [28] = true, [29] = true, [30] = true, [31] = true,
+  [32] = true, [33] = true, [34] = true, [35] = true, [36] = true,
+  [37] = true, [38] = true, [39] = true, [41] = true, [42] = true,
+  [43] = true, [45] = true, [49] = true, [51] = true, [52] = true,
+  [53] = true, [54] = true, [55] = true, [57] = true, [58] = true,
+  [59] = true, [60] = true, [62] = true, [63] = true, [70] = true,
+  [71] = true, [72] = true, [73] = true, [76] = true, [77] = true,
+  [78] = true, [79] = true, [80] = true,
+}
+M.HAS_FULLMAP = {
+  [0] = true, [1] = true, [2] = true, [3] = true, [4] = true, [5] = true,
+  [6] = true, [7] = true, [8] = true, [9] = true, [10] = true, [11] = true,
+  [12] = true, [13] = true, [14] = true, [15] = true, [16] = true,
+  [17] = true, [18] = true, [19] = true, [20] = true, [21] = true,
+  [22] = true, [23] = true, [24] = true, [25] = true, [26] = true,
+  [27] = true, [28] = true, [29] = true, [31] = true, [32] = true,
+  [37] = true, [38] = true, [39] = true, [40] = true, [41] = true,
+  [42] = true, [43] = true, [44] = true, [46] = true, [47] = true,
+  [48] = true, [49] = true, [50] = true, [51] = true, [52] = true,
+  [53] = true, [54] = true, [55] = true, [56] = true, [57] = true,
+  [58] = true, [59] = true, [60] = true, [62] = true, [65] = true,
+  [66] = true, [67] = true, [68] = true, [69] = true, [70] = true,
+  [71] = true, [73] = true, [74] = true, [75] = true, [76] = true,
+  [77] = true, [78] = true, [79] = true, [80] = true,
+}
+
+-- The v12 defaults, by settings key; the migration and the fallback use them.
+M.V12_ICON = { icon_startable = 52, icon_in_progress = 0, icon_completed = 42,
+  icon_unavailable = 21, icon_locked = 41, icon_quest_item = 53,
+  icon_chest = 31, icon_treasure = 58, icon_monster = 29, icon_seller = 13,
+  icon_token = 57, icon_beetle = 73 }
+M.V12_COLOR = { icon_color = 0xFF960707, color_in_progress = 0xFFD7A500,
+  color_completed = 0xFF2E8B57, color_unavailable = 0xFF787878,
+  color_locked = 0xFF46468C, color_quest_item = 0xFF00C8FF,
+  color_chest = 0xFFC08040, color_treasure = 0xFFFFD700,
+  color_monster = 0xFFE04040, color_seller = 0xFF40C0E0,
+  color_token = 0xFFB080FF, color_beetle = 0xFF60E060 }
 
 -- A stored boolean is kept verbatim (a stored false on a default-on
 -- toggle must survive reload); anything else takes the default.
@@ -120,7 +172,8 @@ M.WORLD_BOOL_LABEL = { world_chests = M.WORLD_LABEL.chest,
 
 local BOOL_KEYS = { "enabled", "debug", "show_startable", "show_in_progress",
   "show_completed", "show_unavailable", "show_locked", "show_overhead", "show_minimap",
-  "reveal_gate_names", "show_quest_items", "journal_spoilers" }
+  "reveal_gate_names", "show_quest_items", "journal_spoilers",
+  "matching_icons", "step_icons" }
 for _, k in ipairs(M.WORLD_BOOLS) do BOOL_KEYS[#BOOL_KEYS + 1] = k end
 local COLOR_KEYS = { "icon_color", "color_in_progress", "color_completed",
   "color_unavailable", "color_locked", "color_quest_item",
@@ -130,6 +183,7 @@ local ICON_KEYS = { "icon_startable", "icon_in_progress", "icon_completed",
   "icon_unavailable", "icon_locked", "icon_quest_item",
   "icon_chest", "icon_treasure", "icon_monster", "icon_seller",
   "icon_token", "icon_beetle" }
+M.ICON_KEYS, M.COLOR_KEYS = ICON_KEYS, COLOR_KEYS
 
 -- Search text: non-string -> ""; at most 64 bytes, cut back to the last
 -- complete UTF-8 character.
@@ -149,11 +203,19 @@ function M.validate(raw)
   local d = M.defaults()
   if type(raw) ~= "table" then return d end
   local out = {}
+  -- One-time palette migration (21.7.6): below palette 13 a stored value
+  -- equal to its v12 default takes the v13 default; a changed one stays.
+  local mig = type(raw.palette) ~= "number" or raw.palette < 13
   for _, k in ipairs(BOOL_KEYS) do out[k] = bool_field(raw, k, d) end
-  for _, k in ipairs(COLOR_KEYS) do out[k] = argb_field(raw, k, d) end
-  for _, k in ipairs(ICON_KEYS) do
-    out[k] = M.ICON_INDEX[raw[k]] and raw[k] or d[k]
+  for _, k in ipairs(COLOR_KEYS) do
+    if mig and raw[k] == M.V12_COLOR[k] then out[k] = d[k]
+    else out[k] = argb_field(raw, k, d) end
   end
+  for _, k in ipairs(ICON_KEYS) do
+    if mig and raw[k] == M.V12_ICON[k] then out[k] = d[k]
+    else out[k] = M.ICON_INDEX[raw[k]] and raw[k] or d[k] end
+  end
+  out.palette = 13
   out.overhead_distance = range_field(raw, "overhead_distance", d, 10, 200)
   out.world_max_markers = int_field(raw, "world_max_markers", d, 0, M.WORLD_MAX_MARKERS)
   out.search_text = M.cut_search(raw.search_text)
@@ -182,6 +244,29 @@ function M.color_of(settings, cat)
 end
 function M.icon_of(settings, cat)
   return settings[M.ICON_KEY[cat]] or settings.icon_startable
+end
+
+-- The icon id a surface draws. sheet: "map", "mini" or "head". A step
+-- number (21.8) wins over the category icon. When the id cannot be drawn
+-- (drawable(id) false) and has no art on the sheet, or on "mini" when the
+-- v12 icon is drawable instead, the v12 icon replaces it; "head" never
+-- substitutes (no game glyph there).
+function M.icon_for(settings, m, sheet, step, drawable)
+  local id = step or M.icon_of(settings, m.cat)
+  if sheet == "head" or drawable(id) then return id end
+  local v12 = M.V12_ICON[M.ICON_KEY[m.cat]]
+  if not v12 then return id end
+  local has = (sheet == "map") and M.HAS_FULLMAP or M.HAS_MINIMAP
+  if not has[id] then return v12 end
+  if sheet == "mini" and drawable(v12) then return v12 end
+  return id
+end
+
+-- Every icon and color key back to its default.
+function M.reset_icons(settings)
+  local d = M.defaults()
+  for _, k in ipairs(ICON_KEYS) do settings[k] = d[k] end
+  for _, k in ipairs(COLOR_KEYS) do settings[k] = d[k] end
 end
 
 -- Marker color: the category color, alpha byte halved when the marker

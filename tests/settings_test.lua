@@ -19,13 +19,13 @@ check("valid kept", v.enabled == false and v.icon_startable == 12
   and v.icon_color == 0xFF00FF00 and v.debug == true)
 
 -- per-category icons: defaults, choice-set membership, legacy keys dropped
-local ICON_DEF = { icon_startable = 52, icon_in_progress = 0, icon_completed = 42,
-  icon_unavailable = 21, icon_locked = 41, icon_quest_item = 53 }
+local ICON_DEF = { icon_startable = 52, icon_in_progress = 52, icon_completed = 42,
+  icon_unavailable = 30, icon_locked = 41, icon_quest_item = 35 }
 for k, want in pairs(ICON_DEF) do
   check(k .. " default", D[k] == want)
   check(k .. " default is a choice", su.ICON_INDEX[D[k]] ~= nil)
   check(k .. " kept when a choice", su.validate({ [k] = 9 })[k] == 9)
-  check(k .. " blank-on-minimap type rejected", su.validate({ [k] = 46 })[k] == want)
+  check(k .. " 46 accepted", su.validate({ [k] = 46 })[k] == 46)
   check(k .. " None rejected", su.validate({ [k] = 61 })[k] == want)
   check(k .. " float rejected", su.validate({ [k] = 9.5 })[k] == want)
   check(k .. " string rejected", su.validate({ [k] = "9" })[k] == want)
@@ -45,13 +45,13 @@ check("icon choices unique, index and labels aligned", ok_lab)
 
 -- v2 defaults
 local d = su.validate(nil)
-check("icon_color default red", d.icon_color == 0xFF960707)
+check("icon_color default gold", d.icon_color == 0xFFFFD34D)
 check("show defaults", d.show_startable == true and d.show_in_progress == true
   and d.show_completed == false and d.show_unavailable == false
   and d.show_locked == false)
-check("color defaults", d.color_in_progress == 0xFFD7A500
-  and d.color_completed == 0xFF2E8B57 and d.color_unavailable == 0xFF787878
-  and d.color_locked == 0xFF46468C)
+check("color defaults", d.color_in_progress == 0xFFFF9A3C
+  and d.color_completed == 0xFF7FA88A and d.color_unavailable == 0xFF9A9A9A
+  and d.color_locked == 0xFF7A88B0)
 
 -- every toggle: wrong type -> default; stored true and false kept verbatim
 for _, k in ipairs({ "show_startable", "show_in_progress", "show_completed",
@@ -105,14 +105,14 @@ check("show_quest_items stored false survives",
   su.validate({ show_quest_items = false }).show_quest_items == false)
 check("show_quest_items wrong type -> default",
   su.validate({ show_quest_items = "no" }).show_quest_items == true)
-check("color_quest_item default cyan", D.color_quest_item == 0xFF00C8FF)
-check("color_quest_item absent -> default", su.validate({}).color_quest_item == 0xFF00C8FF)
+check("color_quest_item default blue", D.color_quest_item == 0xFF4FC3F7)
+check("color_quest_item absent -> default", su.validate({}).color_quest_item == 0xFF4FC3F7)
 check("color_quest_item above range -> default",
-  su.validate({ color_quest_item = 2^33 }).color_quest_item == 0xFF00C8FF)
+  su.validate({ color_quest_item = 2^33 }).color_quest_item == 0xFF4FC3F7)
 check("color_quest_item negative -> default",
-  su.validate({ color_quest_item = -1 }).color_quest_item == 0xFF00C8FF)
+  su.validate({ color_quest_item = -1 }).color_quest_item == 0xFF4FC3F7)
 check("color_quest_item fractional -> default",
-  su.validate({ color_quest_item = 1.5 }).color_quest_item == 0xFF00C8FF)
+  su.validate({ color_quest_item = 1.5 }).color_quest_item == 0xFF4FC3F7)
 check("color_quest_item valid kept",
   su.validate({ color_quest_item = 0xFF010203 }).color_quest_item == 0xFF010203)
 for _, k in ipairs({ "icon_color", "color_in_progress", "color_completed",
@@ -137,20 +137,20 @@ check("journal_spoilers stored false kept",
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 49", n == 49)
+  check("defaults key count is 52", n == 52)
 end
 
 -- world tracker settings
 do
   local W = { world_chests = true, world_treasure = true, world_monsters = true,
     world_sellers = true, world_show_opened = false, world_undiscovered = false,
-    color_chest = 0xFFC08040, color_treasure = 0xFFFFD700,
-    color_monster = 0xFFE04040, color_seller = 0xFF40C0E0,
-    icon_chest = 31, icon_treasure = 58, icon_monster = 29, icon_seller = 13,
+    color_chest = 0xFFC8A27A, color_treasure = 0xFFFFFFFF,
+    color_monster = 0xFFFF5A5A, color_seller = 0xFF4DD0C8,
+    icon_chest = 33, icon_treasure = 36, icon_monster = 10, icon_seller = 45,
     world_max_markers = 300,
     world_tokens = true, world_beetles = true, world_small_monsters = false,
-    color_token = 0xFFB080FF, color_beetle = 0xFF60E060,
-    icon_token = 57, icon_beetle = 73 }
+    color_token = 0xFFC792EA, color_beetle = 0xFFB5E550,
+    icon_token = 57, icon_beetle = 46 }
   local V = su.validate({})
   for k, want in pairs(W) do
     check(k .. " default", D[k] == want)
@@ -180,26 +180,26 @@ do
   check("color_seller kept", su.validate({ color_seller = 0x12345678 }).color_seller == 0x12345678)
   check("color_token round-trips", su.validate({ color_token = 0x11223344 }).color_token == 0x11223344)
   check("color_beetle round-trips", su.validate({ color_beetle = 0x55667788 }).color_beetle == 0x55667788)
-  check("color_token -1 rejected", su.validate({ color_token = -1 }).color_token == 0xFFB080FF)
-  check("color_beetle -1 rejected", su.validate({ color_beetle = -1 }).color_beetle == 0xFF60E060)
-  check("color_of token", su.color_of(D, "token") == 0xFFB080FF)
-  check("color_of beetle", su.color_of(D, "beetle") == 0xFF60E060)
+  check("color_token -1 rejected", su.validate({ color_token = -1 }).color_token == 0xFFC792EA)
+  check("color_beetle -1 rejected", su.validate({ color_beetle = -1 }).color_beetle == 0xFFB5E550)
+  check("color_of token", su.color_of(D, "token") == 0xFFC792EA)
+  check("color_of beetle", su.color_of(D, "beetle") == 0xFFB5E550)
   check("icon_of token", su.icon_of(D, "token") == 57)
-  check("icon_of beetle", su.icon_of(D, "beetle") == 73)
-  check("marker_color token", su.marker_color(D, { cat = "token" }) == 0xFFB080FF)
-  check("marker_color beetle", su.marker_color(D, { cat = "beetle" }) == 0xFF60E060)
-  check("color_chest -1 rejected", su.validate({ color_chest = -1 }).color_chest == 0xFFC08040)
+  check("icon_of beetle", su.icon_of(D, "beetle") == 46)
+  check("marker_color token", su.marker_color(D, { cat = "token" }) == 0xFFC792EA)
+  check("marker_color beetle", su.marker_color(D, { cat = "beetle" }) == 0xFFB5E550)
+  check("color_chest -1 rejected", su.validate({ color_chest = -1 }).color_chest == 0xFFC8A27A)
   check("max_markers clamps high", su.validate({ world_max_markers = 950 }).world_max_markers == 900)
   check("max_markers clamps low", su.validate({ world_max_markers = -5 }).world_max_markers == 0)
   check("max_markers floors", su.validate({ world_max_markers = 12.7 }).world_max_markers == 12)
   check("max_markers non-number", su.validate({ world_max_markers = "x" }).world_max_markers == 300)
-  check("icon_chest 6 rejected", su.validate({ icon_chest = 6 }).icon_chest == 31)
-  check("color_of seller", su.color_of(D, "seller") == 0xFF40C0E0)
-  check("icon_of treasure", su.icon_of(D, "treasure") == 58)
+  check("icon_chest 6 rejected", su.validate({ icon_chest = 6 }).icon_chest == 33)
+  check("color_of seller", su.color_of(D, "seller") == 0xFF4DD0C8)
+  check("icon_of treasure", su.icon_of(D, "treasure") == 36)
   check("marker_color done halves alpha",
-    su.marker_color(D, { cat = "chest", done = true }) == 0x7FC08040)
+    su.marker_color(D, { cat = "chest", done = true }) == 0x7FC8A27A)
   check("marker_color not done",
-    su.marker_color(D, { cat = "chest" }) == 0xFFC08040)
+    su.marker_color(D, { cat = "chest" }) == 0xFFC8A27A)
 end
 
 -- world toggles: every one has a label, validates as a boolean, and the cap
@@ -228,6 +228,82 @@ check("shop keys", su.COLOR_KEY.shop == "color_seller" and su.ICON_KEY.shop == "
 check("shop color is seller", su.color_of(su.defaults(), "shop") == su.color_of(su.defaults(), "seller"))
 check("search kept", su.validate({ search_text = "goblin" }).search_text == "goblin")
 check("search validate cuts", #su.validate({ search_text = string.rep("a", 70) }).search_text == 64)
+
+-- v13 (SPEC 21.7): new bools, icon_for, reset_icons, palette migration
+do
+  local never = function() return false end
+  local always = function() return true end
+  for _, k in ipairs({ "matching_icons", "step_icons" }) do
+    check(k .. " wrong type -> default", su.validate({ [k] = "yes" })[k] == D[k])
+    check(k .. " stored true kept", su.validate({ [k] = true })[k] == true)
+    check(k .. " stored false kept", su.validate({ [k] = false })[k] == false)
+  end
+  check("matching_icons default true", D.matching_icons == true)
+  check("step_icons default false", D.step_icons == false)
+  check("palette default 13", D.palette == 13)
+
+  check("icon_for beetle mini never", su.icon_for(D, { cat = "beetle" }, "mini", nil, never) == 73)
+  check("icon_for chest map never", su.icon_for(D, { cat = "chest" }, "map", nil, never) == 31)
+  check("icon_for chest map always", su.icon_for(D, { cat = "chest" }, "map", nil, always) == 33)
+  check("icon_for chest head never", su.icon_for(D, { cat = "chest" }, "head", nil, never) == 33)
+  check("icon_for step map always", su.icon_for(D, { cat = "in_progress" }, "map", 3, always) == 3)
+  check("icon_for shop map never", su.icon_for(D, { cat = "shop" }, "map", nil, never) == 13)
+  local only_v12 = function(id)
+    for _, v in pairs(su.V12_ICON) do if v == id then return true end end
+    return false
+  end
+  check("icon_for chest mini v12 drawable", su.icon_for(D, { cat = "chest" }, "mini", nil, only_v12) == 31)
+  for cat in pairs(su.ICON_KEY) do
+    check("icon_for " .. cat .. " map in HAS_FULLMAP",
+      su.HAS_FULLMAP[su.icon_for(D, { cat = cat }, "map", nil, never)] == true)
+    check("icon_for " .. cat .. " mini in HAS_MINIMAP",
+      su.HAS_MINIMAP[su.icon_for(D, { cat = cat }, "mini", nil, never)] == true)
+  end
+  for key, id in pairs(su.V12_ICON) do
+    check("V12_ICON " .. key .. " in both sets", su.HAS_MINIMAP[id] and su.HAS_FULLMAP[id])
+  end
+  local ni, nc = 0, 0
+  for _, k in ipairs(su.ICON_KEYS) do if su.V12_ICON[k] then ni = ni + 1 end end
+  for _, k in ipairs(su.COLOR_KEYS) do if su.V12_COLOR[k] then nc = nc + 1 end end
+  check("V12_ICON keys are ICON_KEYS", ni == 12 and #su.ICON_KEYS == 12)
+  check("V12_COLOR keys are COLOR_KEYS", nc == 12 and #su.COLOR_KEYS == 12)
+
+  -- reset_icons
+  local S = {}
+  for k, v in pairs(D) do S[k] = v end
+  for _, k in ipairs(su.ICON_KEYS) do S[k] = 9 end
+  for _, k in ipairs(su.COLOR_KEYS) do S[k] = 0xFF010203 end
+  su.reset_icons(S)
+  local all = true
+  for _, k in ipairs(su.ICON_KEYS) do if S[k] ~= D[k] then all = false end end
+  for _, k in ipairs(su.COLOR_KEYS) do if S[k] ~= D[k] then all = false end end
+  check("reset_icons restores every icon and color key", all)
+
+  -- migration
+  local raw = {}
+  for k, v in pairs(su.V12_ICON) do raw[k] = v end
+  for k, v in pairs(su.V12_COLOR) do raw[k] = v end
+  local m = su.validate(raw)
+  local ok = m.palette == 13
+  for _, k in ipairs(su.ICON_KEYS) do if m[k] ~= D[k] then ok = false end end
+  for _, k in ipairs(su.COLOR_KEYS) do if m[k] ~= D[k] then ok = false end end
+  check("migration: all v12 values -> v13 palette", ok)
+  raw.color_chest = 0xFF112233
+  m = su.validate(raw)
+  check("migration: changed color kept", m.color_chest == 0xFF112233 and m.color_monster == D.color_monster)
+  raw.color_chest = su.V12_COLOR.color_chest
+  raw.palette = 13
+  m = su.validate(raw)
+  local kept = m.palette == 13
+  for _, k in ipairs(su.ICON_KEYS) do if m[k] ~= su.V12_ICON[k] then kept = false end end
+  for _, k in ipairs(su.COLOR_KEYS) do if m[k] ~= su.V12_COLOR[k] then kept = false end end
+  check("migration: palette 13 keeps v12 values", kept)
+  raw.palette = "x"
+  local okc, mm = pcall(su.validate, raw)
+  check("migration: palette string does not raise and migrates",
+    okc and mm.palette == 13 and mm.icon_chest == D.icon_chest)
+  check("validate always carries palette 13", su.validate({}).palette == 13 and su.validate(nil).palette == 13)
+end
 
 -- one-time migration: a renamed data file falls back to its old-named file
 do
