@@ -9,6 +9,11 @@
 3. Spec: `docs/SPEC.md`. `docs/` (SPEC.md, plans, ROADMAP.md) is a separate local git
    repo, gitignored here and never pushed; roadmap and spec edits are committed there.
 4. Third-party reference sources live in `reference/` (gitignored, never committed).
+   The icon folder `reframework/images/Clairvoyance/icons/` is generated from
+   game files with `tools/extract_icons.py` and the user's own key (never
+   printed or committed); the release zip carries the folder, never `tools/`.
+   v13 matching icons need the D2DX plugin (Dragon's Dogma 2 mod 1261) and
+   fall back to the game glyphs without it.
 5. CI (`.github/workflows/ci.yml`) runs `check.ps1 -SkipProvenance` and builds the zip
    from the committed `data/Clairvoyance_places.json`; releases are automatic from
    Conventional Commit types on push to master (`scripts/next_version.py`), never hand-tagged.

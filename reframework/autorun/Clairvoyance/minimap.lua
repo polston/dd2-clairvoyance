@@ -3,8 +3,10 @@
 -- dots on them, and gives every slot back on the next PRE. Owned-set blocks
 -- double-borrow of a failed-restore slot; a reclaimed slot is dropped instead
 -- of overwritten on retry; liveness check on saved refs; snapshot-identity
--- wait after a HUD change; POST-only suspension via record_post. No host
--- globals here: every game access arrives through opt.
+-- wait after a HUD change; POST-only suspension via record_post. With
+-- matching icons active (opt.icons_on, SPEC 21.5) candidates are pushed as
+-- pictures instead and a slot is borrowed only for a picture that cannot be
+-- drawn. No host globals here: every game access arrives through opt.
 local M = {}
 
 -- Capture every field of a slot before the first write (SPEC 5.14.4).

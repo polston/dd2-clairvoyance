@@ -22,11 +22,20 @@ map and in your view.
 7. A map search box filters markers by name and also matches shop stock and
    monster drops.
 8. Marker selection follows the map cursor.
+9. Matching icons: every category draws the same picture in the same color on
+   the full map, the minimap and above heads. The pictures are the game's own
+   map icons, tinted with the category color. Without the D2DX plugin the mod
+   draws as before, with the game's icon glyphs.
+10. Optional numbered icons (Hex 1 to 5) mark in-progress quests by their
+    current journal step.
 
 ## Requirements
 
 1. Dragon's Dogma 2 (Steam).
 2. REFramework.
+3. For matching icons: the D2DX plugin (Dragon's Dogma 2 mod 1261). Without it,
+   or with "Matching icons (D2DX)" turned off, every surface keeps the game's
+   own icon glyphs and the rest of the mod works the same.
 
 ## Install
 
@@ -43,6 +52,9 @@ The release zip includes the generated places file the world tracker reads
 Open the REFramework menu and expand Clairvoyance. Icon
 types, colors, the quest tree, the world tracker categories and the map search
 box are all there. Settings are saved to `reframework/data/Clairvoyance.json`.
+"Reset icons and colors to defaults" puts every category icon and color back to
+its default. The first start after the matching-icons update replaces any icon
+or color you never changed with the new default; a value you changed is kept.
 
 ## Development
 
@@ -63,6 +75,13 @@ included in this repository.
 `data/Clairvoyance_places.json` is generated from the game files with
 `tools/extract_world.py` and your own key file. It is regenerated and committed
 after a game patch. CI and the release zip use the committed copy.
+
+## Icon pictures
+
+`reframework/images/Clairvoyance/icons/` holds one white 64x64 picture per
+game map icon, plus `index.json`. They are generated from the game files with
+`tools/extract_icons.py` and your own key file, committed, and shipped in the
+release zip. Re-run the extractor after a game patch.
 
 ## Releasing
 
