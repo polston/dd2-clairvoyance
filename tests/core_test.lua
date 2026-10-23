@@ -1677,7 +1677,7 @@ do
   }
   local ms, panel = core.world_markers(w, sh(), O, {})
   check("wd2 six order", keys(ms) == "w:tre:T,w:tok:k,w:bee:b,w:sell:1:2,w:mon:m,w:chest:c")
-  check("wd2 seven cats", #core.WORLD_CATS == 7 and panel.token.shown == 1 and panel.beetle.shown == 1)
+  check("wd2 eight cats", #core.WORLD_CATS == 8 and panel.token.shown == 1 and panel.beetle.shown == 1)
   ms = core.world_markers(w, sh({ world_max_markers = 3 }), nil, {})
   check("wd2 six order no origin", keys(ms) == "w:tre:T,w:tok:k,w:bee:b")
 
@@ -2292,7 +2292,8 @@ do
   check("ms empty query: identical output", same and #a1.markers > 0)
 
   -- 9 shops
-  check("ms shop: seventh category last", #core.WORLD_CATS == 7 and core.WORLD_CATS[7] == "shop")
+  check("ms shop: shop seventh, npc_search last", #core.WORLD_CATS == 8 and core.WORLD_CATS[7] == "shop"
+    and core.WORLD_CATS[8] == "npc_search")
   local function shop(id, npc, items, extra)
     local s = { shop = id, cid = 9500 + id, npc = npc, pos = P(10 + id), discovered = true,
       items = items }
@@ -2940,6 +2941,229 @@ do
       cat = "in_progress", step = step } }, {}))
   end
   check("st 8: signature differs between step 2 and 3", sigof(2) ~= sigof(3) and sigof(nil) ~= sigof(2))
+end
+
+-- v14 (SPEC 22.7.3-22.7.6, 22.8.4, 22.10.1, 22.11.3): NPC search, route and
+-- hint pin markers, item walk gate.
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local function Q(t) return core.parse_query(t) end
+  local SH = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_max_markers = 300, world_origin = P(0, 0, 0), map_origin = P(0, 0, 0),
+    world_show_opened = false, world_undiscovered = false }
+  local function run(world, search, over, ex)
+    local o = { acceptable = {}, names = {} }
+    for k, v in pairs(ex or {}) do o[k] = v end
+    local a = fake_adapter(o)
+    if o.quest_step then a.quest_step = o.quest_step end
+    local show = { startable = true, in_progress = true, quest_items = true,
+      world = world, search = search }
+    for k, v in pairs(SH) do show[k] = v end
+    for k, v in pairs(over or {}) do show[k] = v end
+    return core.compute(a, show)
+  end
+  local function has(list, key)
+    for _, m in ipairs(list or {}) do if m.key == key then return m end end
+    return nil
+  end
+  local function npc(cid, name, pos, extra)
+    local e = { cid = cid, name = name, pos = pos, alive = true, discovered = true }
+    for k, v in pairs(extra or {}) do e[k] = v end
+    return e
+  end
+
+  -- basic match: snapshot markers, full map pass, row, match cids
+  local w = { npcs = { npc(7, "Brant", P(10)), npc(8, "Alma", P(20)) } }
+  local r = run(w, Q("bran"))
+  local m = has(r.markers, "w:npc:7")
+  check("npc 1: one w:npc marker in markers", m ~= nil and m.cat == "npc_search"
+    and m.label == "Brant" and not has(r.markers, "w:npc:8"))
+  check("npc 1: in fullmap_world with a valid map_origin",
+    has(r.fullmap_world, "w:npc:7") ~= nil)
+  check("npc 1: row and match cids", #r.npc_rows == 1 and r.npc_rows[1].cid == 7
+    and r.npc_rows[1].alive == true and r.npc_rows[1].marker_key == "w:npc:7"
+    and r.npc_rows[1].pos.x == 10 and #r.npc_match_cids == 1 and r.npc_match_cids[1] == 7)
+  local r2 = run(w, Q("bran"), { map_origin = false })
+  check("npc 1b: no map_origin -> no fullmap_world", r2.fullmap_world == nil
+    and has(r2.markers, "w:npc:7") ~= nil)
+  -- uncached twin equal
+  local um = core.world_markers(w, { search = Q("bran"), world_origin = P(0), world_max_markers = 300 },
+    P(0), {})
+  check("npc 1c: uncached world_markers carries the marker too",
+    has(um, "w:npc:7") ~= nil and #um == 1)
+
+  -- no query
+  r = run(w, nil)
+  check("npc 2: no query -> no marker, no rows, no cids",
+    not has(r.markers, "w:npc:7") and #r.npc_rows == 0 and #r.npc_match_cids == 0)
+
+  -- alive false / nil pos / discovered false
+  r = run({ npcs = { npc(7, "Brant", P(10), { alive = false }) } }, Q("bran"))
+  check("npc 3: dead -> no marker, row alive false", not has(r.markers, "w:npc:7")
+    and #r.npc_rows == 1 and r.npc_rows[1].alive == false
+    and r.npc_rows[1].marker_key == nil)
+  r = run({ npcs = { { cid = 7, name = "Brant" } } }, Q("bran"))
+  check("npc 4: nil pos -> row, no marker", not has(r.markers, "w:npc:7")
+    and #r.npc_rows == 1 and r.npc_rows[1].pos == nil and r.npc_rows[1].marker_key == nil
+    and r.npc_match_cids[1] == 7)
+  r = run({ npcs = { npc(7, "Brant", P(10), { discovered = false }) } }, Q("bran"))
+  check("npc 5: undiscovered -> no marker", not has(r.markers, "w:npc:7")
+    and #r.npc_rows == 1)
+  r = run({ npcs = { npc(7, "Brant", P(10), { discovered = false }) } }, Q("bran"),
+    { world_undiscovered = true })
+  check("npc 5b: world_undiscovered -> marker", has(r.markers, "w:npc:7") ~= nil)
+
+  -- dedupe: quest marker, shop marker, seller marker with the same cid
+  r = run({ npcs = { npc(9001, "Brant", P(5)) } }, Q("bran"), nil,
+    { acceptable = { 20 }, names = { [20] = "Brant Quest" }, hints = { [20] = 9001 },
+      npc_pos = { [9001] = P(50, 0, 50) }, npc_names = { [9001] = "Brant" } })
+  check("npc 6a: quest marker covers", has(r.markers, "c:9001") ~= nil
+    and not has(r.markers, "w:npc:9001") and r.npc_rows[1].marker_key == "c:9001")
+  r = run({ npcs = { npc(55, "Brant", P(5)) },
+    shops = { { shop = 1, npc = "Brant", cid = 55, pos = P(6), discovered = true,
+      items = { { name = "Rope" } } } } }, Q("bran"), { world_shops = true })
+  check("npc 6b: shop marker covers", has(r.markers, "w:shop:1") ~= nil
+    and not has(r.markers, "w:npc:55") and r.npc_rows[1].marker_key == "w:shop:1")
+  r = run({ npcs = { npc(55, "Brant", P(5)) },
+    shops = { { shop = 1, npc = "Brant", cid = 55, pos = P(6), discovered = true,
+      items = { { name = "Rope" } } } } }, Q("bran"))
+  check("npc 6b2: leftover shop and NPC with one cid give one marker",
+    has(r.markers, "w:shop:1") ~= nil and not has(r.markers, "w:npc:55")
+    and r.npc_rows[1].marker_key == "w:shop:1")
+  r = run({ npcs = { npc(56, "Brant", P(5)) },
+    sellers = { { shop = 2, item = 3, item_name = "Gem", cid = 56, npc = "Brant",
+      qids = {}, quest = "", pos = P(7), discovered = true } } }, Q("bran"))
+  check("npc 6c: seller marker covers", has(r.markers, "w:sell:2:3") ~= nil
+    and not has(r.markers, "w:npc:56") and r.npc_rows[1].marker_key == "w:sell:2:3")
+
+  -- an NPC match adds no seller whose label did not match
+  r = run({ npcs = { npc(7, "Brant", P(10)) },
+    sellers = { { shop = 2, item = 3, item_name = "Gem", cid = 99, npc = "Zed",
+      qids = {}, quest = "", pos = P(7), discovered = true } } }, Q("bran"))
+  check("npc 7: no unmatched seller", has(r.markers, "w:npc:7") ~= nil
+    and not has(r.markers, "w:sell:2:3"))
+
+  -- the cap: NPCs only fill leftover slots, nearest first
+  local cw = { chests = { { uid = "a", pos = P(1), state = "unopened",
+      items = { { name = "Brandy" } } },
+    { uid = "b", pos = P(2), state = "unopened", items = { { name = "Brandy" } } } },
+    npcs = {} }
+  for i, d in ipairs({ 50, 10, 40, 20, 30 }) do
+    cw.npcs[i] = npc(100 + i, "Brant " .. i, P(d))
+  end
+  r = run(cw, Q("bran"), { world_max_markers = 3 })
+  local wk = {}
+  for _, mm in ipairs(r.markers) do
+    if mm.key:sub(1, 2) == "w:" then wk[#wk + 1] = mm.key end
+  end
+  table.sort(wk)
+  check("npc 8: 2 kept + 5 matches, cap 3 -> the nearest one only",
+    table.concat(wk, ",") == "w:chest:a,w:chest:b,w:npc:102")
+  check("npc 8b: rows list all five, marker_key only on the drawn one",
+    #r.npc_rows == 5 and r.npc_rows[1].cid == 102 and r.npc_rows[1].marker_key == "w:npc:102"
+    and r.npc_rows[2].marker_key == nil)
+
+  -- not in the overhead list
+  local anchors = core.overhead_anchors(r.markers, {}, P(0), 1000)
+  local bad = false
+  for _, an in ipairs(anchors) do
+    if an.marker.key:sub(1, 5) == "w:npc" then bad = true end
+  end
+  check("npc 9: w:npc not in the overhead list", not bad)
+
+  -- 80 matches -> 50 cids in name order
+  local big = { npcs = {} }
+  for i = 1, 80 do big.npcs[i] = npc(1000 + i, string.format("Npc%02d", 81 - i), P(i)) end
+  r = run(big, Q("npc"))
+  check("npc 10: 80 matches -> 50 cids in name order", #r.npc_match_cids == 50
+    and r.npc_match_cids[1] == 1080 and r.npc_match_cids[50] == 1031)
+  check("npc 10b: ten rows", #r.npc_rows == 10)
+
+  -- row order: nearest first, no-pos last by name
+  r = run({ npcs = { npc(1, "Bran C", P(30)), { cid = 2, name = "Bran A" },
+    npc(3, "Bran B", P(10)), { cid = 4, name = "Bran 0" } } }, Q("bran"))
+  local ord = {}
+  for _, row in ipairs(r.npc_rows) do ord[#ord + 1] = row.cid end
+  check("npc 11: rows nearest first, no-pos last by name",
+    table.concat(ord, ",") == "3,1,4,2")
+
+  -- route stops
+  local route = { cid = 12, name = "Mara", stops = {
+    { from = 6, to = 9, pos = P(5), discovered = true },
+    { from = 9, to = 12, pos = P(6), discovered = false },
+    { from = 12, to = 18, pos = P(7), discovered = true } } }
+  r = run({}, nil, { route = route, world_max_markers = 0 })
+  local rs = {}
+  for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then rs[#rs + 1] = mm end end
+  check("npc 12: undiscovered stop skipped, others outside the cap", #rs == 2
+    and rs[1].key == "r:12:1" and rs[1].cid == 12 and rs[1].stop == 1
+    and rs[1].label == "Mara 06-09" and rs[2].stop == 3 and rs[2].label == "Mara 12-18"
+    and #rs[1].qids == 0)
+  r = run({}, nil, { route = route, world_undiscovered = true })
+  local n3 = 0
+  for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then n3 = n3 + 1 end end
+  check("npc 12b: world_undiscovered keeps all three", n3 == 3)
+  route.stops[2].discovered = true
+  r = run({}, nil, { route = route })
+  n3 = 0
+  for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then n3 = n3 + 1 end end
+  check("npc 12c: three stops give three markers", n3 == 3)
+
+  -- hint pins, with a query active, outside the cap
+  r = run({ chests = {} }, Q("zzz"), { world_max_markers = 0,
+    hint_pins = { { qid = 30, i = 2, label = "Look here", pos = P(9) } } })
+  local hp = has(r.markers, "h:30:2")
+  check("npc 13: hint pin with a query, qid and i", hp ~= nil and hp.cat == "hint_pin"
+    and hp.qid == 30 and hp.i == 2 and hp.label == "Look here")
+
+  -- neither is a search result row
+  local rows = core.world_rows(r.markers, {}, P(0))
+  local leak = false
+  for _, row in ipairs(rows) do
+    if row.key:sub(1, 2) == "h:" or row.key:sub(1, 2) == "r:" then leak = true end
+  end
+  check("npc 14: pins are not in the search results list", not leak)
+
+  -- minimap tiers
+  local mk = {
+    { key = "w:chest:a", cat = "chest", pos = P(1) },
+    { key = "h:1:1", cat = "hint_pin", pos = P(2) },
+    { key = "r:1:1", cat = "route_stop", pos = P(3) },
+    { key = "c:5", cat = "startable", pos = P(50) },
+    { key = "w:npc:9", cat = "npc_search", pos = P(4) } }
+  local sel = core.minimap_markers(mk, P(0), 100, 10)
+  local sk = {}
+  for _, mm in ipairs(sel) do sk[#sk + 1] = mm.key end
+  check("npc 15: minimap quest < route/hint < world",
+    table.concat(sk, ",") == "c:5,h:1:1,r:1:1,w:chest:a,w:npc:9")
+
+  -- hint step reads, step_icons off
+  local reads = {}
+  r = run({}, nil, { hint_qids = { 77 }, now = 10, step_icons = false },
+    { quest_step = function(q) reads[#reads + 1] = q; return 3 end })
+  check("npc 16: hint qid read with step_icons off", #reads == 1 and reads[1] == 77
+    and r.hint_steps[77] == 3 and r.quest_steps[77].n == 3)
+  r = run({}, nil, { hint_qids = { 77 }, now = 12, step_icons = false,
+    prev_quest_steps = r.quest_steps },
+    { quest_step = function(q) reads[#reads + 1] = q; return 4 end })
+  check("npc 16b: shared throttle, no re-read inside 5 s", #reads == 1
+    and r.hint_steps[77] == 3)
+  r = run({}, nil, { now = 10, step_icons = false },
+    { quest_step = function(q) reads[#reads + 1] = q; return 3 end })
+  check("npc 16c: no hint qids, step_icons off -> no reads, no steps",
+    #reads == 1 and r.hint_steps == nil and r.quest_steps == nil)
+
+  -- item walk gate and mode
+  check("npc 17: gate on for marks with the menu open",
+    core.item_walk_wanted({ inventory_quest_marks = true, item_menu_open = true }) == true)
+  check("npc 17b: gate off with the menu closed",
+    not core.item_walk_wanted({ inventory_quest_marks = true, item_menu_open = false }))
+  check("npc 17c: mode needs for marks only",
+    core.item_walk_mode({ inventory_quest_marks = true, item_menu_open = true }) == "needs")
+  check("npc 17d: mode full for quest items and for sellers",
+    core.item_walk_mode({ in_progress = true, quest_items = true }) == "full"
+    and core.item_walk_mode({ world_sellers = true }) == "full")
 end
 
 if failures > 0 then os.exit(1) end
