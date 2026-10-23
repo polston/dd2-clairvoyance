@@ -123,8 +123,8 @@ local function fixture(o)
   return f
 end
 
-local function chest_row(uid, x, z, ix)
-  return { uid = uid, pos = P(x, 0, z), gimmick = 10, table_ix = ix or 1 }
+local function chest_row(uid, x, z, ix, gimmick)
+  return { uid = uid, pos = P(x, 0, z), gimmick = gimmick or 10, table_ix = ix or 1 }
 end
 
 local function find(list, uid)
@@ -2009,9 +2009,34 @@ do
     w:set_route(2001, "Aa")
     w:refresh(2, true, tg)
     r = w:input().route
-    check("route err: -1/-1 is route unavailable", r.err == "route unavailable"
-      and r.stops == nil)
-    check("route err: -1/-1 never calls route_stops", stub.calls.route_stops == calls)
+    check("route off: -1/-1 with placeable rows publishes stops + off_schedule",
+      r.err == nil and #r.stops == 1 and r.off_schedule == true)
+    check("route off: route_stops called with no current row",
+      stub.calls.route_stops == calls + 1 and stub.last_cur == nil)
+    d.cur[2001] = { area = 49, location = 0 }
+    d.hour = 12
+    w:poke()
+    w:refresh(2.4, true, tg)
+    check("route off: off_schedule clears on an hour-change rebuild alone",
+      w:input().route.err == nil and w:input().route.off_schedule == nil)
+    w:set_route(2001, "Aa")
+    w:refresh(2.5, true, tg)
+    check("route off: a matched current row has no off_schedule",
+      w:input().route.err == nil and w:input().route.off_schedule == nil)
+    d.area_nodes[49] = nil
+    d.hour = 14
+    w:set_route(2001, "Aa")
+    w:refresh(2.55, true, tg)
+    check("route off: a matched route with zero placed stops is route unavailable",
+      w:input().route.err == "route unavailable" and w:input().route.stops == nil)
+    d.cur[2001] = { area = -1, location = -1, pos = P(1, 1, 1) }
+    d.hour = 13
+    w:set_route(2001, "Aa")
+    w:refresh(2.6, true, tg)
+    r = w:input().route
+    check("route off: -1/-1 with nothing placeable is route unavailable",
+      r.err == "route unavailable" and r.stops == nil)
+    d.area_nodes[49] = { P(1, 0, 1) }
     -- raising route_stops leaves no partial stops
     d.cur[2001] = { area = 49, location = 0 }
     local orig = stub.route_stops
@@ -2754,6 +2779,59 @@ do
   singletons["app.AIWorldGraphManager"] = nil
   check("graph reads: no manager raises", not pcall(R.graph_block_count))
   sdk = saved_sdk
+end
+
+-- v14 Task 3: gimmick 12 chests and the treasure join (SPEC 24.2, 24.4)
+do
+  local f = fixture()
+  f.data.reserved = { chest_row("g12", 10, 10, 1, 12) }
+  local w = f.new()
+  w:refresh(0, true, on("chests"))
+  check("t3: gimmick 12 with no places row is learned as a chest",
+    find(w:input().chests, "g12") ~= nil)
+end
+
+do
+  local function tfix(nodes, rows, noplaces)
+    local files = nil
+    if not noplaces then files = { [K.PLACES] = places(rows) } end
+    local f = fixture({ files = files })
+    f.data.nodes = nodes
+    f.data.iname = { [500] = "Longsword", [600] = "Dagger" }
+    f.data.checked = {}
+    return f
+  end
+  local function crow(uid, x, z, id, n)
+    return prow("chest", uid, 10, x, z, { items = { { id = id, n = n } } })
+  end
+  local function node(name, x, z) return { name = name, pos = P(x, 0, z) } end
+  local function tr(f)
+    local w = f.new()
+    w:refresh(0, true, on("treasure"))
+    return w:input().treasure
+  end
+  local t1 = tr(tfix({ node("N1", 100, 100) }, { crow("c1", 100.5, 100, 500, 2) }))
+  check("t3: node within range carries the chest items, Chests off",
+    t1[1] ~= nil and t1[1].items ~= nil and #t1[1].items == 1 and t1[1].items[1].n == 2
+    and t1[1].items[1].name == "Longsword")
+  local t2 = tr(tfix({ node("N1", 100, 100) }, { crow("c1", 104, 100, 500, 2) }))
+  check("t3: node 4 units from every chest has no items", t2[1] ~= nil and t2[1].items == nil)
+  local t3 = tr(tfix({ node("N1", 100, 100) },
+    { crow("a", 102.4, 100, 600, 1), crow("b", 100.1, 100, 500, 2) }))
+  check("t3: of two rows in range the nearer one's items",
+    t3[1] ~= nil and t3[1].items ~= nil and #t3[1].items == 1 and t3[1].items[1].n == 2)
+  local t5 = tr(tfix({ node("N1", 100, 100) }, { crow("c1", 103, 100, 500, 2) }))
+  check("t3: a row at exactly 3.0 units is mapped", t5[1] ~= nil and t5[1].items ~= nil)
+  local t6 = tr(tfix({ node("N1", 100, 100) }, {
+    prow("chest", "c1", 10, 100, 100.5, { y = 3, items = { { id = 500, n = 2 } } }) }))
+  check("t3: the y offset counts (3D distance)", t6[1] ~= nil and t6[1].items == nil)
+  local t7 = tr(tfix({ node("N1", 100, 100) },
+    { crow("z", 101, 100, 600, 1), crow("y", 99, 100, 500, 2) }))
+  check("t3: equal distance goes to the first sorted uid",
+    t7[1] ~= nil and t7[1].items ~= nil and t7[1].items[1].n == 2)
+  local ok, t4 = pcall(tr, tfix({ node("N1", 100, 100) }, nil, true))
+  check("t3: no places file gives no items and no error",
+    ok and t4[1] ~= nil and t4[1].items == nil)
 end
 
 if failures > 0 then os.exit(1) end

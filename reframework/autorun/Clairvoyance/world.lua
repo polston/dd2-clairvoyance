@@ -25,7 +25,7 @@ M.K = {
   TOKEN_BIT = 16,
   TOKEN_ITEM = 305,
   BEETLE_ITEM = 398,
-  CHEST_IDS = { 10, 11, 692 },
+  CHEST_IDS = { 10, 11, 12, 692, 693, 694 },
   EXTRA_LARGE = { "ch256", "ch260", "ch261", "ch270" },
   CLUSTER = 5,
   PLACES_SLOW_MS = 50,
@@ -200,7 +200,7 @@ function M.new(a, reads, io)
 
   local function new_session()
     return { cast = nil, boss = nil, union = {}, badge = {},
-      nodes = nil, shops = nil, sched_ids = nil, shop_of = {}, shop_cids = nil,
+      nodes = nil, node_chest = nil, shops = nil, sched_ids = nil, shop_of = {}, shop_cids = nil,
       settle = nil, msgs = {}, disc_set = nil, disc_count = nil,
       disc_cache = {}, need_sort = true, file_monsters = {}, held = {}, live = {},
       drop_ids = nil,
@@ -1024,9 +1024,9 @@ function M.new(a, reads, io)
   local function build_route(npcs, cid, day, hour)
     local ok, cur = pcall(reads.current_row, cid)
     if not ok then error("current_row failed") end
-    if type(cur) == "table" and cur.area == -1 and cur.location == -1 then
-      return nil
-    end
+    -- -1/-1 means "not at a scheduled place now", not "no schedule" (spec 25)
+    local off = type(cur) == "table" and cur.area == -1 and cur.location == -1
+    if off then cur = nil end
     local okr, rows = pcall(reads.schedule_rows, cid)
     if not okr or type(rows) ~= "table" then error("schedule_rows failed") end
     local function area_pos(row)
@@ -1037,7 +1037,8 @@ function M.new(a, reads, io)
     local stops, unplaced = npcs.route_stops(rows, npcs.today(day, hour), area_pos,
       type(cur) == "table" and cur or nil)
     if type(stops) ~= "table" then error("route_stops failed") end
-    return { stops = stops, unplaced = unplaced or 0 }
+    if #stops == 0 then return nil end
+    return { stops = stops, unplaced = unplaced or 0, off_schedule = off or nil }
   end
 
   local function route_round()
@@ -1066,7 +1067,8 @@ function M.new(a, reads, io)
       if valid_pos(st.pos) then n.discovered = discovered("r:" .. tostring(st.area) .. ":" .. tostring(st.location), st.pos) end
       stops[i] = n
     end
-    return { cid = cid, name = name, stops = stops, unplaced = c.value.unplaced }
+    return { cid = cid, name = name, stops = stops, unplaced = c.value.unplaced,
+             off_schedule = c.value.off_schedule }
   end
 
   -- ----- the round -----
@@ -1172,12 +1174,43 @@ function M.new(a, reads, io)
         local v = table_read("treasure_nodes")
         if v ~= nil then S.nodes = v end
       end
+      -- each node's nearest places chest row within 3 units (SPEC 24.4); the
+      -- places rows are fixed after load, so this runs once per session
+      if S.nodes ~= nil and S.node_chest == nil then
+        local uids = {}
+        for uid, e in pairs(static) do
+          if e.k == "chest" then uids[#uids + 1] = uid end
+        end
+        table.sort(uids)
+        local map = {}
+        for _, n in ipairs(S.nodes) do
+          if type(n) == "table" and valid_pos(n.pos) then
+            local best, bd = nil, 9
+            for _, uid in ipairs(uids) do
+              local e = static[uid]
+              local dx, dy, dz = e.x - n.pos.x, e.y - n.pos.y, e.z - n.pos.z
+              local d2 = dx * dx + dy * dy + dz * dz
+              if d2 <= bd and (best == nil or d2 < bd) then best, bd = e, d2 end
+            end
+            map[n.name] = best
+          end
+        end
+        S.node_chest = map
+      end
       local checked = guarded("checked", function() return need_table("checked_nodes") end)
       for _, n in ipairs(S.nodes or {}) do
         if type(n) == "table" and valid_pos(n.pos) then
           out.treasure[#out.treasure + 1] = { name = n.name, pos = pcopy(n.pos),
             checked = checked ~= nil and checked[n.name] == true,
             discovered = discovered("t:" .. tostring(n.name), n.pos) }
+          local ce = S.node_chest ~= nil and S.node_chest[n.name] or nil
+          if ce ~= nil and ce.items ~= nil then
+            local t = out.treasure[#out.treasure]
+            t.items = {}
+            for _, it in ipairs(ce.items) do
+              t.items[#t.items + 1] = { name = item_name(it.id), n = it.n }
+            end
+          end
         end
       end
       table.sort(out.treasure, function(p, q) return p.name < q.name end)
