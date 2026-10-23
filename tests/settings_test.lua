@@ -134,11 +134,12 @@ check("journal_spoilers stored false kept",
 
 -- exact defaults key count (24 after the per-category icon keys, plus
 -- journal_spoilers, plus 23 world-tracker keys (SPEC 17.5, 17.10.13),
--- plus 8 v14 keys (SPEC 22.6), plus 83 style and route keys (SPEC 23.4))
+-- plus 8 v14 keys (SPEC 22.6), plus 83 style and route keys (SPEC 23.4),
+-- plus 2 coordinate readout keys)
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 143", n == 143)
+  check("defaults key count is 145", n == 145)
 end
 
 -- world tracker settings

@@ -1193,7 +1193,12 @@ minimap_renderer = require("Clairvoyance.minimap").create({
     return su.icon_for(settings, m, "mini", m.step, icons.drawable_fn)
   end,
   icons_on = function() return icons.mini_read_ok and icons:active() end,
-  frame_info = icons.frame_info,
+  frame_info = function(ui)
+    local px, py, fade, vis = icons.frame_info(ui)
+    -- kept for the coordinates readout under the minimap
+    wt.mini_x, wt.mini_y, wt.mini_vis, wt.mini_t = px, py, vis, os.clock()
+    return px, py, fade, vis
+  end,
   push = icons.mini_push,
   mini_replace = icons.mini_clear,
   picture_for = icons.picture_for,
@@ -1887,11 +1892,8 @@ do
           snapshot.search_n = nres
         end
         if imgui.tree_node(string.format("Search results (%d)###qnml_sr", snapshot.search_n)) then
-          local okp, ptr = pcall(wt.player_tr)
-          local pp = okp and ptr ~= nil and ptr:call("get_Position") or nil
-          if pp ~= nil then
-            imgui.text(string.format("You: %.0f, %.0f", pp.x, pp.z))
-          end
+          -- map space, the same space as every marker position
+          local pp = player_origin
           for _, r in ipairs(srows) do
             if r.pos ~= nil and pp ~= nil then
               imgui.text(string.format("%s - at %.0f, %.0f - %.0f m", r.text,
@@ -2075,6 +2077,12 @@ do
     if changed then
       want_update = true; save_settings(); icons:preload_all()
     end
+    changed, settings.coords_map_cursor = imgui.checkbox(
+      "Coordinates beside the map cursor", settings.coords_map_cursor)
+    if changed then save_settings() end
+    changed, settings.coords_minimap = imgui.checkbox(
+      "Coordinates under the minimap", settings.coords_minimap)
+    if changed then save_settings() end
     imgui.tree_pop()
   end
 
@@ -2272,6 +2280,10 @@ do
         "  failed %d  canceled %d  giver dead %d  locked %d",
         c.failed, c.canceled, c.giver_dead, c.locked))
       if imgui.tree_node("Status") then
+        if player_origin ~= nil then
+          imgui.text(string.format("Player (map): %.0f, %.0f  height %.0f",
+            player_origin.x, player_origin.z, player_origin.y))
+        end
         imgui.text(string.format("Resolved positions: %d", snapshot.resolved_count))
         imgui.text(string.format("Markers added: %d  dropped (pool full): %d",
           added_count, dropped_count))
@@ -2705,6 +2717,30 @@ wt.names_frame = function()
   if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
 end
 re.on_frame(function() wt.layer_run(wt.names_layer, "names", wt.names_frame) end)
+-- Coordinates in map space (the space of every marker and search result):
+-- beside the full map's cursor, and under the minimap.
+wt.coords_layer = wt.layer()
+wt.coords_frame = function()
+  if not settings.enabled then return end
+  local now = os.clock()
+  if settings.coords_map_cursor and ui_map ~= nil and sdk.is_managed_object(ui_map) then
+    local c = adapter.map_cursor ~= nil and adapter.map_cursor(ui_map) or nil
+    local pc = ui_map:get_field("PnlCursor")
+    local gp = pc ~= nil and pc:call("get_GlobalPosition") or nil
+    if c ~= nil and gp ~= nil then
+      wt.style.text(draw, string.format("%.0f, %.0f", c.x, c.z),
+        gp.x + wt.COORD_DX, gp.y + wt.COORD_DY, 0xFFFFFFFF, true, 0xFF000000, 1)
+    end
+  elseif settings.coords_minimap and settings.show_minimap and ui_map == nil
+      and wt.mini_vis and wt.mini_t ~= nil and now - wt.mini_t < 0.5
+      and player_origin ~= nil then
+    local s = string.format("%.0f, %.0f", player_origin.x, player_origin.z)
+    wt.style.text(draw, s, wt.mini_x - #s * 3.5, wt.mini_y + wt.MINI_DY,
+      0xFFFFFFFF, true, 0xFF000000, 1)
+  end
+end
+wt.COORD_DX, wt.COORD_DY, wt.MINI_DY = 28, -8, 120
+re.on_frame(function() wt.layer_run(wt.coords_layer, "coordinates", wt.coords_frame) end)
 
 -- v14 (SPEC 22.10): item-menu quest dots, its own failure counters inside.
 re.on_frame(function()

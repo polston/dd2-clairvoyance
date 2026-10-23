@@ -26,6 +26,7 @@ function M.defaults()
     icon_token = 57, icon_beetle = 46,
     search_text = "",
     overhead_names = 0, inventory_quest_marks = true,
+    coords_map_cursor = true, coords_minimap = true,
     color_npc_search = 0xFFF06292, color_route_stop = 0xFFF8BBD0,
     color_hint_pin = 0xFF00E676,
     icon_npc_search = 31, icon_route_stop = 25, icon_hint_pin = 58,
@@ -192,7 +193,8 @@ M.WORLD_BOOL_LABEL = { world_chests = M.WORLD_LABEL.chest,
 local BOOL_KEYS = { "enabled", "debug", "show_startable", "show_in_progress",
   "show_completed", "show_unavailable", "show_locked", "show_overhead", "show_minimap",
   "reveal_gate_names", "show_quest_items", "journal_spoilers",
-  "matching_icons", "step_icons", "inventory_quest_marks", "route_world_path" }
+  "matching_icons", "step_icons", "inventory_quest_marks", "route_world_path",
+  "coords_map_cursor", "coords_minimap" }
 for _, k in ipairs(M.WORLD_BOOLS) do BOOL_KEYS[#BOOL_KEYS + 1] = k end
 local COLOR_KEYS = { "icon_color", "color_in_progress", "color_completed",
   "color_unavailable", "color_locked", "color_quest_item",
@@ -266,7 +268,8 @@ M.PANEL_ORDER = {
   { id = "npcs", keys = { "show_overhead", "overhead_distance",
     "overhead_names", "route_path", "route_world_path" } },
   { id = "items", keys = { "inventory_quest_marks" } },
-  { id = "map", keys = { "show_minimap", "matching_icons" } },
+  { id = "map", keys = { "show_minimap", "matching_icons",
+    "coords_map_cursor", "coords_minimap" } },
   { id = "appearance", keys = panel_appearance },
   { id = "quest_tree", keys = {} },
   { id = "world", keys = {} },
