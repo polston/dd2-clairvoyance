@@ -306,12 +306,12 @@ do
   check("first pass draws map, mini, head (+shadow)", #d.draws == 4)
   r:draw()
   check("second pass draws only mini", #d.draws == 5)
+  now = now + 0.9
+  r:draw()
+  check("mini persists within 0.9 s", #d.draws == 6)
   now = now + 0.2
   r:draw()
-  check("mini persists within 0.25 s", #d.draws == 6)
-  now = now + 0.3
-  r:draw()
-  check("mini dropped when 0.25 s stale", #d.draws == 6)
+  check("mini dropped when 1.0 s stale", #d.draws == 6)
   r:push("mini", 1, 2, 2, 8, 0xFFFFFFFF, 1)
   r:mini_replace()
   r:push("mini", 1, 3, 3, 8, 0xFFFFFFFF, 1)
@@ -426,7 +426,7 @@ do
   -- stale drop without mini_replace: stamped at push
   r:push("mini", 1, 1, 1, 8, 0xFFFFFFFF, 1)
   r:push("mini", 1, 2, 2, 8, 0xFFFFFFFF, 1)
-  now = now + 0.3
+  now = now + 1.1
   r:draw()
   check("stale mini dropped without mini_replace", r.mini.n == 0)
   -- (5) Image.new returning false / a number marks failed without raising

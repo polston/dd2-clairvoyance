@@ -8,7 +8,7 @@ local PATH_PREFIX = "Clairvoyance/icons/"
 local TRIP_AT = 30        -- consecutive failed passes before the breaker trips
 local TRIP_SECONDS = 5.0
 local TRIP_LIMIT = 3      -- the third trip keeps drawing off
-local MINI_STALE = 0.25   -- seconds without a minimap update before "mini" is dropped
+local MINI_STALE = 1.0    -- seconds without a minimap update before "mini" is dropped
 local MAX_RECORDS = 4096  -- per-layer cap: pushes past it are dropped (a layer that never gets replaced cannot grow without bound)
 
 local function new_layer()
