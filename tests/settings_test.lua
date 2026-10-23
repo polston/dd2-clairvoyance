@@ -133,11 +133,12 @@ check("journal_spoilers stored false kept",
   su.validate({ journal_spoilers = false }).journal_spoilers == false)
 
 -- exact defaults key count (24 after the per-category icon keys, plus
--- journal_spoilers, plus 23 world-tracker keys (SPEC 17.5, 17.10.13))
+-- journal_spoilers, plus 23 world-tracker keys (SPEC 17.5, 17.10.13),
+-- plus 8 v14 keys (SPEC 22.6))
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 52", n == 52)
+  check("defaults key count is 60", n == 60)
 end
 
 -- world tracker settings
@@ -265,8 +266,8 @@ do
   local ni, nc = 0, 0
   for _, k in ipairs(su.ICON_KEYS) do if su.V12_ICON[k] then ni = ni + 1 end end
   for _, k in ipairs(su.COLOR_KEYS) do if su.V12_COLOR[k] then nc = nc + 1 end end
-  check("V12_ICON keys are ICON_KEYS", ni == 12 and #su.ICON_KEYS == 12)
-  check("V12_COLOR keys are COLOR_KEYS", nc == 12 and #su.COLOR_KEYS == 12)
+  check("V12_ICON keys are ICON_KEYS", ni == 15 and #su.ICON_KEYS == 15)
+  check("V12_COLOR keys are COLOR_KEYS", nc == 12 and #su.COLOR_KEYS == 15)
 
   -- reset_icons
   local S = {}
@@ -296,13 +297,88 @@ do
   m = su.validate(raw)
   local kept = m.palette == 13
   for _, k in ipairs(su.ICON_KEYS) do if m[k] ~= su.V12_ICON[k] then kept = false end end
-  for _, k in ipairs(su.COLOR_KEYS) do if m[k] ~= su.V12_COLOR[k] then kept = false end end
+  for _, k in ipairs(su.COLOR_KEYS) do
+    if su.V12_COLOR[k] then
+      if m[k] ~= su.V12_COLOR[k] then kept = false end
+    elseif m[k] ~= D[k] then kept = false end
+  end
   check("migration: palette 13 keeps v12 values", kept)
   raw.palette = "x"
   local okc, mm = pcall(su.validate, raw)
   check("migration: palette string does not raise and migrates",
     okc and mm.palette == 13 and mm.icon_chest == D.icon_chest)
   check("validate always carries palette 13", su.validate({}).palette == 13 and su.validate(nil).palette == 13)
+end
+
+-- v14 (SPEC 22.6): NPC search, names, marks and hints settings
+do
+  local never = function() return false end
+  check("overhead_names default 0", D.overhead_names == 0)
+  check("inventory_quest_marks default true", D.inventory_quest_marks == true)
+  check("color_npc_search default", D.color_npc_search == 0xFFF06292)
+  check("color_route_stop default", D.color_route_stop == 0xFFF8BBD0)
+  check("color_hint_pin default", D.color_hint_pin == 0xFF00E676)
+  check("icon_npc_search default", D.icon_npc_search == 31)
+  check("icon_route_stop default", D.icon_route_stop == 25)
+  check("icon_hint_pin default", D.icon_hint_pin == 58)
+  for _, c in ipairs({ { 0, 0 }, { 1, 1 }, { 2, 2 }, { -1, 0 }, { 3, 2 },
+    { 1.5, 1 }, { "x", 0 } }) do
+    check("overhead_names " .. tostring(c[1]),
+      su.validate({ overhead_names = c[1] }).overhead_names == c[2])
+  end
+  check("overhead_names absent", su.validate({}).overhead_names == 0)
+  check("inventory_quest_marks false kept",
+    su.validate({ inventory_quest_marks = false }).inventory_quest_marks == false)
+  check("inventory_quest_marks true kept",
+    su.validate({ inventory_quest_marks = true }).inventory_quest_marks == true)
+  check("inventory_quest_marks non-bool -> true",
+    su.validate({ inventory_quest_marks = "no" }).inventory_quest_marks == true)
+  for _, k in ipairs({ "color_npc_search", "color_route_stop", "color_hint_pin" }) do
+    check(k .. " kept", su.validate({ [k] = 0xFF112233 })[k] == 0xFF112233)
+    check(k .. " negative rejected", su.validate({ [k] = -1 })[k] == D[k])
+    check(k .. " float rejected", su.validate({ [k] = 1.5 })[k] == D[k])
+    check(k .. " string rejected", su.validate({ [k] = "x" })[k] == D[k])
+    check(k .. " not in V12_COLOR", su.V12_COLOR[k] == nil)
+  end
+  for _, k in ipairs({ "icon_npc_search", "icon_route_stop", "icon_hint_pin" }) do
+    check(k .. " kept", su.validate({ [k] = 9 })[k] == 9)
+    check(k .. " None rejected", su.validate({ [k] = 61 })[k] == D[k])
+    check(k .. " float rejected", su.validate({ [k] = 9.5 })[k] == D[k])
+    check(k .. " string rejected", su.validate({ [k] = "9" })[k] == D[k])
+    check(k .. " V12_ICON equals default", su.V12_ICON[k] == D[k])
+  end
+  local want = { npc_search = 31, route_stop = 25, hint_pin = 58 }
+  for cat, id in pairs(want) do
+    for _, sheet in ipairs({ "map", "mini", "head" }) do
+      check("icon_for " .. cat .. " " .. sheet,
+        su.icon_for(D, { cat = cat }, sheet, nil, never) == id)
+    end
+  end
+  local S = {}
+  for k, v in pairs(D) do S[k] = v end
+  S.icon_npc_search = 40
+  check("icon_for npc_search 40 mini -> v12", su.icon_for(S, { cat = "npc_search" }, "mini", nil, never) == 31)
+  check("icon_for npc_search 40 map kept", su.icon_for(S, { cat = "npc_search" }, "map", nil, never) == 40)
+  check("WORLD_LABEL npc_search", su.WORLD_LABEL.npc_search == "NPCs")
+  check("WORLD_LABEL route_stop", su.WORLD_LABEL.route_stop == "Route stops")
+  check("WORLD_LABEL hint_pin", su.WORLD_LABEL.hint_pin == "Hint pins")
+  check("COLOR_KEY npc_search", su.COLOR_KEY.npc_search == "color_npc_search")
+  check("COLOR_KEY route_stop", su.COLOR_KEY.route_stop == "color_route_stop")
+  check("COLOR_KEY hint_pin", su.COLOR_KEY.hint_pin == "color_hint_pin")
+  check("ICON_KEY npc_search", su.ICON_KEY.npc_search == "icon_npc_search")
+  check("ICON_KEY route_stop", su.ICON_KEY.route_stop == "icon_route_stop")
+  check("ICON_KEY hint_pin", su.ICON_KEY.hint_pin == "icon_hint_pin")
+  local R = {}
+  for k, v in pairs(D) do R[k] = v end
+  for _, k in ipairs({ "icon_npc_search", "icon_route_stop", "icon_hint_pin" }) do R[k] = 9 end
+  for _, k in ipairs({ "color_npc_search", "color_route_stop", "color_hint_pin" }) do R[k] = 0xFF010203 end
+  su.reset_icons(R)
+  local all = true
+  for _, k in ipairs({ "icon_npc_search", "icon_route_stop", "icon_hint_pin",
+    "color_npc_search", "color_route_stop", "color_hint_pin" }) do
+    if R[k] ~= D[k] then all = false end
+  end
+  check("reset_icons restores the six v14 keys", all)
 end
 
 -- one-time migration: a renamed data file falls back to its old-named file
