@@ -1896,7 +1896,7 @@ do
           local pp = player_origin
           for _, r in ipairs(srows) do
             if r.pos ~= nil and pp ~= nil then
-              imgui.text(string.format("%s - at %.0f, %.0f - %.0f m", r.text,
+              imgui.text(string.format("%s - X %.0f  Z %.0f - %.0f m", r.text,
                 r.pos.x, r.pos.z, math.sqrt((r.pos.x - pp.x) ^ 2 + (r.pos.z - pp.z) ^ 2)))
             else
               imgui.text(r.text)
@@ -2728,24 +2728,25 @@ wt.coords_frame = function()
     local pc = ui_map:get_field("PnlCursor")
     local gp = pc ~= nil and pc:call("get_GlobalPosition") or nil
     if c ~= nil and gp ~= nil then
-      wt.coord_tag(string.format("%.0f, %.0f", c.x, c.z), gp.x, gp.y + wt.COORD_DY)
+      -- up and to the right of the cursor, clear of the hover label above it
+      wt.coord_text(string.format("X %.0f  Z %.0f", c.x, c.z),
+        gp.x + wt.CURSOR_DX, gp.y + wt.CURSOR_DY)
     end
   elseif settings.coords_minimap and settings.show_minimap and ui_map == nil
       and wt.mini_vis and wt.mini_t ~= nil and now - wt.mini_t < 0.5
       and player_origin ~= nil then
-    wt.coord_tag(string.format("%.0f, %.0f", player_origin.x, player_origin.z),
-      wt.mini_x, wt.mini_y + wt.MINI_DY)
+    -- below and to the left of the minimap's lower-left edge
+    wt.coord_text(string.format("X %.0f  Z %.0f  height %.0f",
+      player_origin.x, player_origin.z, player_origin.y),
+      wt.mini_x + wt.MINI_DX, wt.mini_y + wt.MINI_DY)
   end
 end
--- A small dark tag centred on cx, its top edge at y.
-wt.coord_tag = function(s, cx, y)
-  local w = #s * wt.COORD_CHAR_W + 2 * wt.COORD_PAD
-  local x = cx - w / 2
-  draw.filled_rect(x, y, w, wt.COORD_H, 0xA0000000)
-  draw.text(s, x + wt.COORD_PAD, y + 2, 0xFFE8E0D0)
+-- Outlined text, its top-left corner at x, y.
+wt.coord_text = function(s, x, y)
+  wt.style.text(draw, s, x, y, 0xFFE8E0D0, true, 0xFF000000, 1)
 end
-wt.COORD_DY, wt.MINI_DY = 30, 120
-wt.COORD_CHAR_W, wt.COORD_PAD, wt.COORD_H = 7, 6, 18
+wt.CURSOR_DX, wt.CURSOR_DY = 18, -34
+wt.MINI_DX, wt.MINI_DY = -120, 95
 re.on_frame(function() wt.layer_run(wt.coords_layer, "coordinates", wt.coords_frame) end)
 
 -- v14 (SPEC 22.10): item-menu quest dots, its own failure counters inside.
