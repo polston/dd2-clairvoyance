@@ -1055,7 +1055,9 @@ function M.new(a, reads, io)
     -- fixture without the read has none
     local sig = ""
     if type(reads.current_sig) == "function" then
+      local ts = clock()
       local oks, a, l, k, o = pcall(reads.current_sig, cid)
+      stats.ms.route_sig = (clock() - ts) * 1000
       if not oks then return errt end
       sig = tostring(a) .. "|" .. tostring(l) .. "|" .. tostring(k) .. "|" .. tostring(o)
     end

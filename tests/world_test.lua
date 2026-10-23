@@ -1236,13 +1236,15 @@ do
     local curs = { [7] = obj({ LocalArea = 49, Location = 3, Pos = P(1, 2, 3) }),
       [8] = obj({ LocalArea = -1, Location = -1, Pos = P(0, 0, 0) }),
       [9] = obj({ LocalArea = -1, Location = -1, KeyLocation = 2309, Pos = P(5, 5, 5),
-        OverwriteSchedule = list({ rowobj(1, 4, 0, 6, 20, 22, -1, -1, 0, 2309) }) }),
+        OverwriteSchedule = list({ rowobj(1, 4, 0, 6, 20, 22, -1, -1, 0, 2309),
+          rowobj(1, 4, 0, 6, 22, 23, -1, -1, 0, 2310) }) }),
       [10] = obj({ LocalArea = 49, Location = 3, KeyLocation = 0,
         OverwriteSchedule = list({}) }) }
     local rowsd = { [7] = list({ rowobj(1, 4, 0, 6, 6, 18, 3, 49, 0),
       rowobj(1, 4, 0, 6, 18, 6, 3, -1, 1) }),
       [11] = list({ rowobj(1, 4, 0, 6, 0, 24, -1, -1, 0, 2309),
-        rowobj(1, 4, 0, 6, 0, 24, -1, -1, 0, 0) }) }
+        rowobj(1, 4, 0, 6, 0, 24, -1, -1, 0, 0),
+        rowobj(1, 4, 0, 6, 0, 24, -1, -1, 0, -2) }) }
     local keynodes = { [2309] = obj({ _Pos = P(576, 19, -1011) }) }
     local keynodes_get = 0
     local nodes_by_area = { [49] = list({ obj(nil, { get_Pos = function() return P(1, 0, 1) end }),
@@ -1280,9 +1282,10 @@ do
     check("reads: schedule rows of an unknown cid fail", not pcall(R.schedule_rows, 99))
     local r11 = R.schedule_rows(11)
     check("reads: row key 2309 kept, 0 reads as -1", r11[1].key == 2309 and r11[2].key == -1
+      and r11[3].key == 4294967294
       and rr[1].key == -1)
     local c9, c10 = R.current_row(9), R.current_row(10)
-    check("reads: current row key and one overwrite row", c9.key == 2309 and #c9.overwrite == 1
+    check("reads: current row key and one overwrite row", c9.key == 2309 and #c9.overwrite == 2
       and c9.overwrite[1].key == 2309 and c9.overwrite[1].start_hour == 20
       and c9.overwrite[1].end_hour == 22 and c9.overwrite[1].area == -1
       and c9.overwrite[1].priority == 0)
@@ -1296,7 +1299,7 @@ do
     check("reads: absent key is nil without get_Item", R.key_pos(7) == nil and keynodes_get == 0)
     local sa, sl, sk, so = R.current_sig(9)
     check("reads: current_sig area, location, key, overwrite keys",
-      sa == -1 and sl == -1 and sk == 2309 and so == "2309")
+      sa == -1 and sl == -1 and sk == 2309 and so == "2309,2310")
     check("reads: current_sig of an absent cid is nil", R.current_sig(99) == nil)
     local okn, day, hour = pcall(R.schedule_now)
     check("reads: schedule now", okn and day == 33 and hour == 7)
