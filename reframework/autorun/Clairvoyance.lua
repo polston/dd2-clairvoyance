@@ -1457,12 +1457,20 @@ local function install_debug()
             want_update = true; last_tick = 0.0; save_settings()
           end
         else
+          local hit = false
           for _, k in ipairs(su.WORLD_BOOLS) do
             if key == k then
               settings[k] = v == true
               want_update = true; last_tick = 0.0; save_settings()
+              hit = true
               break
             end
+          end
+          -- v14 (SPEC 23.4.8): every style and route key, validated
+          if not hit and (key:find("^style_") or key:find("^outline_")
+            or key:find("^route_") or key == "names_color")
+            and su.set_key(settings, key, v) then
+            want_update = true; last_tick = 0.0; save_settings()
           end
         end
       end,
@@ -1612,113 +1620,174 @@ local function draw_detail(label, rec, qid, j, ja, spoilers)
   return true
 end
 
-local function draw_body()
-  local changed
+-- The settings panel (SPEC 23.7). Section functions are keyed by the ids in
+-- su.PANEL_ORDER; draw_body walks that list. One do-block, so the helpers and
+-- the section table add no chunk-level local.
+local draw_body
+do
+  local sec = {}
+  local groups = require("Clairvoyance.style").GROUPS
+  local route_labels = { "Straight lines", "Walking path" }
+  local cat_rows = {
+    { "startable", "Startable" }, { "in_progress", "In progress" },
+    { "completed", "Completed" }, { "unavailable", "Unavailable" },
+    { "locked", "Locked" }, { "quest_item", "Quest items" },
+    { "chest", su.WORLD_LABEL.chest }, { "treasure", su.WORLD_LABEL.treasure },
+    { "token", su.WORLD_LABEL.token }, { "beetle", su.WORLD_LABEL.beetle },
+    { "monster", su.WORLD_LABEL.monster }, { "seller", su.WORLD_LABEL.seller },
+    { "npc_search", su.WORLD_LABEL.npc_search },
+    { "route_stop", su.WORLD_LABEL.route_stop },
+    { "hint_pin", su.WORLD_LABEL.hint_pin },
+  }
+  -- the override sub-tree names: the category's name, then the three extras
+  local gname = { route_line = "Route line", names = "Names", items = "Item menu" }
+  for _, r in ipairs(cat_rows) do gname[r[1]] = r[2] end
 
-  changed, settings.enabled = imgui.checkbox("Enabled", settings.enabled)
-  if changed then
-    want_update = true; last_tick = 0.0; save_settings()
-    minimap_renderer:clear_suspension()
+  -- Appearance controls: validate through su.set_key, then save. A checkbox
+  -- saves at once (the number size alone defers to the slider release).
+  local function ck(label, key)
+    local c, v = imgui.checkbox(label .. "##" .. key, settings[key])
+    if c and su.set_key(settings, key, v) then want_update = true; save_settings() end
   end
-
-  -- SPEC 19.4: map search. Typing never touches last_tick (one tick, one save per 2 s).
-  local sch, sval = imgui.input_text("Map search", settings.search_text)
-  if sch then
-    settings.search_text = su.cut_search(sval)
-    settings_dirty = true; want_update = true
+  local function cc(label, key)
+    local c, v = imgui.color_picker_argb(label .. "##" .. key, settings[key])
+    if c and su.set_key(settings, key, v) then want_update = true; save_settings() end
   end
-  imgui.same_line()
-  if imgui.button("Clear") then
-    settings.search_text = ""
-    settings_dirty = true; want_update = true; last_tick = 0.0
+  local function cs(label, key, lo, hi)
+    local c, v = imgui.slider_int(label .. "##" .. key, settings[key], lo, hi)
+    if c and su.set_key(settings, key, v) then want_update = true; save_settings() end
   end
-  if wt.search_on then
-    local off = {}
-    for _, k in ipairs(su.WORLD_BOOLS) do
-      if k ~= "world_show_opened" and k ~= "world_undiscovered"
-        and k ~= "world_shops" and not settings[k] then
-        off[#off + 1] = string.lower(su.WORLD_BOOL_LABEL[k])
+  -- Number size (SPEC 23.4.3): the slider edits a draft on icons; the setting
+  -- is written on the frame the slider stops being active (1-11 snap to 12).
+  local function number_size()
+    local shown = icons.draft_active and icons.draft_number_size
+      or settings.route_number_size
+    local c, v = imgui.slider_int("Number size##route_number_size", shown, 0, 40)
+    -- read before any other item: is_item_active reads the last item drawn
+    local active = imgui.is_item_active()
+    imgui.same_line()
+    imgui.text("0 = default font")
+    if c then icons.draft_number_size = v; icons.draft_active = true end
+    if icons.draft_active and not active then
+      icons.draft_active = false
+      if su.set_key(settings, "route_number_size", icons.draft_number_size) then
+        want_update = true; settings_dirty = true
       end
     end
-    if #off > 0 then imgui.text("Not searched (off): " .. table.concat(off, ", ")) end
-    if snapshot == nil then
-      imgui.text("No results yet")
-    else
-      -- N counts the markers except route stops and hint pins (SPEC 19.4.4)
-      local srows = snapshot.search_rows
-      if srows == nil then
-        srows = core.world_rows(snapshot.markers,
-          (wt.q("input", nil) or {}).settlements, wt.world_origin)
-        for _, r in ipairs(srows) do
-          r.jump_id = "Show on map##sj_" .. tostring(r.key)
+  end
+
+  sec.enabled = function()
+    local changed
+    changed, settings.enabled = imgui.checkbox("Enabled", settings.enabled)
+    if changed then
+      want_update = true; last_tick = 0.0; save_settings()
+      minimap_renderer:clear_suspension()
+    end
+  end
+
+  sec.search = function()
+    local changed
+    -- SPEC 19.4: map search. Typing never touches last_tick (one tick, one save per 2 s).
+    local sch, sval = imgui.input_text("Map search", settings.search_text)
+    if sch then
+      settings.search_text = su.cut_search(sval)
+      settings_dirty = true; want_update = true
+    end
+    imgui.same_line()
+    if imgui.button("Clear") then
+      settings.search_text = ""
+      settings_dirty = true; want_update = true; last_tick = 0.0
+    end
+    if wt.search_on then
+      local off = {}
+      for _, k in ipairs(su.WORLD_BOOLS) do
+        if k ~= "world_show_opened" and k ~= "world_undiscovered"
+          and k ~= "world_shops" and not settings[k] then
+          off[#off + 1] = string.lower(su.WORLD_BOOL_LABEL[k])
         end
-        snapshot.search_rows = srows
-        local nres = 0
-        for _, m in ipairs(snapshot.markers) do
-          if m.cat ~= "route_stop" and m.cat ~= "hint_pin" then nres = nres + 1 end
-        end
-        snapshot.search_n = nres
       end
-      if imgui.tree_node(string.format("Search results (%d)###qnml_sr", snapshot.search_n)) then
-        for _, r in ipairs(srows) do
-          imgui.text(r.text)
-          if imgui.button(r.jump_id) then jump_pending = r.pos end
-          if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+      if #off > 0 then imgui.text("Not searched (off): " .. table.concat(off, ", ")) end
+      if snapshot == nil then
+        imgui.text("No results yet")
+      else
+        -- N counts the markers except route stops and hint pins (SPEC 19.4.4)
+        local srows = snapshot.search_rows
+        if srows == nil then
+          srows = core.world_rows(snapshot.markers,
+            (wt.q("input", nil) or {}).settlements, wt.world_origin)
+          for _, r in ipairs(srows) do
+            r.jump_id = "Show on map##sj_" .. tostring(r.key)
+          end
+          snapshot.search_rows = srows
+          local nres = 0
+          for _, m in ipairs(snapshot.markers) do
+            if m.cat ~= "route_stop" and m.cat ~= "hint_pin" then nres = nres + 1 end
+          end
+          snapshot.search_n = nres
         end
-        -- v14 (SPEC 22.7.6): the name matches, a route toggle each
-        local nrows = snapshot.npc_rows or {}
-        if #nrows > 0 and imgui.tree_node(
-            string.format("NPCs (%d)###qnml_nr", #nrows)) then
-          local rt = (wt.q("input", nil) or {}).route
-          for _, r in ipairs(nrows) do
-            if r.text == nil then
-              local tx = tostring(r.name)
-              if not r.alive then
-                tx = tx .. " - dead"
-              elseif r.pos ~= nil then
-                local best = core.nearest_settlement(r.pos,
-                  (wt.q("input", nil) or {}).settlements)
-                if best ~= nil then tx = tx .. " - near " .. tostring(best.name) end
-              else
-                tx = tx .. " - position unknown"
-              end
-              r.text = tx
-              r.jump_id = "Show on map##nj_" .. tostring(r.cid)
-              r.route_id = "Route##nr_" .. tostring(r.cid)
-            end
+        if imgui.tree_node(string.format("Search results (%d)###qnml_sr", snapshot.search_n)) then
+          for _, r in ipairs(srows) do
             imgui.text(r.text)
-            if r.pos ~= nil then
-              if imgui.button(r.jump_id) then jump_pending = r.pos end
-              if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
-              imgui.same_line()
-            end
-            local rc, rv = imgui.checkbox(r.route_id, wt.route_cid == r.cid)
-            if rc then
-              if rv then
-                wt.route_cid = r.cid
-                wt.q("set_route", nil, r.cid, r.name)
-              else
-                wt.route_cid = nil
-                wt.q("clear_route", nil)
+            if imgui.button(r.jump_id) then jump_pending = r.pos end
+            if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+          end
+          -- v14 (SPEC 22.7.6): the name matches, a route toggle each
+          local nrows = snapshot.npc_rows or {}
+          if #nrows > 0 and imgui.tree_node(
+              string.format("NPCs (%d)###qnml_nr", #nrows)) then
+            local rt = (wt.q("input", nil) or {}).route
+            for _, r in ipairs(nrows) do
+              if r.text == nil then
+                local tx = tostring(r.name)
+                if not r.alive then
+                  tx = tx .. " - dead"
+                elseif r.pos ~= nil then
+                  local best = core.nearest_settlement(r.pos,
+                    (wt.q("input", nil) or {}).settlements)
+                  if best ~= nil then tx = tx .. " - near " .. tostring(best.name) end
+                else
+                  tx = tx .. " - position unknown"
+                end
+                r.text = tx
+                r.jump_id = "Show on map##nj_" .. tostring(r.cid)
+                r.route_id = "Route##nr_" .. tostring(r.cid)
               end
-              want_update = true; last_tick = 0.0
-            end
-            if wt.route_cid == r.cid and rt ~= nil and rt.cid == r.cid then
-              if rt.err ~= nil then
-                imgui.text("route unavailable")
-              elseif (rt.unplaced or 0) > 0 then
-                imgui.text(string.format("%d stops unplaced", rt.unplaced))
+              imgui.text(r.text)
+              if r.pos ~= nil then
+                if imgui.button(r.jump_id) then jump_pending = r.pos end
+                if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+                imgui.same_line()
+              end
+              local rc, rv = imgui.checkbox(r.route_id, wt.route_cid == r.cid)
+              if rc then
+                if rv then
+                  wt.route_cid = r.cid
+                  wt.q("set_route", nil, r.cid, r.name)
+                else
+                  wt.route_cid = nil
+                  wt.q("clear_route", nil)
+                end
+                want_update = true; last_tick = 0.0
+              end
+              if wt.route_cid == r.cid and rt ~= nil and rt.cid == r.cid then
+                if rt.err ~= nil then
+                  imgui.text("route unavailable")
+                elseif (rt.unplaced or 0) > 0 then
+                  imgui.text(string.format("%d stops unplaced", rt.unplaced))
+                end
               end
             end
+            imgui.tree_pop()
           end
           imgui.tree_pop()
         end
-        imgui.tree_pop()
       end
     end
   end
 
-  if imgui.tree_node("Show categories") then
+  sec.quests = function()
+    local changed
+    if not imgui.tree_node("Quests") then return end
     local toggles = {
       { "show_startable", "Startable" },
       { "show_in_progress", "In progress" },
@@ -1740,423 +1809,497 @@ local function draw_body()
     changed, settings.journal_spoilers = imgui.checkbox(
       "Show every journal step (spoilers)", settings.journal_spoilers)
     if changed then last_tick = 0.0; save_settings() end
-    imgui.tree_pop()
-  end
-
-  -- v10: own top-level node, so the world filters are one click deep
-  if imgui.tree_node("World markers##wcfg") then
-    for _, k in ipairs(su.WORLD_BOOLS) do
-      changed, settings[k] = imgui.checkbox(su.WORLD_BOOL_LABEL[k], settings[k])
-      if changed then want_update = true; last_tick = 0.0; save_settings() end
-    end
-    local wc, wv = imgui.slider_int("Max world markers",
-      settings.world_max_markers, 0, su.WORLD_MAX_MARKERS)
-    if wc then
-      settings.world_max_markers = su.clamp_int(wv, 0, su.WORLD_MAX_MARKERS)
-      settings_dirty = true; want_update = true
+    -- v13 (SPEC 21.4): moved here from Icons and colors
+    changed, settings.step_icons =
+      imgui.checkbox("Numbered icons for in-progress quests", settings.step_icons)
+    if changed then
+      want_update = true; last_tick = 0.0; save_settings(); icons:preload_all()
     end
     imgui.tree_pop()
   end
 
-  changed, settings.show_overhead =
-    imgui.checkbox("Overhead NPC indicators", settings.show_overhead)
-  if changed then save_settings() end
-  local sc, sv = imgui.slider_float("Overhead distance",
-    settings.overhead_distance, 10, 200)
-  if sc then
-    settings.overhead_distance = math.min(200, math.max(10, sv))
-    settings_dirty = true
+  sec.world_markers = function()
+    local changed
+    if imgui.tree_node("World markers##wcfg") then
+      for _, k in ipairs(su.WORLD_BOOLS) do
+        changed, settings[k] = imgui.checkbox(su.WORLD_BOOL_LABEL[k], settings[k])
+        if changed then want_update = true; last_tick = 0.0; save_settings() end
+      end
+      local wc, wv = imgui.slider_int("Max world markers",
+        settings.world_max_markers, 0, su.WORLD_MAX_MARKERS)
+      if wc then
+        settings.world_max_markers = su.clamp_int(wv, 0, su.WORLD_MAX_MARKERS)
+        settings_dirty = true; want_update = true
+      end
+      imgui.tree_pop()
+    end
   end
-  -- v14 (SPEC 22.9.1): independent of the overhead indicators above
-  local nc, ni = imgui.combo("NPC names above heads",
-    settings.overhead_names + 1, wt.names_labels)
-  if nc and wt.names_labels[ni] ~= nil then
-    settings.overhead_names = ni - 1
-    save_settings()
-  end
-  -- v14 (SPEC 22.10.5)
-  changed, settings.inventory_quest_marks = imgui.checkbox(
-    "Mark quest items in the item menu", settings.inventory_quest_marks)
-  if changed then last_tick = 0.0; save_settings() end
 
-  changed, settings.show_minimap =
-    imgui.checkbox("Minimap indicators", settings.show_minimap)
-  if changed then
-    save_settings()
-    minimap_renderer:clear_suspension()
+  sec.npcs = function()
+    local changed
+    if not imgui.tree_node("NPCs") then return end
+    changed, settings.show_overhead =
+      imgui.checkbox("Overhead NPC indicators", settings.show_overhead)
+    if changed then save_settings() end
+    local sc, sv = imgui.slider_float("Overhead distance",
+      settings.overhead_distance, 10, 200)
+    if sc then
+      settings.overhead_distance = math.min(200, math.max(10, sv))
+      settings_dirty = true
+    end
+    -- v14 (SPEC 22.9.1): independent of the overhead indicators above
+    local nc, ni = imgui.combo("NPC names above heads",
+      settings.overhead_names + 1, wt.names_labels)
+    if nc and wt.names_labels[ni] ~= nil then
+      settings.overhead_names = ni - 1
+      save_settings()
+    end
+    -- v14 (SPEC 23.6): how a route is drawn
+    local rc, ri = imgui.combo("Route path", settings.route_path + 1, route_labels)
+    if rc and su.set_key(settings, "route_path", ri - 1) then
+      want_update = true; last_tick = 0.0; save_settings()
+    end
+    local straight = settings.route_path == 0
+    imgui.begin_disabled(straight)
+    local wc, wv = imgui.checkbox("Show route path in the world",
+      settings.route_world_path)
+    imgui.end_disabled()
+    if wc and su.set_key(settings, "route_world_path", wv) then
+      want_update = true; save_settings()
+    end
+    if straight then imgui.same_line(); imgui.text("needs Walking path") end
+    imgui.tree_pop()
   end
-  if imgui.tree_node("Icons and colors") then
+
+  sec.items = function()
+    local changed
+    if not imgui.tree_node("Items") then return end
+    -- v14 (SPEC 22.10.5)
+    changed, settings.inventory_quest_marks = imgui.checkbox(
+      "Mark quest items in the item menu", settings.inventory_quest_marks)
+    if changed then last_tick = 0.0; save_settings() end
+    imgui.tree_pop()
+  end
+
+  sec.map = function()
+    local changed
+    if not imgui.tree_node("Map and minimap") then return end
+    changed, settings.show_minimap =
+      imgui.checkbox("Minimap indicators", settings.show_minimap)
+    if changed then
+      save_settings()
+      minimap_renderer:clear_suspension()
+    end
     if not icons:available() then
-      imgui.text("Matching icons need the D2DX plugin (Dragon's Dogma 2 mod 1261).")
+      imgui.text("Matching icons need the D2DX plugin (Dragon's Dogma 2 mod 1261)."
+        .. " Route lines need it too.")
     end
     changed, settings.matching_icons =
       imgui.checkbox("Matching icons (D2DX)", settings.matching_icons)
     if changed then
       want_update = true; save_settings(); icons:preload_all()
     end
-    changed, settings.step_icons =
-      imgui.checkbox("Numbered icons for in-progress quests", settings.step_icons)
-    if changed then
-      want_update = true; last_tick = 0.0; save_settings(); icons:preload_all()
+    imgui.tree_pop()
+  end
+
+  sec.appearance = function()
+    if not imgui.tree_node("Appearance") then return end
+    if imgui.tree_node("Outlines##ap_out") then
+      ck("Outlines", "outline_on")
+      cc("Outline color", "outline_color")
+      cs("Outline width", "outline_width", 1, 4)
+      imgui.tree_pop()
     end
-    if imgui.button("Reset icons and colors to defaults") then
-      su.reset_icons(settings)
-      save_settings(); icons:preload_all(); want_update = true
+    if imgui.tree_node("Route##ap_route") then
+      cc("Line color", "route_line_color")
+      cs("Line width", "route_line_width", 1, 8)
+      cs("Stop size (%)", "route_stop_size", 50, 200)
+      cc("Number color", "route_number_color")
+      number_size()
+      imgui.tree_pop()
     end
-    -- One icon per category, the same on every surface (choices are every
-    -- picture in the icon folder except the reserved type numbers and
-    -- None, SPEC 21.7.3). Uses color_picker_argb:
-    -- plain color_picker takes/returns ABGR.
-    local rows = {
-      { "startable", "Startable" }, { "in_progress", "In progress" },
-      { "completed", "Completed" }, { "unavailable", "Unavailable" },
-      { "locked", "Locked" }, { "quest_item", "Quest items" },
-      { "chest", su.WORLD_LABEL.chest }, { "treasure", su.WORLD_LABEL.treasure },
-      { "token", su.WORLD_LABEL.token }, { "beetle", su.WORLD_LABEL.beetle },
-      { "monster", su.WORLD_LABEL.monster }, { "seller", su.WORLD_LABEL.seller },
-      { "npc_search", su.WORLD_LABEL.npc_search },
-      { "route_stop", su.WORLD_LABEL.route_stop },
-      { "hint_pin", su.WORLD_LABEL.hint_pin },
-    }
-    for _, r in ipairs(rows) do
-      if imgui.tree_node(r[2] .. "##ic_" .. r[1]) then
-        local ik, ck = su.ICON_KEY[r[1]], su.COLOR_KEY[r[1]]
-        local ic, ni = imgui.combo("Icon##" .. r[1],
-          su.ICON_INDEX[settings[ik]] or 1, su.ICON_LABELS)
-        if ic and su.ICON_CHOICES[ni] then
-          settings[ik] = su.ICON_CHOICES[ni][1]; want_update = true; save_settings()
-          icons:preload_all()
+    cc("Names color", "names_color")
+    if imgui.tree_node("Overrides##ap_ov") then
+      for _, g in ipairs(groups) do
+        if imgui.tree_node(gname[g] .. "##ov_" .. g) then
+          local p = "style_" .. g .. "_"
+          ck("Override", p .. "override")
+          if settings[p .. "override"] then
+            ck("Outline", p .. "outline_on")
+            cc("Outline color", p .. "outline_color")
+            cs("Outline width", p .. "outline_width", 1, 4)
+          end
+          imgui.tree_pop()
         end
-        local pc, nv = imgui.color_picker_argb("Color##" .. r[1], settings[ck])
-        if pc then settings[ck] = nv; want_update = true; save_settings() end
-        imgui.tree_pop()
       end
+      imgui.tree_pop()
+    end
+    if imgui.tree_node("Icons and colors") then
+      -- One icon per category, the same on every surface (choices are every
+      -- picture in the icon folder except the reserved type numbers and
+      -- None, SPEC 21.7.3). Uses color_picker_argb:
+      -- plain color_picker takes/returns ABGR.
+      for _, r in ipairs(cat_rows) do
+        if imgui.tree_node(r[2] .. "##ic_" .. r[1]) then
+          local ik, ck_ = su.ICON_KEY[r[1]], su.COLOR_KEY[r[1]]
+          local ic, ni = imgui.combo("Icon##" .. r[1],
+            su.ICON_INDEX[settings[ik]] or 1, su.ICON_LABELS)
+          if ic and su.ICON_CHOICES[ni] then
+            settings[ik] = su.ICON_CHOICES[ni][1]; want_update = true; save_settings()
+            icons:preload_all()
+          end
+          local pc, nv = imgui.color_picker_argb("Color##" .. r[1], settings[ck_])
+          if pc then settings[ck_] = nv; want_update = true; save_settings() end
+          imgui.tree_pop()
+        end
+      end
+      imgui.tree_pop()
+    end
+    if imgui.button("Reset appearance to defaults") then
+      su.reset_appearance(settings)
+      save_settings(); icons:preload_all(); want_update = true
     end
     imgui.tree_pop()
   end
 
-  changed, settings.debug = imgui.checkbox("Debug logging", settings.debug)
-  if changed then A.set_debug(settings.debug); install_debug(); save_settings() end
-
-  if imgui.button("Force refresh") then
-    committed = {}
-    snapshot = nil
-    want_update = true
-    last_tick = 0.0
-  end
-
-  if snapshot ~= nil then
-    local c = snapshot.counts
-    imgui.text(string.format(
-      "Quests - startable %d  in progress %d  completed %d",
-      c.startable, c.in_progress, c.completed))
-    imgui.text(string.format(
-      "  failed %d  canceled %d  giver dead %d  locked %d",
-      c.failed, c.canceled, c.giver_dead, c.locked))
-    if imgui.tree_node("Status") then
-      imgui.text(string.format("Resolved positions: %d", snapshot.resolved_count))
-      imgui.text(string.format("Markers added: %d  dropped (pool full): %d",
-        added_count, dropped_count))
-      imgui.text(string.format("Pool: %s  used %d / limit %d",
-        pool_label, pool_used, pool_limit))
-      local lines = {}
-      for qid, u in pairs(snapshot.unresolved) do
-        lines[#lines + 1] = string.format("[%d] %s: %s",
-          qid, u.name or "?", u.reason)
-      end
-      table.sort(lines)
-      if #lines > 0 and imgui.tree_node("Unresolved quests") then
-        for _, line in ipairs(lines) do imgui.text(line) end
-        imgui.tree_pop()
-      end
-      local unnamed_ids = {}
-      for qid in pairs(snapshot.unnamed) do unnamed_ids[#unnamed_ids + 1] = qid end
-      table.sort(unnamed_ids)
-      if #unnamed_ids > 0 then
-        imgui.text("Unnamed quest IDs: " .. table.concat(unnamed_ids, ", "))
-      end
-      if adapter.journal_stats ~= nil then
-        imgui.text(core.journal_line(adapter.journal_stats()))
-      end
-      imgui.text(wt.line())
-      imgui.tree_pop()
-    end
-  else
-    imgui.text("Waiting for game / save data")
-  end
-  if snapshot ~= nil and A.QUEST_REGION ~= nil then
-    local exp = {}   -- v9 (SPEC 16.3c): rows open this frame
-    if imgui.tree_node("Quest tree") then
-      tree_open_at = os.clock()
-      if snapshot.quests == nil then
-        imgui.text("Building (next refresh)...")
-      else
-        local spoilers = settings.journal_spoilers
-        local jt, jat = snapshot.journal or {}, snapshot.journal_all or {}
-        snapshot.summary = snapshot.summary or core.summary_nodes(snapshot)
-        for _, s in ipairs(snapshot.summary) do
-          draw_detail(s.label, s.rec, s.qid, jt, jat, spoilers)
-        end
-        local order = { "Melve", "Vernworth", "Checkpoint Rest Town",
-          "Harve", "Bakbattahl", "Sacred Arbor", "Volcanic Island",
-          "Unmoored", "Elsewhere" }
-        local by = {}
-        for _, r in ipairs(snapshot.quests) do
-          if r.cat ~= "locked" or settings.show_locked then
-            local t = by[r.region]
-            if t == nil then t = {} by[r.region] = t end
-            t[#t + 1] = r
+  sec.quest_tree = function()
+    if snapshot ~= nil and A.QUEST_REGION ~= nil then
+      local exp = {}   -- v9 (SPEC 16.3c): rows open this frame
+      if imgui.tree_node("Quest tree") then
+        tree_open_at = os.clock()
+        if snapshot.quests == nil then
+          imgui.text("Building (next refresh)...")
+        else
+          local spoilers = settings.journal_spoilers
+          local jt, jat = snapshot.journal or {}, snapshot.journal_all or {}
+          snapshot.summary = snapshot.summary or core.summary_nodes(snapshot)
+          for _, s in ipairs(snapshot.summary) do
+            draw_detail(s.label, s.rec, s.qid, jt, jat, spoilers)
+          end
+          local order = { "Melve", "Vernworth", "Checkpoint Rest Town",
+            "Harve", "Bakbattahl", "Sacred Arbor", "Volcanic Island",
+            "Unmoored", "Elsewhere" }
+          local by = {}
+          for _, r in ipairs(snapshot.quests) do
+            if r.cat ~= "locked" or settings.show_locked then
+              local t = by[r.region]
+              if t == nil then t = {} by[r.region] = t end
+              t[#t + 1] = r
+            end
+          end
+          for _, reg in ipairs(order) do
+            local list = by[reg]
+            if list ~= nil and #list > 0 then
+              local done = 0
+              for _, r in ipairs(list) do
+                if r.cat == "completed" or r.cat == "failed"
+                  or r.cat == "canceled" then done = done + 1 end
+              end
+              if imgui.tree_node(string.format("%s (%d/%d)###qt_%s",
+                  reg, done, #list, reg)) then
+                for _, r in ipairs(list) do
+                  imgui.text_colored("*", A.argb_to_abgr(
+                    su.color_of(settings, r.grp)))
+                  imgui.same_line()
+                  r.row_label = r.row_label or core.row_label(r, snapshot.nearest_qid)
+                  if draw_detail(r.row_label, r, r.qid, jt, jat, spoilers) then
+                    exp[r.qid] = true
+                  end
+                end
+                imgui.tree_pop()
+              end
+            end
+          end
+          local ts = adapter.tree_gate_stats ~= nil
+            and adapter.tree_gate_stats() or nil
+          if ts ~= nil then
+            imgui.text(tree_gates_line(ts))
           end
         end
-        for _, reg in ipairs(order) do
-          local list = by[reg]
-          if list ~= nil and #list > 0 then
-            local done = 0
-            for _, r in ipairs(list) do
-              if r.cat == "completed" or r.cat == "failed"
-                or r.cat == "canceled" then done = done + 1 end
-            end
-            if imgui.tree_node(string.format("%s (%d/%d)###qt_%s",
-                reg, done, #list, reg)) then
-              for _, r in ipairs(list) do
-                imgui.text_colored("*", A.argb_to_abgr(
-                  su.color_of(settings, r.grp)))
-                imgui.same_line()
-                r.row_label = r.row_label or core.row_label(r, snapshot.nearest_qid)
-                if draw_detail(r.row_label, r, r.qid, jt, jat, spoilers) then
-                  exp[r.qid] = true
+        imgui.tree_pop()
+      end
+      for q in pairs(exp) do
+        if not tree_expanded[q] then last_tick = 0.0; break end   -- detail within a frame or two
+      end
+      tree_expanded = exp
+    end
+  end
+
+  sec.world = function()
+    if snapshot ~= nil and A.QUEST_REGION ~= nil then
+      if imgui.tree_node("World") then
+        local okp, errp = pcall(function()
+          -- read every frame: shown even before the first committed round
+          local ps = wt.q("places_state", wt.ps_dflt)
+          if ps.state ~= "ok" then
+            imgui.text("World data file missing: reinstall the mod")
+          end
+          if ps.stale then imgui.text("World data may be out of date") end
+          local sw = snapshot.world
+          if sw == nil then
+            imgui.text("No world data yet")
+            return
+          end
+          for _, cat in ipairs(core.WORLD_CATS) do
+            local p = cat ~= "npc_search" and sw[cat] or nil   -- NPCs live in the search panel
+            local title = su.WORLD_LABEL[cat] or cat
+            if cat == "shop" and not wt.search_on then title = su.WORLD_LABEL.shops end
+            if p ~= nil and (cat ~= "shop" or wt.search_on or settings.world_shops)
+              and imgui.tree_node(string.format("%s (%d/%d)###wcat_%s",
+                title, p.shown, p.known, cat)) then
+              local rows = wt.rows(cat)
+              if #rows == 0 then imgui.text("Nothing shown") end
+              for _, r in ipairs(rows) do
+                local open = true
+                if cat == "shop" then
+                  open = imgui.tree_node(r.tree_id)
+                  if open then
+                    for _, l in ipairs(r.sells_for or {}) do imgui.text(l) end
+                    if r.stock == nil or #r.stock == 0 then
+                      imgui.text("No stock listed")
+                    else
+                      for _, it in ipairs(r.stock) do
+                        imgui.text(tostring(it.name) .. (it.locked and " (may be locked)" or ""))
+                      end
+                    end
+                  end
+                else
+                  imgui.text(r.text)
+                end
+                if open then
+                  if imgui.button(r.jump_id) then
+                    jump_pending = r.pos
+                  end
+                  if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+                  if cat == "shop" then imgui.tree_pop() end
                 end
               end
               imgui.tree_pop()
             end
           end
-        end
-        local ts = adapter.tree_gate_stats ~= nil
-          and adapter.tree_gate_stats() or nil
-        if ts ~= nil then
-          imgui.text(tree_gates_line(ts))
-        end
+        end)
+        if not okp then logerr("world panel: " .. tostring(errp)) end
+        imgui.tree_pop()
       end
-      imgui.tree_pop()
-    end
-    for q in pairs(exp) do
-      if not tree_expanded[q] then last_tick = 0.0; break end   -- detail within a frame or two
-    end
-    tree_expanded = exp
-    -- v10 (SPEC 17.4g): World panel, after the quest tree, same snapshot gate.
-    if imgui.tree_node("World") then
-      local okp, errp = pcall(function()
-        -- read every frame: shown even before the first committed round
-        local ps = wt.q("places_state", wt.ps_dflt)
-        if ps.state ~= "ok" then
-          imgui.text("World data file missing: reinstall the mod")
-        end
-        if ps.stale then imgui.text("World data may be out of date") end
-        local sw = snapshot.world
-        if sw == nil then
-          imgui.text("No world data yet")
-          return
-        end
-        for _, cat in ipairs(core.WORLD_CATS) do
-          local p = cat ~= "npc_search" and sw[cat] or nil   -- NPCs live in the search panel
-          local title = su.WORLD_LABEL[cat] or cat
-          if cat == "shop" and not wt.search_on then title = su.WORLD_LABEL.shops end
-          if p ~= nil and (cat ~= "shop" or wt.search_on or settings.world_shops)
-            and imgui.tree_node(string.format("%s (%d/%d)###wcat_%s",
-              title, p.shown, p.known, cat)) then
-            local rows = wt.rows(cat)
-            if #rows == 0 then imgui.text("Nothing shown") end
-            for _, r in ipairs(rows) do
-              local open = true
-              if cat == "shop" then
-                open = imgui.tree_node(r.tree_id)
-                if open then
-                  for _, l in ipairs(r.sells_for or {}) do imgui.text(l) end
-                  if r.stock == nil or #r.stock == 0 then
-                    imgui.text("No stock listed")
-                  else
-                    for _, it in ipairs(r.stock) do
-                      imgui.text(tostring(it.name) .. (it.locked and " (may be locked)" or ""))
-                    end
-                  end
-                end
-              else
-                imgui.text(r.text)
-              end
-              if open then
-                if imgui.button(r.jump_id) then
-                  jump_pending = r.pos
-                end
-                if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
-                if cat == "shop" then imgui.tree_pop() end
-              end
-            end
-            imgui.tree_pop()
-          end
-        end
-      end)
-      if not okp then logerr("world panel: " .. tostring(errp)) end
-      imgui.tree_pop()
     end
   end
-  if settings.debug then
-    imgui.text("Collection path: " .. A.debug_probe())
-    imgui.text(string.format("Hover: fires %d  hits %d  misses %d  sel_nil %d",
-      hover_stats.fires, hover_stats.hits, hover_stats.misses,
-      hover_stats.sel_nil))
-    if imgui.button("Probe NPC scan") then pcall(A.rebuild_npc_pos_cache) end
-    local acount = 0
-    for _ in pairs(overhead_anchors) do acount = acount + 1 end
-    imgui.text(string.format(
-      "Overhead: anchors %d, points %d, live hits %d, drawn %d, pass %.2f ms, draw %.2f ms, gate %s, vec reuse %s",
-      acount, #overhead_points, overhead_live_hits, overhead_drawn,
-      math.max(overhead_pass_ms_shown, overhead_pass_ms),
-      math.max(overhead_draw_ms_shown, overhead_draw_ms),
-      overhead_gate, tostring(proj_vec_reuse)))
-    if minimap_unavailable ~= nil then
-      imgui.text("Minimap: " .. minimap_unavailable)
-    else
-      local mr = minimap_renderer
-      imgui.text(string.format(
-        "Minimap: candidates %d, clipped %d, shown %d, dropped %d, pool %s, free %s, post %.2f ms, nearest %s, owned %d, hud changes %d, status %s",
-        mr.candidates_n, mr.clipped, mr.shown, mr.dropped,
-        mr.icons_mode and "-" or tostring(mr.pool_n),
-        mr.icons_mode and "-" or tostring(mr.free_n),
-        math.max(minimap_post_ms_shown, minimap_post_ms),
-        mr.nearest ~= nil and string.format("%.0f m", mr.nearest) or "-",
-        #mr.owned, mr.hud_changes, mr.status))
-    end
-    changed, overhead_force_estimate =
-      imgui.checkbox("Overhead: force width estimate", overhead_force_estimate)
-    if changed then label_widths = {} end
-    if imgui.button("Probe overhead lookup") then
-      local markers = snapshot ~= nil and snapshot.markers or {}
-      local coord_logged = false
-      for _, m in ipairs(markers) do
-        local cid = core.marker_cid(m)
-        if cid ~= nil then
-          local m_pos, m_live, live, hstate = A.probe_lookup(cid)
-          if live ~= nil then
-            logmsg(string.format(
-              "overhead probe cid=%d method(extract)=%s method(transform)=%s pos=%.1f,%.1f,%.1f",
-              cid, tostring(m_pos), tostring(m_live), live.x, live.y, live.z))
-            if not coord_logged then
-              coord_logged = true
-              local nx, ny, nz = adapter.npc_pos(cid)
-              logmsg(string.format(
-                "overhead coord check cid=%d npc_pos=%s,%s,%s live=%.1f,%.1f,%.1f",
-                cid, tostring(nx), tostring(ny), tostring(nz),
-                live.x, live.y, live.z))
-            end
-          else
-            logmsg(string.format(
-              "overhead probe cid=%d live MISS (extract method=%s, holder=%s)",
-              cid, tostring(m_pos), tostring(hstate)))
-          end
-        end
-      end
-      -- Reflection dump: what this build actually offers for a live
-      -- character lookup (the four guessed method names all miss).
-      pcall(function()
-        local cm_td = sdk.find_type_definition("app.CharacterManager")
-        if cm_td ~= nil then
-          for _, meth in ipairs(cm_td:get_methods()) do
-            local nm = meth:get_name()
-            local l = nm:lower()
-            if l:find("chara", 1, true) or l:find("find", 1, true) then
-              logmsg(string.format("cm method: %s/%d -> %s", nm,
-                meth:get_num_params(),
-                tostring(meth:get_return_type():get_full_name())))
-            end
-          end
-          for _, f in ipairs(cm_td:get_fields()) do
-            logmsg(string.format("cm field: %s : %s", f:get_name(),
-              f:get_type():get_full_name()))
-          end
-        end
-      end)
-      local dumped = 0
-      for _, m in ipairs(markers) do
-        local cid = core.marker_cid(m)
-        if cid ~= nil and dumped < 2 then
-          dumped = dumped + 1
-          pcall(A.debug_probe_holder, cid, logmsg)
-        end
-      end
-      logmsg(string.format("probe2 done: %d c-keyed markers dumped (of %d markers)",
-        dumped, #markers))
-    end
-    local cs = A.catalog_stats()
-    imgui.text(string.format(
-      "Catalog: %d entries, %d skipped (%d cast), %d distinct side IDs (%d total)",
-      cs.entries, cs.skipped, cs.cast_skipped, catalog_side_count(), cs.distinct))
-    local os_ = adapter.objective_stats ~= nil and adapter.objective_stats() or nil
-    if os_ ~= nil then
-      imgui.text(string.format(
-        "Objectives: %d quests from %d processors (%d kept, %d skipped, %d failed walks, %d builds), walk %.1f ms",
-        os_.quests, os_.entries, os_.kept, os_.skipped, os_.failed_total,
-        os_.index_builds or 0, last_walk_ms))
-    end
-    local gs = adapter.gate_stats ~= nil and adapter.gate_stats() or nil
-    if gs ~= nil then
-      imgui.text(string.format(
-        "Gates: %d gated of %d acceptable (%d refs, %d skipped, %d failed walks), walk %.1f ms",
-        gs.gated, gs.acceptable, gs.refs, gs.skipped, gs.failed_total,
-        gs.last_ms))
-    end
-    if adapter.item_stats ~= nil then
-      local ok_is, is_ = pcall(adapter.item_stats)
-      if ok_is and is_ ~= nil then imgui.text(items_line(is_)) end
-    end
-    imgui.text(string.format("Tick: %.1f ms", last_tick_ms))
-    if imgui.button("Probe quest states") then
-      local qm = sdk.get_managed_singleton("app.QuestManager")
-      local ids = A.catalog_ids() or {}
-      -- Every failed/canceled quest logs (those are the rare ones the gate
-      -- needs); completed quests cap at 20. All five predicates per line.
-      local logged, completed_logged, tally = 0, 0, {}
-      for _, qid in ipairs(ids) do
-        local st = adapter.quest_state(qid)
-        if st ~= nil then
-          tally[st] = (tally[st] or 0) + 1
-          if st ~= "completed" or completed_logged < 20 then
-            if st == "completed" then
-              completed_logged = completed_logged + 1
-            end
-            local raw = {}
-            for _, mname in ipairs({ "isFailedQuest", "isCanceledQuest",
-              "isClearedQuest", "isEndedQuest" }) do
-              local ok, res = false, nil
-              if qm ~= nil then
-                ok, res = pcall(function() return qm:call(mname, qid) end)
-              end
-              -- "err" distinguishes a failed call from a genuine false.
-              raw[#raw + 1] = mname .. "="
-                .. (ok and tostring(res) or "err")
-            end
-            raw[#raw + 1] = "isQuestLogEnd="
-              .. tostring(A.quest_log_is_end(qid))
-            logmsg(string.format("state probe qid=%d state=%s %s",
-              qid, st, table.concat(raw, " ")))
-            logged = logged + 1
-          end
-        end
-      end
-      logmsg(string.format(
-        "state probe: %d logged; failed %d canceled %d completed %d",
-        logged, tally.failed or 0, tally.canceled or 0,
-        tally.completed or 0))
-    end
-  end
-end
 
-re.on_draw_ui(function()
-  if imgui.tree_node(MOD_NAME) then
-    local ok, e = pcall(draw_body)
+  sec.status = function()
+    local changed
+    if not imgui.tree_node("Status and debug") then return end
+    if snapshot ~= nil then
+      local c = snapshot.counts
+      imgui.text(string.format(
+        "Quests - startable %d  in progress %d  completed %d",
+        c.startable, c.in_progress, c.completed))
+      imgui.text(string.format(
+        "  failed %d  canceled %d  giver dead %d  locked %d",
+        c.failed, c.canceled, c.giver_dead, c.locked))
+      if imgui.tree_node("Status") then
+        imgui.text(string.format("Resolved positions: %d", snapshot.resolved_count))
+        imgui.text(string.format("Markers added: %d  dropped (pool full): %d",
+          added_count, dropped_count))
+        imgui.text(string.format("Pool: %s  used %d / limit %d",
+          pool_label, pool_used, pool_limit))
+        local lines = {}
+        for qid, u in pairs(snapshot.unresolved) do
+          lines[#lines + 1] = string.format("[%d] %s: %s",
+            qid, u.name or "?", u.reason)
+        end
+        table.sort(lines)
+        if #lines > 0 and imgui.tree_node("Unresolved quests") then
+          for _, line in ipairs(lines) do imgui.text(line) end
+          imgui.tree_pop()
+        end
+        local unnamed_ids = {}
+        for qid in pairs(snapshot.unnamed) do unnamed_ids[#unnamed_ids + 1] = qid end
+        table.sort(unnamed_ids)
+        if #unnamed_ids > 0 then
+          imgui.text("Unnamed quest IDs: " .. table.concat(unnamed_ids, ", "))
+        end
+        if adapter.journal_stats ~= nil then
+          imgui.text(core.journal_line(adapter.journal_stats()))
+        end
+        imgui.text(wt.line())
+        imgui.tree_pop()
+      end
+    else
+      imgui.text("Waiting for game / save data")
+    end
+    changed, settings.debug = imgui.checkbox("Debug logging", settings.debug)
+    if changed then A.set_debug(settings.debug); install_debug(); save_settings() end
+
+    if imgui.button("Force refresh") then
+      committed = {}
+      snapshot = nil
+      want_update = true
+      last_tick = 0.0
+    end
+
+    if settings.debug then
+      imgui.text("Collection path: " .. A.debug_probe())
+      imgui.text(string.format("Hover: fires %d  hits %d  misses %d  sel_nil %d",
+        hover_stats.fires, hover_stats.hits, hover_stats.misses,
+        hover_stats.sel_nil))
+      if imgui.button("Probe NPC scan") then pcall(A.rebuild_npc_pos_cache) end
+      local acount = 0
+      for _ in pairs(overhead_anchors) do acount = acount + 1 end
+      imgui.text(string.format(
+        "Overhead: anchors %d, points %d, live hits %d, drawn %d, pass %.2f ms, draw %.2f ms, gate %s, vec reuse %s",
+        acount, #overhead_points, overhead_live_hits, overhead_drawn,
+        math.max(overhead_pass_ms_shown, overhead_pass_ms),
+        math.max(overhead_draw_ms_shown, overhead_draw_ms),
+        overhead_gate, tostring(proj_vec_reuse)))
+      if minimap_unavailable ~= nil then
+        imgui.text("Minimap: " .. minimap_unavailable)
+      else
+        local mr = minimap_renderer
+        imgui.text(string.format(
+          "Minimap: candidates %d, clipped %d, shown %d, dropped %d, pool %s, free %s, post %.2f ms, nearest %s, owned %d, hud changes %d, status %s",
+          mr.candidates_n, mr.clipped, mr.shown, mr.dropped,
+          mr.icons_mode and "-" or tostring(mr.pool_n),
+          mr.icons_mode and "-" or tostring(mr.free_n),
+          math.max(minimap_post_ms_shown, minimap_post_ms),
+          mr.nearest ~= nil and string.format("%.0f m", mr.nearest) or "-",
+          #mr.owned, mr.hud_changes, mr.status))
+      end
+      changed, overhead_force_estimate =
+        imgui.checkbox("Overhead: force width estimate", overhead_force_estimate)
+      if changed then label_widths = {} end
+      if imgui.button("Probe overhead lookup") then
+        local markers = snapshot ~= nil and snapshot.markers or {}
+        local coord_logged = false
+        for _, m in ipairs(markers) do
+          local cid = core.marker_cid(m)
+          if cid ~= nil then
+            local m_pos, m_live, live, hstate = A.probe_lookup(cid)
+            if live ~= nil then
+              logmsg(string.format(
+                "overhead probe cid=%d method(extract)=%s method(transform)=%s pos=%.1f,%.1f,%.1f",
+                cid, tostring(m_pos), tostring(m_live), live.x, live.y, live.z))
+              if not coord_logged then
+                coord_logged = true
+                local nx, ny, nz = adapter.npc_pos(cid)
+                logmsg(string.format(
+                  "overhead coord check cid=%d npc_pos=%s,%s,%s live=%.1f,%.1f,%.1f",
+                  cid, tostring(nx), tostring(ny), tostring(nz),
+                  live.x, live.y, live.z))
+              end
+            else
+              logmsg(string.format(
+                "overhead probe cid=%d live MISS (extract method=%s, holder=%s)",
+                cid, tostring(m_pos), tostring(hstate)))
+            end
+          end
+        end
+        -- Reflection dump: what this build actually offers for a live
+        -- character lookup (the four guessed method names all miss).
+        pcall(function()
+          local cm_td = sdk.find_type_definition("app.CharacterManager")
+          if cm_td ~= nil then
+            for _, meth in ipairs(cm_td:get_methods()) do
+              local nm = meth:get_name()
+              local l = nm:lower()
+              if l:find("chara", 1, true) or l:find("find", 1, true) then
+                logmsg(string.format("cm method: %s/%d -> %s", nm,
+                  meth:get_num_params(),
+                  tostring(meth:get_return_type():get_full_name())))
+              end
+            end
+            for _, f in ipairs(cm_td:get_fields()) do
+              logmsg(string.format("cm field: %s : %s", f:get_name(),
+                f:get_type():get_full_name()))
+            end
+          end
+        end)
+        local dumped = 0
+        for _, m in ipairs(markers) do
+          local cid = core.marker_cid(m)
+          if cid ~= nil and dumped < 2 then
+            dumped = dumped + 1
+            pcall(A.debug_probe_holder, cid, logmsg)
+          end
+        end
+        logmsg(string.format("probe2 done: %d c-keyed markers dumped (of %d markers)",
+          dumped, #markers))
+      end
+      local cs = A.catalog_stats()
+      imgui.text(string.format(
+        "Catalog: %d entries, %d skipped (%d cast), %d distinct side IDs (%d total)",
+        cs.entries, cs.skipped, cs.cast_skipped, catalog_side_count(), cs.distinct))
+      local os_ = adapter.objective_stats ~= nil and adapter.objective_stats() or nil
+      if os_ ~= nil then
+        imgui.text(string.format(
+          "Objectives: %d quests from %d processors (%d kept, %d skipped, %d failed walks, %d builds), walk %.1f ms",
+          os_.quests, os_.entries, os_.kept, os_.skipped, os_.failed_total,
+          os_.index_builds or 0, last_walk_ms))
+      end
+      local gs = adapter.gate_stats ~= nil and adapter.gate_stats() or nil
+      if gs ~= nil then
+        imgui.text(string.format(
+          "Gates: %d gated of %d acceptable (%d refs, %d skipped, %d failed walks), walk %.1f ms",
+          gs.gated, gs.acceptable, gs.refs, gs.skipped, gs.failed_total,
+          gs.last_ms))
+      end
+      if adapter.item_stats ~= nil then
+        local ok_is, is_ = pcall(adapter.item_stats)
+        if ok_is and is_ ~= nil then imgui.text(items_line(is_)) end
+      end
+      imgui.text(string.format("Tick: %.1f ms", last_tick_ms))
+      if imgui.button("Probe quest states") then
+        local qm = sdk.get_managed_singleton("app.QuestManager")
+        local ids = A.catalog_ids() or {}
+        -- Every failed/canceled quest logs (those are the rare ones the gate
+        -- needs); completed quests cap at 20. All five predicates per line.
+        local logged, completed_logged, tally = 0, 0, {}
+        for _, qid in ipairs(ids) do
+          local st = adapter.quest_state(qid)
+          if st ~= nil then
+            tally[st] = (tally[st] or 0) + 1
+            if st ~= "completed" or completed_logged < 20 then
+              if st == "completed" then
+                completed_logged = completed_logged + 1
+              end
+              local raw = {}
+              for _, mname in ipairs({ "isFailedQuest", "isCanceledQuest",
+                "isClearedQuest", "isEndedQuest" }) do
+                local ok, res = false, nil
+                if qm ~= nil then
+                  ok, res = pcall(function() return qm:call(mname, qid) end)
+                end
+                -- "err" distinguishes a failed call from a genuine false.
+                raw[#raw + 1] = mname .. "="
+                  .. (ok and tostring(res) or "err")
+              end
+              raw[#raw + 1] = "isQuestLogEnd="
+                .. tostring(A.quest_log_is_end(qid))
+              logmsg(string.format("state probe qid=%d state=%s %s",
+                qid, st, table.concat(raw, " ")))
+              logged = logged + 1
+            end
+          end
+        end
+        logmsg(string.format(
+          "state probe: %d logged; failed %d canceled %d completed %d",
+          logged, tally.failed or 0, tally.canceled or 0,
+          tally.completed or 0))
+      end
+    end
     imgui.tree_pop()
-    if not ok then logerr(tostring(e)) end
   end
-end)
+
+  draw_body = function()
+    for _, s in ipairs(su.PANEL_ORDER) do sec[s.id]() end
+  end
+
+  re.on_draw_ui(function()
+    if imgui.tree_node(MOD_NAME) then
+      local ok, e = pcall(draw_body)
+      imgui.tree_pop()
+      if not ok then logerr(tostring(e)) end
+    end
+  end)
+end
 
 -- v9 (SPEC 16.3g): feeds the jump machine every frame; not the 2 s tick,
 -- not gated by `enabled`. Defined once, so no closure is built per frame.
