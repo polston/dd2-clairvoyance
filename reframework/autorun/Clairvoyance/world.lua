@@ -1037,7 +1037,7 @@ function M.new(a, reads, io)
     local stops, unplaced = npcs.route_stops(rows, npcs.today(day, hour), area_pos,
       type(cur) == "table" and cur or nil)
     if type(stops) ~= "table" then error("route_stops failed") end
-    if off and #stops == 0 then return nil end
+    if #stops == 0 then return nil end
     return { stops = stops, unplaced = unplaced or 0, off_schedule = off or nil }
   end
 

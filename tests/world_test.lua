@@ -2015,6 +2015,11 @@ do
       stub.calls.route_stops == calls + 1 and stub.last_cur == nil)
     d.cur[2001] = { area = 49, location = 0 }
     d.hour = 12
+    w:poke()
+    w:refresh(2.4, true, tg)
+    check("route off: off_schedule clears on an hour-change rebuild alone",
+      w:input().route.err == nil and w:input().route.off_schedule == nil)
+    d.hour = 12
     w:set_route(2001, "Aa")
     w:refresh(2.5, true, tg)
     check("route off: a matched current row has no off_schedule",
