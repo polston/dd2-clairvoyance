@@ -2909,5 +2909,127 @@ do
     ok and t4[1] ~= nil and t4[1].items == nil)
 end
 
+-- ===== v14 Task 2b: routes through the real route builder (SPEC 25.6.2) =====
+do
+  local saved_loaded = package.loaded["Clairvoyance.npcs"]
+  package.preload["Clairvoyance.npcs"] = nil
+  package.loaded["Clairvoyance.npcs"] = nil
+  local real = require("Clairvoyance.npcs")
+  package.loaded["Clairvoyance.npcs"] = real
+
+  local function rfix()
+    local f = fixture()
+    local d = f.data
+    d.rows, d.day, d.hour, d.cur, d.keypos, d.area_nodes = {}, 33, 20, {}, {}, {}
+    d.holders, d.sent, d.generic, d.hcount, d.area_calls = {}, {}, {}, 0, {}
+    local function rdef(name, fn)
+      f.reads[name] = function(...)
+        f.reads_n[name] = (f.reads_n[name] or 0) + 1
+        return fn(...)
+      end
+    end
+    rdef("schedule_rows", function(cid) return d.rows[cid] end)
+    rdef("schedule_now", function() return d.day, d.hour end)
+    rdef("current_row", function(cid) return d.cur[cid] end)
+    rdef("current_sig", function(cid)
+      local e = d.cur[cid]
+      if e == nil then return nil end
+      return e.area, e.location, e.key or -1, #(e.overwrite or {})
+    end)
+    rdef("key_pos", function(key) return d.keypos[key] end)
+    rdef("area_nodes", function(row)
+      d.area_calls[#d.area_calls + 1] = row
+      return d.area_nodes[row.area .. ":" .. tostring(row.location)]
+    end)
+    rdef("holder_count", function() return d.hcount end)
+    rdef("holder_at", function(i) return d.holders[i] end)
+    rdef("sentiment", function() return nil end)
+    f.adapter.is_generic = function() return false end
+    return f, d
+  end
+  local function row(sh, eh, area, loc, key)
+    return { start_week = 1, end_week = 4, start_day = 0, end_day = 6,
+      start_hour = sh, end_hour = eh, area = area, location = loc, priority = 0,
+      key = key or -1 }
+  end
+
+  -- Albert: base 6-18 location 7, 18-6 area 42, overwrite 20-22 key 2309
+  do
+    local f, d = rfix()
+    d.sched_ids = { 2696 }
+    d.npcname[2696] = "Albert"
+    d.rows[2696] = { row(6, 18, -1, 7), row(18, 6, 42, -1) }
+    d.cur[2696] = { area = -1, location = -1, key = 2309, pos = P(576.0, 19.0, -1011.0),
+      overwrite = { row(20, 22, -1, -1, 2309) } }
+    d.keypos[2309] = P(576.3, 19.3, -1011.1)
+    d.area_nodes["-1:7"] = { P(100, 0, 100) }
+    d.area_nodes["42:-1"] = { P(300, 0, 300) }
+    local w = f.new()
+    local tg = on("search")
+    w:refresh(0, true, tg)
+    w:set_route(2696, "Albert")
+    w:refresh(1, true, tg)
+    local r = w:input().route
+    check("real route: albert publishes 4 stops", r ~= nil and r.err == nil and #r.stops == 4
+      and r.stops[1].from == 6 and r.stops[2].from == 18 and r.stops[3].from == 20
+      and r.stops[4].from == 22 and r.stops[4].to == 6)
+    check("real route: albert stop 3 at the live position, no off_schedule",
+      r ~= nil and r.stops[3].pos.x == 576.0 and r.stops[3].key == 2309
+      and r.off_schedule == nil)
+  end
+
+  -- a key that does not resolve is unplaced and never asks for area nodes
+  do
+    local f, d = rfix()
+    d.sched_ids = { 2697 }
+    d.npcname[2697] = "Bb"
+    d.hour = 7
+    d.rows[2697] = { row(6, 18, -1, -1, 99), row(18, 6, 49, 0) }
+    d.area_nodes["49:0"] = { P(1, 0, 1) }
+    local w = f.new()
+    local tg = on("search")
+    w:refresh(0, true, tg)
+    w:set_route(2697, "Bb")
+    w:refresh(1, true, tg)
+    local r = w:input().route
+    local bad = 0
+    for _, c in ipairs(d.area_calls) do
+      if c.area == -1 and c.location == -1 then bad = bad + 1 end
+    end
+    check("real route: unresolved key is counted unplaced",
+      r ~= nil and r.err == nil and r.unplaced == 1 and #r.stops == 1)
+    check("real route: unresolved key asks area_nodes zero times",
+      #d.area_calls >= 1 and bad == 0)
+  end
+
+  -- two key stops near two towns get their own discovery answers
+  do
+    local f, d = rfix()
+    d.sched_ids = { 2698 }
+    d.npcname[2698] = "Cc"
+    d.hour = 7
+    d.rows[2698] = { row(0, 12, -1, -1, 2309), row(12, 24, -1, -1, 2310) }
+    d.keypos[2309] = P(5, 0, 5)
+    d.keypos[2310] = P(995, 0, 995)
+    d.icons = {
+      { type = K.SETTLEMENT_TYPE, pos = P(0, 0, 0), disp_id = "a", icon_id = 1 },
+      { type = K.SETTLEMENT_TYPE, pos = P(1000, 0, 1000), disp_id = "b", icon_id = 2 } }
+    d.msgs = { a = "Town A", b = "Town B" }
+    d.icons_found = { [2] = true }
+    d.disc_n = 1
+    local w = f.new()
+    local tg = on("search")
+    w:refresh(0, true, tg)
+    w:set_route(2698, "Cc")
+    w:refresh(1, true, tg)
+    local r = w:input().route
+    check("real route: key stops get their own discovery answers",
+      r ~= nil and #r.stops == 2 and r.stops[1].discovered == false
+      and r.stops[2].discovered == true)
+  end
+
+  package.loaded["Clairvoyance.npcs"] = saved_loaded
+end
+
 if failures > 0 then os.exit(1) end
 print("world_test: all OK")
