@@ -278,7 +278,7 @@ do
   local all = true
   for _, k in ipairs(su.ICON_KEYS) do if S[k] ~= D[k] then all = false end end
   for _, k in ipairs(su.COLOR_KEYS) do if S[k] ~= D[k] then all = false end end
-  check("reset_icons restores every icon and color key", all)
+  check("reset_appearance restores every icon and color key", all)
 
   -- migration
   local raw = {}
@@ -378,7 +378,7 @@ do
     "color_npc_search", "color_route_stop", "color_hint_pin" }) do
     if R[k] ~= D[k] then all = false end
   end
-  check("reset_icons restores the six v14 keys", all)
+  check("reset_appearance restores the six v14 keys", all)
 end
 
 -- one-time migration: a renamed data file falls back to its old-named file

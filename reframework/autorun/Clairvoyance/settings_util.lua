@@ -289,6 +289,37 @@ function M.cut_search(s)
   return s:sub(1, n)
 end
 
+-- The one rule per key, read by validate and set_key. kind: "bool", "color",
+-- "icon", "int" (floored, clamped to lo..hi), "float" (kept iff within lo..hi,
+-- else default), "size" (number_size_field), "text" (cut_search).
+local RULE = {}
+for _, k in ipairs(BOOL_KEYS) do RULE[k] = { "bool" } end
+for _, k in ipairs(STYLE_BOOL_KEYS) do RULE[k] = { "bool" } end
+for _, k in ipairs(COLOR_KEYS) do RULE[k] = { "color" } end
+for _, k in ipairs(STYLE_COLOR_KEYS) do RULE[k] = { "color" } end
+for _, k in ipairs(ICON_KEYS) do RULE[k] = { "icon" } end
+for k, r in pairs(STYLE_INT_RANGE) do RULE[k] = { "int", r[1], r[2] } end
+RULE.overhead_distance = { "float", 10, 200 }
+RULE.world_max_markers = { "int", 0, M.WORLD_MAX_MARKERS }
+RULE.overhead_names = { "int", 0, 2 }
+RULE.route_path = { "int", 0, 1 }
+RULE.route_number_size = { "size" }
+RULE.search_text = { "text" }
+
+-- The validated value of raw[k] under its rule (the default when invalid).
+local function field(raw, k, d)
+  local r = RULE[k]
+  local kind = r[1]
+  if kind == "bool" then return bool_field(raw, k, d)
+  elseif kind == "color" then return argb_field(raw, k, d)
+  elseif kind == "icon" then return M.ICON_INDEX[raw[k]] and raw[k] or d[k]
+  elseif kind == "int" then return int_field(raw, k, d, r[2], r[3])
+  elseif kind == "float" then return range_field(raw, k, d, r[2], r[3])
+  elseif kind == "size" then return number_size_field(raw, k, d)
+  end
+  return M.cut_search(raw[k])
+end
+
 function M.validate(raw)
   local d = M.defaults()
   if type(raw) ~= "table" then return d end
@@ -296,84 +327,43 @@ function M.validate(raw)
   -- One-time palette migration (21.7.6): below palette 13 a stored value
   -- equal to its v12 default takes the v13 default; a changed one stays.
   local mig = type(raw.palette) ~= "number" or raw.palette < 13
-  for _, k in ipairs(BOOL_KEYS) do out[k] = bool_field(raw, k, d) end
+  for _, k in ipairs(BOOL_KEYS) do out[k] = field(raw, k, d) end
   for _, k in ipairs(COLOR_KEYS) do
     if mig and raw[k] == M.V12_COLOR[k] then out[k] = d[k]
-    else out[k] = argb_field(raw, k, d) end
+    else out[k] = field(raw, k, d) end
   end
   for _, k in ipairs(ICON_KEYS) do
     if mig and raw[k] == M.V12_ICON[k] then out[k] = d[k]
-    else out[k] = M.ICON_INDEX[raw[k]] and raw[k] or d[k] end
+    else out[k] = field(raw, k, d) end
   end
   out.palette = 13
-  out.overhead_distance = range_field(raw, "overhead_distance", d, 10, 200)
-  out.world_max_markers = int_field(raw, "world_max_markers", d, 0, M.WORLD_MAX_MARKERS)
-  out.search_text = M.cut_search(raw.search_text)
-  out.overhead_names = int_field(raw, "overhead_names", d, 0, 2)
-  for _, k in ipairs(STYLE_BOOL_KEYS) do out[k] = bool_field(raw, k, d) end
-  for _, k in ipairs(STYLE_COLOR_KEYS) do out[k] = argb_field(raw, k, d) end
-  for k, r in pairs(STYLE_INT_RANGE) do out[k] = int_field(raw, k, d, r[1], r[2]) end
-  out.route_number_size = number_size_field(raw, "route_number_size", d)
-  out.route_path = int_field(raw, "route_path", d, 0, 1)
+  for _, k in ipairs(STYLE_BOOL_KEYS) do out[k] = field(raw, k, d) end
+  for _, k in ipairs(STYLE_COLOR_KEYS) do out[k] = field(raw, k, d) end
+  for _, k in ipairs({ "overhead_distance", "world_max_markers", "search_text",
+    "overhead_names", "route_number_size", "route_path" }) do
+    out[k] = field(raw, k, d)
+  end
+  for k in pairs(STYLE_INT_RANGE) do out[k] = field(raw, k, d) end
   return out
 end
 
 -- Validates one key through its field rule and writes it (no palette
 -- migration). False, with no write, for an unknown key or a value of the
--- wrong type.
-local SET_RULE
+-- wrong type. Int keys clamp; float keys (overhead_distance) reject a value
+-- outside the range.
+local DEFAULTS
 function M.set_key(settings, key, v)
-  if not SET_RULE then
-    SET_RULE = {}
-    for _, k in ipairs(BOOL_KEYS) do SET_RULE[k] = "bool" end
-    for _, k in ipairs(STYLE_BOOL_KEYS) do SET_RULE[k] = "bool" end
-    for _, k in ipairs(COLOR_KEYS) do SET_RULE[k] = "color" end
-    for _, k in ipairs(STYLE_COLOR_KEYS) do SET_RULE[k] = "color" end
-    for _, k in ipairs(ICON_KEYS) do SET_RULE[k] = "icon" end
-    for k in pairs(STYLE_INT_RANGE) do SET_RULE[k] = "range" end
-    SET_RULE.route_number_size = "size"
-    SET_RULE.route_path = "route_path"
-    SET_RULE.overhead_names = "overhead_names"
-    SET_RULE.world_max_markers = "world_max"
-    SET_RULE.overhead_distance = "distance"
-    SET_RULE.search_text = "text"
-  end
-  local rule = SET_RULE[key]
-  if not rule then return false end
-  local d = M.defaults()
-  local t = { [key] = v }
-  local isnum = type(v) == "number" and v == v
-  local out
-  if rule == "bool" then
-    if type(v) ~= "boolean" then return false end
-    out = v
-  elseif rule == "color" then
-    out = argb_field(t, key, d)
-    if out ~= v then return false end
-  elseif rule == "icon" then
-    if not M.ICON_INDEX[v] then return false end
-    out = v
-  elseif rule == "range" then
-    if not isnum then return false end
-    out = M.clamp_int(v, STYLE_INT_RANGE[key][1], STYLE_INT_RANGE[key][2])
-  elseif rule == "size" then
-    if not isnum then return false end
-    out = number_size_field(t, key, d)
-  elseif rule == "route_path" then
-    if not isnum then return false end
-    out = M.clamp_int(v, 0, 1)
-  elseif rule == "overhead_names" then
-    if not isnum then return false end
-    out = M.clamp_int(v, 0, 2)
-  elseif rule == "world_max" then
-    if not isnum then return false end
-    out = M.clamp_int(v, 0, M.WORLD_MAX_MARKERS)
-  elseif rule == "distance" then
-    out = range_field(t, key, d, 10, 200)
-    if out ~= v then return false end
-  else
-    if type(v) ~= "string" then return false end
-    out = M.cut_search(v)
+  local r = RULE[key]
+  if not r then return false end
+  DEFAULTS = DEFAULTS or M.defaults()
+  local kind = r[1]
+  local want = (kind == "bool" and "boolean")
+    or ((kind == "int" or kind == "float" or kind == "size") and "number")
+    or (kind == "text" and "string") or nil
+  if want and (type(v) ~= want or v ~= v) then return false end
+  local out = field({ [key] = v }, key, DEFAULTS)
+  if (kind == "color" or kind == "icon" or kind == "float") and out ~= v then
+    return false
   end
   settings[key] = out
   return true
