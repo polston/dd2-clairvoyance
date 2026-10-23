@@ -705,19 +705,26 @@ re.on_frame(function()
     local t0 = os.clock()
     -- v10 (SPEC 17.3a): world round, own pcall so a raise never skips compute;
     -- inside the timed window. The gate (evaluated here) is: a snapshot from
-    -- before this tick exists and the minimap saw the player under 3 s ago.
+    -- before this tick exists and the player was seen: by the minimap under
+    -- 3 s ago, or (HUD hidden) read directly from its transform.
     local ok_w, err_w = pcall(function()
       if world == nil then return end   -- the stub tracker has no round to run
       local mr = minimap_renderer
-      local p = mr ~= nil and mr.pl_pos or nil
+      local seen = mr ~= nil and now - mr.pl_seen_at < world.K.PLAYER_SEEN_S
+      local p = seen and mr.pl_pos or nil
+      if p == nil then
+        -- a hidden HUD hides the minimap: read the player directly (v14)
+        local okt, tr = pcall(wt.player_tr)
+        local u = okt and tr ~= nil and tr:call("get_UniversalPosition") or nil
+        if u ~= nil then p = { x = u.x, y = u.y, z = u.z }; seen = true end
+      end
       if p ~= nil then
         local o = wt.world_origin
         if o == nil or core.dist(p, o) >= world.K.REORIGIN then
           wt.world_origin = { x = p.x, y = p.y, z = p.z }
         end
       end
-      local gate = snapshot ~= nil and mr ~= nil
-        and now - mr.pl_seen_at < world.K.PLAYER_SEEN_S
+      local gate = snapshot ~= nil and seen
       -- the round's toggle names are the setting names without "world_"
       local tg = {}
       for _, k in ipairs(su.WORLD_BOOLS) do tg[k:sub(7)] = settings[k] end
