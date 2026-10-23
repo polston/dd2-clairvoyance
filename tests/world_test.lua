@@ -1851,13 +1851,13 @@ do
     check("npc pos: other cid has no alive", by[2002].alive == nil)
     check("npc pos: other cid has no discovered", by[2002].discovered == nil)
     check("npc pos: one alive read", (f.adapter_n.npc_alive or 0) >= 1)
-    -- cached under "n:<cid>": a move to the discovered town keeps the answer
+    -- keyed by cid and 200 m cell: a move to the discovered town re-asks
     d.npcpos[2001] = P(990, 0, 990)
     w:poke()
     w:refresh(1, true, { search = true, npc_cids = { 2001, 2002 } })
     by = {}
     for _, e in ipairs(w:input().npcs) do by[e.cid] = e end
-    check("npc pos: discovered cached under n:cid", by[2001].discovered == false)
+    check("npc pos: move to another cell re-asks discovered", by[2001].discovered == true)
     check("npc pos: second cid computed on its own key", by[2002].discovered == true)
   end
 

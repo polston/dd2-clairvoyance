@@ -1001,7 +1001,11 @@ function M.new(a, reads, io)
         n.alive = ok and alive == true
         local okp, p = pcall(seller_pos, e.cid)
         n.pos = okp and p or nil
-        if n.pos ~= nil then n.discovered = discovered("n:" .. e.cid, n.pos) end
+        -- keyed by 200 m cell too, so an NPC that travels gets a fresh answer
+        if n.pos ~= nil then
+          n.discovered = discovered(string.format("n:%d:%d:%d", e.cid,
+            n.pos.x // 200, n.pos.z // 200), n.pos)
+        end
       end
       out[i] = n
     end
