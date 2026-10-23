@@ -291,6 +291,10 @@ do
   w.msg = "Quest thing"
   tick(w)
   check("subcategory-only suffix", w.msg == "Quest thing\nQuest item")
+  -- a suffix left by an earlier load (the panel outlives a script reset)
+  w.msg = "Quest thing 2\nQuest item"
+  tick(w)
+  check("stale suffix not doubled", w.msg == "Quest thing 2\nQuest item")
   -- unrelated row leaves the message alone
   local before = w.sets
   w.sel = 1

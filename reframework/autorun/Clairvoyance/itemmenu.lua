@@ -186,7 +186,9 @@ function M.create(opt)
       target = (suffix ~= nil) and (kept .. suffix) or kept
       if target == msg then return end
     else
-      kept = msg
+      -- the panel outlives a script reset (Ruling 6): drop a line an earlier
+      -- load wrote, so it is never taken for the game's own text
+      kept = (msg:gsub("\nQuest item$", ""):gsub("\nQuest: [^\n]*$", ""))
       if suffix == nil then written = nil; return end
       target = kept .. suffix
     end
