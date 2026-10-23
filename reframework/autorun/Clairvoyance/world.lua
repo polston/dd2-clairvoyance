@@ -1169,7 +1169,8 @@ function M.new(a, reads, io)
           for _, r in ipairs(recs) do
             if r.picked ~= nil then has = true end
             if r.picked == true then picked = true end
-            if item == nil and to_int(r.item) ~= nil then item = to_int(r.item) end
+            -- item 0 is the save's "none" (seen on gimmick-12 chests)
+            if item == nil and (to_int(r.item) or 0) > 0 then item = to_int(r.item) end
           end
           if has then state = picked and "opened" or "unopened" end
         end
