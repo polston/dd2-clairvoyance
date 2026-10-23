@@ -37,7 +37,7 @@ function M.create(opt)
     status = "waiting",
     candidates_n = 0, clipped = 0, shown = 0, dropped = 0,
     pool_n = 0, free_n = 0,
-    icons_mode = false,
+    icons_mode = false, push_failed = 0,
     free_at = -math.huge,
     pl_seen_at = -math.huge,
     pl_pos = nil,
@@ -131,6 +131,7 @@ function M.create(opt)
 
   function self:after(ui)
     self.candidates_n, self.clipped, self.shown, self.dropped = 0, 0, 0, 0
+    self.push_failed = 0
     self.nearest = nil
     self.icons_mode = false
     -- SPEC 21.5.2: while pictures are on, every update starts a new "mini"
@@ -234,13 +235,21 @@ function M.create(opt)
           -- v12 slot borrow (game glyph), never a blank.
           local id = opt.picture_for(m)
           if opt.drawable(id) then
-            opt.push(id, px + pos.x, py + pos.y, 28, opt.color_for(m), fade)
-            self.shown = self.shown + 1
+            -- A failing push is not a slot drop: counted apart from dropped.
+            local okp = pcall(opt.push, id, px + pos.x, py + pos.y, 28,
+              opt.color_for(m), fade)
+            if okp then self.shown = self.shown + 1
+            else self.push_failed = self.push_failed + 1 end
             return
           end
         end
         local saved = borrow_slot()
         if saved == nil then
+          if pictures then
+            -- later candidates may still be drawable pictures: no break
+            self.dropped = self.dropped + 1
+            return
+          end
           self.dropped = #cands - i + 1
           out_of_slots = true
           return

@@ -386,6 +386,39 @@ do
   check("pic: show_minimap off still empties set", replaces == 1 and #pushes == 0)
   settings.show_minimap = true
 
+  -- y term: distinct px/py and pos values, all pushes asserted
+  info = { 50, 60, 0.5, true }
+  cands = { { key = "a", pos = { x = 10, y = 0, z = 5 } }, marker(20), marker(30) }
+  pushes = {}
+  rr, h, s = setup()
+  rr:after(h)
+  check("pic: y term and all pushes", #pushes == 3 and pushes[1].x == 60
+    and pushes[1].y == 65 and pushes[2].x == 70 and pushes[2].y == 60
+    and pushes[3].x == 80 and pushes[3].y == 60)
+
+  -- raising frame_info: no push, no raise
+  local real_info = info
+  rr, h, s = setup()
+  pushes, replaces = {}, 0
+  local o_ok = pcall(function()
+    info = setmetatable({}, { __index = function() error("x") end })
+    rr:after(h)
+  end)
+  info = real_info
+  check("pic: raising frame_info", o_ok and #pushes == 0 and replaces == 1)
+
+  -- slot exhaustion on missing pictures does not stop later pictures
+  not_drawable = 99
+  local m1, m2 = marker(10), marker(20)
+  m1.pic, m2.pic = 99, 99
+  cands = { m1, m2, marker(30), marker(40) }
+  pushes = {}
+  rr, h, s = setup()
+  rr:after(h)
+  check("pic: exhaustion keeps later pictures", #pushes == 2 and rr.shown == 3
+    and rr.dropped == 1)
+  not_drawable = nil
+
   -- slots owned before icons_on flips are restored by PRE
   on = false
   cands = { marker(10) }
@@ -399,7 +432,6 @@ do
   on = true
   r3:before(h3)
   check("pic: PRE restores slots", s3.visible == false and s3.icon == 7)
-  on = true
 end
 
 if failures > 0 then os.exit(1) end
