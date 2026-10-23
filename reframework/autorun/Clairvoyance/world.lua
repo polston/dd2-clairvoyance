@@ -1026,6 +1026,18 @@ function M.new(a, reads, io)
     if not ok then error("current_row failed") end
     local okr, rows = pcall(reads.schedule_rows, cid)
     if not okr or type(rows) ~= "table" then error("schedule_rows failed") end
+    cur = type(cur) == "table" and cur or nil
+    -- the quest stage's whole day replaces the live overwrite list in a
+    -- copy (SPEC 26.4); a nil, empty or failed read keeps the live input
+    if cur ~= nil and type(reads.quest_overrides) == "function" then
+      local okq, qrows = call("quest_overrides", cid)
+      if okq and type(qrows) == "table" and #qrows > 0 then
+        local copy = {}
+        for k, v in pairs(cur) do copy[k] = v end
+        copy.overwrite = qrows
+        cur = copy
+      end
+    end
     local function area_pos(row)
       -- a key location wins; a -1/-1 row without one has no place (spec 25.4.3)
       if type(row.key) == "number" and row.key > 0 and type(reads.key_pos) == "function" then
@@ -1037,8 +1049,7 @@ function M.new(a, reads, io)
       if not okn or type(list) ~= "table" then return nil end
       return npcs.anchor_node(list)
     end
-    local stops, unplaced, matched = npcs.route_stops(rows, npcs.today(day, hour), area_pos,
-      type(cur) == "table" and cur or nil)
+    local stops, unplaced, matched = npcs.route_stops(rows, npcs.today(day, hour), area_pos, cur)
     if type(stops) ~= "table" then error("route_stops failed") end
     if #stops == 0 then return nil end
     return { stops = stops, unplaced = unplaced or 0, off_schedule = (matched == false) or nil }
@@ -2156,6 +2167,127 @@ function M.game_reads()
     end)
     return int_value(G(e, "LocalArea")), int_value(G(e, "Location")),
       key_of(G(e, "KeyLocation")), table.concat(keys, ",")
+  end
+
+  -- ===== quest override stage rows (SPEC 26) =====
+  local UNKNOWN = {}
+  local MAX_DEPTH = 16
+
+  local function full_name(x) return x:get_type_definition():get_full_name() end
+  local function addr_of(x) return x:get_address() end
+
+  local function node_kind(x)
+    local ok, n = pcall(full_name, x)
+    if not ok or type(n) ~= "string" then return nil end
+    if n:find("CheckCondiiton", 1, true) then return "group" end
+    if n:find("CheckVariable", 1, true) then return "variable" end
+    return nil
+  end
+
+  local walk
+
+  -- three-valued all / any over a Lua array of nodes
+  local function combine(all, nodes, depth)
+    local unknown = false
+    for i = 1, #nodes do
+      local v = walk(nodes[i], depth + 1)
+      if all then
+        if v == false then return false end
+      elseif v == true then
+        return true
+      end
+      if v == UNKNOWN then unknown = true end
+    end
+    if unknown then return UNKNOWN end
+    return all
+  end
+
+  -- true, false or UNKNOWN. Only an integer variable takes the game's
+  -- evaluate(); a flag, any other node or a failed read is unknown.
+  walk = function(node, depth)
+    if depth > MAX_DEPTH then return UNKNOWN end
+    local kind = node_kind(node)
+    if kind == "group" then
+      local op = int_value(G(node, "_Operator"))
+      local arr = elems(G(node, "_Entity"))
+      if arr == nil or (op ~= 0 and op ~= 1) then return UNKNOWN end
+      return combine(op == 0, arr, depth)
+    elseif kind == "variable" then
+      if int_value(G(node, "_ValueType")) ~= 2 then return UNKNOWN end
+      local v = C(G(node, "_Entity"), "evaluate")
+      if type(v) == "boolean" then return v end
+    end
+    return UNKNOWN
+  end
+
+  -- stage state of an entry's ConditionEntity, and whether its own
+  -- evaluate() is true (that wins over the walk)
+  local function stage_state(cond)
+    if cond == nil then return UNKNOWN, false end
+    if C(cond, "evaluate") == true then return true, true end
+    local arr = elems(G(cond, "_ConditionArray"))
+    if arr == nil then return UNKNOWN, false end
+    if #arr == 0 then return G(cond, "_IsNoConditonEnable") == true, false end
+    local op = int_value(G(cond, "_Operator"))
+    if op ~= 0 and op ~= 1 then return UNKNOWN, false end
+    return combine(op == 0, arr, 1), false
+  end
+
+  local function entry_address(e)
+    local ok, a = pcall(addr_of, e)
+    if ok then return a end
+    return nil
+  end
+
+  -- the kept entry's rows, its "now" flag and address; nil when dropped
+  local function stage_entry(qm, e)
+    local state, now = stage_state(G(e, "ConditionEntity"))
+    if state == false then return nil end
+    local od = G(e, "OverrideData")
+    if C(od, "checkEnableScheduleData") == false then return nil end
+    local qid = G(e, "QuestID")
+    local q = int_value(qid)
+    if q == nil then q = qid end
+    if q ~= nil and C(qm, "checkActivated", q) == false then return nil end
+    local rows = {}
+    each(G(G(od, "_Schedule"), "_Schedule"), function(r)
+      if r ~= nil then rows[#rows + 1] = sched_row(r) end
+    end)
+    return { rows = rows, now = now, addr = entry_address(e) }
+  end
+
+  -- Rows of the quest stage's entries for one cid (SPEC 26.4); nil when
+  -- the quest tables are unreadable, {} when the quest is not steering
+  -- this NPC now.
+  function R.quest_overrides(cid)
+    local qm = single("app.QuestManager")
+    local all = G(qm, "NpcOverrideDict")
+    if qm == nil or all == nil then return nil end
+    local applied = G(qm, "CurrentNpcOverrideDict")
+    if C(applied, "ContainsKey", cid) ~= true then return {} end
+    if C(all, "ContainsKey", cid) ~= true then return {} end
+    local applied_addr = entry_address(C(applied, "get_Item", cid))
+    local first, now, rest = {}, {}, {}
+    local ok = each(C(all, "get_Item", cid), function(e)
+      if e == nil then return end
+      local okk, k = pcall(stage_entry, qm, e)
+      if not okk or k == nil then return end
+      if applied_addr ~= nil and k.addr == applied_addr then
+        first[#first + 1] = k
+      elseif k.now then
+        now[#now + 1] = k
+      else
+        rest[#rest + 1] = k
+      end
+    end)
+    if not ok then return {} end
+    local out = {}
+    for _, bucket in ipairs({ first, now, rest }) do
+      for _, k in ipairs(bucket) do
+        for _, r in ipairs(k.rows) do out[#out + 1] = r end
+      end
+    end
+    return out
   end
 
   -- Node positions of a row's area (Ruling 4); nil when it has none.
