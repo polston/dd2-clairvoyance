@@ -383,9 +383,10 @@ end
 
 -- v10 (SPEC 17.4): world markers. Categories in output order; WORLD_DEF.toggle
 -- names the show field that switches each one and WORLD_DEF.src the world
--- table list that feeds it.
+-- table list that feeds it (shop and npc_search have none: they are fed by
+-- their own candidate builders).
 M.WORLD_CATS = { "treasure", "token", "beetle", "seller", "monster", "chest",
-  "shop" }
+  "shop", "npc_search" }
 local WORLD_DEF = {
   treasure = { toggle = "world_treasure", src = "treasure" },
   token = { toggle = "world_tokens", src = "tokens" },
@@ -396,7 +397,12 @@ local WORLD_DEF = {
   -- v11/v12: no toggle entry. Shop candidates exist while a search is
   -- active or show.world_shops == true (SPEC 20.3).
   shop = { src = "shops" },
+  -- v14: NPC name matches. No toggle; candidates exist only while a query
+  -- does, and fill the leftover slots together with shops.
+  npc_search = {},
 }
+-- Categories whose candidates are built outside the generic per-src loops.
+local function special_cat(cat) return cat == "shop" or cat == "npc_search" end
 local WORLD_CAT_RANK = {}
 for i, cat in ipairs(M.WORLD_CATS) do WORLD_CAT_RANK[cat] = i end
 M.WORLD_MARKER_MAX = 300
@@ -668,6 +674,11 @@ local function make_cand(cat, e, ctx)
     c.stock = e.items        -- by reference (SPEC 20.4)
     c.sells_for = {}         -- seller lines, filled by world_accept
     c.hidden = (e.discovered == false) and not ctx.undisc
+  elseif cat == "npc_search" then
+    c.key = "w:npc:" .. tostring(e.cid)
+    c.label = tostring(e.name)
+    c.hidden = e.alive == false
+      or ((e.discovered == false) and not ctx.undisc)
   else
     for i, q in ipairs(e.qids or {}) do c.qids[i] = q end
     c.key = string.format("w:sell:%s:%s", tostring(e.shop), tostring(e.item))
@@ -678,6 +689,98 @@ local function make_cand(cat, e, ctx)
     c.hidden = (e.discovered == false) and not ctx.undisc
   end
   return c
+end
+
+-- v14 (SPEC 22.7.3): the entries of `npcs` whose name matches the query, in
+-- name order (lower-cased name, then cid). No query: none. Lower-cased names
+-- are cached per entry (weak keys).
+local npc_hay = setmetatable({}, { __mode = "k" })
+local function npc_low(e)
+  local h = npc_hay[e]
+  if h == nil or h.name ~= e.name then
+    h = { name = e.name, low = e.name:lower() }
+    npc_hay[e] = h
+  end
+  return h.low
+end
+
+-- One memo entry: the same list (and size) with the same query returns the
+-- same result table, so a tick scans and sorts the name list once. Callers
+-- must not modify the result.
+local npc_memo = {}
+function M.npc_matches(npcs, q)
+  if q == nil or type(npcs) ~= "table" then return {} end
+  if npc_memo.npcs == npcs and npc_memo.n == #npcs and npc_memo.key == q.key then
+    return npc_memo.out
+  end
+  local out = {}
+  for _, e in ipairs(npcs) do
+    if type(e) == "table" and type(e.name) == "string"
+      and type(e.cid) == "number" and query_match(q, npc_low(e)) then
+      out[#out + 1] = e
+    end
+  end
+  table.sort(out, function(a, b)
+    local la, lb = npc_low(a), npc_low(b)
+    if la ~= lb then return la < lb end
+    return a.cid < b.cid
+  end)
+  npc_memo.npcs, npc_memo.n, npc_memo.key, npc_memo.out = npcs, #npcs, q.key, out
+  return out
+end
+
+-- Ruling 10: the first 50 matched cids, in name order.
+M.NPC_MATCH_MAX = 50
+function M.npc_match_cids(matches)
+  local out = {}
+  for i = 1, math.min(M.NPC_MATCH_MAX, #matches) do out[i] = matches[i].cid end
+  return out
+end
+
+-- Candidates of the matched NPCs that have a position (one per cid).
+local function npc_cands(matches, ctx)
+  local out, seen = {}, {}
+  for _, e in ipairs(matches) do
+    if valid_pos(e.pos) and not seen[e.cid] then
+      seen[e.cid] = true
+      out[#out + 1] = make_cand("npc_search", e, ctx)
+    end
+  end
+  return out
+end
+
+-- The panel rows of the matches (SPEC 22.7.5): at most `limit` (ten), those
+-- with a position nearest to `origin` first (name order without one), the
+-- ones without a position last by name. `cover` maps a cid to the key of
+-- the marker that stands for it.
+function M.npc_rows(matches, origin, cover, limit)
+  local with, without = {}, {}
+  local has = valid_pos(origin)
+  for i, e in ipairs(matches) do
+    local r = { cid = e.cid, name = e.name, alive = e.alive ~= false,
+      marker_key = cover and cover[e.cid] or nil }
+    if valid_pos(e.pos) then
+      r.pos = pos_copy(e.pos)
+      with[#with + 1] = { r = r, i = i, d = has and dist2(e.pos, origin) or 0 }
+    else
+      without[#without + 1] = r
+    end
+  end
+  table.sort(with, function(x, y)
+    if x.d ~= y.d then return x.d < y.d end
+    return x.i < y.i
+  end)
+  local max = limit or M.WORLD_ROWS
+  local rows = {}
+  for _, w in ipairs(with) do
+    if #rows >= max then break end
+    rows[#rows + 1] = w.r
+  end
+  for _, r in ipairs(without) do
+    if #rows >= max then break end
+    rows[#rows + 1] = r
+  end
+  return rows
 end
 
 local function world_ctx(show, boxes)
@@ -731,7 +834,7 @@ local function world_candidates(world, show, boxes, q)
   local drops = q ~= nil and world.drops or nil
   for _, cat in ipairs(M.WORLD_CATS) do
     known[cat] = 0
-    if cat ~= "shop" then
+    if not special_cat(cat) then
       for _, e in ipairs(world[WORLD_DEF[cat].src] or {}) do
         if included(cat, e, small_ok, dups) then
           known[cat] = known[cat] + 1
@@ -754,6 +857,11 @@ local function world_candidates(world, show, boxes, q)
     show.world_shops == true)
   known.shop = n
   for _, c in ipairs(sc) do cands[#cands + 1] = c end
+  if q ~= nil then
+    local matches = M.npc_matches(world.npcs, q)
+    known.npc_search = #matches
+    for _, c in ipairs(npc_cands(matches, ctx)) do cands[#cands + 1] = c end
+  end
   return cands, known, shop_of
 end
 
@@ -779,6 +887,13 @@ end
 -- leaves (SPEC 19.7.5). Every shop accepted is also listed in `shop_all`.
 local function world_accept(c, has_origin, origin, quest_cids, kept, merged,
                             shops, shop_of, shops_on, shop_all)
+  if c.cat == "npc_search" then
+    -- v14: NPC matches only ever fill the leftover slots (SPEC 22.7.4)
+    c.d = has_origin and dist2(c.pos, origin) or 0
+    shops[#shops + 1] = c
+    c.in_shops = true
+    return
+  end
   if c.cat == "shop" then shop_all[#shop_all + 1] = c end
   if c.cat == "seller" and shop_of and shop_of[c.shop] then
     -- SPEC 19.7.7: the shop marker stands in for its seller
@@ -831,7 +946,8 @@ end
 -- cap, a shop merged into a quest marker adds a `merged` panel entry and one
 -- the cap left out an `offmap` entry (SPEC 20.5.5, 20.5.7); neither is a
 -- marker or counted in `shown`.
-local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_all)
+local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
+                            quest_cids)
   -- Nearest win the cap (ties by key); no origin: (category, key) order.
   local function by_pick(x, y)
     if has_origin then
@@ -848,12 +964,51 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
   end
   -- SPEC 19.7.5 (search with world_shops off): matching shops fill the
   -- remaining slots, nearest first.
+  -- v14: cover maps a cid to the key of the marker already standing for it
+  -- (a quest marker, or a kept shop or seller marker), so an NPC match with
+  -- that cid adds none (SPEC 22.7.4).
+  local cover = {}
+  for cid, v in pairs(quest_cids or {}) do
+    cover[cid] = type(v) == "table" and v.key or ("c:" .. tostring(cid))
+  end
+  for _, c in ipairs(kept) do
+    if (c.cat == "shop" or c.cat == "seller") and type(c.cid) == "number"
+      and cover[c.cid] == nil then
+      cover[c.cid] = c.key
+    end
+  end
   if shops and #shops > 0 and #kept < cap then
     table.sort(shops, function(x, y)
       if has_origin and x.d ~= y.d then return x.d < y.d end
       return x.key < y.key
     end)
-    for i = 1, math.min(#shops, cap - #kept) do kept[#kept + 1] = shops[i] end
+    -- Shops and NPC matches share the leftover slots, nearest first. A
+    -- covered NPC takes none; a shop takes the place of a chosen NPC with
+    -- its cid.
+    local room = cap - #kept
+    local chosen, npc_at, shop_cid = {}, {}, {}
+    for _, c in ipairs(shops) do
+      local cid = type(c.cid) == "number" and c.cid or nil
+      if c.cat == "npc_search" then
+        if not (cid and (cover[cid] or shop_cid[cid])) and #chosen < room then
+          chosen[#chosen + 1] = c
+          if cid then npc_at[cid] = #chosen end
+        end
+      elseif cid and npc_at[cid] then
+        chosen[npc_at[cid]] = c
+        npc_at[cid] = nil
+        shop_cid[cid] = true
+      elseif #chosen < room then
+        chosen[#chosen + 1] = c
+        if cid then shop_cid[cid] = true end
+      end
+    end
+    for _, c in ipairs(chosen) do
+      kept[#kept + 1] = c
+      if type(c.cid) == "number" and cover[c.cid] == nil then
+        cover[c.cid] = c.key
+      end
+    end
   end
 
   -- world_ord: rank by key in the kept set, so marker identity does not
@@ -874,6 +1029,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       pos = pos_copy(c.pos),
       label = c.label, done = c.done, world_ord = c.world_ord, hover = c.hover,
       why = c.why }
+    if c.cat == "npc_search" then m.cid = c.cid end
     if c.cat == "shop" then
       if #c.sells_for > 0 then m.hover = with_sells(c) end
       m.stock, m.sells_for = c.stock, c.sells_for
@@ -903,7 +1059,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       end
     end
   end
-  return markers, panel, merged
+  return markers, panel, merged, cover
 end
 
 -- Selection, order and panel (SPEC 17.4b, 17.4g). `quest_cids` (optional)
@@ -923,12 +1079,13 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   local cands, known, shop_of = world_candidates(world, show, boxes, show.search)
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = known[cat] end
   for _, c in ipairs(cands) do
-    if (c.cat == "shop" or show[WORLD_DEF[c.cat].toggle] ~= false) and not c.hidden then
+    if (special_cat(c.cat) or show[WORLD_DEF[c.cat].toggle] ~= false) and not c.hidden then
       world_accept(c, has_origin, origin, quest_cids, kept, merged, shops, shop_of,
         shops_on, shop_all)
     end
   end
-  return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all)
+  return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
+    quest_cids)
 end
 
 -- Cached entry point (SPEC 17.10.10). A 256-unit grid of the world's
@@ -950,7 +1107,7 @@ local function build_grid(world, small_ok)
   for _, cat in ipairs(M.WORLD_CATS) do
     g.known[cat] = 0
     g.flat[cat] = {}
-    for _, e in ipairs(cat ~= "shop" and world[WORLD_DEF[cat].src] or {}) do
+    for _, e in ipairs(not special_cat(cat) and world[WORLD_DEF[cat].src] or {}) do
       if included(cat, e, small_ok, dups) then
         g.known[cat] = g.known[cat] + 1
         if cat ~= "seller" then
@@ -994,7 +1151,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   ctx.labels = g.labels
   local on = {}
   for _, cat in ipairs(M.WORLD_CATS) do
-    if cat ~= "shop" and show[WORLD_DEF[cat].toggle] ~= false then
+    if not special_cat(cat) and show[WORLD_DEF[cat].toggle] ~= false then
       on[#on + 1] = cat
     end
   end
@@ -1018,6 +1175,19 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
       if not c.hidden then
         world_accept(c, has_origin, origin, quest_cids, kept, merged, shops, shop_of,
           shops_on, shop_all)
+      end
+    end
+  end
+  if q ~= nil then
+    -- v14 (SPEC 22.7.3): the NPC matches, after the shops; not grid-bound,
+    -- they number at most the name list.
+    local matches = M.npc_matches(world.npcs, q)
+    panel.npc_search.known = #matches
+    for _, c in ipairs(npc_cands(matches, ctx)) do
+      stats.cand_builds = stats.cand_builds + 1
+      if not c.hidden then
+        world_accept(c, has_origin, origin, quest_cids, kept, merged, shops,
+          shop_of, shops_on, shop_all)
       end
     end
   end
@@ -1102,7 +1272,8 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
       end
     end
   end
-  return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all)
+  return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
+    quest_cids)
 end
 
 -- The settlement nearest to pos by 3D distance (first wins a tie), or nil.
@@ -1124,8 +1295,12 @@ end
 -- merged and offmap onto their row (SPEC 20.5.3-7).
 function M.world_rows(entries, settlements, origin, limit)
   local list = {}
-  for i, e in ipairs(entries or {}) do
-    list[i] = { e = e, i = i, d = valid_pos(origin) and dist2(e.pos, origin) or 0 }
+  for _, e in ipairs(entries or {}) do
+    -- v14: route and hint pins are not search results
+    if e.cat ~= "route_stop" and e.cat ~= "hint_pin" then
+      local i = #list + 1
+      list[i] = { e = e, i = i, d = valid_pos(origin) and dist2(e.pos, origin) or 0 }
+    end
   end
   if valid_pos(origin) then
     table.sort(list, function(x, y)
@@ -1731,21 +1906,41 @@ function M.compute(adapter, show)
   end
 
   -- v13 (SPEC 21.8): current step of a lone in-progress quest per marker.
-  local quest_steps
-  if show.step_icons and adapter.quest_step ~= nil then
+  -- v14 (SPEC 22.11.3): hint qids join the same read list and throttle,
+  -- whatever step_icons says.
+  local quest_steps, hint_steps
+  local hint_qids = type(show.hint_qids) == "table" and show.hint_qids or {}
+  if (show.step_icons or #hint_qids > 0) and adapter.quest_step ~= nil then
     local want, listed = {}, {}
-    for _, m in ipairs(markers) do
-      if m.cat == "in_progress" and #m.inprog == 1 and not listed[m.inprog[1]] then
-        listed[m.inprog[1]] = true
-        want[#want + 1] = m.inprog[1]
+    if show.step_icons then
+      for _, m in ipairs(markers) do
+        if m.cat == "in_progress" and #m.inprog == 1 and not listed[m.inprog[1]] then
+          listed[m.inprog[1]] = true
+          want[#want + 1] = m.inprog[1]
+        end
+      end
+    end
+    for _, hq in ipairs(hint_qids) do
+      if type(hq) == "number" and not listed[hq] then
+        listed[hq] = true
+        want[#want + 1] = hq
       end
     end
     quest_steps = M.step_reads(adapter, want, show.prev_quest_steps or {}, show.now or 0)
-    for _, m in ipairs(markers) do
-      if m.cat == "in_progress" and #m.inprog == 1 then
-        local e = quest_steps[m.inprog[1]]
-        local n = e and e.n
-        if type(n) == "number" and n >= 1 and n <= 5 then m.step = n end
+    if show.step_icons then
+      for _, m in ipairs(markers) do
+        if m.cat == "in_progress" and #m.inprog == 1 then
+          local e = quest_steps[m.inprog[1]]
+          local n = e and e.n
+          if type(n) == "number" and n >= 1 and n <= 5 then m.step = n end
+        end
+      end
+    end
+    for _, hq in ipairs(hint_qids) do
+      local e = quest_steps[hq]
+      if e and type(e.n) == "number" then
+        hint_steps = hint_steps or {}
+        hint_steps[hq] = e.n
       end
     end
   end
@@ -1767,6 +1962,7 @@ function M.compute(adapter, show)
   -- v10 (SPEC 17.4): world markers, appended AFTER every item marker. The
   -- seller merge runs here, once the quest markers exist.
   local world_panel, fullmap_world
+  local npc_rows, npc_match_cids = {}, {}
   if show.world then
     local boxes, quest_by_cid = {}, {}
     local locs = adapter.item_locations and adapter.item_locations() or nil
@@ -1779,9 +1975,14 @@ function M.compute(adapter, show)
       local cid = M.marker_cid(m)
       if cid ~= nil then quest_by_cid[cid] = m end
     end
-    local wms, merged
-    wms, world_panel, merged = M.world_markers_cached(show.world, show,
+    local wms, merged, cover
+    wms, world_panel, merged, cover = M.world_markers_cached(show.world, show,
       show.world_origin, boxes, quest_by_cid)
+    if q ~= nil then
+      local matches = M.npc_matches(show.world.npcs, q)
+      npc_match_cids = M.npc_match_cids(matches)
+      npc_rows = M.npc_rows(matches, show.world_origin, cover)
+    end
     for _, mg in ipairs(merged) do
       local qm = quest_by_cid[mg.cid]
       qm.hover = (qm.hover or qm.label or "") .. "\n" .. mg.line
@@ -1793,6 +1994,34 @@ function M.compute(adapter, show)
     if valid_pos(show.map_origin) then
       fullmap_world = M.world_markers_cached(show.world, show,
         show.map_origin, boxes, quest_by_cid, { grid_builds = 0, cand_builds = 0 })
+    end
+  end
+
+  -- v14 (SPEC 22.8.4, 22.11.3): the route stops and hint pins, outside the
+  -- cap and the search filter. cid / stop and qid / i identify the icon.
+  local undisc = show.world_undiscovered == true
+  local route = show.route
+  if type(route) == "table" and type(route.stops) == "table"
+    and type(route.cid) == "number" then
+    for n, s in ipairs(route.stops) do
+      if type(s) == "table" and valid_pos(s.pos)
+        and (s.discovered ~= false or undisc) then
+        markers[#markers + 1] = {
+          key = string.format("r:%d:%d", math.floor(route.cid), n),
+          cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
+          label = string.format("%s %02d-%02d", tostring(route.name),
+            math.floor(tonumber(s.from) or 0), math.floor(tonumber(s.to) or 0)),
+          cid = route.cid, stop = n }
+      end
+    end
+  end
+  for _, p in ipairs(type(show.hint_pins) == "table" and show.hint_pins or {}) do
+    if type(p) == "table" and type(p.qid) == "number" and type(p.i) == "number"
+      and valid_pos(p.pos) then
+      markers[#markers + 1] = {
+        key = string.format("h:%d:%d", math.floor(p.qid), math.floor(p.i)),
+        cat = "hint_pin", qids = {}, pos = pos_copy(p.pos),
+        label = tostring(p.label or ""), qid = p.qid, i = p.i }
     end
   end
 
@@ -1812,6 +2041,9 @@ function M.compute(adapter, show)
     journal = journal,
     journal_all = journal_all,
     quest_steps = quest_steps,
+    hint_steps = hint_steps,
+    npc_rows = npc_rows,
+    npc_match_cids = npc_match_cids,
   }
 end
 
@@ -1895,7 +2127,18 @@ end
 -- otherwise the tick invalidates (zero managed calls).
 function M.item_walk_wanted(show)
   return show ~= nil and ((show.in_progress == true and show.quest_items == true)
-    or show.world_sellers == true)
+    or show.world_sellers == true
+    or (show.inventory_quest_marks == true and show.item_menu_open == true))
+end
+
+-- v14 (SPEC 22.10.1): "full" when the round also feeds the quest-item and
+-- seller markers, "needs" when only the item menu marks want it.
+function M.item_walk_mode(show)
+  if show ~= nil and ((show.in_progress == true and show.quest_items == true)
+    or show.world_sellers == true) then
+    return "full"
+  end
+  return "needs"
 end
 
 -- v4 minimap (SPEC §11.1): nearest-first in-radius selection, capped.
@@ -1923,7 +2166,10 @@ function M.minimap_markers(markers, origin, radius, cap)
     local d2 = dx * dx + dy * dy + dz * dz
     if d2 <= radius2 then
       if best == nil or d2 < best then best = d2 end
-      local w = WORLD_DEF[m.cat] ~= nil and 1 or 0
+      -- quest and item markers 0, route stops and hint pins 1, world 2
+      local w = 0
+      if WORLD_DEF[m.cat] ~= nil then w = 2
+      elseif m.cat == "route_stop" or m.cat == "hint_pin" then w = 1 end
       if lim >= 1 and (n < lim or before(w, d2, m.key, sel[n])) then
         local i = n < lim and n + 1 or n
         if n < lim then n = n + 1 end
