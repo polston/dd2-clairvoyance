@@ -1290,13 +1290,18 @@ local function step_lines(rec, j, ja, spoilers)
   local out = {}
   for i, s in ipairs(ja.steps) do
     local text = (type(s) == "table" and nonempty(s.base)) and s.base or ("Step " .. i)
-    local prefix = ""
-    if cat == "completed" then prefix = "done: "
-    elseif cur ~= nil then
-      if i <= cur then prefix = "done: "
-      elseif i == cur + 1 then prefix = "> " end
+    -- The game's message table marks developer-cut tasks "#Rejected#"; hide
+    -- them but keep the original index i so the current-step marker stays
+    -- aligned with the game's task index.
+    if not text:find("#Rejected#", 1, true) then
+      local prefix = ""
+      if cat == "completed" then prefix = "done: "
+      elseif cur ~= nil then
+        if i <= cur then prefix = "done: "
+        elseif i == cur + 1 then prefix = "> " end
+      end
+      out[#out + 1] = prefix .. text
     end
-    out[#out + 1] = prefix .. text
   end
   return out
 end

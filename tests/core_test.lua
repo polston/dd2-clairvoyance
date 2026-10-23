@@ -1291,6 +1291,10 @@ do
     { step_index = 1 }, ALL, false).steps == nil)
   check("jd SM6: no catalog entry -> no steps", core.row_detail({ cat = "in_progress" },
     { step_index = 1 }, { missing = true }, true).steps == nil)
+  d = core.row_detail({ cat = "in_progress" }, { step_index = 2 }, { steps = {
+    { base = "A" }, { base = "<COLOR FF0000>#Rejected#</COLOR> Mes_x_002" }, { base = "C" } } }, true)
+  check("jd SM7: game-cut steps hidden, marker keeps game index",
+    #d.steps == 2 and d.steps[1] == "done: A" and d.steps[2] == "> C")
 
   -- SN summary nodes
   local res = { quests = { { qid = 10, name = "Ten", state = "startable", dist = 5.4 },
