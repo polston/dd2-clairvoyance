@@ -233,6 +233,215 @@ do
   check("hint_step bad step", N.hint_step(hints, 7, "x") == nil)
 end
 
+-- walking-path search, route pairs, fit, route polyline (SPEC 23.6)
+do
+  -- links = { [i] = { targets... } }; coords = { {x,y,z}, ... }
+  local function mkgraph(coords, links)
+    local g = { n = #coords, x = {}, y = {}, z = {}, ls = {}, lc = {}, lt = {} }
+    local slot = 1
+    for i, c in ipairs(coords) do
+      g.x[i], g.y[i], g.z[i] = c[1], c[2], c[3]
+      local l = links[i] or {}
+      g.ls[i] = slot
+      g.lc[i] = #l
+      for _, t in ipairs(l) do g.lt[slot] = t; slot = slot + 1 end
+    end
+    return g
+  end
+  local function run(job, budget)
+    local st
+    repeat st = N.path_step(job, budget or 1e9, function() return 0 end)
+    until st ~= "running"
+    return st
+  end
+  local function same(a, b)
+    if #a ~= #b then return false end
+    for i = 1, #a do if a[i] ~= b[i] then return false end end
+    return true
+  end
+
+  local chain = mkgraph({ {0,0,0}, {1,0,0}, {2,0,0}, {3,0,0} },
+    { {2}, {1, 3}, {2, 4}, {3} })
+  local j = N.path_new(chain, 1, 4)
+  check("path chain done", run(j) == "done")
+  check("path chain", same(j.path, { 1, 2, 3, 4 }))
+  check("path chain expanded", j.expanded >= 3)
+  local same_job = N.path_new(chain, 2, 2)
+  check("path a==b", N.path_step(same_job, 1, function() return 0 end) == "done"
+    and same(same_job.path, { 2 }))
+  check("path done is sticky",
+    N.path_step(same_job, 1, function() return 0 end) == "done")
+
+  -- detour: 1 -> 2 (near goal 5, long link 2->5) and 1 -> 3 -> 4 -> 5
+  local det = mkgraph({ {0,0,0}, {9,-3,0}, {3,1,0}, {7,1,0}, {10,0,0} },
+    { {2, 3}, {5}, {4}, {5}, {} })
+  j = N.path_new(det, 1, 5)
+  check("detour", run(j) == "done" and same(j.path, { 1, 3, 4, 5 }))
+
+  -- one-way
+  local ow = mkgraph({ {0,0,0}, {1,0,0} }, { {2}, {} })
+  j = N.path_new(ow, 1, 2)
+  check("one-way forward", run(j) == "done" and same(j.path, { 1, 2 }))
+  j = N.path_new(ow, 2, 1)
+  check("one-way back failed", run(j) == "failed" and j.path == nil)
+  check("failed is sticky",
+    N.path_step(j, 1, function() return 0 end) == "failed")
+
+  -- unreachable, cap
+  local iso = mkgraph({ {0,0,0}, {1,0,0}, {5,0,0} }, { {2}, {1}, {} })
+  j = N.path_new(iso, 1, 3)
+  check("unreachable", run(j) == "failed")
+  local coords, links = {}, {}
+  for i = 1, 30 do
+    coords[i] = { i, 0, 0 }
+    links[i] = { i + 1 <= 30 and i + 1 or nil }
+  end
+  local long = mkgraph(coords, links)
+  j = N.path_new(long, 1, 30, { cap = 10 })
+  check("cap failed", run(j) == "failed" and j.expanded > 10)
+  j = N.path_new(long, 1, 30)
+  check("cap default", j.cap == 20000 and j.weight == 1.2)
+  check("long chain ok", run(j) == "done" and #j.path == 30)
+
+  -- resumable on a 40x50 grid
+  local W, H = 40, 50
+  coords, links = {}, {}
+  for r = 0, H - 1 do
+    for c = 0, W - 1 do
+      local i = r * W + c + 1
+      coords[i] = { c, 0, r }
+      local l = {}
+      if c > 0 then l[#l + 1] = i - 1 end
+      if c < W - 1 then l[#l + 1] = i + 1 end
+      if r > 0 then l[#l + 1] = i - W end
+      if r < H - 1 then l[#l + 1] = i + W end
+      links[i] = l
+    end
+  end
+  local grid = mkgraph(coords, links)
+  local full = N.path_new(grid, 1, W * H)
+  check("grid full", run(full) == "done")
+  local t = 0
+  local clk = function() t = t + 0.001; return t end
+  local sliced = N.path_new(grid, 1, W * H)
+  local calls, st = 0, "running"
+  while st == "running" and calls < 5000 do
+    st = N.path_step(sliced, 0.5, clk)
+    calls = calls + 1
+  end
+  check("grid sliced done", st == "done")
+  check("grid sliced took several calls", calls > 1)
+  check("grid sliced same path", same(sliced.path, full.path))
+
+  -- nearest
+  local ng = mkgraph({ {0,0,0}, {10,0,0}, {10,10,10} }, {})
+  local nj = N.nearest_new(ng, 9, 1, 0)
+  check("nearest", N.nearest_step(nj, 1e9, function() return 0 end) == "done"
+    and nj.best == 2 and math.abs(nj.dist - math.sqrt(2)) < 1e-9)
+  t = 0
+  nj = N.nearest_new(ng, 10, 9, 9)
+  calls, st = 0, "running"
+  while st == "running" and calls < 100 do
+    st = N.nearest_step(nj, 0.5, clk)
+    calls = calls + 1
+  end
+  check("nearest budgeted", st == "done" and nj.best == 3 and calls > 1)
+end
+
+-- route_pairs
+do
+  local function s(d, x) return { discovered = d, pos = { x = x or 0, y = 0, z = 0 } } end
+  local rp = N.route_pairs({ s(true), s(false), s(true) }, false)
+  check("pairs skip undiscovered", #rp == 1 and rp[1][1] == 1 and rp[1][2] == 3)
+  rp = N.route_pairs({ s(true), s(false), s(true) }, true)
+  check("pairs undisc", #rp == 2 and rp[1][2] == 2 and rp[2][1] == 2 and rp[2][2] == 3)
+  rp = N.route_pairs({ s(true), s(true, 0 / 0), s(true) }, false)
+  check("pairs skip nan", #rp == 1 and rp[1][2] == 3)
+  check("pairs one stop", #N.route_pairs({ s(true) }, false) == 0)
+  check("pairs nil discovered counts",
+    #N.route_pairs({ { pos = { x = 0, y = 0, z = 0 } }, s(true) }, false) == 1)
+end
+
+-- fit
+do
+  local pts = { { 0, 0, 100, 0 }, { 100, 0, 300, 0 } }
+  local f = N.fit(pts, 2, nil, {})
+  check("fit 2 points", f and math.abs(f.s - 2) < 1e-9 and f.residual < 0.01)
+
+  local function mk(fx)
+    local p = {}
+    for i, m in ipairs({ { 0, 0 }, { 100, 0 }, { 0, 100 }, { 40, 70 } }) do
+      local lx, ly = fx(m[1], m[2])
+      p[i] = { m[1], m[2], lx, ly }
+    end
+    return p
+  end
+  local ps = mk(function(mx, mz) return 2 * mx + 100, -2 * mz + 50 end)
+  local out = {}
+  f = N.fit(ps, 3, nil, out)
+  check("fit returns out", f == out)
+  check("fit signs", f and f.s and math.abs(f.s - 2) < 1e-9 and f.sx == 1 and f.sz == -1)
+  check("fit residual", f and f.residual < 0.01)
+  if f then
+    local lx, ly = N.fit_apply(f, 40, 70)
+    check("fit_apply", math.abs(lx - 180) < 1e-6 and math.abs(ly - (-90)) < 1e-6)
+  end
+  local flip = mk(function(mx, mz) return -3 * mx + 10, 3 * mz + 20 end)
+  f = N.fit(flip, 4, nil, {})
+  check("fit sx flip", f and f.sx == -1 and f.sz == 1 and math.abs(f.s - 3) < 1e-9)
+
+  check("fit too close", N.fit({ { 0, 0, 0, 0 }, { 100, 0, 10, 0 } }, 2, nil, {}) == nil)
+  check("fit one point", N.fit({ { 0, 0, 0, 0 } }, 1, nil, {}) == nil)
+
+  local th = math.rad(30)
+  local c, sn = math.cos(th), math.sin(th)
+  local rot = mk(function(mx, mz)
+    local ux, uy = 2 * mx, -2 * mz
+    return 100 + c * ux - sn * uy, 50 + sn * ux + c * uy
+  end)
+  f = N.fit(rot, 3, { similarity = true }, {})
+  check("fit similarity", f and f.residual < 0.01)
+  if f then
+    local lx, ly = N.fit_apply(f, rot[4][1], rot[4][2])
+    check("fit similarity apply", math.abs(lx - rot[4][3]) < 1e-6
+      and math.abs(ly - rot[4][4]) < 1e-6)
+  end
+  f = N.fit(rot, 3, nil, {})
+  check("fit rotated plain residual", f and f.residual > 2)
+  f = N.fit(ps, 3, { similarity = true }, {})
+  check("fit similarity on plain data", f and f.residual < 0.01)
+end
+
+-- route_polyline
+do
+  local fit = { a = 2, b = 0, c = 0, d = 2, ox = 10, oy = 20 }
+  local ends = { { lx = 1, ly = 2 }, { lx = 3, ly = 4 }, { lx = 5, ly = 6 } }
+  local out = {}
+  local n = N.route_polyline({ { i = 1, j = 3 } }, ends, nil, 0, out)
+  check("polyline mode 0", n == 4 and out[1] == 1 and out[2] == 2 and out[3] == 5
+    and out[4] == 6 and out[5] == nil)
+  local pairs1 = { { i = 1, j = 3, pts = { 1, 0, 1, 2, 0, 2, 3, 0, 3 } } }
+  n = N.route_polyline(pairs1, ends, fit, 1, out)
+  check("polyline mode 1", n == 10 and out[3] == 12 and out[4] == 22
+    and out[7] == 16 and out[8] == 26 and out[9] == 5 and out[10] == 6)
+  n = N.route_polyline(pairs1, ends, fit, 0, out)
+  check("polyline mode 1 off", n == 4)
+  n = N.route_polyline(pairs1, ends, nil, 1, out)
+  check("polyline no fit straight", n == 4)
+  n = N.route_polyline({ { i = 1, j = 3 } }, { { lx = 1, ly = 2 }, nil, { mx = 5, mz = 6 } },
+    fit, 0, out)
+  check("polyline map end fitted", n == 4 and out[3] == 20 and out[4] == 32)
+  n = N.route_polyline({ { i = 1, j = 3 } }, { { lx = 1, ly = 2 }, nil, { mx = 5, mz = 6 } },
+    nil, 0, out)
+  check("polyline map end no fit omitted", n == 0 and #out == 0)
+  n = N.route_polyline({ { i = 1, j = 2 } }, { { lx = 1, ly = 2 } }, fit, 0, out)
+  check("polyline nil end omitted", n == 0)
+  n = N.route_polyline({ { i = 1, j = 2 }, { i = 2, j = 3 } }, ends, fit, 0, out)
+  check("polyline separator", n == 9 and out[5] == false and out[6] == 3 and out[9] == 6)
+  n = N.route_polyline({ { i = 1, j = 2 } }, ends, fit, 0, out)
+  check("polyline clears tail", n == 4 and #out == 4 and out[5] == nil)
+end
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)
