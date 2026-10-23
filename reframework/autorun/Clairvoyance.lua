@@ -104,6 +104,69 @@ wt.rows = function(cat)
   end
   return rows
 end
+-- v14 (SPEC 22.11.3): the opened Hints nodes' qids, and the pins of those
+-- whose step is the active one now (pins bypass the search and the cap).
+wt.hints, wt.hints_open = {}, {}   -- hints by qid (npcs.parse_hints); qid -> step idx
+wt.hint_inputs = function()
+  local qids, pins = {}, {}
+  for qid in pairs(wt.hints_open) do qids[#qids + 1] = qid end
+  table.sort(qids)
+  local hs = snapshot ~= nil and snapshot.hint_steps or nil
+  if hs ~= nil then
+    local npcs = require("Clairvoyance.npcs")
+    for _, qid in ipairs(qids) do
+      local n = hs[qid]
+      local st = type(n) == "number" and n - 1 == wt.hints_open[qid]
+        and npcs.hint_step(wt.hints, qid, n) or nil
+      if st ~= nil then
+        for i, p in ipairs(st.pins) do
+          pins[#pins + 1] = { qid = qid, i = i, label = p.label,
+            pos = { x = p.x, y = p.y, z = p.z } }
+        end
+      end
+    end
+  end
+  return qids, pins
+end
+-- v14 (SPEC 10.3b): one failure guard per new frame layer, state in a table
+-- of its own. Log each distinct message once (16 cap); 30 failing frames in
+-- a row suspend the layer for 5 s.
+wt.layer = function() return { fails = 0, suspend = 0.0, logged = {}, n = 0 } end
+wt.layer_run = function(L, name, fn)
+  if os.clock() < L.suspend then return end
+  local ok, err = pcall(fn)
+  if ok then L.fails = 0; return end
+  L.fails = L.fails + 1
+  local msg = tostring(err)
+  if not L.logged[msg] and L.n < 16 then
+    L.logged[msg] = true; L.n = L.n + 1
+    log.error("[Clairvoyance] " .. name .. " error: " .. msg)
+  end
+  if L.fails >= 30 then L.fails = 0; L.suspend = os.clock() + 5.0 end
+end
+wt.route_layer, wt.names_layer = wt.layer(), wt.layer()
+wt.names_labels = { "Off", "Quest NPCs", "All named NPCs" }
+wt.names_stats = { drawn = 0, skipped = 0, spawned = 0 }
+-- The player's Transform (the manual player), or nil.
+wt.player_tr = function()
+  local cm = sdk.get_managed_singleton("app.CharacterManager")
+  local pl = cm ~= nil and cm:call("get_ManualPlayer") or nil
+  local go = pl ~= nil and pl:call("get_GameObject") or nil
+  local tr = go ~= nil and go:call("get_Transform") or nil
+  if tr ~= nil and sdk.is_managed_object(tr) then return tr end
+  return nil
+end
+-- Map space minus camera space (SPEC 22.4.5): the player's UniversalPosition
+-- minus Position. nil when unreadable; the caller draws nothing then.
+wt.read_offset = function()
+  local ok, tr = pcall(wt.player_tr)
+  if not ok or tr == nil then return nil end
+  local okp, u, p = pcall(function()
+    return tr:call("get_UniversalPosition"), tr:call("get_Position")
+  end)
+  if not okp or u == nil or p == nil then return nil end
+  return u.x - p.x, u.y - p.y, u.z - p.z
+end
 local committed = {}
 local want_update = false
 -- Last player map-space position the minimap hook saw (ui.PlUPos); fed to
@@ -254,15 +317,74 @@ do
     return su.icon_for(settings, m, "head", m.step, icons.never)
   end
 
+  -- v14 (SPEC 22.8.4a): lines join the route stops in stop order, the stop
+  -- number beside each; screen positions come from the icon records. Hoisted
+  -- pieces, so no closure is built per frame.
+  icons.route_recs, icons.nums = {}, {}
+  icons.by_stop = function(a, b) return a.marker.stop < b.marker.stop end
+  icons.route_lines = function()
+    local rr, n = icons.route_recs, 0
+    for _, rec in ipairs(icons.recs) do
+      if rec.marker.cat == "route_stop" and type(rec.marker.stop) == "number" then
+        n = n + 1
+        rr[n] = rec
+      end
+    end
+    for i = #rr, n + 1, -1 do rr[i] = nil end
+    if n == 0 then return end
+    table.sort(rr, icons.by_stop)
+    local col = A.argb_to_abgr(su.color_of(settings, "route_stop"))
+    local px, py
+    for i = 1, n do
+      local rec = rr[i]
+      local x, y = icons.read(rec)
+      if x ~= nil then
+        local sx, sy = icons:to_screen(x, y)
+        if px ~= nil then draw.line(px, py, sx, sy, col) end
+        px, py = sx, sy
+        local num = icons.nums[rec.marker.stop]
+        if num == nil then
+          num = tostring(rec.marker.stop)
+          icons.nums[rec.marker.stop] = num
+        end
+        local off = rec.size * icons:k() / 2 + 2
+        draw.text(num, sx + off + 1, sy - 5, 0xFF000000)
+        draw.text(num, sx + off, sy - 6, 0xFFFFFFFF)
+      end
+    end
+  end
+
   -- The per-frame pass: fill the full-map layer from the records while the
   -- map is up, then draw everything queued (SPEC 21.2.7, 21.4.4).
   function icons.frame()
     if ui_map ~= nil and os.clock() - icons.map_seen < 0.25 and icons:active() then
       icons:fill(icons.recs, icons.read)
+      pcall(icons.route_lines)
     end
     icons:draw()
   end
   icons:preload_all()
+  -- v14 (SPEC 22.10): item-menu quest marks. A missing or broken module
+  -- must never stop the mod loading.
+  local okm, im = pcall(function()
+    return require("Clairvoyance.itemmenu").create{
+      sdk = sdk, draw = draw,
+      enabled = function() return settings.enabled and settings.inventory_quest_marks end,
+      related = adapter.item_related,
+      quest_flag = function(d) return d:get_field("_SubCategory") == 4 end,
+      color_abgr = function() return A.argb_to_abgr(settings.color_quest_item) end,
+      screen_h = function() local sz = imgui.get_display_size(); return sz and sz.y or 1080 end,
+      clock = os.clock, log = logmsg,
+      on_open = adapter.reset_item_throttle,
+    }
+  end)
+  if okm and im ~= nil then
+    icons.itemmenu = im
+    local oki, erri = pcall(im.install, im)
+    if not oki then logmsg("item menu install failed: " .. tostring(erri)) end
+  else
+    logmsg("item menu unavailable: " .. tostring(im))
+  end
 end
 local hover_labels = {}   -- icon address -> label
 local hover_stats = { fires = 0, hits = 0, misses = 0, sel_nil = 0,
@@ -509,6 +631,7 @@ re.on_frame(function()
       pcall(wt.reset, wt)
       wt.world_origin = nil
       wt.map_origin, wt.map_origin_at = nil, nil
+      wt.hints_open, wt.route_cid = {}, nil   -- SPEC 22.6.6
     end
     -- v9: a debug-expanded qid keeps the tree live (QNML_DEBUG, SPEC 16.10)
     local tree_live = core.tree_wanted(now, tree_open_at)
@@ -535,7 +658,25 @@ re.on_frame(function()
       prev_quest_steps = snapshot and snapshot.quest_steps,
       now = now,
       search = core.parse_query(settings.search_text),   -- SPEC 19.5; nil = no search
+      -- v14 (SPEC 22.10, 22.11)
+      inventory_quest_marks = settings.inventory_quest_marks,
+      item_menu_open = icons.itemmenu ~= nil and icons.itemmenu:open(),
     }
+    show.hint_qids, show.hint_pins = wt.hint_inputs()
+    -- SPEC 22.8.4: the route NPC lasts while the search shows it
+    if wt.route_cid ~= nil then
+      local keep = false
+      if show.search ~= nil then
+        if snapshot == nil then
+          keep = true
+        else
+          for _, c in ipairs(snapshot.npc_match_cids or {}) do
+            if c == wt.route_cid then keep = true; break end
+          end
+        end
+      end
+      if not keep then wt.route_cid = nil; wt.q("clear_route", nil) end
+    end
     -- SPEC 19.4c: the first tick of a search asks the world for a round now
     if show.search ~= nil and not wt.search_on then wt.q("poke", nil) end
     wt.search_on = show.search ~= nil
@@ -562,6 +703,7 @@ re.on_frame(function()
       local tg = {}
       for _, k in ipairs(su.WORLD_BOOLS) do tg[k:sub(7)] = settings[k] end
       tg.search = show.search ~= nil
+      tg.npc_cids = snapshot ~= nil and snapshot.npc_match_cids or nil   -- Ruling 10
       if wt:refresh(now, gate, tg) then wt.line_txt = nil end
     end)
     if not ok_w then logerr("world round: " .. tostring(err_w)) end
@@ -571,6 +713,7 @@ re.on_frame(function()
     show.map_origin = wt.map_origin
     show.world_givers = wt.q("givers", {})
     show.world = wt.q("input", nil)
+    show.route = (show.world or {}).route   -- SPEC 22.8.4
     -- v5 (SPEC 12.3a): own pcall so a raised walk never skips compute;
     -- inside the timed window so Tick ms includes it; skipped when the
     -- category is hidden (SPEC 9.9).
@@ -596,9 +739,17 @@ re.on_frame(function()
     -- edge tracking) and no managed call runs.
     if adapter.refresh_items ~= nil then
       if core.item_walk_wanted(show) then
-        local ok_i, err_i = pcall(adapter.refresh_items)
+        -- Ruling 9: a round widening from the menu's need read to the full
+        -- round runs at once
+        local mode = core.item_walk_mode(show)
+        if wt.item_mode == "needs" and mode == "full" and adapter.reset_item_throttle ~= nil then
+          pcall(adapter.reset_item_throttle)
+        end
+        wt.item_mode = mode
+        local ok_i, err_i = pcall(adapter.refresh_items, mode)
         if not ok_i then logerr("item walk: " .. tostring(err_i)) end
       else
+        wt.item_mode = nil
         pcall(adapter.invalidate_items)
       end
     end
@@ -1256,6 +1407,13 @@ local function install_debug()
         elseif key == "step_icons" then
           settings.step_icons = v == true
           want_update = true; last_tick = 0.0; save_settings(); icons:preload_all()
+        elseif key == "overhead_names" then
+          if type(v) == "number" then
+            settings.overhead_names = su.clamp_int(v, 0, 2); save_settings()
+          end
+        elseif key == "inventory_quest_marks" then
+          settings.inventory_quest_marks = v == true
+          last_tick = 0.0; save_settings()
         elseif key == "world_max_markers" then
           if type(v) == "number" then
             settings.world_max_markers = su.clamp_int(v, 0, su.WORLD_MAX_MARKERS)
@@ -1271,6 +1429,27 @@ local function install_debug()
           end
         end
       end,
+      -- v14 (SPEC 22.11.4): every side quest's step text, qids as string keys
+      dump_steps = function()
+        local out = {}
+        for qid, steps in pairs(adapter.quest_steps_text()) do out[tostring(qid)] = steps end
+        json.dump_file("Clairvoyance_steps.json", out)
+        logmsg("dump_steps: wrote Clairvoyance_steps.json")
+      end,
+      -- v14 (SPEC 22.11.5): append the player's map-space position as a pin
+      pin = function(qid, idx, label)
+        local ok_t, tr = pcall(wt.player_tr)
+        local u = ok_t and tr ~= nil and tr:call("get_UniversalPosition") or nil
+        if u == nil then logmsg("pin: no player position"); return nil end
+        local list = json.load_file("Clairvoyance_pins.json")
+        if type(list) ~= "table" then list = {} end
+        list[#list + 1] = { qid = qid, idx = idx, label = label,
+          x = u.x, y = u.y, z = u.z }
+        json.dump_file("Clairvoyance_pins.json", list)
+        logmsg(string.format("pin: %s step %s %s (%d pins)",
+          tostring(qid), tostring(idx), tostring(label), #list))
+        return #list
+      end,
       -- stats plus at most 20 rows (counts and labels); positions go to the log only
       world = function()
         local st = wt.q("stats", {})
@@ -1279,7 +1458,7 @@ local function install_debug()
         local max_rows = world ~= nil and world.K.DEBUG_ROWS or 0
         if sn ~= nil then
           for _, cat in ipairs(core.WORLD_CATS) do
-            if sn[cat] ~= nil and #rows < max_rows
+            if cat ~= "npc_search" and sn[cat] ~= nil and #rows < max_rows
               and (cat ~= "shop" or wt.search_on or settings.world_shops) then
               for _, r in ipairs(wt.rows(cat)) do
                 if #rows >= max_rows then break end
@@ -1316,7 +1495,10 @@ local function install_debug()
           tracked_qid = snapshot and snapshot.tracked_qid or nil,
           map_ctor_n = map_ctor_n, setup_icon_n = setup_icon_n,
           same_fallback_n = hover_stats.same_fallback_n,
-          draw = icons:stats_line() }
+          draw = icons:stats_line(),
+          item_menu = icons.itemmenu ~= nil and icons.itemmenu:stats_line() or nil,
+          names = string.format("Names: spawned %d, drawn %d, skipped %d",
+            wt.names_stats.spawned, wt.names_stats.drawn, wt.names_stats.skipped) }
       end,
     }
   else
@@ -1350,6 +1532,27 @@ local function draw_detail(label, rec, qid, j, ja, spoilers)
     if d.jump ~= nil then
       if imgui.button(d.jump_id) then jump_pending = d.jump end
       if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+    end
+    -- v14 (SPEC 22.11.2): the Hints node. Opening it is the spoiler gate;
+    -- the step in its id starts a new step's node closed.
+    local hq = wt.hints[qid]
+    if hq ~= nil and rec ~= nil and rec.cat ~= "locked" then
+      local jr = j[qid]
+      local idx = rec.cat == "in_progress" and jr ~= nil
+        and type(jr.step_index) == "number" and jr.step_index or nil
+      if imgui.tree_node("Hints###qh_" .. qid .. "_" .. (idx ~= nil and idx or "q")) then
+        local tw = imgui.text_wrapped or imgui.text
+        if hq.quest ~= nil then tw(hq.quest) end
+        if idx ~= nil then
+          if wt.hints_open[qid] ~= idx then
+            wt.hints_open[qid] = idx
+            last_tick = 0.0   -- the pins show within a frame or two
+          end
+          local st = require("Clairvoyance.npcs").hint_step(wt.hints, qid, idx + 1)
+          if st ~= nil then tw(st.text) end
+        end
+        imgui.tree_pop()
+      end
     end
   end)
   if not ok then logerr("tree detail: " .. tostring(err)) end
@@ -1389,21 +1592,70 @@ local function draw_body()
     if snapshot == nil then
       imgui.text("No results yet")
     else
-      local nres = #snapshot.markers
-      if imgui.tree_node(string.format("Search results (%d)###qnml_sr", nres)) then
-        local srows = snapshot.search_rows
-        if srows == nil then
-          srows = core.world_rows(snapshot.markers,
-            (wt.q("input", nil) or {}).settlements, wt.world_origin)
-          for _, r in ipairs(srows) do
-            r.jump_id = "Show on map##sj_" .. tostring(r.key)
-          end
-          snapshot.search_rows = srows
+      -- core.world_rows skips route stops and hint pins, so N counts the
+      -- rows shown, not the markers
+      local srows = snapshot.search_rows
+      if srows == nil then
+        srows = core.world_rows(snapshot.markers,
+          (wt.q("input", nil) or {}).settlements, wt.world_origin)
+        for _, r in ipairs(srows) do
+          r.jump_id = "Show on map##sj_" .. tostring(r.key)
         end
+        snapshot.search_rows = srows
+      end
+      if imgui.tree_node(string.format("Search results (%d)###qnml_sr", #srows)) then
         for _, r in ipairs(srows) do
           imgui.text(r.text)
           if imgui.button(r.jump_id) then jump_pending = r.pos end
           if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+        end
+        -- v14 (SPEC 22.7.6): the name matches, a route toggle each
+        local nrows = snapshot.npc_rows or {}
+        if #nrows > 0 and imgui.tree_node(
+            string.format("NPCs (%d)###qnml_nr", #nrows)) then
+          local rt = (wt.q("input", nil) or {}).route
+          for _, r in ipairs(nrows) do
+            if r.text == nil then
+              local tx = tostring(r.name)
+              if not r.alive then
+                tx = tx .. " - dead"
+              elseif r.pos ~= nil then
+                local best = core.nearest_settlement(r.pos,
+                  (wt.q("input", nil) or {}).settlements)
+                if best ~= nil then tx = tx .. " - near " .. tostring(best.name) end
+              else
+                tx = tx .. " - position unknown"
+              end
+              r.text = tx
+              r.jump_id = "Show on map##nj_" .. tostring(r.cid)
+              r.route_id = "Route##nr_" .. tostring(r.cid)
+            end
+            imgui.text(r.text)
+            if r.pos ~= nil then
+              if imgui.button(r.jump_id) then jump_pending = r.pos end
+              if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+              imgui.same_line()
+            end
+            local rc, rv = imgui.checkbox(r.route_id, wt.route_cid == r.cid)
+            if rc then
+              if rv then
+                wt.route_cid = r.cid
+                wt.q("set_route", nil, r.cid, r.name)
+              else
+                wt.route_cid = nil
+                wt.q("clear_route", nil)
+              end
+              want_update = true; last_tick = 0.0
+            end
+            if wt.route_cid == r.cid and rt ~= nil and rt.cid == r.cid then
+              if rt.err ~= nil then
+                imgui.text("route unavailable")
+              elseif (rt.unplaced or 0) > 0 then
+                imgui.text(string.format("%d stops unplaced", rt.unplaced))
+              end
+            end
+          end
+          imgui.tree_pop()
         end
         imgui.tree_pop()
       end
@@ -1459,6 +1711,17 @@ local function draw_body()
     settings.overhead_distance = math.min(200, math.max(10, sv))
     settings_dirty = true
   end
+  -- v14 (SPEC 22.9.1): independent of the overhead indicators above
+  local nc, ni = imgui.combo("NPC names above heads",
+    settings.overhead_names + 1, wt.names_labels)
+  if nc and wt.names_labels[ni] ~= nil then
+    settings.overhead_names = ni - 1
+    save_settings()
+  end
+  -- v14 (SPEC 22.10.5)
+  changed, settings.inventory_quest_marks = imgui.checkbox(
+    "Mark quest items in the item menu", settings.inventory_quest_marks)
+  if changed then last_tick = 0.0; save_settings() end
 
   changed, settings.show_minimap =
     imgui.checkbox("Minimap indicators", settings.show_minimap)
@@ -1495,6 +1758,9 @@ local function draw_body()
       { "chest", su.WORLD_LABEL.chest }, { "treasure", su.WORLD_LABEL.treasure },
       { "token", su.WORLD_LABEL.token }, { "beetle", su.WORLD_LABEL.beetle },
       { "monster", su.WORLD_LABEL.monster }, { "seller", su.WORLD_LABEL.seller },
+      { "npc_search", su.WORLD_LABEL.npc_search },
+      { "route_stop", su.WORLD_LABEL.route_stop },
+      { "hint_pin", su.WORLD_LABEL.hint_pin },
     }
     for _, r in ipairs(rows) do
       if imgui.tree_node(r[2] .. "##ic_" .. r[1]) then
@@ -1636,7 +1902,7 @@ local function draw_body()
           return
         end
         for _, cat in ipairs(core.WORLD_CATS) do
-          local p = sw[cat]
+          local p = cat ~= "npc_search" and sw[cat] or nil   -- NPCs live in the search panel
           local title = su.WORLD_LABEL[cat] or cat
           if cat == "shop" and not wt.search_on then title = su.WORLD_LABEL.shops end
           if p ~= nil and (cat ~= "shop" or wt.search_on or settings.world_shops)
@@ -1902,6 +2168,117 @@ re.on_frame(function()
   end
 end)
 
+-- v14 (SPEC 22.8.4c, 22.11.3): route stops and hint pins as overhead points.
+-- Camera space = map space minus the player's offset, read each frame; no
+-- offset means nothing this frame. Own failure counters (10.3b).
+wt.route_frame = function()
+  if not settings.enabled or not settings.show_overhead
+    or snapshot == nil or ui_map ~= nil then return end
+  local pts = snapshot.route_pts
+  if pts == nil then
+    pts = {}
+    for _, m in ipairs(snapshot.markers) do
+      if m.cat == "route_stop" or m.cat == "hint_pin" then pts[#pts + 1] = m end
+    end
+    snapshot.route_pts = pts
+  end
+  if #pts == 0 then return end
+  local cx, cy, cz = camera_pos()
+  if cx == nil then return end
+  local ox, oy, oz = wt.read_offset()
+  if ox == nil then return end
+  local max_d2 = settings.overhead_distance * settings.overhead_distance
+  for i = 1, #pts do
+    local m = pts[i]
+    local px, py, pz = m.pos.x - ox, m.pos.y - oy, m.pos.z - oz
+    local dx, dy, dz = px - cx, py - cy, pz - cz
+    local d2 = dx * dx + dy * dy + dz * dz
+    if d2 <= max_d2 then overhead_draw_one(m, px, py, pz, d2, max_d2) end
+  end
+end
+re.on_frame(function() wt.layer_run(wt.route_layer, "route points", wt.route_frame) end)
+
+-- v14 (SPEC 22.9): names above heads. The quest set is built once per
+-- snapshot: the c: marker cids and the cast of in-progress quest markers.
+wt.names_quest_set = function()
+  if wt.names_set_snap == snapshot and wt.names_set ~= nil then return wt.names_set end
+  local set = {}
+  for _, m in ipairs(snapshot.markers) do
+    local c = core.marker_cid(m)
+    if c ~= nil then set[c] = true end
+    if m.cat == "in_progress" then
+      for _, qid in ipairs(m.qids or {}) do
+        local okc, cast = pcall(adapter.cast_ids, qid)
+        if okc and type(cast) == "table" then
+          for _, id in ipairs(cast) do set[id] = true end
+        end
+      end
+    end
+  end
+  wt.names_set, wt.names_set_snap = set, snapshot
+  return set
+end
+wt.names_frame = function()
+  local mode = settings.overhead_names
+  if not settings.enabled or mode == 0 or ui_map ~= nil
+    or (mode == 1 and snapshot == nil) then return end
+  local cx, cy, cz = camera_pos()
+  if cx == nil then return end
+  wt.q("spawned_step", nil, 200)
+  local list = wt.spawned or {}
+  local set = mode == 1 and wt.names_quest_set() or nil
+  local max_d2 = settings.overhead_distance * settings.overhead_distance
+  local st = wt.names_stats
+  st.spawned, st.drawn, st.skipped = #list, 0, 0
+  for i = 1, #list do
+    local e = list[i]
+    if set == nil or set[e.cid] then
+      local tr = e.transform
+      -- a freed NPC faults natively (10.5): the guard comes before every read
+      if tr == nil or not sdk.is_managed_object(tr) then
+        st.skipped = st.skipped + 1
+      else
+        local okp, px, py, pz = pcall(read_tr_pos, tr)
+        if not okp or px == nil then
+          st.skipped = st.skipped + 1
+        else
+          local dx, dy, dz = px - cx, py - cy, pz - cz
+          if dx * dx + dy * dy + dz * dz <= max_d2 then
+            local sp
+            if proj_vec_reuse then
+              proj_vec.x, proj_vec.y, proj_vec.z = px, py + OVERHEAD_Y_OFFSET, pz
+              sp = draw.world_to_screen(proj_vec)
+            else
+              sp = draw.world_to_screen(Vector3f.new(px, py + OVERHEAD_Y_OFFSET, pz))
+            end
+            if sp ~= nil then
+              if e.txt == nil or e.txt_dbg ~= settings.debug then
+                local t = tostring(e.name)
+                if e.tier ~= nil then t = t .. " - " .. e.tier end
+                if settings.debug and e.value ~= nil then
+                  t = t .. " (" .. tostring(e.value) .. ")"
+                end
+                e.txt, e.txt_dbg = t, settings.debug
+              end
+              local w = label_width(e.txt)
+              local tx, ty = sp.x - w / 2, sp.y - 30   -- above the dot
+              draw.text(e.txt, tx + 1, ty + 1, 0xFF000000)
+              draw.text(e.txt, tx, ty, 0xFFFFFFFF)
+              st.drawn = st.drawn + 1
+            end
+          end
+        end
+      end
+    end
+  end
+end
+re.on_frame(function() wt.layer_run(wt.names_layer, "names", wt.names_frame) end)
+
+-- v14 (SPEC 22.10): item-menu quest dots, its own failure counters inside.
+re.on_frame(function()
+  if icons.itemmenu ~= nil then pcall(icons.itemmenu.frame, icons.itemmenu) end
+end)
+
 -- v13 (SPEC 21.2.7): after the overhead callback, so this frame's "head"
 -- records are queued before the draw pass. Defined once; no closure per frame.
 do
@@ -1913,6 +2290,19 @@ do
       logerr("icons: " .. icons_err)
     end
   end)
+end
+
+-- v14 (SPEC 22.11.1): the hints file, validated once; a missing or bad file
+-- means no Hints nodes and one log line.
+do
+  local okh, why = pcall(function()
+    local t = json.load_file("Clairvoyance_hints.json")
+    if t == nil then error("hints file missing or unreadable", 0) end
+    local hints, errs = require("Clairvoyance.npcs").parse_hints(t)
+    wt.hints = hints
+    if #errs > 0 then error(#errs .. " hint entries dropped, first: " .. errs[1], 0) end
+  end)
+  if not okh then logmsg("hints: " .. tostring(why)) end
 end
 
 logmsg("loaded")
