@@ -185,6 +185,10 @@ do
   local m_gpos = find_method("via.gui.TransformObject", "get_GlobalPosition")
   local m_cscale = find_method("via.gui.Control", "get_ColorScale")
   local m_avisible = find_method("via.gui.PlayObject", "get_ActualVisible")
+  -- False when any method the full-map reader needs failed to resolve: no
+  -- picture is queued then, so the game glyph stays visible.
+  icons.read_ok = w_visible ~= nil and s_visible ~= nil
+    and s_position ~= nil and s_size ~= nil
   local function call_m(m, obj)
     return m:call(obj)   -- a nil method raises; every caller is under pcall
   end
@@ -676,7 +680,7 @@ do
   -- Queues the marker's picture for the draw pass when it can be drawn;
   -- true means the game glyph is hidden (alpha byte 0).
   local function note_picture(pool, ref, m)
-    if pool.label ~= "sprite" then return false end
+    if pool.label ~= "sprite" or not icons.read_ok then return false end
     local pid = su.icon_for(settings, m, "head", m.step, icons.never)
     if not icons:drawable(pid) then return false end
     local sprite = ref.Sprite
