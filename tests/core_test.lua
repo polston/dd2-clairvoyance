@@ -2840,5 +2840,75 @@ do
     and out[3] == shop and out[4] == chest and out[1] == q1)
 end
 
+-- st: v13 step numbers for in-progress quests (SPEC 21.8)
+do
+  local function mk(prog, steps, reads)
+    local a = fake_adapter({ acceptable = {}, progressing = prog, catalog = prog,
+      statics = (function() local t = {} for i, q in ipairs(prog) do t[q] = { x = i * 100, y = 0, z = 0 } end return t end)() })
+    a.quest_step = function(q) reads[#reads + 1] = q; return steps[q] end
+    return a
+  end
+  local function find(r, q)
+    for _, m in ipairs(r.markers) do if m.qids[1] == q then return m end end
+  end
+  local reads = {}
+  local r = core.compute(mk({ 11 }, { [11] = 3 }, reads), { in_progress = true, step_icons = true, now = 10 })
+  check("st 1: one in-progress qid at step 3", find(r, 11).step == 3 and r.quest_steps[11].n == 3)
+  check("st 1b: markers carry no scratch field", find(r, 11).inprog == nil)
+  reads = {}
+  r = core.compute(mk({ 11, 12 }, { [11] = 3, [12] = 2 }, reads),
+    { in_progress = true, step_icons = true, now = 10,
+      }) -- distinct statics: two markers, each lone
+  check("st 2a: separate markers each get a step", find(r, 11).step == 3 and find(r, 12).step == 2)
+  -- two in-progress qids at one position -> one marker -> nil
+  local a2 = mk({ 11, 12 }, { [11] = 3, [12] = 2 }, {})
+  a2.static_pos = function() return { x = 5, y = 0, z = 5 } end
+  r = core.compute(a2, { in_progress = true, step_icons = true, now = 10 })
+  check("st 2: two in-progress qids on one marker -> nil",
+    #r.markers == 1 and r.markers[1].step == nil)
+  r = core.compute(mk({ 11 }, { [11] = 6 }, {}), { in_progress = true, step_icons = true, now = 10 })
+  check("st 3: step 6 -> nil", find(r, 11).step == nil)
+  r = core.compute(mk({ 11 }, { [11] = 0 }, {}), { in_progress = true, step_icons = true, now = 10 })
+  check("st 3b: step 0 -> nil", find(r, 11).step == nil)
+  reads = {}
+  r = core.compute(mk({ 11 }, { [11] = 3 }, reads), { in_progress = true, step_icons = false, now = 10,
+    prev_quest_steps = { [11] = { n = 3, at = 9 } } })
+  check("st 4: setting off -> nil, zero reads, no quest_steps",
+    find(r, 11).step == nil and #reads == 0 and r.quest_steps == nil)
+  -- 5 s limit
+  reads = {}
+  local a = mk({ 11 }, { [11] = 3 }, reads)
+  r = core.compute(a, { in_progress = true, step_icons = true, now = 10 })
+  r = core.compute(a, { in_progress = true, step_icons = true, now = 14, prev_quest_steps = r.quest_steps })
+  check("st 5: within 5 s no new read, step carried", #reads == 1 and find(r, 11).step == 3)
+  r = core.compute(a, { in_progress = true, step_icons = true, now = 15, prev_quest_steps = r.quest_steps })
+  check("st 5b: at 5 s a new read", #reads == 2 and r.quest_steps[11].at == 15)
+  -- 10 per tick
+  local ids, steps = {}, {}
+  for i = 1, 12 do ids[i] = 100 + i; steps[100 + i] = 1 + (i % 5) end
+  reads = {}
+  a = mk(ids, steps, reads)
+  r = core.compute(a, { in_progress = true, step_icons = true, now = 0 })
+  local first = {}
+  for _, q in ipairs(reads) do first[q] = true end
+  check("st 6: tick 1 reads 10 never-read", #reads == 10)
+  local nread = 0
+  for _ in pairs(r.quest_steps) do nread = nread + 1 end
+  check("st 6b: 10 entries after tick 1", nread == 10)
+  for i = #reads, 1, -1 do reads[i] = nil end
+  r = core.compute(a, { in_progress = true, step_icons = true, now = 5, prev_quest_steps = r.quest_steps })
+  local unread_first = reads[1] ~= nil and not first[reads[1]] and reads[2] ~= nil and not first[reads[2]]
+  local rest_old = true
+  for i = 3, #reads do if not first[reads[i]] then rest_old = false end end
+  check("st 7: tick 2 reads the 2 never-read then the 8 oldest",
+    #reads == 10 and unread_first and rest_old)
+  -- signature
+  local function sigof(step)
+    return (core.signature({ { key = "k", pos = { x = 0, y = 0, z = 0 }, qids = { 1 },
+      cat = "in_progress", step = step } }, {}))
+  end
+  check("st 8: signature differs between step 2 and 3", sigof(2) ~= sigof(3) and sigof(nil) ~= sigof(2))
+end
+
 if failures > 0 then os.exit(1) end
 print("core_test: all OK")

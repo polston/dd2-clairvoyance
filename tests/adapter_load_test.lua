@@ -105,8 +105,9 @@ local contract = {
   "refresh_items",
   "tracked_qid", "journal_now", "journal_all", "npc_name", "journal_stats",
   "map_open", "map_jump_apply", "journal_note_jump", "map_cursor",
+  "quest_step",
 }
-assert(#contract == 44)
+assert(#contract == 45)
 for _, name in ipairs(contract) do
   assert(type(a[name]) == "function", "contract function missing: " .. name)
 end
@@ -2931,6 +2932,13 @@ do
   assert(a.journal_now(20140) == nil and failed() == f0 + 3, "JR6 raising view -> nil, counted")
   local reads = a.journal_stats().read
   assert(reads == 4, "JR7 successful reads counted (20120 x3, 20130)")
+  -- quest_step (SPEC 21.8.2): index + 1 under read_log; a raising read -> nil, counted
+  do
+    local r0, f00 = a.journal_stats().read, failed()
+    assert(a.quest_step(20120) == 3, "QS1 step = 0-based index + 1")
+    assert(a.journal_stats().read == r0 + 1, "QS2 counts as a journal read")
+    assert(a.quest_step(20130) == nil and failed() == f00 + 1, "QS3 raising read -> nil, counted failed")
+  end
   local f1 = failed()
   QPOS.raise = true
   local jr = a.journal_now(20120)

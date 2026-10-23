@@ -2032,6 +2032,17 @@ function journal.now(qid)
     end, qid)
 end
 
+-- v13 (SPEC 21.8.2): the 1-based current step number of an in-progress
+-- quest (get_CurrentTaskIndex + 1), or nil. Counted as a journal read.
+function journal.quest_step(qid)
+    return journal.read_log(function(qlm, qid)
+        local idx = int_value(qlm:get_field("_QuestLogInfoDict"):call("get_Item", qid)
+            :call("get_CurrentTaskIndex"))
+        if idx == nil then return nil end
+        return idx + 1
+    end, qid)
+end
+
 function journal.all(qid)
     return journal.read_log(function(qlm, qid)
         local cat = qlm:get_field("_Catalog")
@@ -3454,6 +3465,7 @@ function A.make()
   a.tracked_qid = journal.tracked_qid
   a.journal_now = journal.now
   a.journal_all = journal.all
+  a.quest_step = journal.quest_step
   a.npc_name = journal.npc_name
   a.journal_stats = journal.stats_copy
   a.map_open = journal.map_open
