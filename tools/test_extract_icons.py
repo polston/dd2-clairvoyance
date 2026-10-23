@@ -16,6 +16,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import extract_icons as ei  # noqa: E402
+import qnml_pak  # noqa: E402
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(TOOLS)
@@ -163,18 +164,40 @@ class KeyTests(unittest.TestCase):
                 got = _key_path_from(os.path.join(root, "tools", "key_check.py"))
                 self.assertEqual(os.path.realpath(got), want, root)
 
-    def test_key_value_never_in_output(self):
-        secret = "abcdef0123456789feedface"
+    def _run_with_pak(self, secret):
         with tempfile.TemporaryDirectory() as d:
             key = os.path.join(d, "k.txt")
             with open(key, "w") as f:
                 f.write(secret)
+            with open(os.path.join(d, "re_chunk_000.pak"), "wb") as f:
+                f.write(struct.pack("<4sBBHII", b"KPKA", 4, 2, qnml_pak.SUPPORTED_FEATURE, 0, 0)
+                        + struct.pack("<Q", 0) + b"" * 128)
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 code = ei.main(["--game", d, "--key", key, "--out", os.path.join(d, "o")])
+            self.assertEqual(sorted(os.listdir(d)), ["k.txt", "re_chunk_000.pak"])
+            return code, out.getvalue() + err.getvalue()
+
+    def test_key_value_never_in_output(self):
+        for secret in ("zzzzsecretzz", "abcdef0123456789feedface"):
+            code, text = self._run_with_pak(secret)
             self.assertEqual(code, 1)
-            self.assertNotIn(secret, out.getvalue() + err.getvalue())
-            self.assertEqual(os.listdir(d), ["k.txt"])
+            self.assertTrue(text.strip())
+            self.assertNotIn(secret, text)
+
+
+class CutTests(unittest.TestCase):
+    def test_cut_rectangle(self):
+        px = [bytes([i, i + 1, i + 2, 255]) for i in range(0, 32, 4)]
+        bgra = b"".join(px)  # 4x2 pixels
+        pat = {"left": 0.25, "right": 0.75, "top": 0.0, "bottom": 0.5}
+        cw, ch, got = ei._cut(pat, 4, 2, bgra)
+        self.assertEqual((cw, ch), (2, 1))
+        self.assertEqual(got, [(6, 5, 4, 255), (10, 9, 8, 255)])
+
+    def test_cut_empty(self):
+        pat = {"left": 0.5, "right": 0.5, "top": 0.0, "bottom": 1.0}
+        self.assertEqual(ei._cut(pat, 4, 2, bytes(32)), (0, 0, []))
 
 
 def _lua_table(text, name):

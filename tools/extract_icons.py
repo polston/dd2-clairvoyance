@@ -212,8 +212,8 @@ def extract(game, key_hex, out_dir):
         raise IconError(why)
     try:
         pak = qnml_pak.Pak(base, key_hex)
-    except (qnml_pak.PakError, OSError) as e:
-        raise IconError("cannot read archive: %s" % e)
+    except (qnml_pak.PakError, OSError, struct.error) as e:
+        raise IconError("cannot read archive: %s" % (e if isinstance(e, qnml_pak.PakError) else type(e).__name__))
     try:
         cuts = {name: _sheet_cuts(pak, f) for name, f in SHEETS}
     except (qnml_pak.PakError, ValueError, IndexError, struct.error) as e:
@@ -259,9 +259,9 @@ def main(argv=None):
         print(str(e))
         return 1
     except ImportError as e:
-        print("missing module: %s (needs Pillow and texture2ddecoder)" % e.name)
+        print("missing module: %s (needs Pillow and texture2ddecoder)" % e.name or type(e).__name__)
         return 1
-    except (KeyError, IndexError, ValueError, OSError) as e:
+    except (KeyError, IndexError, ValueError, OSError, struct.error) as e:
         print("extraction failed: %s" % type(e).__name__)
         return 1
 
