@@ -2728,18 +2728,24 @@ wt.coords_frame = function()
     local pc = ui_map:get_field("PnlCursor")
     local gp = pc ~= nil and pc:call("get_GlobalPosition") or nil
     if c ~= nil and gp ~= nil then
-      wt.style.text(draw, string.format("%.0f, %.0f", c.x, c.z),
-        gp.x + wt.COORD_DX, gp.y + wt.COORD_DY, 0xFFFFFFFF, true, 0xFF000000, 1)
+      wt.coord_tag(string.format("%.0f, %.0f", c.x, c.z), gp.x, gp.y + wt.COORD_DY)
     end
   elseif settings.coords_minimap and settings.show_minimap and ui_map == nil
       and wt.mini_vis and wt.mini_t ~= nil and now - wt.mini_t < 0.5
       and player_origin ~= nil then
-    local s = string.format("%.0f, %.0f", player_origin.x, player_origin.z)
-    wt.style.text(draw, s, wt.mini_x - #s * 3.5, wt.mini_y + wt.MINI_DY,
-      0xFFFFFFFF, true, 0xFF000000, 1)
+    wt.coord_tag(string.format("%.0f, %.0f", player_origin.x, player_origin.z),
+      wt.mini_x, wt.mini_y + wt.MINI_DY)
   end
 end
-wt.COORD_DX, wt.COORD_DY, wt.MINI_DY = 28, -8, 120
+-- A small dark tag centred on cx, its top edge at y.
+wt.coord_tag = function(s, cx, y)
+  local w = #s * wt.COORD_CHAR_W + 2 * wt.COORD_PAD
+  local x = cx - w / 2
+  draw.filled_rect(x, y, w, wt.COORD_H, 0xA0000000)
+  draw.text(s, x + wt.COORD_PAD, y + 2, 0xFFE8E0D0)
+end
+wt.COORD_DY, wt.MINI_DY = 30, 120
+wt.COORD_CHAR_W, wt.COORD_PAD, wt.COORD_H = 7, 6, 18
 re.on_frame(function() wt.layer_run(wt.coords_layer, "coordinates", wt.coords_frame) end)
 
 -- v14 (SPEC 22.10): item-menu quest dots, its own failure counters inside.
