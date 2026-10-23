@@ -1338,11 +1338,11 @@ do
         get_Item = function(k) return map[k] end })
     end
     local function flag()
-      return obj({ _ValueType = 1, _Entity = obj(nil, { evaluate = function() return false end }) },
+      return obj({ _Entity = obj({ _ValueType = 1 }, { evaluate = function() return false end }) },
         nil, "app.quest.condition.CheckVariable")
     end
     local function step(v)
-      return obj({ _ValueType = 2, _Entity = obj(nil, { evaluate = function()
+      return obj({ _Entity = obj({ _ValueType = 2 }, { evaluate = function()
         if v == "raise" then error("fake evaluate failure") end
         return v
       end }) }, nil, "app.quest.condition.CheckVariable")

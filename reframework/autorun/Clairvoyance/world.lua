@@ -2213,8 +2213,10 @@ function M.game_reads()
       if arr == nil or (op ~= 0 and op ~= 1) then return UNKNOWN end
       return combine(op == 0, arr, depth)
     elseif kind == "variable" then
-      if int_value(G(node, "_ValueType")) ~= 2 then return UNKNOWN end
-      local v = C(G(node, "_Entity"), "evaluate")
+      local ve = G(node, "_Entity")
+      local vt = int_value(G(ve, "_ValueType"))
+      if vt == nil or vt == 1 then return UNKNOWN end
+      local v = C(ve, "evaluate")
       if type(v) == "boolean" then return v end
     end
     return UNKNOWN
