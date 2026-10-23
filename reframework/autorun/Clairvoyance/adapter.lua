@@ -1845,6 +1845,7 @@ end
 -- read caches, re-arms the walk for the next call; `rounds` untouched.
 function items.invalidate()
     ITEM_NEEDS = nil
+    items.related, items.related_titles = nil, nil
     ITEM_WANTED = {}
     items.clear_locs()
     ITEM_FAILED_STREAK = 0
@@ -2081,6 +2082,12 @@ function journal.npc_name(cid)
     if hit ~= nil then return hit or nil end
     local nm = sdk.get_managed_singleton("app.NPCManager")
     if nm == nil then return nil end
+    -- v14 (SPEC 22.7.2): a cid the dictionary does not hold is not a failure
+    -- and is not cached (the NPC may load later)
+    local okc, has = pcall(function()
+        return nm:call("get_CharacterDataDict"):call("ContainsKey", cid)
+    end)
+    if okc and has == false then return nil end
     local ok, n = pcall(function()
         return journal.msg(nm:call("get_CharacterDataDict"):call("get_Item", cid)
             :get_field("<Normal>k__BackingField"):call("get_Item", 0):get_field("NameID"))
@@ -3001,6 +3008,9 @@ end
 -- all three location sets (no scan runs while nothing is needed).
 local function commit_item_needs(t)
     ITEM_NEEDS = t
+    -- v14 (SPEC 22.10.1): the quest-related map dies with the need table;
+    -- a normal round sets it again right after this call
+    items.related, items.related_titles = nil, nil
     local w = {}
     for _, list in pairs(t) do
         for _, nd in ipairs(list) do w[nd.id] = true end
@@ -3226,15 +3236,18 @@ local function item_round_needs(now)
         held = h
         skipped = skipped + hsk
     end
+    -- v14: quest-related items from the same records, before the need table
+    local rel = require("Clairvoyance.npcs").related_items(records)
     local t, ignored = qnml_core.item_need_table(records, held)
     if type(t) ~= "table" then error("item_need_table: bad result") end
     commit_item_needs(t)
+    if type(rel) == "table" then items.related = rel end
     ITEM_FAILED_STREAK = 0
     ITEM_STATS.ignored = ignored or 0
     ITEM_STATS.round_skipped = ITEM_STATS.round_skipped + skipped
 end
 
-local function refresh_items_body()
+local function refresh_items_body(mode)
     local gm = nil
     local now = os.clock()
     if now - ITEM_LAST_AT >= K.ROUND_INTERVAL then
@@ -3243,6 +3256,11 @@ local function refresh_items_body()
         ITEM_STATS.rounds = ITEM_STATS.rounds + 1
         ITEM_STATS.round_skipped, ITEM_STATS.round_capped = 0, 0
         item_round_needs(now)
+        -- v14 (Ruling 9): the item menu asks for the need read alone
+        if mode == "needs" then
+            ITEM_STATS.last_ms = (os.clock() - now) * 1000.0
+            return
+        end
         -- scans run on the COMMITTED table, whatever this round's outcome
         if next(ITEM_WANTED) ~= nil then
             gm = sdk.get_managed_singleton("app.GimmickManager")
@@ -3255,6 +3273,7 @@ local function refresh_items_body()
         end
         ITEM_STATS.last_ms = (os.clock() - now) * 1000.0
     end
+    if mode == "needs" then return end
     if next(ITEM_WANTED) ~= nil then
         gm = gm or sdk.get_managed_singleton("app.GimmickManager")
         local dr, dsk, dcp = scan_drops(gm)
@@ -3263,9 +3282,9 @@ local function refresh_items_body()
     end
 end
 
-function items.refresh()
+function items.refresh(mode)
     items.in_round = false
-    local ok, err = pcall(refresh_items_body)
+    local ok, err = pcall(refresh_items_body, mode)
     if not ok then
         -- only an error inside a started round is a failed round
         if items.in_round then item_round_failed() end
@@ -3332,10 +3351,21 @@ do
     return A.guid_parse(WORLD_GUID_PREFIX .. string.format("%012x",
       ord % 0x1000000000000))
   end
-  local WORLD_MARKER_CATS = {}
+  local WORLD_MARKER_CATS = { npc_search = true }
   for _, c in ipairs(qnml_core.WORLD_CATS) do WORLD_MARKER_CATS[c] = true end
+  -- v14 (SPEC 22.6.6): route stops and hint pins; 32 slots per owner
+  local ROUTE_GUID_PREFIX = "51a1c0de-0000-4003-8000-"
+  local PIN_GUID_PREFIX = "51a1c0de-0000-4004-8000-"
   function A.map_marker_guid(m)
     local c = m.cat
+    if c == "route_stop" then
+      return A.guid_parse(ROUTE_GUID_PREFIX .. string.format("%012x",
+        (m.cid * 32 + m.stop) % 0x1000000000000))
+    end
+    if c == "hint_pin" then
+      return A.guid_parse(PIN_GUID_PREFIX .. string.format("%012x",
+        (m.qid * 32 + m.i) % 0x1000000000000))
+    end
     if WORLD_MARKER_CATS[c] then
       return A.world_marker_guid(m.world_ord or 0)
     end
@@ -3453,6 +3483,41 @@ function A.make()
   a.refresh_items = items.refresh
   function a.invalidate_items() items.invalidate() end
   function a.item_needs() return ITEM_NEEDS end
+  -- v14 (SPEC 22.10.1): { [item_id] = { quest title, ... } }, cached until
+  -- the next commit
+  function a.item_related()
+    if items.related_titles == nil then
+      local out = {}
+      for id, qids in pairs(items.related or {}) do
+        local titles = {}
+        for i, q in ipairs(qids) do
+          titles[i] = a.quest_name(q) or ("Quest " .. tostring(q))
+        end
+        out[id] = titles
+      end
+      items.related_titles = out
+    end
+    return items.related_titles
+  end
+  -- the next refresh_items round runs at once (Ruling 9)
+  function a.reset_item_throttle() ITEM_LAST_AT = -math.huge end
+  -- SPEC 22.11.4.1: every side quest's step text, keys the 0-based task index
+  function a.quest_steps_text()
+    local out = {}
+    for _, qid in ipairs(a.catalog_ids() or {}) do
+      if a.is_side(qid) then
+        local r = a.journal_all(qid)
+        if r ~= nil then
+          local steps = {}
+          for i, st in ipairs(r.steps) do
+            steps[tostring(i - 1)] = { base = st.base, detail = st.detail }
+          end
+          out[qid] = steps
+        end
+      end
+    end
+    return out
+  end
   function a.item_locations()
     local out = {}
     for _, k in ipairs(LOC_KINDS) do

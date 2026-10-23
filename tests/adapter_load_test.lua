@@ -4,6 +4,32 @@
 package.path = "reframework/autorun/Clairvoyance/?.lua;"
   .. "reframework/autorun/?.lua;" .. package.path
 
+-- npcs.lua stand-in (the real module arrives from another lane): same
+-- signature as related_items(records) -> { [item_id] = { qid, ... } }
+-- (only "more"/"morethan" records; qids unique, ascending).
+package.preload["Clairvoyance.npcs"] = function()
+  local M = {}
+  function M.related_items(records)
+    M.last = records
+    if M.override ~= nil then return M.override end
+    local seen, out = {}, {}
+    for _, r in ipairs(records) do
+      if r.op == "more" or r.op == "morethan" then
+        seen[r.id] = seen[r.id] or {}
+        seen[r.id][r.qid] = true
+      end
+    end
+    for id, set in pairs(seen) do
+      local l = {}
+      for q in pairs(set) do l[#l + 1] = q end
+      table.sort(l)
+      out[id] = l
+    end
+    return out
+  end
+  return M
+end
+
 local function permissive()
   local obj = {}
   setmetatable(obj, {
@@ -102,12 +128,12 @@ local contract = {
   "refresh_tree_gates", "invalidate_tree_gates", "tree_gate_qids",
   "tree_gate_table", "tree_gate_stats",
   "invalidate_items", "item_needs", "item_locations", "item_name", "item_stats",
-  "refresh_items",
+  "refresh_items", "item_related", "reset_item_throttle", "quest_steps_text",
   "tracked_qid", "journal_now", "journal_all", "npc_name", "journal_stats",
   "map_open", "map_jump_apply", "journal_note_jump", "map_cursor",
   "quest_step",
 }
-assert(#contract == 45)
+assert(#contract == 48)
 for _, name in ipairs(contract) do
   assert(type(a[name]) == "function", "contract function missing: " .. name)
 end
@@ -2347,6 +2373,22 @@ do
       == "51a1c0de-0000-4001-8000-0000012c0001", "world branch leaves items")
   assert(A.map_marker_guid({ cat = "in_progress", qids = { 300 } })
       == "51a1c0de-0000-4000-8000-00000000012c", "world branch leaves quests")
+  -- v14 marker ids (SPEC 22.6.6)
+  do
+    local rg = A.map_marker_guid({ cat = "route_stop", cid = 7, stop = 3 })
+    local hg = A.map_marker_guid({ cat = "hint_pin", qid = 20090, i = 1 })
+    local qg = A.map_marker_guid({ cat = "in_progress", qids = { 20090 } })
+    assert(rg == "51a1c0de-0000-4003-8000-" .. string.format("%012x", 7 * 32 + 3),
+      "MG route_stop layout: " .. tostring(rg))
+    assert(hg == "51a1c0de-0000-4004-8000-" .. string.format("%012x", 20090 * 32 + 1),
+      "MG hint_pin layout: " .. tostring(hg))
+    assert(rg ~= hg and rg ~= qg and hg ~= qg, "MG r:, h: and quest guids differ")
+    assert(A.map_marker_guid({ cat = "route_stop", cid = 0x7fffffffffff, stop = 9 })
+      == "51a1c0de-0000-4003-8000-" .. string.format("%012x",
+        (0x7fffffffffff * 32 + 9) % 0x1000000000000), "MG modulo 2^48")
+    assert(A.map_marker_guid({ cat = "npc_search", world_ord = 4 })
+      == "51a1c0de-0000-4002-8000-000000000004", "MG npc_search keeps the world guid")
+  end
   A.guid_parse = real_gp
 
   -- ---- Task 3 pins (refresh_items) ----
@@ -2772,6 +2814,96 @@ do
   ai.refresh_items()
   assert(owner_reads == 512, "IW14 held-count owner cap 512")
 
+  -- ---- v14: quest-related items, needs-only round (SPEC 22.10.1) ----
+  local nstub = require("Clairvoyance.npcs")
+  local function rel_world()
+    ifresh()
+    IS.prog = { 20090, 20091 }
+    IS.procs = {
+      iproc(20090, { has_item({ { id = 300, num = 2, lv = 4 } }) }),
+      iproc(20091, { has_item({ { id = 300, num = 1, lv = 4 },
+        { id = 301, num = 1, lv = 99 } }) }),
+    }
+    IS.dict = storage({ { key = PL, value = ilist({ sd(300, 2) }) } })
+  end
+  nstub.override = nil
+  rel_world()
+  ai.refresh_items()
+  assert(next(ai.item_needs()) == nil, "RL1 held 2 satisfies both needs")
+  assert(type(nstub.last) == "table" and #nstub.last == 3
+    and nstub.last[1].qid == 20090 and nstub.last[1].id == 300
+    and nstub.last[1].num == 2 and nstub.last[1].op == "more",
+    "RL1 npcs got the raw records")
+  local rel = ai.item_related()
+  assert(#rel[300] == 2 and rel[301] == nil, "RL1 other op absent, two titles for item 300")
+  assert(rel[300][1] == ai.quest_name(20090) and type(rel[300][1]) == "string",
+    "RL1 title of the first quest")
+  assert(rel[300][2] == (ai.quest_name(20091) or "Quest 20091"), "RL1 second title")
+  assert(ai.item_related() == rel, "RL2 cached until the next commit")
+  nstub.override = { [300] = { 20090, 20099 } }
+  assert(ai.item_related() == rel, "RL2 override does not leak into the cache")
+  iclk = iclk + 10
+  ai.refresh_items()
+  rel = ai.item_related()
+  assert(rel[300][2] == "Quest 20099" and ai.quest_name(20099) == nil,
+    "RL3 a quest with no name gives Quest <qid>")
+  nstub.override = nil
+  -- RL4 failed round keeps the table
+  rel_world()
+  ai.refresh_items()
+  local rel4 = ai.item_related()
+  IS.dict = nil
+  iclk = iclk + 10
+  ai.refresh_items()
+  assert(ai.item_stats().failed_total == 1 and ai.item_related() == rel4
+    and #rel4[300] == 2, "RL4 a failed round keeps the related table")
+  -- RL5 third failed round empties it
+  iclk = iclk + 10 ai.refresh_items()
+  iclk = iclk + 10 ai.refresh_items()
+  assert(ai.item_stats().failed_total == 3 and next(ai.item_related()) == nil,
+    "RL5 third failed round clears")
+  -- RL6 invalidate
+  rel_world()
+  ai.refresh_items()
+  assert(next(ai.item_related()) ~= nil, "RL6 setup")
+  ai.invalidate_items()
+  assert(next(ai.item_related()) == nil, "RL6 invalidate clears")
+  -- RL7 owner reset
+  rel_world()
+  ai.refresh_items()
+  assert(next(ai.item_related()) ~= nil, "RL7 setup")
+  IS.qm = new_iqm()
+  pcall(ai.refresh_gates)
+  assert(next(ai.item_related()) == nil, "RL7 owner reset clears")
+  -- RL8 empty wanted set (no side quest in progress)
+  rel_world()
+  ai.refresh_items()
+  IS.prog = { 10100 }
+  iclk = iclk + 10
+  ai.refresh_items()
+  assert(next(ai.item_related()) == nil, "RL8 empty-wanted early return clears")
+
+  -- RN needs-only round (Ruling 9)
+  ifresh()
+  ai.refresh_items("needs")
+  assert((IS.gets["app.GimmickManager"] or 0) == 0, "RN1 no scan fetch")
+  assert(ai.item_needs() ~= nil and ai.item_needs()[20090] ~= nil
+    and IS.cls_reads > 0, "RN1 the needs read ran")
+  assert(#ai.item_locations() == 0, "RN1 no locations scanned")
+  local rc = IS.count_reads
+  iclk = iclk + 1
+  ai.refresh_items("needs")
+  assert(IS.count_reads == rc, "RN2 inside 10 s: no second read")
+  ai.reset_item_throttle()
+  ai.refresh_items("needs")
+  assert(IS.count_reads > rc, "RN3 reset_item_throttle: next call reads at once")
+  rc = IS.count_reads
+  ai.refresh_items("needs")
+  assert(IS.count_reads == rc, "RN3 and only the first of two calls")
+  assert((IS.gets["app.GimmickManager"] or 0) == 0, "RN3 still no scan fetch")
+  ai.refresh_items()
+  assert((IS.gets["app.GimmickManager"] or 0) > 0, "RN4 default mode still scans")
+
   sdk.get_managed_singleton, os.clock = prev_gms, prev_clock
 end
 
@@ -2782,7 +2914,7 @@ do
     sdk.find_type_definition, Vector3f
   local TEXT = { g_base = "Determine Malcolm's location.", g_det = "A boy is missing.",
     g_chk = "Ask around", g_cap = "Slums", g_empty = "", g_s1 = "Step one",
-    g_s2 = "Step two", g_sum = "Catalog summary", g_name = "Brant" }
+    g_s2 = "Step two", g_rej = "#Rejected# cut", g_sum = "Catalog summary", g_name = "Brant" }
   local msg_calls, msg_sigs = 0, {}
   local function guid(id)
     return { call = function(_, m) if m == "ToString()" then return id end end }
@@ -2867,7 +2999,8 @@ do
   local catalog = obj({}, { getCount = function() return cat_count end,
     getValues = function()
       values_calls = values_calls + 1
-      return arr({ res(20120, { "g_s1", "g_s2" }), res(10030, { "g_s1" }) })
+      return arr({ res(20120, { "g_s1", "g_s2" }), res(10030, { "g_s1" }),
+        res(20150, { "g_s1", "g_rej", "g_s2" }) })
     end })
   local qlm_addr = 0x1000
   local qlm = obj({ _QuestLogInfoDict = dict, _Catalog = catalog },
@@ -2883,7 +3016,7 @@ do
     if cid ~= 189868107 then error("KeyNotFound") end
     return obj({ ["<Normal>k__BackingField"] = obj({}, { get_Item = function(i)
       return i == 0 and cd or nil end }) })
-  end })
+  end, ContainsKey = function(cid) return cid ~= 43 end })
   local npcm = obj({}, { get_CharacterDataDict = cdict })
   local S = { ["app.QuestLogManager"] = qlm, ["app.GuiManager"] = gm, ["app.NPCManager"] = npcm }
   sdk.get_managed_singleton = function(n) return S[n] end
@@ -2962,6 +3095,22 @@ do
   a.journal_all(20120)
   assert(values_calls == 3, "JR10 address change rebuilds")
 
+  -- JR8b v14 step dump: side quests only, keys 0-based strings, a
+  -- "#Rejected#" step kept at its index
+  do
+    local keep_ids, keep_side = a.catalog_ids, a.is_side
+    a.catalog_ids = function() return { 20150, 20120, 10030 } end
+    a.is_side = function(q) return q ~= 10030 end
+    local d = a.quest_steps_text()
+    a.catalog_ids, a.is_side = keep_ids, keep_side
+    assert(d[10030] == nil, "JR8b non-side quest left out")
+    local s3 = d[20150]
+    assert(s3 ~= nil and s3["0"].base == "Step one" and s3["1"].base == "#Rejected# cut"
+      and s3["2"].base == "Step two" and s3["3"] == nil and s3[1] == nil,
+      "JR8b three steps keyed 0,1,2 as strings; rejected step kept")
+    assert(d[20120]["1"].base == "Step two", "JR8b second quest")
+  end
+
   -- JR11 giver names, cached by id; a failed lookup is counted once and
   -- cached as a miss until the session reset (SPEC 16.5: one read per new id)
   assert(a.npc_name(189868107) == "Brant", "JR11 name via NameID")
@@ -2972,6 +3121,13 @@ do
   assert(a.npc_name(42) == nil and cdict_calls == cc + 1 and failed() == f1 + 1,
     "JR12 a failed id is cached as a miss: no second lookup, no second count")
   assert(a.npc_name(nil) == nil, "JR12 nil id -> nil")
+  -- JR12b v14: a cid the dictionary does not hold (ContainsKey false) is nil,
+  -- uncounted, and never reaches get_Item
+  do
+    local c1, f2 = cdict_calls, failed()
+    assert(a.npc_name(43) == nil and failed() == f2 and cdict_calls == c1,
+      "JR12b ContainsKey false: nil, no failure counted, no get_Item")
+  end
   S["app.NPCManager"] = nil
   assert(a.npc_name(77) == nil and failed() == f1 + 1, "JR12 no NPCManager -> nil, uncounted")
   S["app.NPCManager"] = npcm
