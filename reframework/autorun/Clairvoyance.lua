@@ -31,7 +31,9 @@ do
   local ok_w, inst = false, nil
   if world ~= nil then
     ok_w, inst = pcall(function()
-      return world.new(adapter, world.game_reads())
+      local wio = world.default_io()
+      wio.log = function(s) log.info("[Clairvoyance] " .. tostring(s)) end
+      return world.new(adapter, world.game_reads(), wio)
     end)
     if not ok_w then
       log.error("[Clairvoyance] world tracker unavailable: " .. tostring(inst))
@@ -49,6 +51,31 @@ do
     }
   end
   wt = inst
+  -- v14 (SPEC 23.5): one outline style table per group, refilled in place
+  -- each frame; no table is built per frame.
+  wt.style = require("Clairvoyance.style")
+  wt.styles = {}
+  for _, g in ipairs(wt.style.GROUPS) do
+    wt.styles[g] = { on = true, color = 0xFF000000, width = 1 }
+  end
+  wt.styles.none = { on = false, color = 0xFF000000, width = 1 }
+  wt.dk, wt.dw, wt.dh = 1, 1920, 1080   -- display scale (height / 1080) and size
+  wt.outline_acc = 0                    -- ms spent in outline draws outside icons
+  wt.path_draw_ms = 0
+  wt.path_scr = {}                      -- reused screen buffer for the in-world path
+  wt.a = function(argb) return ((argb >> 24) & 0xFF) / 255 end
+  wt.refresh_styles = function()
+    local gs, styles = wt.style.GROUPS, wt.styles
+    for i = 1, #gs do
+      local st = styles[gs[i]]
+      st.on, st.color, st.width = wt.style.resolve(settings, gs[i])
+    end
+    local ok, sz = pcall(imgui.get_display_size)
+    if ok and sz ~= nil and sz.y > 0 then
+      wt.dk, wt.dw, wt.dh = sz.y / 1080, sz.x, sz.y
+    end
+  end
+  pcall(wt.refresh_styles)
   wt.world_origin = nil   -- committed origin: a plain { x, y, z } copy, or nil
   wt.map_retakes, wt.rebuild_ms, wt.rebuild_max = 0, 0, 0   -- SPEC 20.12.8-9
   wt.ps_dflt = { state = "bad", stale = false }   -- places_state default, shared
@@ -149,6 +176,7 @@ wt.layer_run = function(L, name, fn)
   if L.fails >= 30 then L.fails = 0; L.suspend = os.clock() + 5.0 end
 end
 wt.route_layer, wt.names_layer, wt.lines_layer = wt.layer(), wt.layer(), wt.layer()
+wt.path_layer = wt.layer()
 wt.names_labels = { "Off", "Quest NPCs", "All named NPCs" }
 wt.names_stats = { drawn = 0, skipped = 0, spawned = 0 }
 -- The player's Transform (the manual player), or nil.
@@ -214,6 +242,10 @@ local icons = require("Clairvoyance.icons").create{
   enabled = function() return settings.enabled and settings.matching_icons end,
   request_rebuild = function() want_update = true end,
   mini_ok = function() return ui_map == nil end,
+  style_of = function(cat) return wt.styles[wt.style.group_of(cat)] end,
+  scale_of = function(cat)
+    return cat == "route_stop" and settings.route_stop_size / 100 or 1
+  end,
 }
 do
   -- Hoisted pieces, built once: no closure is created per frame (SPEC 21.2.5).
@@ -313,8 +345,9 @@ do
     if ok then return px, py, fade, vis end
     return nil
   end
-  icons.mini_push = function(id, x, y, size, argb, fade)
-    icons:push("mini", id, x, y, size, argb, fade)
+  icons.mini_push = function(id, x, y, size, argb, fade, m)
+    local st = m ~= nil and wt.styles[wt.style.group_of(m.cat)] or nil
+    icons:push("mini", id, x, y, size, argb, fade, st)
   end
   icons.mini_clear = function() icons:mini_replace() end
   icons.picture_for = function(m)
@@ -325,42 +358,157 @@ do
   -- number beside each; screen positions come from the icon records. Hoisted
   -- pieces, so no closure is built per frame.
   icons.route_recs, icons.nums = {}, {}
-  icons.by_stop = function(a, b) return a.marker.stop < b.marker.stop end
-  icons.route_lines = function()
-    local rr, n = icons.route_recs, 0
-    for _, rec in ipairs(icons.recs) do
-      if rec.marker.cat == "route_stop" and type(rec.marker.stop) == "number" then
-        n = n + 1
-        rr[n] = rec
-      end
-    end
-    for i = #rr, n + 1, -1 do rr[i] = nil end
-    if n == 0 then return end
-    table.sort(rr, icons.by_stop)
-    local col = A.argb_to_abgr(su.color_of(settings, "route_stop"))
-    local px, py
-    for i = 1, n do
+  icons.npcs = require("Clairvoyance.npcs")
+  icons.fit_pts, icons.fit, icons.fit_opt = {}, {}, { similarity = false }
+  icons.end_rows, icons.ends, icons.ends_n = {}, {}, 0
+  icons.route_pts, icons.scr, icons.fonts = {}, {}, {}
+  -- Route numbers beside the stop records read this frame. Hoisted; the font
+  -- is pushed around the loop and popped even when a draw raises.
+  icons.number_loop = function(nrr, px)
+    local rr = icons.route_recs
+    local st = wt.styles.route_stop
+    local o = wt.style.offset(st.width, wt.dk)
+    local col = settings.route_number_color
+    local abgr, a = A.argb_to_abgr(col), wt.a(col)
+    local scale = settings.route_stop_size / 100
+    local k = icons:k()
+    local dy = px > 0 and px / 2 or 6
+    for i = 1, nrr do
       local rec = rr[i]
-      local x, y = icons.read(rec)
-      if x ~= nil then
-        local sx, sy = icons:to_screen(x, y)
-        if px ~= nil then draw.line(px, py, sx, sy, col) end
-        px, py = sx, sy
-        local num = icons.nums[rec.marker.stop]
-        if num == nil then
-          num = tostring(rec.marker.stop)
-          icons.nums[rec.marker.stop] = num
-        end
-        local off = rec.size * icons:k() / 2 + 2
-        draw.text(num, sx + off + 1, sy - 5, 0xFF000000)
-        draw.text(num, sx + off, sy - 6, 0xFFFFFFFF)
+      local sx, sy = icons:to_screen(rec.lx, rec.ly)
+      local num = icons.nums[rec.marker.stop]
+      if num == nil then
+        num = tostring(rec.marker.stop)
+        icons.nums[rec.marker.stop] = num
+      end
+      local off = rec.size * scale * k / 2 + 2
+      local t1 = st.on and os.clock() or nil
+      wt.style.text(draw, num, sx + off, sy - dy, abgr, st.on, st.color, o, a)
+      if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
+    end
+  end
+  icons.draw_numbers = function(nrr)
+    local rns = settings.route_number_size
+    local px, font = 0, nil
+    if rns > 0 then
+      px = math.floor(rns * wt.dk + 0.5)
+      font = icons.fonts[px]
+      if font == nil then
+        local okf, f = pcall(imgui.load_font, nil, px)
+        font = (okf and f) or false
+        icons.fonts[px] = font
       end
     end
+    local pushed = font and pcall(imgui.push_font, font)
+    local ok, err = pcall(icons.number_loop, nrr, px)
+    if pushed then pcall(imgui.pop_font) end
+    if not ok then error(err, 0) end
+  end
+  -- Full-map layout points of every pair -> screen points (x, y pairs; a
+  -- false, false pair is a break). Two consecutive off-screen points get a
+  -- break between them; a point is never replaced.
+  icons.to_screen_pts = function(pts, n)
+    local scr, sn = icons.scr, 0
+    local W, H = wt.dw, wt.dh
+    local prev_off = nil
+    local i = 1
+    while i <= n do
+      local x = pts[i]
+      if x == false then
+        scr[sn + 1], scr[sn + 2] = false, false
+        sn = sn + 2
+        prev_off = nil
+        i = i + 1
+      else
+        local sx, sy = icons:to_screen(x, pts[i + 1])
+        local off = sx < 0 or sx > W or sy < 0 or sy > H
+        if prev_off and off then
+          scr[sn + 1], scr[sn + 2] = false, false
+          sn = sn + 2
+        end
+        scr[sn + 1], scr[sn + 2] = sx, sy
+        sn = sn + 2
+        prev_off = off
+        i = i + 2
+      end
+    end
+    for j = #scr, sn + 1, -1 do scr[j] = nil end
+    return sn
+  end
+  icons.route_lines = function()
+    local recs, fp, nf = icons.recs, icons.fit_pts, 0
+    local rr, nrr = icons.route_recs, 0
+    local fill_at = icons.fill_at
+    local rows, ends = icons.end_rows, icons.ends
+    for i = 1, icons.ends_n do ends[i] = nil end
+    local input = wt.q("input", nil)
+    local route = input ~= nil and input.route or nil
+    local stops = route ~= nil and route.stops or nil
+    local nstops = stops ~= nil and #stops or 0
+    for i = 1, #recs do
+      local rec = recs[i]
+      local m = rec.marker
+      if rec.read_at == fill_at and m.pos ~= nil then
+        nf = nf + 1
+        local row = fp[nf]
+        if row == nil then row = {}; fp[nf] = row end
+        row[1], row[2], row[3], row[4] = m.pos.x, m.pos.z, rec.lx, rec.ly
+        if m.cat == "route_stop" and type(m.stop) == "number" then
+          nrr = nrr + 1
+          rr[nrr] = rec
+          local e = rows[m.stop]
+          if e == nil then e = {}; rows[m.stop] = e end
+          e.lx, e.ly, e.mx, e.mz = rec.lx, rec.ly, nil, nil
+          ends[m.stop] = e
+          if m.stop > icons.ends_n then icons.ends_n = m.stop end
+        end
+      end
+    end
+    for i = #rr, nrr + 1, -1 do rr[i] = nil end
+    if nrr > 0 then icons.draw_numbers(nrr) end
+    local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
+    if pairs_ == nil or #pairs_ == 0 then return end
+    local fit = icons.npcs.fit(fp, nf, icons.fit_opt, icons.fit)
+    for i = 1, nstops do
+      if ends[i] == nil then
+        local p = stops[i].pos
+        if type(p) == "table" then
+          local e = rows[i]
+          if e == nil then e = {}; rows[i] = e end
+          e.lx, e.ly, e.mx, e.mz = nil, nil, p.x, p.z
+          ends[i] = e
+          if i > icons.ends_n then icons.ends_n = i end
+        end
+      end
+    end
+    local t0 = os.clock()
+    local n = icons.npcs.route_polyline(pairs_, ends, fit, settings.route_path,
+      icons.route_pts)
+    local sn = icons.to_screen_pts(icons.route_pts, n)
+    if sn > 0 then
+      local st = wt.styles.route_line
+      local k = icons:k()
+      local col = settings.route_line_color
+      local t1 = st.on and os.clock() or nil
+      wt.style.polyline(draw, icons.scr, settings.route_line_width * k,
+        A.argb_to_abgr(col), st.on, st.color, wt.style.offset(st.width, k), wt.a(col))
+      if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
+    end
+    wt.path_draw_ms = (os.clock() - t0) * 1000
+  end
+  -- One debug line for the walking-path costs (SPEC 23.6.10).
+  wt.path_line = function()
+    return string.format(
+      "Paths: copy max %.2f ms, search max %.2f ms, last expanded %s (pair %s), draw %.2f ms, outline draw %.2f ms",
+      wt.copy_ms_max or 0, wt.search_ms_max or 0, tostring(wt.last_expanded),
+      tostring(wt.last_pair), wt.path_draw_ms, icons.outline_ms + wt.outline_acc)
   end
 
   -- The per-frame pass: fill the full-map layer from the records while the
   -- map is up, then draw everything queued (SPEC 21.2.7, 21.4.4).
   function icons.frame()
+    pcall(wt.refresh_styles)
+    wt.outline_acc = 0
     if ui_map ~= nil and os.clock() - icons.map_seen < 0.25 and icons:active() then
       icons:fill(icons.recs, icons.read)
       if wt.route_on then wt.layer_run(wt.lines_layer, "route lines", icons.route_lines) end
@@ -381,6 +529,7 @@ do
       clock = os.clock, log = logmsg,
       on_open = adapter.reset_item_throttle,
       imgui = imgui,
+      style = function() local st = wt.styles.items; return st.on, st.color, st.width end,
       label_color = function() return A.argb_to_abgr(settings.color_quest_item) end,
       -- the label font, loaded once on first use (a failure is cached as false)
       font = (function()
@@ -581,6 +730,7 @@ re.on_frame(function()
           #mr.owned, mr.hud_changes, mr.status))
       end
       logmsg(icons:stats_line())
+      logmsg(wt.path_line())
       local cs = A.catalog_stats()
       logmsg(string.format(
         "Catalog: %d entries, %d skipped (%d cast), %d distinct side IDs (%d total)",
@@ -880,7 +1030,7 @@ do
     if sprite == nil then return false end
     local recs = icons.recs
     recs[#recs + 1] = { marker = m, id = pid, ref = ref, sprite = sprite,
-      size = icons.map_size(sprite), argb = marker_argb(m) }
+      cat = m.cat, size = icons.map_size(sprite), argb = marker_argb(m) }
     return true
   end
   local function log_rebuild()
@@ -1211,21 +1361,26 @@ local function overhead_draw_one(marker, px, py, pz, d2, name_d2)
   -- SPEC 21.6: the category picture when it can be drawn, else the v12 dots.
   local pid = su.icon_for(settings, marker, "head", marker.step, icons.drawable_fn)
   local pic = icons:drawable(pid)
+  local st = wt.styles[wt.style.group_of(marker.cat)] or wt.styles.none
+  local o = wt.style.offset(st.width, wt.dk)
+  local t1 = st.on and os.clock() or nil
   local label_dy = 10
   if pic then
-    icons:push("head", pid, sp.x, sp.y, 24, argb, 1)
-    label_dy = 12 * icons:k() + 2
+    local size = 24
+    if marker.cat == "route_stop" then size = 24 * settings.route_stop_size / 100 end
+    icons:push("head", pid, sp.x, sp.y, size, argb, 1, st)
+    label_dy = 12 * size / 24 * icons:k() + 2
   else
-    draw.filled_circle(sp.x, sp.y, 8, 0xFF000000, 24)
-    draw.filled_circle(sp.x, sp.y, 6, A.argb_to_abgr(argb), 24)
+    wt.style.circle(draw, sp.x, sp.y, 6, A.argb_to_abgr(argb), st.on, st.color,
+      o, 24, wt.a(argb))
   end
   if d2 <= name_d2 then
     local label = marker.label or ""
     local w = label_width(label)
     local tx, ty = sp.x - w / 2, sp.y + label_dy
-    draw.text(label, tx + 1, ty + 1, 0xFF000000)
-    draw.text(label, tx, ty, 0xFFFFFFFF)
+    wt.style.text(draw, label, tx, ty, 0xFFFFFFFF, st.on, st.color, o)
   end
+  if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
   return 1
 end
 
@@ -1626,7 +1781,7 @@ end
 local draw_body
 do
   local sec = {}
-  local groups = require("Clairvoyance.style").GROUPS
+  local groups = wt.style.GROUPS
   local route_labels = { "Straight lines", "Walking path" }
   local cat_rows = {
     { "startable", "Startable" }, { "in_progress", "In progress" },
@@ -1775,6 +1930,8 @@ do
                 elseif (rt.unplaced or 0) > 0 then
                   imgui.text(string.format("%d stops unplaced", rt.unplaced))
                 end
+                local ps = wt.q("path_status", nil, settings.route_path)
+                if ps ~= nil then imgui.text(ps) end
               end
             end
             imgui.tree_pop()
@@ -2163,6 +2320,7 @@ do
           mr.nearest ~= nil and string.format("%.0f m", mr.nearest) or "-",
           #mr.owned, mr.hud_changes, mr.status))
       end
+      imgui.text(wt.path_line())
       changed, overhead_force_estimate =
         imgui.checkbox("Overhead: force width estimate", overhead_force_estimate)
       if changed then label_widths = {} end
@@ -2370,6 +2528,44 @@ end)
 -- v14 (SPEC 22.8.4c, 22.11.3): route stops and hint pins as overhead points.
 -- Camera space = map space minus the player's offset, read each frame; no
 -- offset means nothing this frame. Own failure counters (10.3b).
+-- v14 (SPEC 23.6.8): the ready walking paths in the world, nodes raised 0.3 m.
+-- A node out of range or off screen is a break; one polyline call draws all.
+wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
+  local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
+  if pairs_ == nil then return end
+  local buf, n = wt.path_scr, 0
+  for k = 1, #pairs_ do
+    local pts = pairs_[k].pts
+    if pts ~= nil then
+      if n > 0 then buf[n + 1], buf[n + 2] = false, false; n = n + 2 end
+      for q = 1, #pts - 2, 3 do
+        local px, py, pz = pts[q] - ox, pts[q + 1] - oy + 0.3, pts[q + 2] - oz
+        local dx, dy, dz = px - cx, py - cy, pz - cz
+        local sx, sy = false, false
+        if dx * dx + dy * dy + dz * dz <= max_d2 then
+          local sp
+          if proj_vec_reuse then
+            proj_vec.x, proj_vec.y, proj_vec.z = px, py, pz
+            sp = draw.world_to_screen(proj_vec)
+          else
+            sp = draw.world_to_screen(Vector3f.new(px, py, pz))
+          end
+          if sp ~= nil then sx, sy = sp.x, sp.y end
+        end
+        buf[n + 1], buf[n + 2] = sx, sy
+        n = n + 2
+      end
+    end
+  end
+  for j = #buf, n + 1, -1 do buf[j] = nil end
+  if n == 0 then return end
+  local st = wt.styles.route_line
+  local col = settings.route_line_color
+  local t1 = st.on and os.clock() or nil
+  wt.style.polyline(draw, buf, settings.route_line_width * wt.dk,
+    A.argb_to_abgr(col), st.on, st.color, wt.style.offset(st.width, wt.dk), wt.a(col))
+  if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
+end
 wt.route_frame = function()
   if not settings.enabled or not settings.show_overhead or not wt.has_pts
     or snapshot == nil or ui_map ~= nil then return end
@@ -2381,12 +2577,14 @@ wt.route_frame = function()
     end
     snapshot.route_pts = pts
   end
-  if #pts == 0 then return end
   local cx, cy, cz = camera_pos()
   if cx == nil then return end
   local ox, oy, oz = wt.read_offset()
   if ox == nil then return end
   local max_d2 = settings.overhead_distance * settings.overhead_distance
+  if settings.route_world_path and settings.route_path == 1 then
+    wt.world_path(cx, cy, cz, ox, oy, oz, max_d2)
+  end
   for i = 1, #pts do
     local m = pts[i]
     local px, py, pz = m.pos.x - ox, m.pos.y - oy, m.pos.z - oz
@@ -2396,6 +2594,15 @@ wt.route_frame = function()
   end
 end
 re.on_frame(function() wt.layer_run(wt.route_layer, "route points", wt.route_frame) end)
+
+-- v14 (SPEC 23.6.3): walking-path copy and search, 2 ms a frame, only while a
+-- path route is shown or a copy is still running.
+wt.path_frame = function()
+  if (wt.route_on and settings.route_path == 1) or wt.q("path_busy", false) then
+    wt.q("path_step", nil, 2, settings.route_path, settings.world_undiscovered)
+  end
+end
+re.on_frame(function() wt.layer_run(wt.path_layer, "route path", wt.path_frame) end)
 
 -- v14 (SPEC 22.9): names above heads. The quest set is built once per
 -- snapshot: the c: marker cids and the cast of in-progress quest markers.
@@ -2429,6 +2636,10 @@ wt.names_frame = function()
   local max_d2 = settings.overhead_distance * settings.overhead_distance
   local st = wt.names_stats
   st.spawned, st.drawn, st.skipped = #list, 0, 0
+  local nst = wt.styles.names
+  local no = wt.style.offset(nst.width, wt.dk)
+  local ncol = settings.names_color
+  local nabgr, na = A.argb_to_abgr(ncol), wt.a(ncol)
   for i = 1, #list do
     local e = list[i]
     if set == nil or set[e.cid] then
@@ -2461,8 +2672,9 @@ wt.names_frame = function()
               end
               local w = label_width(e.txt)
               local tx, ty = sp.x - w / 2, sp.y - 30   -- above the dot
-              draw.text(e.txt, tx + 1, ty + 1, 0xFF000000)
-              draw.text(e.txt, tx, ty, 0xFFFFFFFF)
+              local t1 = nst.on and os.clock() or nil
+              wt.style.text(draw, e.txt, tx, ty, nabgr, nst.on, nst.color, no, na)
+              if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
               st.drawn = st.drawn + 1
             end
           end
