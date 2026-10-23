@@ -122,6 +122,7 @@ function M.create(opt)
     local color = opt.color_abgr()
     local on, ocolor, owidth = false, 0xFF000000, 1
     if opt.style then on, ocolor, owidth = opt.style() end
+    ocolor = ocolor or 0xFF000000
     local o = style.offset(owidth or 1, k)
     local dot_a = ((color >> 24) & 0xFF) / 255
     local related = opt.related() or {}

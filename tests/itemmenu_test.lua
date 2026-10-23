@@ -553,6 +553,28 @@ do
     w.circles[1] and ((w.circles[1].c >> 24) & 0xFF) == 128)
 end
 
+do
+  now = 0
+  local w = make_world({ true, nil, nil })
+  w.scroll = 1
+  tick(w)
+  w.r:frame()
+  check("outline: nil color and width default", #w.circles == 2 and #w.texts == 9
+    and w.texts[1].c == 0xFF000000 and w.r:stats_line():find("fails=0", 1, true) ~= nil)
+end
+
+do
+  now = 0
+  local w = make_world({ true, 0xFF0000FF, 1 })
+  w.scroll = 1
+  w.screen_h = 2160
+  tick(w)
+  w.r:frame()
+  check("outline: scaled ring radius", w.circles[1] and w.circles[1].r == 8 + 2 + 1)
+  check("outline: scaled first offset", w.texts[1] and w.texts[1].x == 1298 * 2 + 2)
+  check("outline: ARGB color reaches draw as ABGR", w.texts[1] and w.texts[1].c == 0xFFFF0000)
+end
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)
