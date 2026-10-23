@@ -22,15 +22,27 @@ end
 
 -- Strict reads for the frame and the append: a failed or empty read raises,
 -- so the caller's pcall counts it (SPEC 22.10.6).
+-- get_size/get_element are wrapper methods on a managed array (o:get_size()),
+-- not methods reached through call(); a List answers get_Count/get_Item.
+local function direct(o, name, ...)
+  local ok, f = pcall(function() return o[name] end)
+  if not ok or type(f) ~= "function" then return nil end
+  local ok2, v = pcall(f, o, ...)
+  if ok2 then return v end
+  return nil
+end
+
 local function size_of(coll)
-  local n = try(coll, "get_size")
+  local n = direct(coll, "get_size")
+  if n == nil then n = try(coll, "get_size") end
   if n == nil then n = try(coll, "get_Count") end
   if type(n) ~= "number" then error("no size on collection") end
   return n
 end
 
 local function element_of(coll, i)
-  local e = try(coll, "get_element", i)
+  local e = direct(coll, "get_element", i)
+  if e == nil then e = try(coll, "get_element", i) end
   if e == nil then e = try(coll, "get_Item", i) end
   if e == nil then error("no element " .. i) end
   return e

@@ -1493,6 +1493,15 @@ local function install_debug()
         end
         st.shop = { shown = sp ~= nil and sp.shown or 0,
           known = sp ~= nil and sp.known or 0, two_shop_npcs = two }
+        -- v14: NPC search rows and the shown route (names and counts only)
+        local nr = {}
+        for i, r in ipairs(snapshot ~= nil and snapshot.npc_rows or {}) do
+          nr[i] = string.format("%s pos=%s alive=%s marker=%s", tostring(r.name),
+            tostring(r.pos ~= nil), tostring(r.alive), tostring(r.marker_key))
+        end
+        st.npc_rows = nr
+        st.npc_names = #((wt.q("input", nil) or {}).npcs or {})
+        st.route = (wt.q("input", nil) or {}).route
         return st
       end,
       state = function()

@@ -1767,7 +1767,11 @@ function M.game_reads()
   -- Spawned holders only (a non-nil _chara); get_element, since
   -- get_elements stops at the first nil slot.
   function R.holder_at(i)
-    local h = C(holder_dic(), "get_element", i)
+    -- get_element is the array wrapper's own method (dic:get_element(i));
+    -- call("get_element") does not reach it in game. C is the fallback.
+    local dic = holder_dic()
+    local okd, h = pcall(function() return dic:get_element(i) end)
+    if not okd then h = C(dic, "get_element", i) end
     if h == nil then return nil end
     local chara = G(h, "_chara")
     if chara == nil then return nil end
