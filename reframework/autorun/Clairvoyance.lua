@@ -135,12 +135,15 @@ local walk_ms_max = 0.0    -- max walk since the last 5 s log dump (catches
 -- Map state
 local ui_map = nil        -- captured ui040205
 
+local function logmsg(s) log.info("[" .. MOD_NAME .. "] " .. tostring(s)) end
+local function logerr(s) log.error("[" .. MOD_NAME .. "] " .. tostring(s)) end
+
 -- v13 matching icons (SPEC 21). The picture renderer is this file's one new
 -- chunk-level local; everything else is a field of it or lives in a do-block.
 local icons = require("Clairvoyance.icons").create{
   d2dx = d2dx,
   clock = os.clock,
-  log = function(s) log.info("[" .. MOD_NAME .. "] " .. tostring(s)) end,
+  log = logmsg,
   enabled = function() return settings.enabled and settings.matching_icons end,
   request_rebuild = function() want_update = true end,
   mini_ok = function() return ui_map == nil end,
@@ -168,30 +171,27 @@ do
     self:preload(ids)
   end
 
-  -- Game methods, resolved once at load (SPEC 21.4.4, 21.5.1). A missing
-  -- method falls back to a dynamic call by name.
-  local function find_method(name, ...)
-    for i = 1, select("#", ...) do
-      local td = sdk.find_type_definition((select(i, ...)))
-      local m = td ~= nil and td:get_method(name) or nil
-      if m ~= nil then return m end
-    end
-    return nil
+  -- Game methods, resolved once at load from the type that declares each
+  -- (verified in game): the full-map wrapper (MapIconSpriteRef), its child
+  -- sprite (via.gui.Sprite), the minimap Root and the icon-root panel.
+  local function find_method(tname, name)
+    local td = sdk.find_type_definition(tname)
+    return td ~= nil and td:get_method(name) or nil
   end
-  local m_visible = find_method("get_Visible", "via.gui.Control", "via.gui.TransformObject")
-  local m_position = find_method("get_Position", "via.gui.Control", "via.gui.TransformObject")
-  local m_size = find_method("get_Size", "via.gui.Control", "via.gui.TransformObject")
-  local m_gpos = find_method("get_GlobalPosition", "via.gui.TransformObject")
-  local m_cscale = find_method("get_ColorScale", "via.gui.Control")
-  local m_avisible = find_method("get_ActualVisible", "via.gui.Control", "via.gui.TransformObject")
-  local function call_m(m, obj, name)
-    if m ~= nil then return m:call(obj) end
-    return obj:call(name)
+  local w_visible = find_method("app.GUIBase.MapIconSpriteRef", "get_Visible")
+  local s_visible = find_method("via.gui.Sprite", "get_Visible")
+  local s_position = find_method("via.gui.Sprite", "get_Position")
+  local s_size = find_method("via.gui.Sprite", "get_Size")
+  local m_gpos = find_method("via.gui.TransformObject", "get_GlobalPosition")
+  local m_cscale = find_method("via.gui.Control", "get_ColorScale")
+  local m_avisible = find_method("via.gui.PlayObject", "get_ActualVisible")
+  local function call_m(m, obj)
+    return m:call(obj)   -- a nil method raises; every caller is under pcall
   end
 
   -- Sprite side in 1920x1080 units; 32 when the read fails or is <= 0.
   local function size_read(sprite)
-    local sz = call_m(m_size, sprite, "get_Size")
+    local sz = call_m(s_size, sprite)
     local w = sz ~= nil and sz.w or nil
     if type(w) == "number" and w > 0 then return w end
     return 32
@@ -201,14 +201,23 @@ do
     return ok and w or 32
   end
 
+  -- Re-reads each record's size; run after apply_styles sets the icon scale.
+  function icons.resize()
+    local recs = icons.recs
+    for i = 1, #recs do
+      local rec = recs[i]
+      if sdk.is_managed_object(rec.sprite) then rec.size = icons.map_size(rec.sprite) end
+    end
+  end
+
   -- The fill's reader (SPEC 21.4.4): nil skips the record, a raise is
   -- caught by the fill's own pcall and also skips it.
   function icons.read(rec)
     local sprite, ref = rec.sprite, rec.ref
     if not sdk.is_managed_object(sprite) or not sdk.is_managed_object(ref) then return nil end
-    if call_m(m_visible, ref, "get_Visible") ~= true then return nil end
-    if call_m(m_visible, sprite, "get_Visible") ~= true then return nil end
-    local p = call_m(m_position, sprite, "get_Position")
+    if call_m(w_visible, ref) ~= true then return nil end
+    if call_m(s_visible, sprite) ~= true then return nil end
+    local p = call_m(s_position, sprite)
     if p == nil then return nil end
     return p.x, p.y
   end
@@ -217,10 +226,10 @@ do
   -- fade and the visible flag. Only PnlMapIconSpriteRoot is asked for a
   -- position, never the texture node under it.
   local function frame_read(ui)
-    local gp = call_m(m_gpos, ui.PnlMapIconSpriteRoot, "get_GlobalPosition")
+    local gp = call_m(m_gpos, ui.PnlMapIconSpriteRoot)
     local root = ui.Root
-    local cs = call_m(m_cscale, root, "get_ColorScale")
-    local vis = call_m(m_avisible, root, "get_ActualVisible")
+    local cs = call_m(m_cscale, root)
+    local vis = call_m(m_avisible, root)
     return gp.x, gp.y, cs.w, vis == true and ui_map == nil
   end
   function icons.frame_info(ui)
@@ -318,8 +327,6 @@ local uint_t = sdk.find_type_definition("System.UInt32")
 local idx_obj = int_t:create_instance():add_ref()
 local color_obj = uint_t:create_instance():add_ref()
 local INT_OFF, UINT_OFF = A.int_value_offset, A.uint_value_offset
-local function logmsg(s) log.info("[" .. MOD_NAME .. "] " .. tostring(s)) end
-local function logerr(s) log.error("[" .. MOD_NAME .. "] " .. tostring(s)) end
 
 local function catalog_side_count()
   local side = 0
@@ -814,6 +821,7 @@ local function apply_styles(this)
     rec.ref:set_Scale(scale)
     rec.ref:set_Prio(native_max_prio + 1)
   end
+  pcall(icons.resize)
 end
 
 -- ===== v4 minimap layer (SPEC §11) =====
