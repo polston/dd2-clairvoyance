@@ -326,8 +326,8 @@ do
       is_live = function() return live end,
       icons_on = function() return on end,
       frame_info = function() return info[1], info[2], info[3], info[4] end,
-      push = function(id, x, y, size, argb, fade)
-        pushes[#pushes + 1] = { id = id, x = x, y = y, size = size, argb = argb, fade = fade }
+      push = function(id, x, y, size, argb, fade, mk)
+        pushes[#pushes + 1] = { id = id, x = x, y = y, size = size, argb = argb, fade = fade, marker = mk }
       end,
       mini_replace = function() replaces = replaces + 1 end,
       picture_for = function(m) return m.pic or 77 end,
@@ -350,7 +350,8 @@ do
   check("pic: mini_replace once", replaces == 1)
   check("pic: three pushes", #pushes == 3 and rr.shown == 3 and rr.icons_mode == true)
   check("pic: push values", pushes[1].x == 60 and pushes[1].y == 60 and pushes[1].size == 28
-    and pushes[1].argb == 255 and pushes[1].fade == 0.5 and pushes[1].id == 77)
+    and pushes[1].argb == 255 and pushes[1].fade == 0.5 and pushes[1].id == 77
+    and pushes[1].marker == cands[1])
   check("pic: no slot setters", #s.calls == 0 and rr.free_n == 0 and rr.dropped == 0)
   check("pic: clipped counted", rr.clipped == 1)
 

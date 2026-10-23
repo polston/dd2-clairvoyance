@@ -15,7 +15,9 @@ local function new_layer()
   return { n = 0, pool = {} }
 end
 
-local function layer_push(layer, id, x, y, size, tint, alpha)
+local OFFS = { 1, 0, -1, 0, 0, 1, 0, -1, 1, 1, 1, -1, -1, 1, -1, -1 }
+
+local function layer_push(layer, id, x, y, size, tint, alpha, style)
   local n = layer.n + 1
   if n > MAX_RECORDS then return end
   layer.n = n
@@ -25,12 +27,14 @@ local function layer_push(layer, id, x, y, size, tint, alpha)
     layer.pool[n] = rec
   end
   rec.id, rec.x, rec.y, rec.size, rec.tint, rec.alpha = id, x, y, size, tint, alpha
+  rec.style = style
 end
 
 -- One layer's records, inside the pcall of the pass. Centers become top-left
 -- corners (SPEC 21.2.7); "head" records are already screen pixels.
 local function draw_layer(r, layer, ox, oy, k, is_head)
   local d2dx, opts, images = r.d2dx, r.opts, r.images
+  local clock = r.clock
   local pool = layer.pool
   for i = 1, layer.n do
     local rec = pool[i]
@@ -40,10 +44,20 @@ local function draw_layer(r, layer, ox, oy, k, is_head)
       local px, py
       if is_head then
         px, py = rec.x - s / 2, rec.y - s / 2
-        opts.tint, opts.alpha = 0xFF000000, rec.alpha
-        d2dx.image_ex(entry.img, px + 1, py + 1, s, s, opts)
       else
         px, py = ox + rec.x * k - s / 2, oy + rec.y * k - s / 2
+      end
+      local style = rec.style
+      if style ~= nil and style.on then
+        local t1 = clock()
+        local o = math.max(1, math.floor(style.width * k + 0.5))
+        local c = style.color
+        opts.tint = c | 0xFF000000
+        opts.alpha = ((c >> 24) & 0xFF) / 255 * rec.alpha
+        for j = 1, 15, 2 do
+          d2dx.image_ex(entry.img, px + OFFS[j] * o, py + OFFS[j + 1] * o, s, s, opts)
+        end
+        r.outline_ms = r.outline_ms + (clock() - t1) * 1000
       end
       opts.tint, opts.alpha = rec.tint, rec.alpha
       d2dx.image_ex(entry.img, px, py, s, s, opts)
@@ -62,7 +76,7 @@ function M.create(opt)
   local d2dx = opt.d2dx
   local clock = opt.clock or function() return 0 end
   local r = {
-    d2dx = d2dx,
+    d2dx = d2dx, clock = clock, outline_ms = 0, fill_at = -math.huge,
     images = {},            -- id -> { img, state = "pending" | "ready" | "failed" }
     pending = {}, pending_n = 0,
     map = new_layer(), mini = new_layer(), head = new_layer(),
@@ -206,16 +220,16 @@ function M.create(opt)
     if changed then rebuild() end
   end
 
-  function r:push(layer, id, x, y, size, argb, fade)
+  function r:push(layer, id, x, y, size, argb, fade, style)
     local tint = argb | 0xFF000000
     local alpha = (((argb >> 24) & 0xFF) / 255) * fade
     if layer == "mini" then
       self.mini_at = clock()
-      layer_push(self.mini, id, x, y, size, tint, alpha)
+      layer_push(self.mini, id, x, y, size, tint, alpha, style)
     elseif layer == "map" then
-      layer_push(self.map, id, x, y, size, tint, alpha)
+      layer_push(self.map, id, x, y, size, tint, alpha, style)
     elseif layer == "head" then
-      layer_push(self.head, id, x, y, size, tint, alpha)
+      layer_push(self.head, id, x, y, size, tint, alpha, style)
     end
   end
 
@@ -233,9 +247,14 @@ function M.create(opt)
       local ok, x, y = pcall(read, rec)
       if ok and type(x) == "number" and type(y) == "number" and type(rec.argb) == "number"
           and type(rec.size) == "number" and rec.id ~= nil then
-        self:push("map", rec.id, x, y, rec.size, rec.argb, 1)
+        local cat = rec.cat
+        local style = opt.style_of ~= nil and opt.style_of(cat) or nil
+        local scale = opt.scale_of ~= nil and opt.scale_of(cat) or 1
+        rec.lx, rec.ly, rec.read_at = x, y, t0
+        self:push("map", rec.id, x, y, rec.size * scale, rec.argb, 1, style)
       end
     end
+    self.fill_at = t0
     self.fill_ms = (clock() - t0) * 1000
   end
 
@@ -288,6 +307,7 @@ function M.create(opt)
       clear_queues()
       return
     end
+    self.outline_ms = 0
     local t0 = clock()
     local oks, w, h = pcall(d2dx.surface_size)
     if not oks or type(w) ~= "number" or w <= 0 or type(h) ~= "number" or h <= 0 then

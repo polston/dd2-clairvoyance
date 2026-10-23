@@ -247,7 +247,7 @@ function M.create(opt)
           if opt.drawable(id) then
             -- A failing push is not a slot drop: counted apart from dropped.
             local okp = pcall(opt.push, id, px + pos.x, py + pos.y, 28,
-              opt.color_for(m), fade)
+              opt.color_for(m), fade, m)
             if okp then self.shown = self.shown + 1
             else self.push_failed = self.push_failed + 1 end
             return

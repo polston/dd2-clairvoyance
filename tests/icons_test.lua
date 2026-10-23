@@ -204,14 +204,12 @@ do
   r:push("mini", 2, 10, 10, 28, 0xFFFFFFFF, 1)
   r:push("map", 1, 20, 20, 32, 0xFFFFFFFF, 1)
   r:draw()
-  check("draw count: map, mini, head shadow, head", #d.draws == 4)
+  check("draw count: map, mini, head", #d.draws == 3)
   check("order: map first", d.draws[1].img == d.files["Clairvoyance/icons/1.png"])
   check("order: mini second", d.draws[2].img == d.files["Clairvoyance/icons/2.png"])
-  check("head shadow first", d.draws[3].tint == 0xFF000000 and d.draws[3].x == 500 - 12 + 1
-    and d.draws[3].y == 400 - 12 + 1)
-  check("head picture second", d.draws[4].tint == 0xFF112233 and d.draws[4].x == 488 and d.draws[4].y == 388)
+  check("head picture third", d.draws[3].tint == 0xFF112233 and d.draws[3].x == 488 and d.draws[3].y == 388)
   local seq = table.concat(d.calls, ",")
-  check("begin_frame before draws, end_frame last", seq:find("begin_frame,image_ex,image_ex,image_ex,image_ex,end_frame$") ~= nil)
+  check("begin_frame before draws, end_frame last", seq:find("begin_frame,image_ex,image_ex,image_ex,end_frame$") ~= nil)
 end
 
 -- Empty queues and inactive make zero D2DX calls.
@@ -303,23 +301,74 @@ do
   r:push("head", 1, 5, 5, 8, 0xFFFFFFFF, 1)
   r:push("mini", 1, 2, 2, 8, 0xFFFFFFFF, 1)
   r:draw()
-  check("first pass draws map, mini, head (+shadow)", #d.draws == 4)
+  check("first pass draws map, mini, head", #d.draws == 3)
   r:draw()
-  check("second pass draws only mini", #d.draws == 5)
+  check("second pass draws only mini", #d.draws == 4)
   now = now + 0.2
   r:draw()
-  check("mini persists within 0.25 s", #d.draws == 6)
+  check("mini persists within 0.25 s", #d.draws == 5)
   now = now + 0.3
   r:draw()
-  check("mini dropped when 0.25 s stale", #d.draws == 6)
+  check("mini dropped when 0.25 s stale", #d.draws == 5)
   r:push("mini", 1, 2, 2, 8, 0xFFFFFFFF, 1)
   r:mini_replace()
   r:push("mini", 1, 3, 3, 8, 0xFFFFFFFF, 1)
   r:draw()
-  check("mini_replace starts a new set", #d.draws == 7 and d.draws[7].x == 3 - 4)
+  check("mini_replace starts a new set", #d.draws == 6 and d.draws[6].x == 3 - 4)
   r:mini_replace()
   r:draw()
-  check("empty replaced set draws nothing", #d.draws == 7)
+  check("empty replaced set draws nothing", #d.draws == 6)
+end
+
+-- Outlined pictures (SPEC 23.5.4).
+do
+  local offs = { {1,0}, {-1,0}, {0,1}, {0,-1}, {1,1}, {1,-1}, {-1,1}, {-1,-1} }
+  local d = fake_d2dx(); ready_image(d, 3)
+  local r = make(d)
+  r:preload({ 3 }); r:draw()
+  r:push("head", 3, 500, 400, 24, 0xFF112233, 1, { on = true, color = 0xFF000000, width = 1 })
+  r:draw()
+  check("outlined head: 9 calls", #d.draws == 9)
+  local ok = true
+  for i = 1, 8 do
+    local c = d.draws[i]
+    if c.tint ~= 0xFF000000 or c.x ~= 488 + offs[i][1] or c.y ~= 388 + offs[i][2] then ok = false end
+  end
+  check("outline: 8 offset copies in order, black tint", ok)
+  check("outline: picture last at center", d.draws[9].tint == 0xFF112233 and d.draws[9].x == 488 and d.draws[9].y == 388)
+  check("outline_ms recorded", type(r.outline_ms) == "number")
+  local n = #d.draws
+  r:push("head", 3, 500, 400, 24, 0xFF112233, 1, nil); r:draw()
+  check("style nil: 1 call", #d.draws == n + 1)
+  r:push("head", 3, 500, 400, 24, 0xFF112233, 1, { on = false, color = 0xFF000000, width = 1 }); r:draw()
+  check("style off: 1 call", #d.draws == n + 2)
+  check("style off: outline_ms 0", r.outline_ms == 0)
+  -- tint and alpha
+  local m = #d.draws
+  r:push("map", 3, 100, 100, 32, 0xFFFFFFFF, 0.5, { on = true, color = 0x80FF0000, width = 2 })
+  r:draw()
+  check("outline tint opaque from style color", d.draws[m + 1].tint == 0xFFFF0000)
+  check("outline alpha 0.251", math.abs(d.draws[m + 1].alpha - 0.251) < 0.002)
+  check("outline width 2 offset", d.draws[m + 1].x == 100 - 16 + 2 and d.draws[m + 1].y == 100 - 16)
+end
+
+-- fill: per-category style and scale, layout position kept.
+do
+  local d = fake_d2dx(); ready_image(d, 1)
+  local sty = { on = true, color = 0xFF000000, width = 1 }
+  local r = make(d, { style_of = function(cat) if cat == "route_stop" then return sty end end,
+    scale_of = function(cat) if cat == "route_stop" then return 1.5 end return 1 end })
+  r:preload({ 1 }); r:draw()
+  now = 42
+  local recs = { { id = 1, size = 20, argb = 0xFFFFFFFF, cat = "route_stop" },
+                 { id = 1, size = 20, argb = 0xFFFFFFFF, cat = "chest" } }
+  r:fill(recs, function() return 100, 200 end)
+  check("fill: route stop 1.5x with style", r.map.pool[1].size == 30 and r.map.pool[1].style == sty)
+  check("fill: other category 1x no style", r.map.pool[2].size == 20 and r.map.pool[2].style == nil)
+  check("fill: lx ly read_at on records", recs[1].lx == 100 and recs[1].ly == 200 and recs[2].lx == 100
+    and recs[1].read_at == 42)
+  check("fill_at set", r.fill_at == 42)
+  now = 0
 end
 
 -- mini skipped while mini_ok() is false (kept, not dropped).
