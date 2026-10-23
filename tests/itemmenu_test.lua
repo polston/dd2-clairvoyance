@@ -163,11 +163,11 @@ do
   w.r:frame()
   check("two dots", #w.circles == 2)
   local c1, c2 = w.circles[1], w.circles[2]
-  -- k = 1, radius 4, corner = x + 140, y; dot inset by the radius
+  -- k = 1, radius 4, corner = center + (70, -70); dot inset by the radius
   check("dot radius", c1 and c1.r == 4)
   check("dot color", c1 and c1.c == 0xFF00FF00)
-  check("slot 3 dot", c1 and c1.x == 100 + 141 * 3 + 140 - 4 and c1.y == 200 + 4)
-  check("slot 7 dot", c2 and c2.x == 100 + 141 * 2 + 140 - 4 and c2.y == 200 + 141 + 4)
+  check("slot 3 dot", c1 and c1.x == 100 + 141 * 3 + 70 - 4 and c1.y == 200 - 70 + 4)
+  check("slot 7 dot", c2 and c2.x == 100 + 141 * 2 + 70 - 4 and c2.y == 200 + 141 - 70 + 4)
   check("dots stat", w.r:stats_line():find("dots=2", 1, true) ~= nil)
 
   -- scaled by screen_h / 1080
@@ -176,7 +176,7 @@ do
   w.r:frame()
   c1 = w.circles[1]
   check("scaled radius", c1 and c1.r == 8)
-  check("scaled corner", c1 and c1.x == (100 + 141 * 3 + 140) * 2 - 8 and c1.y == 200 * 2 + 8)
+  check("scaled corner", c1 and c1.x == (100 + 141 * 3 + 70) * 2 - 8 and c1.y == (200 - 70) * 2 + 8)
   w.screen_h = 1080
 
   -- a moved Pnl draws at the new corner
@@ -185,7 +185,7 @@ do
   w.slots[4].y = w.slots[4].y + 30
   w.r:frame()
   c1 = w.circles[1]
-  check("moved slot follows", c1 and c1.x == 100 + 141 * 3 + 50 + 140 - 4 and c1.y == 200 + 30 + 4)
+  check("moved slot follows", c1 and c1.x == 100 + 141 * 3 + 50 + 70 - 4 and c1.y == 200 + 30 - 70 + 4)
 
   -- a freed slot draws nothing and is not a failure
   w.circles = {}
@@ -251,7 +251,7 @@ do
   w.r:frame()
   check("scrolled: one dot", #w.circles == 1)
   local c = w.circles[1]
-  check("scrolled: row 7 at slot 2", c and c.x == 100 + 141 * 2 + 140 - 4 and c.y == 200 + 4)
+  check("scrolled: row 7 at slot 2", c and c.x == 100 + 141 * 2 + 70 - 4 and c.y == 200 - 70 + 4)
 end
 
 -- Rows past the list end draw nothing (25 rows, scroll 1 shows rows 5..34).

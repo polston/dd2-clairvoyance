@@ -48,7 +48,8 @@ local function element_of(coll, i)
   return e
 end
 
--- GUI-to-screen conversion of one corner point; Task 11 fixes it here.
+-- GUI-to-screen conversion of one point. Measured in game at 1080 lines:
+-- a slot Pnl's GlobalPosition is the slot center, in screen pixels.
 local function to_screen(x, y, k)
   return x * k, y * k
 end
@@ -127,8 +128,8 @@ function M.create(opt)
           if row_marks(infos, row, related) ~= nil then
             local p = pnl:call("get_GlobalPosition")
             if p == nil then error("no global position") end
-            -- the top-right corner, the dot inset by its radius
-            local sx, sy = to_screen(p.x + SLOT_SIZE, p.y, k)
+            -- the top-right corner (the position is the center), inset by the radius
+            local sx, sy = to_screen(p.x + SLOT_SIZE / 2, p.y - SLOT_SIZE / 2, k)
             opt.draw.filled_circle(sx - radius, sy + radius, radius, color, DOT_SEGMENTS)
             n = n + 1
           end
