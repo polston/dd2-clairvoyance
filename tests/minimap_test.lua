@@ -307,5 +307,132 @@ do
   settings.enabled = true
 end
 
+-- 21. pictures (SPEC 21.5, Ruling 2)
+do
+  local pushes, replaces = {}, 0
+  local on, drawable_ok = true, true
+  local info = { 50, 60, 0.5, true }
+  local not_drawable = nil
+  local function pic_renderer()
+    local o = {
+      settings = settings,
+      clock = function() return now end,
+      vector = function(x, y, z) return { x = x, y = y, z = z } end,
+      set_color = function(ref, argb) ref:set_Color("ours:" .. tostring(argb)) end,
+      icon_for = function() return 2 end,
+      color_for = function() return 255 end,
+      snapshot = function() return snap end,
+      candidates = function() return cands, 5 end,
+      is_live = function() return live end,
+      icons_on = function() return on end,
+      frame_info = function() return info[1], info[2], info[3], info[4] end,
+      push = function(id, x, y, size, argb, fade)
+        pushes[#pushes + 1] = { id = id, x = x, y = y, size = size, argb = argb, fade = fade }
+      end,
+      mini_replace = function() replaces = replaces + 1 end,
+      picture_for = function(m) return m.pic or 77 end,
+      drawable = function(id) return id ~= not_drawable end,
+    }
+    return mm.create(o)
+  end
+  local function setup()
+    local s = fake_slot(false)
+    local h = fake_hud({ s })
+    local rr = pic_renderer()
+    rr:before(h)
+    new_snap()
+    return rr, h, s
+  end
+  settings.show_minimap = true
+  cands = { marker(10), marker(20), marker(30), marker(500) }
+  local rr, h, s = setup()
+  rr:after(h)
+  check("pic: mini_replace once", replaces == 1)
+  check("pic: three pushes", #pushes == 3 and rr.shown == 3 and rr.icons_mode == true)
+  check("pic: push values", pushes[1].x == 60 and pushes[1].y == 60 and pushes[1].size == 28
+    and pushes[1].argb == 255 and pushes[1].fade == 0.5 and pushes[1].id == 77)
+  check("pic: no slot setters", #s.calls == 0 and rr.free_n == 0 and rr.dropped == 0)
+  check("pic: clipped counted", rr.clipped == 1)
+
+  pushes, replaces = {}, 0
+  info = { 50, 60, 0.5, false }
+  rr, h, s = setup()
+  rr:after(h)
+  check("pic: invisible pushes nothing", #pushes == 0 and replaces == 1 and #s.calls == 0)
+  info = { 50, 60, 0, true }
+  rr:after(h)
+  check("pic: fade 0 pushes nothing", #pushes == 0 and replaces == 2)
+  info = { nil }
+  rr:after(h)
+  check("pic: frame_info nil pushes nothing", #pushes == 0 and replaces == 3)
+
+  info = { 50, 60, 0.5, true }
+  cands = { marker(10), marker(20) }
+  cands[2].pic = 99
+  not_drawable = 99
+  pushes = {}
+  rr, h, s = setup()
+  rr:after(h)
+  check("pic: not drawable borrows a slot", #pushes == 1 and rr.shown == 2
+    and s.visible == true and s.icon == 2 and rr.dropped == 0)
+  local setters = 0
+  for _, c in ipairs(s.calls) do if c == "icon" then setters = setters + 1 end end
+  check("pic: one slot setter call", setters == 1)
+  not_drawable = nil
+
+  settings.show_minimap = false
+  replaces, pushes = 0, {}
+  rr:after(h)
+  check("pic: show_minimap off still empties set", replaces == 1 and #pushes == 0)
+  settings.show_minimap = true
+
+  -- y term: distinct px/py and pos values, all pushes asserted
+  info = { 50, 60, 0.5, true }
+  cands = { { key = "a", pos = { x = 10, y = 0, z = 5 } }, marker(20), marker(30) }
+  pushes = {}
+  rr, h, s = setup()
+  rr:after(h)
+  check("pic: y term and all pushes", #pushes == 3 and pushes[1].x == 60
+    and pushes[1].y == 65 and pushes[2].x == 70 and pushes[2].y == 60
+    and pushes[3].x == 80 and pushes[3].y == 60)
+
+  -- raising frame_info: no push, no raise
+  local real_info = info
+  rr, h, s = setup()
+  pushes, replaces = {}, 0
+  local o_ok = pcall(function()
+    info = setmetatable({}, { __index = function() error("x") end })
+    rr:after(h)
+  end)
+  info = real_info
+  check("pic: raising frame_info", o_ok and #pushes == 0 and replaces == 1)
+
+  -- slot exhaustion on missing pictures does not stop later pictures
+  not_drawable = 99
+  local m1, m2 = marker(10), marker(20)
+  m1.pic, m2.pic = 99, 99
+  cands = { m1, m2, marker(30), marker(40) }
+  pushes = {}
+  rr, h, s = setup()
+  rr:after(h)
+  check("pic: exhaustion keeps later pictures", #pushes == 2 and rr.shown == 3
+    and rr.dropped == 1)
+  not_drawable = nil
+
+  -- slots owned before icons_on flips are restored by PRE
+  on = false
+  cands = { marker(10) }
+  local s3 = fake_slot(false)
+  local h3 = fake_hud({ s3 })
+  local r3 = pic_renderer()
+  r3:before(h3)
+  new_snap()
+  r3:after(h3)
+  check("pic: off draws v12", s3.visible == true and r3.icons_mode == false)
+  on = true
+  r3:before(h3)
+  check("pic: PRE restores slots", s3.visible == false and s3.icon == 7)
+end
+
 if failures > 0 then os.exit(1) end
 print("minimap_test: all OK")

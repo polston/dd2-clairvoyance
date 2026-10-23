@@ -37,6 +37,7 @@ function M.create(opt)
     status = "waiting",
     candidates_n = 0, clipped = 0, shown = 0, dropped = 0,
     pool_n = 0, free_n = 0,
+    icons_mode = false, push_failed = 0,
     free_at = -math.huge,
     pl_seen_at = -math.huge,
     pl_pos = nil,
@@ -130,7 +131,13 @@ function M.create(opt)
 
   function self:after(ui)
     self.candidates_n, self.clipped, self.shown, self.dropped = 0, 0, 0, 0
+    self.push_failed = 0
     self.nearest = nil
+    self.icons_mode = false
+    -- SPEC 21.5.2: while pictures are on, every update starts a new "mini"
+    -- set, so a disabled or toggled-off minimap empties it.
+    local pictures = opt.icons_on ~= nil and opt.icons_on()
+    if pictures then opt.mini_replace() end
     if ui == nil or ui ~= self.ui then return end
 
     -- SPEC 17.3a: player-seen clock, independent of the minimap toggles.
@@ -163,7 +170,10 @@ function M.create(opt)
     self.pool_n = count
 
     local now = opt.clock()
-    if now - self.free_at >= 1.0 then
+    if pictures then
+      self.icons_mode = true
+      self.free_n = 0
+    elseif now - self.free_at >= 1.0 then
       self.free_at = now
       local free = 0
       for i = 0, count - 1 do
@@ -201,6 +211,16 @@ function M.create(opt)
       return nil
     end
 
+    local px, py, fade
+    if pictures then
+      local okf, a, b, c, d = pcall(opt.frame_info, ui)
+      if okf and a ~= nil and d and c ~= nil and c > 0 then
+        px, py, fade = a, b, c
+      else
+        return  -- nothing queues: full map open, faded out, or no frame info
+      end
+    end
+
     local range2 = range * range
     local out_of_slots = false
     for i, m in ipairs(cands) do
@@ -210,8 +230,26 @@ function M.create(opt)
           self.clipped = self.clipped + 1
           return
         end
+        if pictures then
+          -- Ruling 2: a picture that is not drawable falls through to the
+          -- v12 slot borrow (game glyph), never a blank.
+          local id = opt.picture_for(m)
+          if opt.drawable(id) then
+            -- A failing push is not a slot drop: counted apart from dropped.
+            local okp = pcall(opt.push, id, px + pos.x, py + pos.y, 28,
+              opt.color_for(m), fade)
+            if okp then self.shown = self.shown + 1
+            else self.push_failed = self.push_failed + 1 end
+            return
+          end
+        end
         local saved = borrow_slot()
         if saved == nil then
+          if pictures then
+            -- later candidates may still be drawable pictures: no break
+            self.dropped = self.dropped + 1
+            return
+          end
           self.dropped = #cands - i + 1
           out_of_slots = true
           return
