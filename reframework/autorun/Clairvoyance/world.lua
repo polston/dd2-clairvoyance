@@ -100,6 +100,7 @@ function M.default_io()
     load = function(path) return json.load_file(path) end,
     dump = function(path, t) return json.dump_file(path, t) ~= false end,
     clock = os.clock,
+    log = function() end,
   }
 end
 
@@ -167,9 +168,13 @@ end
 -- ===== the instance =====
 function M.new(a, reads, io)
   reads = reads or {}
-  io = io or M.default_io()
+  do
+    local given = io or {}
+    io = M.default_io()
+    for k, v in pairs(given) do io[k] = v end
+  end
   local clock = io.clock or os.clock
-  local w = {}
+  local w = { route_gen = 0 }
 
   local places = { state = "missing", rows = 0, dropped = 0, load_ms = 0,
     slow = false, pak = nil }
@@ -1308,6 +1313,13 @@ function M.new(a, reads, io)
     return false
   end
 
+  -- a round result whose route is on: no error, the current cid, a stop
+  local function published_on(res)
+    local r = res and res.route
+    return type(r) == "table" and r.err == nil and r.cid == S.route_cid
+      and type(r.stops) == "table" and #r.stops > 0
+  end
+
   -- ----- public -----
   function w:refresh(now, gate, toggles)
     if not gate or type(toggles) ~= "table" then return false end
@@ -1327,6 +1339,7 @@ function M.new(a, reads, io)
     local ok, res = pcall(round, now, tg)
     stats.round_ms = (clock() - rt0) * 1000
     if not ok or type(res) ~= "table" then return false end
+    if published_on(res) and not published_on(input_tbl) then w.route_gen = w.route_gen + 1 end
     input_tbl = res
     committed = true
     if rerun then rerun = false; last_round = nil end
@@ -1344,11 +1357,14 @@ function M.new(a, reads, io)
 
   -- SPEC 22.8: the route NPC; the next refresh builds it
   function w:set_route(cid, name)
+    if cid ~= S.route_cid then w.path_job = nil; w.route_gen = w.route_gen + 1 end
     S.route_cid, S.route_name, S.route_cache = cid, name, nil
     last_round = nil
   end
 
   function w:clear_route()
+    w.path_job = nil
+    w.route_gen = w.route_gen + 1
     S.route_cid, S.route_name, S.route_cache = nil, nil, nil
     if input_tbl ~= nil then input_tbl.route = nil end
   end
@@ -1413,6 +1429,7 @@ function M.new(a, reads, io)
 
   function w:reset()
     S = new_session()
+    w.path_job = nil
     if type(reads.reset) == "function" then pcall(reads.reset) end
     input_tbl = nil
     committed = false
@@ -1455,6 +1472,295 @@ function M.new(a, reads, io)
       rounds = stats.rounds, saves = stats.saves, save_ms = stats.save_ms,
       last_save_reason = stats.last_save_reason,
     }
+  end
+
+  -- ----- walking graph copy and route paths (SPEC 23.6) -----
+  -- The game graph is copied into flat arrays across frames; route paths
+  -- are searched over the copy (never through a game path query).
+  w.paths, w.near, w.copy_tries, w.pver = {}, {}, 0, 0
+  w.copy_ms_max, w.search_ms_max = 0, 0
+  local PATH_CAP = 64
+  local path_order = {}        -- w.paths keys, oldest first
+  local fail_gen = nil         -- w.route_gen when the copy last failed
+  local blockbuf = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {} }
+  local copy_failed = false
+  local rp = nil               -- cached route pairs, keys and drawn list
+  local rp_empty = {}
+
+  -- the published route stops, or nil when no route is on
+  local function route_stops()
+    if not published_on(input_tbl) then return nil end
+    return input_tbl.route.stops
+  end
+
+  local function copy_fail(err)
+    w.copy, copy_failed, fail_gen = nil, true, w.route_gen
+    w.copy_tries = w.copy_tries + 1
+    pcall(io.log, "graph copy failed: " .. tostring(err))
+  end
+
+  -- one budgeted slice of the copy: blocks in order, then link resolution
+  local function copy_run(c, limit)
+    local t0 = clock()
+    if c.nb == nil then
+      local n = reads.graph_block_count()
+      if type(n) ~= "number" or n < 1 then error("no graph blocks") end
+      c.nb, c.b, c.nn, c.nl = n, 0, 0, 0
+      c.off, c.x, c.y, c.z, c.lc, c.lb, c.ln = {}, {}, {}, {}, {}, {}, {}
+    end
+    local nb = c.nb
+    while c.b < nb do
+      local tb = clock()
+      local n = reads.graph_block(c.b, blockbuf)
+      if type(n) ~= "number" or n < 0 then error("bad graph block") end
+      local x, y, z, lc, lb, ln = c.x, c.y, c.z, c.lc, c.lb, c.ln
+      local bx, by, bz, blc = blockbuf.x, blockbuf.y, blockbuf.z, blockbuf.lc
+      local nn, nl = c.nn, c.nl
+      c.off[c.b + 1] = nn
+      local tl = 0
+      for k = 1, n do
+        nn = nn + 1
+        x[nn], y[nn], z[nn] = bx[k], by[k], bz[k]
+        local m = blc[k]
+        lc[nn] = m
+        tl = tl + m
+      end
+      local blb, bln = blockbuf.lb, blockbuf.ln
+      for k = 1, tl do
+        lb[nl + k], ln[nl + k] = blb[k], bln[k]
+      end
+      c.nn, c.nl = nn, nl + tl
+      c.b = c.b + 1
+      local now = clock()
+      c.tsum = (c.tsum or 0) + (now - tb)
+      -- stop before a block that would likely overrun the budget
+      if now - t0 + c.tsum / c.b >= limit then return end
+    end
+    if c.ri == nil then
+      c.ri, c.rslot, c.wslot, c.ls, c.lt = 1, 1, 0, {}, {}
+    end
+    local nn, lc, lb, ln, off, ls, lt = c.nn, c.lc, c.lb, c.ln, c.off, c.ls, c.lt
+    local ri, rslot, wslot = c.ri, c.rslot, c.wslot
+    while ri <= nn do
+      local m = lc[ri]
+      ls[ri] = wslot + 1
+      local valid = 0
+      for s = rslot, rslot + m - 1 do
+        local bo = off[lb[s] + 1]
+        if bo ~= nil then
+          local cnt = (off[lb[s] + 2] or nn) - bo
+          local iid = ln[s]
+          if iid >= 0 and iid < cnt then
+            valid = valid + 1
+            lt[wslot + valid] = bo + iid + 1
+          end
+        end
+      end
+      wslot = wslot + valid
+      rslot = rslot + m
+      lc[ri] = valid
+      ri = ri + 1
+      if ri % 256 == 0 and clock() - t0 >= limit then
+        c.ri, c.rslot, c.wslot = ri, rslot, wslot
+        return
+      end
+    end
+    w.graph = { n = nn, x = c.x, y = c.y, z = c.z, ls = ls, lc = lc, lt = lt }
+    w.copy = nil
+  end
+
+  local function stop_key(p)
+    return string.format("%.1f,%.1f,%.1f", p.x, p.y, p.z)
+  end
+
+  local function same_route(c, stops, undisc)
+    if c.undisc ~= undisc or c.cid ~= S.route_cid or c.n ~= #stops then return false end
+    for i = 1, c.n do
+      local s = stops[i]
+      local p = s.pos
+      if c.kd[i] ~= s.discovered or c.kx[i] ~= (p and p.x) or c.ky[i] ~= (p and p.y)
+        or c.kz[i] ~= (p and p.z) then
+        return false
+      end
+    end
+    return true
+  end
+
+  local function build_rp(stops, undisc)
+    local npcs = require("Clairvoyance.npcs")
+    local c = { cid = S.route_cid, undisc = undisc, n = #stops,
+      kx = {}, ky = {}, kz = {}, kd = {}, keys = {}, list_ver = -1 }
+    for i = 1, c.n do
+      local s = stops[i]
+      local p = s.pos
+      c.kd[i] = s.discovered
+      if type(p) == "table" then c.kx[i], c.ky[i], c.kz[i] = p.x, p.y, p.z end
+    end
+    c.pairs = npcs.route_pairs(stops, undisc)
+    for _, pr in ipairs(c.pairs) do
+      for _, i in ipairs(pr) do
+        if c.keys[i] == nil then c.keys[i] = stop_key(stops[i].pos) end
+      end
+    end
+    c.list = {}
+    return c
+  end
+
+  local function rp_get(stops, undisc)
+    if rp == nil or not same_route(rp, stops, undisc) then rp = build_rp(stops, undisc) end
+    return rp
+  end
+
+  -- the first unresolved item of the route: kind "near" (key, stop index)
+  -- or "path" (path key, node a, node b); nil when every pair is settled
+  local function next_target(c)
+    local near, paths = w.near, w.paths
+    for k = 1, #c.pairs do
+      local pr = c.pairs[k]
+      local ki, kj = c.keys[pr[1]], c.keys[pr[2]]
+      local a, b = near[ki], near[kj]
+      if a == nil then return "near", ki, pr[1] end
+      if b == nil then return "near", kj, pr[2] end
+      if a and b then
+        local pk = a * 1048576 + b
+        if paths[pk] == nil then return "path", pk, a, b end
+      end
+    end
+    return nil
+  end
+
+  -- never evicts a path of the shown route; evicts the oldest others
+  local function store_path(pk, entry)
+    w.paths[pk] = entry
+    path_order[#path_order + 1] = pk
+    if #path_order > PATH_CAP then
+      local keep = {}
+      for _, pr in ipairs(rp and rp.pairs or rp_empty) do
+        local a, b = w.near[rp.keys[pr[1]]], w.near[rp.keys[pr[2]]]
+        if a and b then keep[a * 1048576 + b] = true end
+      end
+      local i = 1
+      while #path_order > PATH_CAP and i <= #path_order do
+        local k = path_order[i]
+        if keep[k] then
+          i = i + 1
+        else
+          w.paths[k] = nil
+          table.remove(path_order, i)
+        end
+      end
+    end
+    w.pver = w.pver + 1
+  end
+
+  w.store_path = store_path
+
+  local function search_slice(stops, budget_ms, undisc)
+    local npcs = require("Clairvoyance.npcs")
+    local c = rp_get(stops, undisc)
+    local kind, k, a, b = next_target(c)
+    if kind == nil then w.path_job = nil; return end
+    local t0 = clock()
+    local j = w.path_job
+    if kind == "near" then
+      if j == nil or j.kind ~= "near" or j.key ~= k then
+        local p = stops[a].pos
+        j = { kind = "near", key = k, job = npcs.nearest_new(w.graph, p.x, p.y, p.z) }
+        w.path_job = j
+      end
+      if npcs.nearest_step(j.job, budget_ms, clock) == "done" then
+        w.near[k] = j.job.best or false
+        w.path_job = nil
+      end
+    else
+      if j == nil or j.kind ~= "path" or j.pk ~= k then
+        j = { kind = "path", pk = k, job = npcs.path_new(w.graph, a, b) }
+        w.path_job = j
+      end
+      local st = npcs.path_step(j.job, budget_ms, clock)
+      if st ~= "running" then
+        w.last_expanded, w.last_pair = j.job.expanded, k
+        store_path(k, st == "done" and j.job.path or false)
+        w.path_job = nil
+      end
+    end
+    local ms = (clock() - t0) * 1000
+    if ms > w.search_ms_max then w.search_ms_max = ms end
+  end
+
+  -- SPEC 23.6: the path_step target; one copy slice, else one search slice
+  function w:path_step(budget_ms, route_path, undisc)
+    undisc = undisc and true or false
+    local stops = route_stops()
+    local on = stops ~= nil
+    local want = on and route_path == 1
+    if want and w.copy == nil and w.graph == nil and w.copy_tries < 3
+      and (not copy_failed or w.route_gen ~= fail_gen) then
+      w.copy, copy_failed = {}, false
+    end
+    if w.copy ~= nil then
+      local t0 = clock()
+      local ok, err = pcall(copy_run, w.copy, (budget_ms or 0) / 1000)
+      if not ok then copy_fail(err) end
+      local ms = (clock() - t0) * 1000
+      if ms > w.copy_ms_max then w.copy_ms_max = ms end
+    elseif want and w.graph ~= nil then
+      search_slice(stops, budget_ms, undisc)
+    end
+  end
+
+  function w:path_busy() return w.copy ~= nil end
+
+  function w:path_status(route_path)
+    if route_path ~= 1 or route_stops() == nil then return nil end
+    local c = w.copy
+    if c ~= nil then
+      local pct = 0
+      if c.nb ~= nil then pct = (100 * c.b) // c.nb end
+      return "path: copying " .. pct .. "%"
+    end
+    if w.graph == nil then
+      if copy_failed then return "path unavailable" end
+      return "path: copying 0%"
+    end
+    if rp == nil or not same_route(rp, route_stops(), rp.undisc) or next_target(rp) ~= nil then
+      return "path: finding"
+    end
+    return "path ready"
+  end
+
+  -- per pair { i, j, pts }: pts a flat x, y, z list (map space), nil while
+  -- not found. Rebuilt only when the route, undisc or w.paths changes.
+  function w:route_paths(undisc)
+    undisc = undisc and true or false
+    local stops = route_stops()
+    if stops == nil then return rp_empty end
+    local c = rp_get(stops, undisc)
+    if c.list_ver ~= w.pver then
+      local g = w.graph
+      local list = {}
+      for k, pr in ipairs(c.pairs) do
+        local item = { i = pr[1], j = pr[2] }
+        local a, b = w.near[c.keys[pr[1]]], w.near[c.keys[pr[2]]]
+        if g ~= nil and a and b then
+          local e = w.paths[a * 1048576 + b]
+          if e then
+            local pts = e.pts
+            if pts == nil then
+              pts = {}
+              for q, node in ipairs(e) do
+                pts[q * 3 - 2], pts[q * 3 - 1], pts[q * 3] = g.x[node], g.y[node], g.z[node]
+              end
+              e.pts = pts
+            end
+            item.pts = pts
+          end
+        end
+        list[k] = item
+      end
+      c.list, c.list_ver = list, w.pver
+    end
+    return c.list
   end
 
   return w
@@ -2068,6 +2374,59 @@ function M.game_reads()
       end
     end
     return out
+  end
+
+  -- ===== the AI walking graph (SPEC 23.6) =====
+  -- Each call re-acquires the chain (no object is held between frames) and
+  -- raises on any failed check. Field names measured in game 2026-10-23:
+  -- NodeID.blockId / indexId are 0-based list positions.
+  local function managed(o, what)
+    if o == nil or not sdk.is_managed_object(o) then error("graph: " .. what) end
+    return o
+  end
+
+  local function graph_blocks()
+    local mgr = managed(single("app.AIWorldGraphManager"), "no manager")
+    local datas = managed(G(mgr, "AIWorldGraphDatas"), "no graph datas")
+    local data = managed(C(datas, "get_Item", 0), "no graph data")
+    local gd = managed(G(data, "<GraphData>k__BackingField"), "no graph data body")
+    local graph = managed(G(gd, "AIWorldGraph"), "no graph")
+    return managed(G(graph, "Nodes"), "no blocks")
+  end
+
+  function R.graph_block_count()
+    local n = C(graph_blocks(), "get_Count")
+    if type(n) ~= "number" then error("graph: block count") end
+    return n
+  end
+
+  -- Fills out.x, out.y, out.z, out.lc per node and out.lb, out.ln per link
+  -- (the links of node 1, then node 2, ...); returns the node count.
+  function R.graph_block(i, out)
+    local block = managed(C(graph_blocks(), "get_Item", i), "no block")
+    local list = managed(G(block, "Nodes"), "no node list")
+    local n = C(list, "get_Count")
+    if type(n) ~= "number" then error("graph: node count") end
+    local x, y, z, lc, lb, ln = out.x, out.y, out.z, out.lc, out.lb, out.ln
+    local nl = 0
+    for k = 1, n do
+      local node = managed(C(list, "get_Item", k - 1), "no node")
+      local p = xyz(G(node, "_Pos"))
+      if p == nil then error("graph: node position") end
+      x[k], y[k], z[k] = p.x, p.y, p.z
+      local links = managed(G(node, "Links"), "no links")
+      local m = C(links, "get_Count")
+      if type(m) ~= "number" then error("graph: link count") end
+      for j = 0, m - 1 do
+        local id = C(links, "get_Item", j)
+        local b, ix = G(id, "blockId"), G(id, "indexId")
+        if type(b) ~= "number" or type(ix) ~= "number" then error("graph: link id") end
+        nl = nl + 1
+        lb[nl], ln[nl] = b, ix
+      end
+      lc[k] = m
+    end
+    return n
   end
 
   -- Drops every held game object (new save session).
