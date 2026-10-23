@@ -650,6 +650,7 @@ re.on_frame(function()
       pcall(wt.reset, wt)
       wt.world_origin = nil
       wt.map_origin, wt.map_origin_at = nil, nil
+      if wt.route_cid ~= nil then logmsg("route cleared: save or session changed") end
       wt.hints_open, wt.route_cid = {}, nil   -- SPEC 22.6.6
     end
     -- v9: a debug-expanded qid keeps the tree live (QNML_DEBUG, SPEC 16.10)
@@ -695,7 +696,12 @@ re.on_frame(function()
           end
         end
       end
-      if not keep then wt.route_cid = nil; wt.q("clear_route", nil) end
+      if not keep then
+        logmsg(string.format("route cleared: search %s, world %s, %d matched",
+          tostring(show.search ~= nil), tostring(snapshot ~= nil and snapshot.world ~= nil),
+          snapshot ~= nil and #(snapshot.npc_match_cids or {}) or -1))
+        wt.route_cid = nil; wt.q("clear_route", nil)
+      end
     end
     -- SPEC 19.4c: the first tick of a search asks the world for a round now
     if show.search ~= nil and not wt.search_on then wt.q("poke", nil) end
