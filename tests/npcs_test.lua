@@ -501,7 +501,9 @@ do
 
   s, _, m = N.route_stops(base, at(7), kpos,
     { area = -1, location = 7, key = -1, pos = P, overwrite = { ow } })
-  check("albert hour 7 key pos", s[3].pos.x == 2309 and s[3].pos ~= P)
+  local want = kpos(ow)
+  check("albert hour 7 key pos", s[3].pos ~= P and s[3].pos.x == want.x
+    and s[3].pos.y == want.y and s[3].pos.z == want.z)
   check("albert hour 7 current pos", s[1].pos == P)
   check("albert hour 7 matched", m == true)
 
@@ -526,6 +528,13 @@ do
 
   s = N.route_stops({ krow(0, 6, -1, -1, 5), krow(22, 24, -1, -1, 6) }, at(3), kpos, nil)
   check("no midnight merge across keys", #s == 2)
+
+  s = N.route_stops({ krow(0, 6, -1, -1, 5), krow(6, 24, -1, -1, 6) }, at(3), kpos, nil)
+  check("no run merge across keys", #s == 2)
+
+  local _, _, m7 = N.route_stops({ krow(0, 24, 5, 7, 9) }, at(3), kpos,
+    { area = 5, location = 7, pos = P })
+  check("key on one side no match", m7 == false)
 
   local _, _, m4 = N.route_stops(base, at(20), kpos,
     { area = 42, location = -1, pos = P, overwrite = { ow } })
