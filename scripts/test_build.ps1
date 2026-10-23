@@ -12,13 +12,18 @@ $havePython = $false
 try { & $Python --version | Out-Null; $havePython = ($LASTEXITCODE -eq 0) } catch { $havePython = $false }
 if (-not $havePython) { Write-Host "build tests: skipped (no Python)" }
 
-function New-Case([string]$name, [string]$stub) {
+function New-Case([string]$name, [string]$stub, [switch]$NoIcons) {
     $d = Join-Path $base $name
     $root = Join-Path $d "root"
     New-Item -ItemType Directory -Force (Join-Path $root "tools") | Out-Null
     Copy-Item (Join-Path $repo "modinfo.ini") $root
     New-Item -ItemType Directory -Force (Join-Path $root "reframework") | Out-Null
     Copy-Item (Join-Path $repo "reframework/autorun") (Join-Path $root "reframework") -Recurse
+    if (-not $NoIcons) {
+        $imgs = Join-Path $root "reframework/images/Clairvoyance"
+        New-Item -ItemType Directory -Force $imgs | Out-Null
+        Copy-Item (Join-Path $repo "reframework/images/Clairvoyance/*") $imgs -Recurse -Force
+    }
     Set-Content -Path (Join-Path $root "tools/extract_world.py") -Value $stub -Encoding ASCII
     $game = Join-Path $d "game"
     New-Item -ItemType Directory -Force $game | Out-Null
@@ -59,7 +64,11 @@ if ($havePython) {
     $zip = Join-Path $c.Out "Clairvoyance.zip"
     $ok = ($r.Code -eq 0) -and (Test-Path $zip)
     $e = @(); if ($ok) { $e = Get-Entries $zip }
-    Assert-True "zip_contents" ($ok -and ($e -contains "reframework/data/Clairvoyance_places.json") -and -not ($e | Where-Object { $_ -match $toolsRe })) "code $($r.Code) entries $($e -join ',')"
+    Assert-True "zip_contents" ($ok -and ($e -contains "reframework/data/Clairvoyance_places.json") -and ($e -contains "reframework/images/Clairvoyance/icons/index.json") -and ($e -contains "reframework/images/Clairvoyance/icons/52.png") -and -not ($e | Where-Object { $_ -match $toolsRe })) "code $($r.Code) entries $($e -join ',')"
+    # the icons folder is required: a scratch repo without it fails the build
+    $c = New-Case "t2b" $stub -NoIcons
+    $r = Invoke-Build $c @("-GameDir", $c.Game, "-KeyFile", $c.Key)
+    Assert-True "missing_icons_fails" (($r.Code -ne 0) -and ($r.Text -match "icons folder missing: reframework/images/Clairvoyance")) "code $($r.Code) text $($r.Text)"
     # prerequisites: pak, Python version, zstandard
     $c = New-Case "t6" $stub
     Remove-Item (Join-Path $c.Game "re_chunk_000.pak")

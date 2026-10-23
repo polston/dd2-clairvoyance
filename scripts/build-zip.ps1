@@ -61,6 +61,11 @@ if ($Version -ne "") {
 }
 New-Item -ItemType Directory -Force (Join-Path $stage "reframework") | Out-Null
 Copy-Item (Join-Path $Root "reframework/autorun") (Join-Path $stage "reframework") -Recurse
+$iconsSrc = Join-Path $Root "reframework/images/Clairvoyance"
+if (-not (Test-Path -LiteralPath $iconsSrc -PathType Container)) { Stop-Build "icons folder missing: reframework/images/Clairvoyance" }
+$iconsDst = Join-Path $stage "reframework/images/Clairvoyance"
+New-Item -ItemType Directory -Force $iconsDst | Out-Null
+Copy-Item (Join-Path $iconsSrc "*") $iconsDst -Recurse -Force
 
 if ($NoPlaces) { $zip = Join-Path $OutDir "Clairvoyance-noplaces.zip" }
 else {
