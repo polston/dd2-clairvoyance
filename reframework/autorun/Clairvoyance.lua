@@ -109,7 +109,11 @@ end
 wt.hints, wt.hints_open = {}, {}   -- hints by qid (npcs.parse_hints); qid -> step idx
 wt.hint_inputs = function()
   local qids, pins = {}, {}
-  for qid in pairs(wt.hints_open) do qids[#qids + 1] = qid end
+  local rb = snapshot ~= nil and snapshot.rec_by or nil
+  for qid in pairs(wt.hints_open) do
+    local rec = rb ~= nil and rb[qid] or nil
+    if rec == nil or rec.cat == "in_progress" then qids[#qids + 1] = qid end
+  end
   table.sort(qids)
   local hs = snapshot ~= nil and snapshot.hint_steps or nil
   if hs ~= nil then
@@ -144,7 +148,7 @@ wt.layer_run = function(L, name, fn)
   end
   if L.fails >= 30 then L.fails = 0; L.suspend = os.clock() + 5.0 end
 end
-wt.route_layer, wt.names_layer = wt.layer(), wt.layer()
+wt.route_layer, wt.names_layer, wt.lines_layer = wt.layer(), wt.layer(), wt.layer()
 wt.names_labels = { "Off", "Quest NPCs", "All named NPCs" }
 wt.names_stats = { drawn = 0, skipped = 0, spawned = 0 }
 -- The player's Transform (the manual player), or nil.
@@ -359,7 +363,7 @@ do
   function icons.frame()
     if ui_map ~= nil and os.clock() - icons.map_seen < 0.25 and icons:active() then
       icons:fill(icons.recs, icons.read)
-      pcall(icons.route_lines)
+      if wt.route_on then wt.layer_run(wt.lines_layer, "route lines", icons.route_lines) end
     end
     icons:draw()
   end
@@ -371,7 +375,7 @@ do
       sdk = sdk, draw = draw,
       enabled = function() return settings.enabled and settings.inventory_quest_marks end,
       related = adapter.item_related,
-      quest_flag = function(d) return d:get_field("_SubCategory") == 4 end,
+      quest_flag = function(d) return d ~= nil and d:get_field("_SubCategory") == 4 end,
       color_abgr = function() return A.argb_to_abgr(settings.color_quest_item) end,
       screen_h = function() local sz = imgui.get_display_size(); return sz and sz.y or 1080 end,
       clock = os.clock, log = logmsg,
@@ -714,6 +718,10 @@ re.on_frame(function()
     show.world_givers = wt.q("givers", {})
     show.world = wt.q("input", nil)
     show.route = (show.world or {}).route   -- SPEC 22.8.4
+    -- the frame layers do no work while there is no route and no pin
+    wt.route_on = type(show.route) == "table" and type(show.route.stops) == "table"
+      and #show.route.stops > 0
+    wt.has_pts = wt.route_on or #show.hint_pins > 0
     -- v5 (SPEC 12.3a): own pcall so a raised walk never skips compute;
     -- inside the timed window so Tick ms includes it; skipped when the
     -- category is hidden (SPEC 9.9).
@@ -1102,7 +1110,7 @@ local function camera_pos()
   local go = cam:call("get_GameObject")
   if go == nil then return nil end
   local tr = go:call("get_Transform")
-  if tr == nil then return nil end
+  if tr == nil or not sdk.is_managed_object(tr) then return nil end
   local p = tr:call("get_Position")
   if p == nil then return nil end
   return p.x, p.y, p.z
@@ -1536,7 +1544,7 @@ local function draw_detail(label, rec, qid, j, ja, spoilers)
     -- v14 (SPEC 22.11.2): the Hints node. Opening it is the spoiler gate;
     -- the step in its id starts a new step's node closed.
     local hq = wt.hints[qid]
-    if hq ~= nil and rec ~= nil and rec.cat ~= "locked" then
+    if hq ~= nil and rec ~= nil and rec.cat ~= "locked" and adapter.is_side(qid) then
       local jr = j[qid]
       local idx = rec.cat == "in_progress" and jr ~= nil
         and type(jr.step_index) == "number" and jr.step_index or nil
@@ -1592,8 +1600,7 @@ local function draw_body()
     if snapshot == nil then
       imgui.text("No results yet")
     else
-      -- core.world_rows skips route stops and hint pins, so N counts the
-      -- rows shown, not the markers
+      -- N counts the markers except route stops and hint pins (SPEC 19.4.4)
       local srows = snapshot.search_rows
       if srows == nil then
         srows = core.world_rows(snapshot.markers,
@@ -1602,8 +1609,13 @@ local function draw_body()
           r.jump_id = "Show on map##sj_" .. tostring(r.key)
         end
         snapshot.search_rows = srows
+        local nres = 0
+        for _, m in ipairs(snapshot.markers) do
+          if m.cat ~= "route_stop" and m.cat ~= "hint_pin" then nres = nres + 1 end
+        end
+        snapshot.search_n = nres
       end
-      if imgui.tree_node(string.format("Search results (%d)###qnml_sr", #srows)) then
+      if imgui.tree_node(string.format("Search results (%d)###qnml_sr", snapshot.search_n)) then
         for _, r in ipairs(srows) do
           imgui.text(r.text)
           if imgui.button(r.jump_id) then jump_pending = r.pos end
@@ -2172,7 +2184,7 @@ end)
 -- Camera space = map space minus the player's offset, read each frame; no
 -- offset means nothing this frame. Own failure counters (10.3b).
 wt.route_frame = function()
-  if not settings.enabled or not settings.show_overhead
+  if not settings.enabled or not settings.show_overhead or not wt.has_pts
     or snapshot == nil or ui_map ~= nil then return end
   local pts = snapshot.route_pts
   if pts == nil then
