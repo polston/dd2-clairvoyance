@@ -403,8 +403,11 @@ do
   check("pending not ready", not r:ready(2))
   img.state = "loaded"
   check("ready() checks live state", r:ready(2))
+  check("ready() flip requests one rebuild", st.rebuilds == 1)
   r:draw()
-  check("ready() flip: poll adds no rebuild", st.rebuilds == 0 and r.pending_n == 0)
+  check("ready() flip: poll adds no second rebuild", st.rebuilds == 1 and r.pending_n == 0)
+  r:ready(2)
+  check("repeat ready() adds none", st.rebuilds == 1)
   -- (2) fill with nil y, nil argb, nil size, non-number x
   local n0 = r.fail_count
   local recs = { { id = 1, size = 20, argb = 0xFFFFFFFF }, { id = 1, size = 20 },
@@ -420,6 +423,12 @@ do
   check("mini capped at 4096", r.mini.n == 4096 and #r.mini.pool == 4096)
   r:mini_replace()
   check("mini_replace resets the count", r.mini.n == 0)
+  -- stale drop without mini_replace: stamped at push
+  r:push("mini", 1, 1, 1, 8, 0xFFFFFFFF, 1)
+  r:push("mini", 1, 2, 2, 8, 0xFFFFFFFF, 1)
+  now = now + 0.3
+  r:draw()
+  check("stale mini dropped without mini_replace", r.mini.n == 0)
   -- (5) Image.new returning false / a number marks failed without raising
   local d2 = fake_d2dx()
   d2.Image.new = function(p) if p:find("7") then return false end return 42 end

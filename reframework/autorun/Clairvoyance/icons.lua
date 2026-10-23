@@ -150,7 +150,11 @@ function M.create(opt)
     if e == nil then return false end
     if e.state == "pending" and e.img ~= nil then
       local okr, is_ready = pcall(e.img.is_ready, e.img)
-      if okr and is_ready then e.state = "ready" end
+      if okr and is_ready then
+        e.state = "ready"
+        -- callers outside a build (overhead, minimap) may see the flip first
+        rebuild()
+      end
     end
     return e.state == "ready"
   end
@@ -170,7 +174,6 @@ function M.create(opt)
       local entry = r.images[id]
       local img = entry.img
       local settled = false
-      local okr, is_ready = pcall(img.is_ready, img)
       if entry.state ~= "pending" then
         -- settled by ready() or preload since it was queued: nothing changed for the poll
         r.pending[i] = r.pending[r.pending_n]
@@ -178,6 +181,7 @@ function M.create(opt)
         r.pending_n = r.pending_n - 1
         goto continue
       end
+      local okr, is_ready = pcall(img.is_ready, img)
       if okr and is_ready then
         entry.state = "ready"
         settled = true
