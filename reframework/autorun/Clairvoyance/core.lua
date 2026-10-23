@@ -1492,6 +1492,42 @@ local function giver_position(adapter, qid, cands, static, world_in, givers)
   return nil
 end
 
+-- v13 (SPEC 21.8.2): step reads for in-progress quests, newest data carried
+-- through prev. Never-read first, then oldest; at most STEP_CAP reads per
+-- tick and one per qid per STEP_MIN_AGE seconds.
+M.STEP_CAP = 10
+M.STEP_MIN_AGE = 5
+function M.step_reads(adapter, qids, prev, now)
+  local out = {}
+  local ranked = {}
+  for _, q in ipairs(qids) do
+    local p = prev[q]
+    if p ~= nil and now - (p.at or 0) < M.STEP_MIN_AGE then
+      out[q] = p
+    else
+      ranked[#ranked + 1] = q
+    end
+  end
+  table.sort(ranked, function(x, y)
+    local px, py = prev[x], prev[y]
+    if (px == nil) ~= (py == nil) then return px == nil end
+    if px ~= nil and px.at ~= py.at then return (px.at or 0) < (py.at or 0) end
+    return x < y
+  end)
+  local reads = 0
+  for _, q in ipairs(ranked) do
+    if reads < M.STEP_CAP then
+      reads = reads + 1
+      local ok, n = pcall(adapter.quest_step, q)
+      if not ok or type(n) ~= "number" or n ~= math.floor(n) then n = nil end
+      out[q] = { n = n, at = now }
+    elseif prev[q] ~= nil then
+      out[q] = prev[q]
+    end
+  end
+  return out
+end
+
 function M.compute(adapter, show)
   show = show or DEFAULT_SHOW
   local q = show.search
@@ -1655,7 +1691,7 @@ function M.compute(adapter, show)
       -- quests never reach this line, so they keep pos/giver nil.
       local g = groups[key]
       if g == nil then
-        g = { key = key, pos = pos, qids = {}, raw_cats = {} }
+        g = { key = key, pos = pos, qids = {}, raw_cats = {}, inprog = {} }
         groups[key] = g
         order[#order + 1] = key
       end
@@ -1666,6 +1702,7 @@ function M.compute(adapter, show)
       end
       g.qids[#g.qids + 1] = qid
       g.raw_cats[qid] = cat
+      if cat == "in_progress" then g.inprog[#g.inprog + 1] = qid end
     until true
   end
 
@@ -1687,6 +1724,27 @@ function M.compute(adapter, show)
       markers[#markers + 1] = g
     end
   end
+
+  -- v13 (SPEC 21.8): current step of a lone in-progress quest per marker.
+  local quest_steps
+  if show.step_icons and adapter.quest_step ~= nil then
+    local want, listed = {}, {}
+    for _, m in ipairs(markers) do
+      if m.cat == "in_progress" and #m.inprog == 1 and not listed[m.inprog[1]] then
+        listed[m.inprog[1]] = true
+        want[#want + 1] = m.inprog[1]
+      end
+    end
+    quest_steps = M.step_reads(adapter, want, show.prev_quest_steps or {}, show.now or 0)
+    for _, m in ipairs(markers) do
+      if m.cat == "in_progress" and #m.inprog == 1 then
+        local e = quest_steps[m.inprog[1]]
+        local n = e and e.n
+        if type(n) == "number" and n >= 1 and n <= 5 then m.step = n end
+      end
+    end
+  end
+  for _, m in ipairs(markers) do m.inprog = nil end
 
   local tracked_qid, nearest_qid, journal, journal_all
   if quests ~= nil then
@@ -1748,6 +1806,7 @@ function M.compute(adapter, show)
     nearest_qid = nearest_qid,
     journal = journal,
     journal_all = journal_all,
+    quest_steps = quest_steps,
   }
 end
 
@@ -1774,7 +1833,7 @@ function M.signature(markers, committed)
     parts[#parts + 1] = string.format("%s=%d:%d:%d[%s]{%s}{%s}<%s>",
       m.key, math.floor(c.x), math.floor(c.y), math.floor(c.z),
       table.concat(m.qids, ","), m.label or "", m.hover or "",
-      (m.cat or "") .. (m.done and "|d" or ""))
+      (m.cat or "") .. (m.done and "|d" or "") .. (m.step and ("|s" .. m.step) or ""))
   end
   table.sort(parts)
   return table.concat(parts, "|"), new_committed

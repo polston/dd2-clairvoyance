@@ -2840,5 +2840,103 @@ do
     and out[3] == shop and out[4] == chest and out[1] == q1)
 end
 
+-- st: v13 step numbers for in-progress quests (SPEC 21.8)
+do
+  local function mk(prog, steps, reads)
+    local a = fake_adapter({ acceptable = {}, progressing = prog, catalog = prog,
+      statics = (function() local t = {} for i, q in ipairs(prog) do t[q] = { x = i * 100, y = 0, z = 0 } end return t end)() })
+    a.quest_step = function(q) reads[#reads + 1] = q; return steps[q] end
+    return a
+  end
+  local function find(r, q)
+    for _, m in ipairs(r.markers) do if m.qids[1] == q then return m end end
+  end
+  local reads = {}
+  local r = core.compute(mk({ 11 }, { [11] = 3 }, reads), { in_progress = true, step_icons = true, now = 10 })
+  check("st 1: one in-progress qid at step 3", find(r, 11).step == 3 and r.quest_steps[11].n == 3)
+  check("st 1b: markers carry no scratch field", find(r, 11).inprog == nil)
+  reads = {}
+  r = core.compute(mk({ 11, 12 }, { [11] = 3, [12] = 2 }, reads),
+    { in_progress = true, step_icons = true, now = 10,
+      }) -- distinct statics: two markers, each lone
+  check("st 2a: separate markers each get a step", find(r, 11).step == 3 and find(r, 12).step == 2)
+  -- two in-progress qids at one position -> one marker -> nil
+  local a2 = mk({ 11, 12 }, { [11] = 3, [12] = 2 }, {})
+  a2.static_pos = function() return { x = 5, y = 0, z = 5 } end
+  r = core.compute(a2, { in_progress = true, step_icons = true, now = 10 })
+  check("st 2: two in-progress qids on one marker -> nil",
+    #r.markers == 1 and r.markers[1].step == nil)
+  r = core.compute(mk({ 11 }, { [11] = 6 }, {}), { in_progress = true, step_icons = true, now = 10 })
+  check("st 3: step 6 -> nil", find(r, 11).step == nil)
+  r = core.compute(mk({ 11 }, { [11] = 0 }, {}), { in_progress = true, step_icons = true, now = 10 })
+  check("st 3b: step 0 -> nil", find(r, 11).step == nil)
+  reads = {}
+  r = core.compute(mk({ 11 }, { [11] = 3 }, reads), { in_progress = true, step_icons = false, now = 10 })
+  check("st 4: setting off -> nil, zero reads, no quest_steps",
+    find(r, 11).step == nil and #reads == 0 and r.quest_steps == nil)
+  -- 5 s limit
+  reads = {}
+  local a = mk({ 11 }, { [11] = 3 }, reads)
+  r = core.compute(a, { in_progress = true, step_icons = true, now = 10 })
+  r = core.compute(a, { in_progress = true, step_icons = true, now = 14, prev_quest_steps = r.quest_steps })
+  check("st 5: within 5 s no new read, step carried", #reads == 1 and find(r, 11).step == 3)
+  r = core.compute(a, { in_progress = true, step_icons = true, now = 15, prev_quest_steps = r.quest_steps })
+  check("st 5b: at 5 s a new read", #reads == 2 and r.quest_steps[11].at == 15)
+  -- 10 per tick
+  local ids, steps = {}, {}
+  for i = 1, 12 do ids[i] = 100 + i; steps[100 + i] = 1 + (i % 5) end
+  reads = {}
+  a = mk(ids, steps, reads)
+  r = core.compute(a, { in_progress = true, step_icons = true, now = 0 })
+  local first = {}
+  for _, q in ipairs(reads) do first[q] = true end
+  check("st 6: tick 1 reads 10 never-read", #reads == 10)
+  local nread = 0
+  for _ in pairs(r.quest_steps) do nread = nread + 1 end
+  check("st 6b: 10 entries after tick 1", nread == 10)
+  for i = #reads, 1, -1 do reads[i] = nil end
+  r = core.compute(a, { in_progress = true, step_icons = true, now = 5, prev_quest_steps = r.quest_steps })
+  local unread_first = reads[1] ~= nil and not first[reads[1]] and reads[2] ~= nil and not first[reads[2]]
+  local rest_old = true
+  for i = 3, #reads do if not first[reads[i]] then rest_old = false end end
+  check("st 7: tick 2 reads the 2 never-read then the 8 oldest",
+    #reads == 10 and unread_first and rest_old)
+  -- tick 2 carried the 2 over-cap... entries: all 12 present, un-read ones keep tick-1 data
+  -- (st 7 ran tick 2 with all 10 prior eligible, so re-run the cap case with 12 never-read + carry)
+  do
+    local ids2, st2 = {}, {}
+    for i = 1, 12 do ids2[i] = 200 + i; st2[200 + i] = 1 + (i % 5) end
+    local rd = {}
+    local a3 = mk(ids2, st2, rd)
+    -- 12 prior entries aged 0..11, now = 20: all eligible, no never-read; cap reads the 10 oldest
+    local prev = {}
+    for i = 1, 12 do prev[200 + i] = { n = 1, at = i - 1 } end
+    local r3 = core.compute(a3, { in_progress = true, step_icons = true, now = 20, prev_quest_steps = prev })
+    local ok_order = #rd == 10
+    for i = 1, 10 do if rd[i] ~= 200 + i then ok_order = false end end
+    check("st 9: oldest-first order (ages 0..11 -> the 10 oldest, in order)", ok_order)
+    local n3 = 0
+    for _ in pairs(r3.quest_steps) do n3 = n3 + 1 end
+    check("st 10: over-cap entries carried unchanged",
+      n3 == 12 and r3.quest_steps[211] == prev[211] and r3.quest_steps[212] == prev[212])
+  end
+  -- in-progress category required: startable + in-progress on one position
+  do
+    local rd = {}
+    local a4 = fake_adapter({ acceptable = { 21 }, progressing = { 22 }, catalog = { 21, 22 },
+      statics = { [21] = { x = 5, y = 0, z = 5 }, [22] = { x = 5, y = 0, z = 5 } } })
+    a4.quest_step = function(q) rd[#rd + 1] = q; return 3 end
+    local r4 = core.compute(a4, { startable = true, in_progress = true, step_icons = true, now = 10 })
+    check("st 11: startable + in-progress marker gets no step, no read",
+      #r4.markers == 1 and r4.markers[1].cat == "startable" and r4.markers[1].step == nil and #rd == 0)
+  end
+  -- signature
+  local function sigof(step)
+    return (core.signature({ { key = "k", pos = { x = 0, y = 0, z = 0 }, qids = { 1 },
+      cat = "in_progress", step = step } }, {}))
+  end
+  check("st 8: signature differs between step 2 and 3", sigof(2) ~= sigof(3) and sigof(nil) ~= sigof(2))
+end
+
 if failures > 0 then os.exit(1) end
 print("core_test: all OK")
