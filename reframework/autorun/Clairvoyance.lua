@@ -1444,6 +1444,12 @@ local function install_debug()
         json.dump_file("Clairvoyance_steps.json", out)
         logmsg("dump_steps: wrote Clairvoyance_steps.json")
       end,
+      -- v14: the panel's Route toggle for one NPC search row (cid nil clears)
+      route = function(cid, name)
+        if cid == nil then wt.route_cid = nil; wt.q("clear_route", nil); return end
+        wt.route_cid = cid
+        wt.q("set_route", nil, cid, name)
+      end,
       -- v14 (SPEC 22.11.5): append the player's map-space position as a pin
       pin = function(qid, idx, label)
         local ok_t, tr = pcall(wt.player_tr)
