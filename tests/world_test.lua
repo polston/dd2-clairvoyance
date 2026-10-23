@@ -1335,7 +1335,10 @@ do
     end
     local function qdict(map)
       return obj(nil, { ContainsKey = function(k) return map[k] ~= nil end,
-        get_Item = function(k) return map[k] end })
+        get_Item = function(k)
+          if map[k] == nil then error("fake missing key") end
+          return map[k]
+        end })
     end
     local function flag()
       return obj({ _Entity = obj({ _ValueType = 1 }, { evaluate = function() return false end }) },
@@ -1415,6 +1418,16 @@ do
       one(entry(10, 101, cond(0, {}, true))) == "101")
     check("quest ov: empty array without the flag is dropped",
       one(entry(10, 101, cond(0, {}, false))) == "")
+    check("quest ov: an empty nested group is unknown, entry kept",
+      one(entry(10, 101, cond(0, { grp(0, {}) }, false))) == "101")
+    check("quest ov: an empty nested group under any is unknown, entry kept",
+      one(entry(10, 101, cond(1, { grp(1, {}) }, false))) == "101")
+    check("quest ov: no ConditionEntity is unknown, entry kept",
+      one(entry(10, 101, nil)) == "101")
+    check("quest ov: no ConditionEntity is still gated by the schedule",
+      one(entry(10, 101, nil, { disabled = true })) == "")
+    check("quest ov: no ConditionEntity is still gated by the quest",
+      one(entry(10, 101, nil, { quest = 7 }), { [7] = true }) == "")
     check("quest ov: a raised leaf evaluate is unknown, entry kept",
       one(entry(10, 101, cond(0, { step("raise") }, false))) == "101")
     check("quest ov: a raised leaf with a false sibling under all still drops",
@@ -1487,6 +1500,11 @@ do
       setup({ [1] = list({ good }) }, {})
       r = R.quest_overrides(1)
       check("quest ov: no applied entry gives {}", type(r) == "table" and #r == 0)
+      singletons["app.QuestManager"] = obj({ NpcOverrideDict = qdict({ [1] = list({ good }) }) },
+        { checkActivated = function() return true end })
+      r = R.quest_overrides(1)
+      check("quest ov: unreadable CurrentNpcOverrideDict gives {}",
+        type(r) == "table" and #r == 0)
       singletons["app.QuestManager"] = nil
       check("quest ov: unreadable QuestManager gives nil", R.quest_overrides(1) == nil)
       singletons["app.QuestManager"] = obj({ CurrentNpcOverrideDict = qdict({}) })
@@ -2537,7 +2555,7 @@ do
       w:refresh(0, true, tg)
       w:set_route(2001, "Aa")
       w:refresh(1, true, tg)
-      return stub.last_cur, d, live
+      return stub.last_cur, d, live, w
     end
     local qrows = { { start_hour = 6, end_hour = 15, area = -1, location = -1,
       priority = 0, key = 2302 } }
@@ -2555,8 +2573,10 @@ do
     check("quest ov stub: a non-table read keeps the live list",
       cur ~= nil and cur.overwrite == live)
 
-    local d
-    cur, d, live = qrun(function() return qrows end)
+    local d, w
+    cur, d, live, w = qrun(function() return qrows end)
+    check("quest ov stub: the read is timed in stats.ms.quest_overrides",
+      type(w:stats().ms.quest_overrides) == "number")
     check("quest ov stub: a non-empty read replaces the list in a copy",
       cur ~= nil and cur.overwrite == qrows and cur ~= d.cur[2001] and cur.area == 49
       and cur.location == 0)

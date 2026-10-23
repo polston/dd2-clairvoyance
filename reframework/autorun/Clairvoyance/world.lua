@@ -2210,7 +2210,7 @@ function M.game_reads()
     if kind == "group" then
       local op = int_value(G(node, "_Operator"))
       local arr = elems(G(node, "_Entity"))
-      if arr == nil or (op ~= 0 and op ~= 1) then return UNKNOWN end
+      if arr == nil or #arr == 0 or (op ~= 0 and op ~= 1) then return UNKNOWN end
       return combine(op == 0, arr, depth)
     elseif kind == "variable" then
       local ve = G(node, "_Entity")
