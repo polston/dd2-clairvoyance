@@ -1663,10 +1663,12 @@ do
     local shown = icons.draft_active and icons.draft_number_size
       or settings.route_number_size
     local c, v = imgui.slider_int("Number size##route_number_size", shown, 0, 40)
+    -- read before any other item: is_item_active reads the last item drawn
+    local active = imgui.is_item_active()
     imgui.same_line()
     imgui.text("0 = default font")
     if c then icons.draft_number_size = v; icons.draft_active = true end
-    if icons.draft_active and not imgui.is_item_active() then
+    if icons.draft_active and not active then
       icons.draft_active = false
       if su.set_key(settings, "route_number_size", icons.draft_number_size) then
         want_update = true; settings_dirty = true
