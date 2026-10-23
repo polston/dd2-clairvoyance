@@ -1221,6 +1221,75 @@ do
     check("reads: empty walk raises", not pcall(R.monster_drops))
   end
 
+  -- v14 reads: schedule rows, current row, area nodes, holders, sentiment
+  do
+    local R = world.game_reads()
+    local function rowobj(sw, ew, sd, ed, sh, eh, loc, area, pri)
+      return obj({ StartWeek = sw, EndWeek = ew, StartDay = sd, EndDay = ed,
+        StartHour = sh, EndHour = eh, Location = loc, LocalArea = area, Priority = pri })
+    end
+    local function dict(map)
+      return obj(nil, { ContainsKey = function(k) return map[k] ~= nil end,
+        get_Item = function(k) return map[k] end })
+    end
+    local curs = { [7] = obj({ LocalArea = 49, Location = 3, Pos = P(1, 2, 3) }),
+      [8] = obj({ LocalArea = -1, Location = -1, Pos = P(0, 0, 0) }) }
+    local rowsd = { [7] = list({ rowobj(1, 4, 0, 6, 6, 18, 3, 49, 0),
+      rowobj(1, 4, 0, 6, 18, 6, 3, -1, 1) }) }
+    local nodes_by_area = { [49] = list({ obj(nil, { get_Pos = function() return P(1, 0, 1) end }),
+      obj(nil, { get_Pos = function() return P(2, 0, 2) end }) }) }
+    local listed = {}
+    singletons["app.NPCManager"] = obj({
+      ["<NPCScheduleCurrentDict>k__BackingField"] = dict(curs),
+      ["<NPCScheduleDict>k__BackingField"] = dict(rowsd),
+      NPCHolderDic = obj(nil, { get_Length = function() return 3 end,
+        get_element = function(i)
+          if i == 0 then
+            return obj({ _chara = obj(nil, { get_Transform = function() return "tf" end }),
+              CharaID = 1001,
+              SentimentToPlayer = obj({ Rank = 100, Value = 137 }) })
+          elseif i == 1 then
+            return obj({ CharaID = 5 })
+          end
+          return nil
+        end }) }, { get_CurrentScheduleDay = function() return 33 end,
+        get_CurrentScheduleHour = function() return 7 end })
+    singletons["app.AIAreaManager"] = obj(nil, {
+      getKeyNodesInLocalArea = function(area) listed.area = area; return nodes_by_area[area] end,
+      getNodeListInArea = function(loc, a2, flag)
+        listed.loc, listed.a2, listed.flag = loc, a2, flag
+        return list({ obj(nil, { get_Pos = function() return P(9, 0, 9) end }) })
+      end })
+
+    local okr, rr = pcall(R.schedule_rows, 7)
+    check("reads: schedule rows shape", okr and #rr == 2 and rr[1].area == 49
+      and rr[1].start_hour == 6 and rr[1].end_hour == 18 and rr[1].location == 3
+      and rr[1].priority == 0 and rr[1].start_week == 1 and rr[1].end_day == 6
+      and rr[2].area == -1 and rr[2].priority == 1)
+    check("reads: schedule rows of an unknown cid fail", not pcall(R.schedule_rows, 99))
+    local okn, day, hour = pcall(R.schedule_now)
+    check("reads: schedule now", okn and day == 33 and hour == 7)
+    local cr = R.current_row(7)
+    check("reads: current row", cr and cr.area == 49 and cr.location == 3 and cr.pos.x == 1)
+    local c8 = R.current_row(8)
+    check("reads: current row -1/-1", c8 and c8.area == -1 and c8.location == -1)
+    check("reads: current row of an unknown cid is nil", R.current_row(99) == nil)
+    local an = R.area_nodes({ area = 49, location = 3 })
+    check("reads: area nodes by local area (integer)", an and #an == 2 and listed.area == 49)
+    local ab = R.area_nodes({ area = -1, location = 6 })
+    check("reads: area nodes by location", ab and #ab == 1 and listed.loc == 6
+      and listed.a2 == -1 and listed.flag == true)
+    check("reads: an area with no nodes is nil", R.area_nodes({ area = 50, location = 3 }) == nil)
+    check("reads: holder count", R.holder_count() == 3)
+    local h0 = R.holder_at(0)
+    check("reads: spawned holder", h0 and h0.cid == 1001 and h0.transform == "tf"
+      and h0.holder ~= nil)
+    check("reads: unspawned holder is nil", R.holder_at(1) == nil)
+    check("reads: empty slot is nil", R.holder_at(2) == nil)
+    local rk, vl = R.sentiment(h0.holder)
+    check("reads: sentiment rank and value", rk == 100 and vl == 137)
+    check("reads: unreadable sentiment raises", not pcall(R.sentiment, obj({})))
+  end
   sdk = saved_sdk
 end
 
@@ -1641,6 +1710,461 @@ do
   check("shops toggle: all off reads no shops", (f4.reads_n.shops or 0) == 0)
   local w5 = shops_world()
   check("shops toggle: early return does not fire", w5:refresh(0, true, { shops = true }) == true)
+end
+
+-- ===== v14 Task 4: NPC names, routes and spawned holders (SPEC 22.7-22.9) =====
+do
+  local stub = { calls = { route_stops = 0, area_pos = 0 } }
+  function stub.today(day, hour)
+    return { week = math.floor(day / 7) % 4 + 1, weekday = day % 7, hour = hour }
+  end
+  function stub.route_stops(rows, today, area_pos, cur)
+    stub.calls.route_stops = stub.calls.route_stops + 1
+    stub.last_cur, stub.last_today = cur, today
+    local stops, unplaced = {}, 0
+    for _, r in ipairs(rows) do
+      stub.calls.area_pos = stub.calls.area_pos + 1
+      local p = area_pos(r)
+      if p == nil then unplaced = unplaced + 1
+      else
+        stops[#stops + 1] = { from = r.start_hour, to = r.end_hour, area = r.area,
+          location = r.location, pos = p }
+      end
+    end
+    return stops, unplaced
+  end
+  function stub.anchor_node(list) return list[1] end
+  function stub.tier(rank)
+    if type(rank) ~= "number" or rank == -501 then return nil end
+    return "T" .. rank
+  end
+  package.loaded["Clairvoyance.npcs"] = nil
+  package.preload["Clairvoyance.npcs"] = function() return stub end
+
+  local function nfix()
+    local f = fixture()
+    local d = f.data
+    d.rows, d.day, d.hour, d.cur, d.area_nodes = {}, 33, 7, {}, {}
+    d.holders, d.sent, d.generic, d.hcount = {}, {}, {}, 0
+    local function rdef(name, fn)
+      f.reads[name] = function(...)
+        f.reads_n[name] = (f.reads_n[name] or 0) + 1
+        if f.fail[name] then error("fake read failure: " .. name) end
+        return fn(...)
+      end
+    end
+    rdef("schedule_rows", function(cid) return d.rows[cid] end)
+    rdef("schedule_now", function() return d.day, d.hour end)
+    rdef("current_row", function(cid) return d.cur[cid] end)
+    rdef("area_nodes", function(row) return d.area_nodes[row.area] end)
+    rdef("holder_count", function() return d.hcount end)
+    rdef("holder_at", function(i) return d.holders[i] end)
+    rdef("sentiment", function(h) return d.sent[h.cid] and d.sent[h.cid].rank,
+      d.sent[h.cid] and d.sent[h.cid].value end)
+    f.adapter.is_generic = function(cid) return d.generic[cid] == true end
+    stub.calls.route_stops, stub.calls.area_pos = 0, 0
+    return f, d
+  end
+
+  local function ids(n)
+    local t = {}
+    for i = 1, n do t[i] = 1000 + i end
+    return t
+  end
+
+  -- names: 200 per round, rerun until done, generic and nil names skipped
+  do
+    local f, d = nfix()
+    d.sched_ids = ids(450)
+    for _, c in ipairs(d.sched_ids) do d.npcname[c] = "N" .. c end
+    d.generic[1003] = true
+    d.npcname[1005] = nil
+    local w = f.new()
+    local tg = on("search")
+    check("names: round ran", w:refresh(0, true, tg))
+    check("names: first slice 200 cids read", (f.adapter_n.npc_name or 0) <= 200
+      and (f.adapter_n.npc_name or 0) >= 199)
+    local n1 = w:input().npcs
+    check("names: 198 entries after round 1 (generic and nil skipped)",
+      n1 ~= nil and #n1 == 198)
+    check("names: not done sets rerun (next refresh runs inside throttle)",
+      w:refresh(0.5, true, tg) == true)
+    check("names: 2 rounds read 400 cids", #w:input().npcs == 398)
+    check("names: round 3 still inside throttle runs", w:refresh(1, true, tg) == true)
+    check("names: all 450 less 2 after round 3", #w:input().npcs == 448)
+    local seen = {}
+    for _, e in ipairs(w:input().npcs) do seen[e.cid] = e.name end
+    check("names: generic excluded", seen[1003] == nil)
+    check("names: nil name excluded", seen[1005] == nil)
+    check("names: name carried", seen[1010] == "N1010")
+    check("names: entry has no pos without npc_cids", w:input().npcs[1].pos == nil
+      and w:input().npcs[1].alive == nil)
+    check("names: npcs_first_ms set", w:stats().npcs_first_ms ~= nil)
+    check("names: finished, no rerun", w:refresh(1.5, true, tg) == false)
+    f.clear_counts()
+    w:poke()
+    w:refresh(20, true, tg)
+    check("names: finished list is not re-read", (f.adapter_n.npc_name or 0) == 0)
+    w:reset()
+    check("names: reset clears npcs_first_ms", w:stats().npcs_first_ms == nil)
+    check("names: reset empties the published list", w:input() == nil)
+    w:refresh(30, true, tg)
+    check("names: after reset the list rebuilds from the start",
+      #w:input().npcs == 198)
+  end
+
+  -- search off: no name read
+  do
+    local f, d = nfix()
+    d.sched_ids = ids(10)
+    for _, c in ipairs(d.sched_ids) do d.npcname[c] = "N" .. c end
+    local w = f.new()
+    w:refresh(0, true, on("chests"))
+    check("names: search off reads no name", (f.adapter_n.npc_name or 0) == 0)
+    check("names: search off publishes no npcs", w:input().npcs == nil)
+  end
+
+  -- positions only for npc_cids; discovered key per cid
+  do
+    local f, d = nfix()
+    d.sched_ids = { 2001, 2002 }
+    d.npcname[2001], d.npcname[2002] = "Aa", "Bb"
+    d.npcpos[2001] = P(10, 0, 10)
+    d.npcpos[2002] = P(900, 0, 900)
+    d.icons = {
+      { type = K.SETTLEMENT_TYPE, pos = P(0, 0, 0), disp_id = "a", icon_id = 1 },
+      { type = K.SETTLEMENT_TYPE, pos = P(1000, 0, 1000), disp_id = "b", icon_id = 2 } }
+    d.msgs = { a = "Town A", b = "Town B" }
+    d.icons_found = { [2] = true }
+    d.disc_n = 1
+    local w = f.new()
+    w:refresh(0, true, { search = true, npc_cids = { 2001 } })
+    local by = {}
+    for _, e in ipairs(w:input().npcs) do by[e.cid] = e end
+    check("npc pos: listed cid has pos", by[2001].pos ~= nil and by[2001].pos.x == 10)
+    check("npc pos: listed cid alive", by[2001].alive == true)
+    check("npc pos: listed cid discovered false (near town A)",
+      by[2001].discovered == false)
+    check("npc pos: other cid has no pos", by[2002].pos == nil)
+    check("npc pos: other cid has no alive", by[2002].alive == nil)
+    check("npc pos: other cid has no discovered", by[2002].discovered == nil)
+    check("npc pos: one alive read", (f.adapter_n.npc_alive or 0) >= 1)
+    -- cached under "n:<cid>": a move to the discovered town keeps the answer
+    d.npcpos[2001] = P(990, 0, 990)
+    w:poke()
+    w:refresh(1, true, { search = true, npc_cids = { 2001, 2002 } })
+    by = {}
+    for _, e in ipairs(w:input().npcs) do by[e.cid] = e end
+    check("npc pos: discovered cached under n:cid", by[2001].discovered == false)
+    check("npc pos: second cid computed on its own key", by[2002].discovered == true)
+  end
+
+  -- dead and unpositioned
+  do
+    local f, d = nfix()
+    d.sched_ids = { 2001 }
+    d.npcname[2001] = "Aa"
+    d.alive = false
+    local w = f.new()
+    w:refresh(0, true, { search = true, npc_cids = { 2001 } })
+    local e = w:input().npcs[1]
+    check("npc pos: dead cid alive == false", e.alive == false)
+    check("npc pos: no position leaves pos nil", e.pos == nil and e.discovered == nil)
+  end
+
+  -- npc_cids change runs a round inside the throttle
+  do
+    local f, d = nfix()
+    d.sched_ids = { 2001 }
+    d.npcname[2001] = "Aa"
+    local w = f.new()
+    w:refresh(0, true, { search = true, npc_cids = { 2002, 2001 } })
+    check("sig: unchanged set (other order) does not run",
+      w:refresh(1, true, { search = true, npc_cids = { 2001, 2002 } }) == false)
+    check("sig: changed set runs a round",
+      w:refresh(2, true, { search = true, npc_cids = { 2001 } }) == true)
+    check("sig: nil set differs from a set",
+      w:refresh(3, true, { search = true }) == true)
+    check("sig: nil again does not run",
+      w:refresh(4, true, { search = true }) == false)
+  end
+
+  -- route
+  local function rows_of(...)
+    local t = {}
+    for _, r in ipairs({ ... }) do
+      t[#t + 1] = { start_week = 1, end_week = 4, start_day = 0, end_day = 6,
+        start_hour = r[1], end_hour = r[2], area = r[3], location = r[4] or 0,
+        priority = 0 }
+    end
+    return t
+  end
+
+  do
+    local f, d = nfix()
+    d.sched_ids = { 2001 }
+    d.npcname[2001] = "Aa"
+    d.rows[2001] = rows_of({ 6, 18, 49 }, { 18, 6, 46 }, { 0, 1, 99 })
+    d.cur[2001] = { area = 49, location = 0, pos = P(5, 5, 5) }
+    d.area_nodes[49] = { P(1, 0, 1), P(2, 0, 2) }
+    d.area_nodes[46] = { P(3, 0, 3) }
+    d.icons = {
+      { type = K.SETTLEMENT_TYPE, pos = P(0, 0, 0), disp_id = "a", icon_id = 1 } }
+    d.msgs = { a = "Town A" }
+    d.icons_found = {}
+    d.disc_n = 1
+    local w = f.new()
+    local tg = on("search")
+    w:refresh(0, true, tg)
+    check("route: none until set", w:input().route == nil)
+    w:set_route(2001, "Aa")
+    check("route: set_route then refresh builds on that call",
+      w:refresh(1, true, tg) == true)
+    local r = w:input().route
+    check("route: cid and name", r ~= nil and r.cid == 2001 and r.name == "Aa")
+    check("route: stops from route_stops", r and #r.stops == 2 and r.stops[1].area == 49
+      and r.stops[1].pos.x == 1 and r.stops[2].area == 46)
+    check("route: unplaced carried", r and r.unplaced == 1)
+    check("route: no error", r and r.err == nil)
+    check("route: cur passed", stub.last_cur and stub.last_cur.area == 49
+      and stub.last_cur.pos.x == 5)
+    check("route: today passed", stub.last_today and stub.last_today.hour == 7
+      and stub.last_today.weekday == 5)
+    check("route: stop discovered asked (undiscovered town)",
+      r and r.stops[1].discovered == false)
+    -- same area key reuses the first answer: move the settlement answer
+    check("route: second stop discovered false too", r and r.stops[2].discovered == false)
+    check("route: one build", stub.calls.route_stops == 1)
+    -- unchanged hour reuses cache
+    w:poke()
+    w:refresh(2, true, tg)
+    check("route: unchanged hour reuses the cache", stub.calls.route_stops == 1
+      and w:input().route and #w:input().route.stops == 2)
+    check("route: cache reads rows once", (f.reads_n.schedule_rows or 0) == 1)
+    -- hour change rebuilds once
+    d.hour = 8
+    w:poke()
+    w:refresh(3, true, tg)
+    check("route: hour change rebuilds", stub.calls.route_stops == 2)
+    w:poke()
+    w:refresh(4, true, tg)
+    check("route: next round at the same hour reuses", stub.calls.route_stops == 2)
+    -- clear
+    w:clear_route()
+    check("route: clear_route drops the published route", w:input().route == nil)
+    w:poke()
+    w:refresh(5, true, tg)
+    check("route: stays cleared", w:input().route == nil)
+    -- set again, then reset clears it
+    w:set_route(2001, "Aa")
+    w:refresh(6, true, tg)
+    check("route: set again builds", w:input().route ~= nil)
+    w:reset()
+    w:refresh(7, true, tg)
+    check("route: reset clears the route", w:input().route == nil)
+  end
+
+  -- route errors
+  do
+    local f, d = nfix()
+    d.sched_ids = { 2001 }
+    d.npcname[2001] = "Aa"
+    d.rows[2001] = rows_of({ 6, 18, 49 })
+    d.cur[2001] = { area = 49, location = 0 }
+    d.area_nodes[49] = { P(1, 0, 1) }
+    local w = f.new()
+    local tg = on("search")
+    f.fail.schedule_rows = true
+    w:set_route(2001, "Aa")
+    w:refresh(0, true, tg)
+    local r = w:input().route
+    check("route err: raising schedule_rows", r ~= nil and r.err == "route unavailable"
+      and r.cid == 2001 and r.name == "Aa" and r.stops == nil)
+    f.fail.schedule_rows = nil
+    d.hour = 9
+    w:set_route(2001, "Aa")
+    w:refresh(1, true, tg)
+    check("route err: recovers when the read works", w:input().route.err == nil
+      and #w:input().route.stops == 1)
+    -- -1/-1 current row
+    local calls = stub.calls.route_stops
+    d.cur[2001] = { area = -1, location = -1, pos = P(1, 1, 1) }
+    d.hour = 10
+    w:set_route(2001, "Aa")
+    w:refresh(2, true, tg)
+    r = w:input().route
+    check("route err: -1/-1 is route unavailable", r.err == "route unavailable"
+      and r.stops == nil)
+    check("route err: -1/-1 never calls route_stops", stub.calls.route_stops == calls)
+    -- raising route_stops leaves no partial stops
+    d.cur[2001] = { area = 49, location = 0 }
+    local orig = stub.route_stops
+    stub.route_stops = function() error("boom") end
+    d.hour = 11
+    w:set_route(2001, "Aa")
+    w:refresh(3, true, tg)
+    stub.route_stops = orig
+    r = w:input().route
+    check("route err: raising route_stops gives err, no stops",
+      r.err == "route unavailable" and r.stops == nil and r.unplaced == nil)
+    -- schedule_now failure
+    f.fail.schedule_now = true
+    w:set_route(2001, "Aa")
+    w:refresh(4, true, tg)
+    check("route err: schedule_now failure", w:input().route.err == "route unavailable")
+  end
+
+  -- area_nodes through anchor_node; missing nodes leave a stop unplaced
+  do
+    local f, d = nfix()
+    d.sched_ids = { 2001 }
+    d.npcname[2001] = "Aa"
+    d.rows[2001] = rows_of({ 6, 18, 49 }, { 18, 6, 77 })
+    d.cur[2001] = { area = 49, location = 0 }
+    d.area_nodes[49] = { P(9, 0, 9), P(1, 0, 1) }
+    d.area_nodes[77] = {}
+    local w = f.new()
+    w:set_route(2001, "Aa")
+    w:refresh(0, true, on("search"))
+    local r = w:input().route
+    check("route: anchor_node picks the stop position", #r.stops == 1
+      and r.stops[1].pos.x == 9)
+    check("route: empty node list stays unplaced", r.unplaced == 1)
+  end
+
+  -- spawned holders
+  local function holder(cid, tf) return { cid = cid, transform = tf or { cid = cid }, holder = { cid = cid } } end
+
+  do
+    local f, d = nfix()
+    d.hcount = 1706
+    d.holders[10] = holder(3001)
+    d.holders[300] = holder(3002)
+    d.holders[1705] = holder(3003)
+    d.generic[3002] = true
+    d.npcname[3001], d.npcname[3003] = "Aa", "Cc"
+    d.npcname[3002] = "Gen"
+    d.sent[3001] = { rank = 100, value = 137 }
+    d.sent[3003] = { rank = -30, value = 2 }
+    local w = f.new()
+    check("spawned: empty before a pass", #w.spawned == 0)
+    for i = 1, 8 do w:spawned_step(200) end
+    check("spawned: not complete after 8 calls", #w.spawned == 0)
+    w:spawned_step(200)
+    check("spawned: complete after 9 calls", #w.spawned == 2)
+    local by = {}
+    for _, e in ipairs(w.spawned) do by[e.cid] = e end
+    check("spawned: generic holder skipped", by[3002] == nil)
+    check("spawned: entry fields", by[3001] and by[3001].name == "Aa"
+      and by[3001].tier == "T100" and by[3001].value == 137
+      and by[3001].transform ~= nil and type(by[3001].tier_at) == "number")
+    check("spawned: second entry", by[3003] and by[3003].tier == "T-30")
+    check("spawned: every slot read once", (f.reads_n.holder_at or 0) == 1706)
+
+    -- a nil-named holder is skipped
+    local f2, d2 = nfix()
+    d2.hcount = 5
+    d2.holders[1] = holder(3001)
+    d2.holders[2] = holder(3002)
+    d2.npcname[3001] = "Aa"
+    local w2 = f2.new()
+    w2:spawned_step(200)
+    check("spawned: nil-named holder skipped", #w2.spawned == 1 and w2.spawned[1].cid == 3001)
+
+    -- a raising holder_at slot is skipped, the pass continues
+    local f3, d3 = nfix()
+    d3.hcount = 4
+    d3.holders[0] = holder(3001)
+    d3.holders[3] = holder(3002)
+    d3.npcname[3001], d3.npcname[3002] = "Aa", "Bb"
+    local orig = f3.reads.holder_at
+    f3.reads.holder_at = function(i) if i == 1 then error("freed") end return orig(i) end
+    local w3 = f3.new()
+    w3:spawned_step(200)
+    check("spawned: a raising slot is skipped", #w3.spawned == 2)
+  end
+
+  -- sentiment: once per second, raising keeps the entry
+  do
+    local f, d = nfix()
+    d.hcount = 3
+    d.holders[0] = holder(3001)
+    d.holders[1] = holder(3002)
+    d.npcname[3001], d.npcname[3002] = "Aa", "Bb"
+    d.sent[3001] = { rank = 200, value = 1 }
+    d.sent[3002] = { rank = 100, value = 2 }
+    local w = f.new()
+    w:spawned_step(200)
+    check("sentiment: read once per cid", f.reads_n.sentiment == 2)
+    f.clock_t = f.clock_t + 0.5
+    w:spawned_step(200)
+    check("sentiment: second pass within 1 s does not re-read", f.reads_n.sentiment == 2)
+    check("sentiment: cached tier kept", w.spawned[1].tier ~= nil and #w.spawned == 2)
+    f.clock_t = f.clock_t + 1
+    w:spawned_step(200)
+    check("sentiment: re-read after 1 s", f.reads_n.sentiment == 4)
+
+    -- raising sentiment keeps the entry with tier nil
+    local f2, d2 = nfix()
+    d2.hcount = 2
+    d2.holders[0] = holder(3001)
+    d2.npcname[3001] = "Aa"
+    f2.fail.sentiment = true
+    local w2 = f2.new()
+    w2:spawned_step(200)
+    check("sentiment: raising keeps the entry", #w2.spawned == 1)
+    check("sentiment: raising leaves tier nil", w2.spawned[1].tier == nil
+      and w2.spawned[1].value == nil)
+    local n = f2.reads_n.sentiment
+    w2:spawned_step(200)
+    check("sentiment: a failed read is not retried inside 1 s", f2.reads_n.sentiment == n)
+
+    -- a full pass replaces the list
+    d2.holders[0] = nil
+    f2.clock_t = f2.clock_t + 2
+    w2:spawned_step(200)
+    check("spawned: a full pass replaces the list", #w2.spawned == 0)
+
+    -- reset empties the list
+    local f5, d5 = nfix()
+    d5.hcount = 2
+    d5.holders[0] = holder(3001)
+    d5.npcname[3001] = "Aa"
+    local w5 = f5.new()
+    w5:spawned_step(200)
+    w5:reset()
+    check("spawned: reset empties the list", #w5.spawned == 0)
+    w5:spawned_step(200)
+    check("spawned: walk works after reset", #w5.spawned == 1)
+    -- a count that is unreadable does nothing and does not raise
+    local f6, d6 = nfix()
+    f6.fail.holder_count = true
+    local w6 = f6.new()
+    local ok = pcall(w6.spawned_step, w6, 200)
+    check("spawned: unreadable count does not raise", ok and #w6.spawned == 0)
+  end
+
+  -- reset empties names, route, spawned together
+  do
+    local f, d = nfix()
+    d.sched_ids = { 2001 }
+    d.npcname[2001] = "Aa"
+    d.rows[2001] = rows_of({ 6, 18, 49 })
+    d.cur[2001] = { area = 49, location = 0 }
+    d.area_nodes[49] = { P(1, 0, 1) }
+    d.hcount = 1
+    d.holders[0] = holder(2001)
+    local w = f.new()
+    w:set_route(2001, "Aa")
+    w:refresh(0, true, on("search"))
+    w:spawned_step(200)
+    check("reset all: precondition", #w:input().npcs == 1 and w:input().route ~= nil
+      and #w.spawned == 1)
+    w:reset()
+    w:refresh(1, true, on("search"))
+    check("reset all: route gone", w:input().route == nil)
+    check("reset all: spawned gone", #w.spawned == 0)
+  end
 end
 
 if failures > 0 then os.exit(1) end

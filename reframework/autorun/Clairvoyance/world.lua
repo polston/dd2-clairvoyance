@@ -9,6 +9,8 @@ local M = {}
 
 M.K = {
   WORLD_ROUND = 10.0,
+  NPC_NAME_SLICE = 200,
+  SENTIMENT_EVERY = 1.0,
   SAVE_EVERY = 60,
   REMOVE_RADIUS = 50,
   REMOVE_NEIGHBOURS = 3,
@@ -196,9 +198,14 @@ function M.new(a, reads, io)
       nodes = nil, shops = nil, sched_ids = nil, shop_of = {}, shop_cids = nil,
       settle = nil, msgs = {}, disc_set = nil, disc_count = nil,
       disc_cache = {}, need_sort = true, file_monsters = {}, held = {}, live = {},
-      drop_ids = nil }
+      drop_ids = nil,
+      -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
+      npc_list = {}, npc_next = 1, npc_done = false, npc_sig = "",
+      route_cid = nil, route_name = nil, route_cache = nil,
+      sent = {}, walk_i = 0, walk_n = 0, walk_acc = {} }
   end
   S = new_session()
+  w.spawned = {}
 
   -- ----- places file -----
   local function parse_places(v)
@@ -920,6 +927,134 @@ function M.new(a, reads, io)
 
   local function pcopy(e) return { x = e.x, y = e.y, z = e.z } end
 
+  -- ----- NPC names, positions and the route (SPEC 22.7, 22.8) -----
+  local function sched_ids_list()
+    if S.sched_ids == nil then
+      local ok, v = call("schedule_ids")
+      if ok and type(v) == "table" then S.sched_ids = v end
+    end
+    return S.sched_ids
+  end
+
+  local function cid_set(list)
+    local set = {}
+    for _, c in ipairs(type(list) == "table" and list or {}) do set[c] = true end
+    return set
+  end
+
+  local function cid_signature(list)
+    if type(list) ~= "table" or #list == 0 then return "" end
+    local t = {}
+    for i, c in ipairs(list) do t[i] = tostring(c) end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+
+  local function is_generic(cid)
+    if type(a.is_generic) ~= "function" then return false end
+    local ok, g = pcall(a.is_generic, cid)
+    return ok and g == true
+  end
+
+  local function read_name(cid)
+    local ok, nm = pcall(a.npc_name, cid)
+    if ok and type(nm) == "string" and nm ~= "" then return nm end
+    return nil
+  end
+
+  -- builds up to NPC_NAME_SLICE more names; sets rerun until the list is done
+  local function build_names()
+    if S.npc_done then return end
+    local ids = sched_ids_list()
+    if ids == nil then return end
+    local last = math.min(S.npc_next + M.K.NPC_NAME_SLICE - 1, #ids)
+    for i = S.npc_next, last do
+      local cid = ids[i]
+      if not is_generic(cid) then
+        local nm = read_name(cid)
+        if nm ~= nil then S.npc_list[#S.npc_list + 1] = { cid = cid, name = nm } end
+      end
+    end
+    S.npc_next = last + 1
+    if S.npc_next > #ids then
+      S.npc_done = true
+    else
+      rerun = true
+    end
+  end
+
+  local function npc_round(tg)
+    local t0 = clock()
+    build_names()
+    if S.npc_done and stats.npcs_first_ms == nil then
+      stats.npcs_first_ms = (clock() - t0) * 1000
+    end
+    local want = cid_set(tg.npc_cids)
+    local out = {}
+    for i, e in ipairs(S.npc_list) do
+      local n = { cid = e.cid, name = e.name }
+      if want[e.cid] then
+        local ok, alive = pcall(a.npc_alive, e.cid)
+        n.alive = ok and alive == true
+        n.pos = seller_pos(e.cid)
+        if n.pos ~= nil then n.discovered = discovered("n:" .. e.cid, n.pos) end
+      end
+      out[i] = n
+    end
+    S.npc_sig = cid_signature(tg.npc_cids)
+    return out
+  end
+
+  local ROUTE_ERR = "route unavailable"
+
+  -- the raw route for the set NPC at this hour; nil for an NPC with no
+  -- route (Ruling 3); raises on any failed read
+  local function build_route(npcs, cid, day, hour)
+    local ok, cur = pcall(reads.current_row, cid)
+    if not ok then error("current_row failed") end
+    if type(cur) == "table" and cur.area == -1 and cur.location == -1 then
+      return nil
+    end
+    local okr, rows = pcall(reads.schedule_rows, cid)
+    if not okr or type(rows) ~= "table" then error("schedule_rows failed") end
+    local function area_pos(row)
+      local okn, list = pcall(reads.area_nodes, row)
+      if not okn or type(list) ~= "table" then return nil end
+      return npcs.anchor_node(list)
+    end
+    local stops, unplaced = npcs.route_stops(rows, npcs.today(day, hour), area_pos,
+      type(cur) == "table" and cur or nil)
+    if type(stops) ~= "table" then error("route_stops failed") end
+    return { stops = stops, unplaced = unplaced or 0 }
+  end
+
+  local function route_round()
+    local cid, name = S.route_cid, S.route_name
+    if cid == nil then return nil end
+    local errt = { cid = cid, name = name, err = ROUTE_ERR }
+    if type(reads.schedule_now) ~= "function" then return errt end
+    local okn, day, hour = pcall(reads.schedule_now)
+    if not okn or type(day) ~= "number" or type(hour) ~= "number" then return errt end
+    local c = S.route_cache
+    if c == nil or c.cid ~= cid or c.hour ~= hour then
+      local ok, built = pcall(function()
+        return build_route(require("Clairvoyance.npcs"), cid, day, hour)
+      end)
+      c = { cid = cid, hour = hour, value = ok and built or nil }
+      S.route_cache = c
+    end
+    if c.value == nil then return errt end
+    refresh_discovery()
+    local stops = {}
+    for i, st in ipairs(c.value.stops) do
+      local n = {}
+      for k, v in pairs(st) do n[k] = v end
+      if valid_pos(st.pos) then n.discovered = discovered("r:" .. tostring(st.area), st.pos) end
+      stops[i] = n
+    end
+    return { cid = cid, name = name, stops = stops, unplaced = c.value.unplaced }
+  end
+
   -- ----- the round -----
   local function round(now, tg)
     stats.hits, stats.misses = 0, 0
@@ -1134,6 +1269,8 @@ function M.new(a, reads, io)
     for _, cat in ipairs({ "chests", "treasure", "tokens", "beetles", "monsters", "sellers" }) do
       stats.known[cat] = #out[cat]
     end
+    if tg.search then out.npcs = npc_round(tg) end
+    out.route = route_round()
     return out
   end
 
@@ -1170,7 +1307,10 @@ function M.new(a, reads, io)
       or tg.sellers or tg.search or tg.shops) then
       return false
     end
-    if last_round ~= nil and now - last_round < M.K.WORLD_ROUND then return false end
+    if last_round ~= nil and now - last_round < M.K.WORLD_ROUND
+      and not (tg.search and cid_signature(tg.npc_cids) ~= S.npc_sig) then
+      return false
+    end
     last_round, last_now = now, now
     rerun = false
     local rt0 = clock()
@@ -1191,6 +1331,55 @@ function M.new(a, reads, io)
 
   -- the next refresh runs a round even inside the throttle window
   function w:poke() last_round = nil end
+
+  -- SPEC 22.8: the route NPC; the next refresh builds it
+  function w:set_route(cid, name)
+    S.route_cid, S.route_name, S.route_cache = cid, name, nil
+    last_round = nil
+  end
+
+  function w:clear_route()
+    S.route_cid, S.route_name, S.route_cache = nil, nil, nil
+    if input_tbl ~= nil then input_tbl.route = nil end
+  end
+
+  -- SPEC 22.9.3: walk n holder slots per call; a finished pass replaces
+  -- w.spawned. Sentiment is re-read at most once per second per cid.
+  function w:spawned_step(n)
+    if S.walk_i == 0 then
+      local okc, count = pcall(reads.holder_count)
+      if not okc or type(count) ~= "number" or count <= 0 then return end
+      S.walk_n, S.walk_acc = count, {}
+    end
+    local npcs = require("Clairvoyance.npcs")
+    local now = clock()
+    local last = math.min(S.walk_i + n, S.walk_n)
+    for i = S.walk_i, last - 1 do
+      local ok, h = pcall(reads.holder_at, i)
+      if ok and type(h) == "table" and h.cid ~= nil and not is_generic(h.cid) then
+        local nm = read_name(h.cid)
+        if nm ~= nil then
+          local s = S.sent[h.cid]
+          if s == nil or now - s.at >= M.K.SENTIMENT_EVERY then
+            local oks, rank, value = pcall(reads.sentiment, h.holder)
+            local tier = nil
+            if oks then
+              local okt, t = pcall(npcs.tier, rank)
+              if okt then tier = t end
+            end
+            s = { at = now, tier = tier, value = oks and value or nil }
+            S.sent[h.cid] = s
+          end
+          S.walk_acc[#S.walk_acc + 1] = { cid = h.cid, name = nm,
+            transform = h.transform, tier = s.tier, value = s.value, tier_at = s.at }
+        end
+      end
+    end
+    S.walk_i = last
+    if last >= S.walk_n then
+      w.spawned, S.walk_i, S.walk_acc = S.walk_acc, 0, {}
+    end
+  end
 
   function w:givers()
     if givers_cache ~= nil and givers_rev == rev then return givers_cache end
@@ -1220,7 +1409,9 @@ function M.new(a, reads, io)
     last_round = nil
     unlisted = 0
     stats.search_first_ms = nil
+    stats.npcs_first_ms = nil
     stats.drops_first_ms, stats.drops = nil, nil
+    w.spawned = {}
   end
 
   function w:save(reason)
@@ -1247,7 +1438,8 @@ function M.new(a, reads, io)
         load_ms = places.load_ms, slow = places.slow, pak = places.pak },
       index = { hits = stats.hits, misses = stats.misses },
       unlisted = unlisted, ms = ms, known = known, monster_ids = ids,
-      search_first_ms = stats.search_first_ms, round_ms = stats.round_ms,
+      search_first_ms = stats.search_first_ms, npcs_first_ms = stats.npcs_first_ms,
+      round_ms = stats.round_ms,
       drops_first_ms = stats.drops_first_ms, drops = drops,
       rounds = stats.rounds, saves = stats.saves, save_ms = stats.save_ms,
       last_save_reason = stats.last_save_reason,
@@ -1487,6 +1679,96 @@ function M.game_reads()
     local d = sched_dict()
     if C(d, "ContainsKey", cid) ~= true then return nil end
     return xyz(G(C(d, "get_Item", cid), "Pos"))
+  end
+
+  -- ===== v14 reads (SPEC 22.4, 22.8, 22.9; Rulings 1, 3-5) =====
+  local function npc_dict(field)
+    return G(single("app.NPCManager"), field)
+  end
+
+  -- Rows of one cid's daily schedule (npcs.route_stops row shape).
+  function R.schedule_rows(cid)
+    local d = npc_dict("<NPCScheduleDict>k__BackingField")
+    if C(d, "ContainsKey", cid) ~= true then error("no schedule rows") end
+    local out = {}
+    local ok = each(C(d, "get_Item", cid), function(r)
+      if r == nil then return end
+      out[#out + 1] = { start_week = int_value(G(r, "StartWeek")),
+        end_week = int_value(G(r, "EndWeek")),
+        start_day = int_value(G(r, "StartDay")), end_day = int_value(G(r, "EndDay")),
+        start_hour = int_value(G(r, "StartHour")), end_hour = int_value(G(r, "EndHour")),
+        area = int_value(G(r, "LocalArea")), location = int_value(G(r, "Location")),
+        priority = int_value(G(r, "Priority")) }
+    end)
+    if not ok then error("schedule rows unreadable") end
+    return out
+  end
+
+  function R.schedule_now()
+    local nm = single("app.NPCManager")
+    local day, hour = C(nm, "get_CurrentScheduleDay"), C(nm, "get_CurrentScheduleHour")
+    if type(day) ~= "number" or type(hour) ~= "number" then
+      error("schedule time unreadable")
+    end
+    return day, hour
+  end
+
+  -- NPCScheduleCurrent of one cid: area, location, map-space position.
+  function R.current_row(cid)
+    local d = sched_dict()
+    if C(d, "ContainsKey", cid) ~= true then return nil end
+    local e = C(d, "get_Item", cid)
+    if e == nil then return nil end
+    return { area = int_value(G(e, "LocalArea")), location = int_value(G(e, "Location")),
+      pos = xyz(G(e, "Pos")) }
+  end
+
+  -- Node positions of a row's area (Ruling 4); nil when it has none.
+  function R.area_nodes(row)
+    local am = single("app.AIAreaManager")
+    local list
+    if row.area ~= nil and row.area >= 0 then
+      list = C(am, "getKeyNodesInLocalArea", row.area)
+    else
+      list = C(am, "getNodeListInArea", row.location, -1, true)
+    end
+    if list == nil then return nil end
+    local out = {}
+    each(list, function(n)
+      local p = xyz(C(n, "get_Pos"))
+      if p ~= nil then out[#out + 1] = p end
+    end)
+    if #out == 0 then return nil end
+    return out
+  end
+
+  -- ===== spawned holders (SPEC 22.9.3, Ruling 5) =====
+  local function holder_dic() return npc_dict("NPCHolderDic") end
+
+  function R.holder_count()
+    local dic = holder_dic()
+    local n = C(dic, "get_Length")
+    if type(n) ~= "number" then n = C(dic, "get_Count") end
+    if type(n) ~= "number" then error("holder count unreadable") end
+    return n
+  end
+
+  -- Spawned holders only (a non-nil _chara); get_element, since
+  -- get_elements stops at the first nil slot.
+  function R.holder_at(i)
+    local h = C(holder_dic(), "get_element", i)
+    if h == nil then return nil end
+    local chara = G(h, "_chara")
+    if chara == nil then return nil end
+    local cid = u32(int_value(G(h, "CharaID")))
+    if cid == nil then return nil end
+    return { cid = cid, transform = C(chara, "get_Transform"), holder = h }
+  end
+
+  function R.sentiment(holder)
+    local s = G(holder, "SentimentToPlayer")
+    if s == nil then error("sentiment unreadable") end
+    return int_value(G(s, "Rank")), int_value(G(s, "Value"))
   end
 
   function R.schedule_ids()
