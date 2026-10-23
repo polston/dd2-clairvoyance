@@ -7,11 +7,27 @@ import json
 import sys
 
 
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def check_pin(p, pos):
+    """Raises ValueError naming the pin position when a pin is malformed."""
+    ok = (isinstance(p, dict)
+          and _num(p.get("qid")) and p["qid"] == int(p["qid"])
+          and _num(p.get("idx")) and p["idx"] == int(p["idx"]) and p["idx"] >= 0
+          and all(_num(p.get(k)) for k in ("x", "y", "z"))
+          and isinstance(p.get("label"), str))
+    if not ok:
+        raise ValueError("pin %d is malformed" % pos)
+
+
 def merge(hints, pins):
     """Merges pins into hints in place; returns the number added."""
     added = 0
-    for p in pins:
-        entry = hints.setdefault(str(p["qid"]), {})
+    for pos, p in enumerate(pins):
+        check_pin(p, pos)
+        entry = hints.setdefault(str(int(p["qid"])), {})
         steps = entry.setdefault("steps", {})
         step = steps.setdefault(str(int(p["idx"])), {})
         lst = step.setdefault("pins", [])

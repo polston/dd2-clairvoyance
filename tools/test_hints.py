@@ -59,6 +59,20 @@ class Check(unittest.TestCase):
         self.assertIn("qid 5", out)
         self.assertIn(words(8), out)
 
+    def test_paraphrase_passes(self):
+        ref = hints_check.normalize(
+            "Head north along the river road until you reach the broken bridge, "
+            "then speak to the ferryman waiting on the far bank.")
+        mine = hints_check.normalize(
+            "Follow the river road to the collapsed bridge and talk with the ferryman across the water.")
+        self.assertEqual(hints_check.shared_runs(mine, ref), [])
+
+    def test_non_numeric_hint_key_not_read(self):
+        os.makedirs(os.path.join(self.d.name, "ref", "x"), exist_ok=True)
+        with open(os.path.join(self.ref, "..", "stray.txt"), "w") as f:
+            f.write(words(10))
+        self.assertEqual(hints_check.check({"..": {"quest": words(8)}}, self.ref), [])
+
     def test_html_ignored(self):
         with open(os.path.join(self.ref, "5", "1.html"), "w") as f:
             f.write(words(10))
@@ -86,6 +100,15 @@ class MergePins(unittest.TestCase):
         self.assertIn("7", h)
         self.assertEqual(h["9"], {"quest": "q"})
 
+    def test_malformed_pin_names_position(self):
+        bad = [dict(self.pin), dict(self.pin, idx=2.7)]
+        with self.assertRaisesRegex(ValueError, "pin 1"):
+            hints_merge_pins.merge({}, bad)
+        with self.assertRaisesRegex(ValueError, "pin 0"):
+            hints_merge_pins.merge({}, [{"qid": 7}])
+        with self.assertRaisesRegex(ValueError, "pin 0"):
+            hints_merge_pins.merge({}, [dict(self.pin, label=5)])
+
     def test_main_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
             pf, hf = os.path.join(d, "p.json"), os.path.join(d, "h.json")
@@ -106,6 +129,16 @@ class Fetch(unittest.TestCase):
                          [("12", "example.invalid/a"), ("13", "example.invalid/b")])
         with self.assertRaises(ValueError):
             list(hints_fetch.parse_sources("12\n"))
+
+    def test_bad_qids_rejected(self):
+        for q in ("../x", "/abs/path", "..", "1a", "C" + ":" + "x"):
+            with self.assertRaises(ValueError, msg=q):
+                list(hints_fetch.parse_sources("%s example.invalid/a" % q))
+
+    def test_redirect_to_other_scheme_refused(self):
+        h = hints_fetch._SafeRedirect()
+        with self.assertRaises(ValueError):
+            h.redirect_request(None, None, 302, "Found", {}, "ftp" + "://example.invalid/x")
 
     def test_visible_text_drops_scripts(self):
         t = hints_fetch.visible_text(

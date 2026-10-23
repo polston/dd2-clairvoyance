@@ -50,6 +50,8 @@ def check(hints, ref_dir):
     """Returns (qid, run) pairs for every shared run."""
     found = []
     for qid, entry in hints.items():
+        if not re.fullmatch(r"[0-9]+", str(qid)):
+            continue
         qdir = os.path.join(ref_dir, str(qid))
         if not os.path.isdir(qdir):
             continue
