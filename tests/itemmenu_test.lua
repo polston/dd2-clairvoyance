@@ -44,7 +44,7 @@ local now = 0
 local function clock() return now end
 
 -- The world: 25 rows, 30 slots, one description text.
-local function make_world()
+local function make_world(style_args)
   local w = { scroll = 0, sel = 3, msg = "Potion\nHeals.", sets = 0,
     raise_data = {}, sdk_calls = 0, hooks = {}, logs = {}, screen_h = 1080,
     enabled = true, opens = 0, circles = {}, draw_raise = false, texts = {}, pushes = 0, pops = 0 }
@@ -112,8 +112,9 @@ local function make_world()
     enabled = function() return w.enabled end,
     related = function() return w.related end,
     quest_flag = function(d) return d:get_field("_SubCategory") == 4 end,
-    color_abgr = function() return 0xFF00FF00 end,
+    color_abgr = function() return w.dot_color or 0xFF00FF00 end,
     label_color = function() return 0xFF00FF00 end,
+    style = style_args and function() return style_args[1], style_args[2], style_args[3] end or nil,
     imgui = { push_font = function() w.pushes = w.pushes + 1 end,
       pop_font = function() w.pops = w.pops + 1 end },
     font = function() return "F" end,
@@ -278,12 +279,11 @@ do
   local w = make_world()
   tick(w)
   w.r:frame()
-  check("label: two texts", #w.texts == 2)
-  local sh, tx = w.texts[1], w.texts[2]
+  check("label: one text without style", #w.texts == 1)
+  local tx = w.texts[1]
   check("label: text", tx and tx.t == "Quest: Lost Ring, Old Debt")
   check("label: position", tx and tx.x == 1274 + 24 and tx.y == 168 - 34)
   check("label: color", tx and tx.c == 0xFF00FF00)
-  check("label: shadow", sh and sh.t == tx.t and sh.x == tx.x + 1 and sh.y == tx.y + 1 and sh.c == 0xFF000000)
   check("label: font pushed and popped once", w.pushes == 1 and w.pops == 1)
   check("labels stat", w.r:stats_line():find("labels=1", 1, true) ~= nil)
   check("description never written", w.sets == 0)
@@ -292,7 +292,7 @@ do
   w.texts = {}
   w.screen_h = 2160
   w.r:frame()
-  tx = w.texts[2]
+  tx = w.texts[1]
   check("label: scaled", tx and tx.x == (1274 + 24) * 2 and tx.y == (168 - 34) * 2)
   w.screen_h = 1080
 
@@ -301,7 +301,7 @@ do
   w.related = { [103] = { "Lost Ring", "Old Debt", "Third" } }
   tick(w)
   w.r:frame()
-  check("label: three titles", w.texts[2] and w.texts[2].t == "Quest: Lost Ring, Old Debt, Third")
+  check("label: three titles", w.texts[1] and w.texts[1].t == "Quest: Lost Ring, Old Debt, Third")
   w.texts = {}
   w.related = {}
   tick(w)
@@ -315,7 +315,7 @@ do
   w.sel = 7
   tick(w)
   w.r:frame()
-  check("label: subcategory only", w.texts[2] and w.texts[2].t == "Quest item")
+  check("label: subcategory only", w.texts[1] and w.texts[1].t == "Quest item")
 end
 
 do
@@ -391,7 +391,7 @@ do
   w.r:install()
   tick(w)
   w.r:frame()
-  check("font failure: label still drawn", #w.texts == 2 and pops == 0)
+  check("font failure: label still drawn", #w.texts == 1 and pops == 0)
   check("font failure: not a frame failure", w.r:stats_line():find("fails=0", 1, true) ~= nil)
 end
 
@@ -513,6 +513,44 @@ do
     w.r:frame()
   end
   check("log capped at 16", #w.logs == 16)
+end
+
+-- Outline (SPEC 23.5): style on draws a ring behind the dot and 8 offset texts.
+do
+  now = 0
+  local w = make_world({ true, 0xFF000000, 1 })
+  w.scroll = 1   -- one dot on screen
+  tick(w)
+  w.r:frame()
+  check("outline: one dot is two circles", #w.circles == 2)
+  check("outline: ring radius", w.circles[1] and w.circles[1].r == 4 + 1 + 1)
+  check("outline: dot radius", w.circles[2] and w.circles[2].r == 4)
+  check("outline: label is nine texts", #w.texts == 9)
+  local last = w.texts[9]
+  check("outline: last text is the label", last and last.c == 0xFF00FF00
+    and last.x == 1274 + 24 and last.y == 168 - 34)
+  check("outline: first text offset", w.texts[1] and w.texts[1].x == 1274 + 24 + 1
+    and w.texts[1].y == 168 - 34 and w.texts[1].c == 0xFF000000)
+end
+
+do
+  now = 0
+  local w = make_world({ false, 0xFF000000, 1 })
+  w.scroll = 1   -- one dot on screen
+  tick(w)
+  w.r:frame()
+  check("outline off: one circle and one text", #w.circles == 1 and #w.texts == 1)
+end
+
+do
+  now = 0
+  local w = make_world({ true, 0xFF000000, 1 })
+  w.dot_color = 0x8000FF00
+  w.scroll = 1   -- one dot on screen
+  tick(w)
+  w.r:frame()
+  check("outline: ring alpha byte follows the dot alpha",
+    w.circles[1] and ((w.circles[1].c >> 24) & 0xFF) == 128)
 end
 
 if failures > 0 then
