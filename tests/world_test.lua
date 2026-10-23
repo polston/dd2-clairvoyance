@@ -2300,19 +2300,25 @@ do
     rdef("current_row", function() return { area = 1, location = 1 } end)
     rdef("area_nodes", function() return nil end)
     rdef("graph_block_count", function() return #cur end)
-    rdef("graph_block", function(i, out)
+    rdef("graph_block", function(i, out, first, count)
       if d.graph_fail_at == i then error("fake graph failure") end
       local blk = cur[i + 1]
-      local nl = 0
-      for k, nd in ipairs(blk) do
-        out.x[k], out.y[k], out.z[k] = nd[1], nd[2], nd[3]
-        out.lc[k] = #nd[4]
+      local lo = first or 1
+      local hi = count and math.min(#blk, lo + count - 1) or #blk
+      local nl, fl = 0, 0
+      for k = lo, hi do
+        local nd = blk[k]
+        fl = fl + 1
+        out.x[fl], out.y[fl], out.z[fl] = nd[1], nd[2], nd[3]
+        out.lc[fl] = #nd[4]
         for _, l in ipairs(nd[4]) do
           nl = nl + 1
           out.lb[nl], out.ln[nl] = l[1], l[2]
         end
       end
-      return #blk
+      if d.node_cost then f.clock_t = f.clock_t + d.node_cost * fl end
+      if d.on_read then d.on_read(i, lo, fl) end
+      return #blk, fl
     end)
     return f, d
   end
@@ -2427,7 +2433,7 @@ do
     f.tick = 0.001
     local w = with_route(f, { P(1, 0, 0), P(5, 0, 0) })
     local seen100 = false
-    for _ = 1, 10 do
+    for _ = 1, 400 do
       w:path_step(0.5, 1, true)
       if w.graph == nil and pct(w:path_status(1)) == 100 then seen100 = true end
     end
@@ -2444,16 +2450,116 @@ do
     check("mid: copy started", w:path_busy() == true and w.graph == nil)
     w:clear_route()
     w:path_step(0.5, 1, false)
-    check("mid: keeps copying with no route", f.reads_n.graph_block == 2
-      and w:path_busy() == true)
+    local before = f.reads_n.graph_block
+    check("mid: keeps copying with no route", before >= 2 and w:path_busy() == true)
     w:set_route(2001, "Aa")
     w:refresh(2, true, on("search"))
     w:path_step(0.5, 1, false)
-    check("mid: route on again continues the same copy", f.reads_n.graph_block == 3
+    check("mid: route on again continues the same copy", f.reads_n.graph_block > before
       and f.reads_n.graph_block_count == 1 and w:path_busy() == true)
-    w:path_step(0.5, 1, false)
-    check("mid: finished", w.graph ~= nil and w:path_busy() == false)
-    check("mid: no restart", f.reads_n.graph_block == 3 and f.reads_n.graph_block_count == 1)
+    local guard = 0
+    while w:path_busy() and guard < 100 do w:path_step(0.5, 1, false); guard = guard + 1 end
+    check("mid: finished", w.graph ~= nil and w:path_busy() == false and w.graph.n == 6)
+    check("mid: no restart", f.reads_n.graph_block_count == 1 and w.copy_tries == 0)
+  end
+
+  -- a slice stops between nodes: a 1000-node block over a 2 ms budget
+  do
+    local big = {}
+    for k = 1, 1000 do
+      big[k] = { k, k * 2, k * 3, { { 0, k % 1000 }, { 0, (k * 7) % 1000 } } }
+    end
+    local function run(cost)
+      local f, d = gfix({ big })
+      d.node_cost = cost
+      local reads_log = {}
+      d.on_read = function(_, lo, fl) reads_log[#reads_log + 1] = { lo, fl } end
+      local w = with_route(f, R3)
+      local slices, worst, guard = 0, 0, 0
+      while w.graph == nil and guard < 2000 do
+        local t0, r0 = f.clock_t, #reads_log
+        w:path_step(2, 1, true)
+        slices = slices + 1
+        guard = guard + 1
+        local nodes = 0
+        for r = r0 + 1, #reads_log do nodes = nodes + reads_log[r][2] end
+        -- nodes after the first read of the slice must fit the budget
+        local first_n = reads_log[r0 + 1] and reads_log[r0 + 1][2] or 0
+        local over = f.clock_t - t0 - (reads_log[r0 + 1] and first_n * cost or 0)
+        if over > worst then worst = over end
+      end
+      return w, slices, worst
+    end
+    local wa = run(0)
+    local wb, slices, worst = run(0.00002)
+    check("slice: copy finishes in many slices", wb.graph ~= nil and slices > 5)
+    check("slice: nothing after the first read exceeds the budget", worst <= 0.002 + 1e-9)
+    -- 1 ms clock: reads time at 0 or 1 ms; a slice stays within budget + one tick
+    do
+      local f, d = gfix({ big })
+      d.node_cost = 0.000022
+      f.io.clock = function() return math.floor(f.clock_t * 1000) / 1000 end
+      local w = with_route(f, R3)
+      local worstq, g = 0, 0
+      repeat
+        local t0 = f.clock_t
+        w:path_step(2, 1, true)
+        g = g + 1
+        if f.clock_t - t0 > worstq then worstq = f.clock_t - t0 end
+      until w.graph ~= nil or g >= 2000
+      check("slice: 1 ms clock keeps each slice within budget + one tick",
+        w.graph ~= nil and worstq <= 0.003 + 1e-9)
+    end
+    -- a slow first read (mean above the budget) still lets the copy finish
+    do
+      local f, d = gfix({ big })
+      d.node_cost = 0.000022
+      local first = true
+      d.on_read = function()
+        if first then first = false; f.clock_t = f.clock_t + 0.04 end
+      end
+      local w = with_route(f, R3)
+      local g = 0
+      repeat w:path_step(2, 1, true); g = g + 1 until w.graph ~= nil or g >= 5000
+      check("slice: slow first read does not stall the copy",
+        w.graph ~= nil and w.graph.n == 1000)
+    end
+    local same = wa.graph ~= nil and wb.graph ~= nil and wa.graph.n == 1000
+      and wb.graph.n == 1000
+    for _, key in ipairs({ "x", "y", "z", "ls", "lc" }) do
+      for i = 1, 1000 do
+        if not same or wa.graph[key][i] ~= wb.graph[key][i] then same = false end
+      end
+    end
+    for i = 1, 2000 do
+      if not same or wa.graph.lt[i] ~= wb.graph.lt[i] then same = false end
+    end
+    check("slice: node-sliced copy equals the one-shot copy", same)
+  end
+
+  -- a block that changes size mid-copy never raises an index error
+  do
+    local big, small = {}, {}
+    for k = 1, 200 do big[k] = { k, 0, 0, { { 0, 0 } } } end
+    for k = 1, 5 do small[k] = { k, 0, 0, { { 0, 0 } } } end
+    for _, target in ipairs({ small, {} }) do
+      local f, d = gfix({ big })
+      d.node_cost = 0.00002
+      local swapped = false
+      d.on_read = function(_, lo)
+        if lo > 1 and not swapped then swapped = true; cur = { target } end
+      end
+      local w = with_route(f, R3)
+      local n = 0
+      repeat w:path_step(1, 1, true); n = n + 1 until not w:path_busy() or n >= 200
+      local bad = false
+      for _, m in ipairs(f.logs) do
+        if m:find("attempt to") then bad = true end
+      end
+      check("slice: shrinking block ends without an index error (" .. #target .. ")",
+        swapped and not bad and not w:path_busy() and #f.logs == 0 and w.copy_tries == 0
+        and w.graph ~= nil)
+    end
   end
 
   -- search over the finished copy
@@ -2628,10 +2734,17 @@ do
   check("graph reads: block 1 as plain tables", n == 1 and out.x[1] == 7 and out.y[1] == 8
     and out.z[1] == 9 and out.lc[1] == 2 and out.lb[1] == 0 and out.ln[1] == 0
     and out.lb[2] == 1 and out.ln[2] == 0 and type(out.x) == "table")
+  local nc, nf = R.graph_block(1, out, 1, 16)
+  check("graph reads: clamp reports node count and filled", nc == 1 and nf == 1)
+  local nc2, nf2 = R.graph_block(0, out, 2, 5)
+  check("graph reads: partial read from node 2", nc2 == 2 and nf2 == 1 and out.x[1] == 4
+    and out.lc[1] == 0)
+  local nc3, nf3 = R.graph_block(0, out, 3, 5)
+  check("graph reads: past the end fills none", nc3 == 2 and nf3 == 0)
   local n0 = R.graph_block(0, out)
   check("graph reads: block 0", n0 == 2 and out.x[2] == 4 and out.lc[1] == 1
     and out.lc[2] == 0 and out.ln[1] == 1)
-  check("graph reads: chain re-acquired each call", fetches == 3)
+  check("graph reads: chain re-acquired each call", fetches == 6)
   bad[blk0] = true
   check("graph reads: failed managed check raises", not pcall(R.graph_block, 0, out))
   bad[blk0] = nil
