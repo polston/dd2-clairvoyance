@@ -476,6 +476,68 @@ do
   check("fit nil without out", N.fit({ { 0, 0, 0, 0 } }, 1, nil) == nil)
 end
 
+-- schedule overrides and key locations (SPEC 25)
+do
+  local function krow(sh, eh, area, loc, key)
+    return row(sh, eh, area, 0, { location = loc, key = key })
+  end
+  local function kpos(r) return { x = r.key or r.area, y = 0, z = r.location } end
+  local base = { krow(6, 18, -1, 7), krow(18, 6, 42, -1) }
+  local ow = krow(20, 22, -1, -1, 2309)
+  local day = { week = 1, weekday = 5 }
+  local function at(h) return { week = day.week, weekday = day.weekday, hour = h } end
+  local P = { x = 1, y = 2, z = 3 }
+  local function ft(stops)
+    local o = {}
+    for i, s in ipairs(stops) do o[i] = s.from .. "/" .. s.to end
+    return table.concat(o, ",")
+  end
+
+  local s, _, m = N.route_stops(base, at(20), kpos,
+    { area = -1, location = -1, key = 2309, pos = P, overwrite = { ow } })
+  check("albert hour 20 stops", #s == 4 and ft(s) == "6/18,18/20,20/22,22/6")
+  check("albert hour 20 pos", s[3].pos == P and s[3].key == 2309)
+  check("albert hour 20 matched", m == true)
+
+  s, _, m = N.route_stops(base, at(7), kpos,
+    { area = -1, location = 7, key = -1, pos = P, overwrite = { ow } })
+  check("albert hour 7 key pos", s[3].pos.x == 2309 and s[3].pos ~= P)
+  check("albert hour 7 current pos", s[1].pos == P)
+  check("albert hour 7 matched", m == true)
+
+  s = N.route_stops(base, at(20), kpos, { area = -1, location = -1, key = 11, pos = P,
+    overwrite = { krow(20, 22, -1, -1, 11), krow(20, 22, -1, -1, 12) } })
+  check("first overwrite wins", s[3].from == 20 and s[3].to == 22 and s[3].key == 11)
+
+  s = N.route_stops(base, at(20), kpos, { area = 42, location = -1, pos = P,
+    overwrite = { row(20, 22, -1, 0, { location = -1, key = 2309, start_week = 2, end_week = 2 }) } })
+  check("overwrite not today", #s == 2 and ft(s) == "6/18,18/6")
+
+  local _, _, m2 = N.route_stops({ krow(0, 24, -1, -1, 5) }, at(3), kpos,
+    { area = -1, location = -1, key = 9, pos = P })
+  check("different keys no match", m2 == false)
+  local s5 = N.route_stops({ krow(0, 24, -1, -1, 5) }, at(3), kpos,
+    { area = -1, location = -1, key = 9, pos = P })
+  check("different keys pos from area_pos", s5[1].pos.x == 5)
+
+  local _, _, m3 = N.route_stops({ krow(0, 24, -1, -1) }, at(3), kpos,
+    { area = -1, location = -1, pos = P })
+  check("keyless -1/-1 no match", m3 == false)
+
+  s = N.route_stops({ krow(0, 6, -1, -1, 5), krow(22, 24, -1, -1, 6) }, at(3), kpos, nil)
+  check("no midnight merge across keys", #s == 2)
+
+  local _, _, m4 = N.route_stops(base, at(20), kpos,
+    { area = 42, location = -1, pos = P, overwrite = { ow } })
+  check("overwrite unmatched", m4 == false)
+
+  local _, _, m5 = N.route_stops(base, at(7), kpos, nil)
+  check("nil cur matched", m5 == true)
+  local _, _, m6 = N.route_stops({ krow(0, 5, -1, 7) }, at(7), kpos,
+    { area = -1, location = 7, pos = P })
+  check("no row picked unmatched", m6 == false)
+end
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)
