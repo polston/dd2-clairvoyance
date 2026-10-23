@@ -276,4 +276,296 @@ function M.hint_step(hints, qid, quest_step)
   return q.steps[quest_step - 1]
 end
 
+-- ---------------------------------------------------------------------------
+-- Walking-path search, route pairs, map fit and route polylines (SPEC 23.6.4,
+-- 23.6.6, 23.6.7). Graph shape g: g.n, g.x/y/z[i], g.ls[i] first link slot,
+-- g.lc[i] link count, g.lt[slot] target node. clock returns seconds.
+-- ---------------------------------------------------------------------------
+
+local sqrt = math.sqrt
+
+local function finite(v)
+  return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+end
+
+function M.nearest_new(g, x, y, z)
+  return { g = g, x = x, y = y, z = z, i = 1, best = nil, bestd2 = math.huge,
+    dist = nil, status = "running" }
+end
+
+function M.nearest_step(job, budget_ms, clock)
+  if job.status == "done" then return "done" end
+  local g, x, y, z = job.g, job.x, job.y, job.z
+  local gx, gy, gz = g.x, g.y, g.z
+  local n = g.n
+  local limit = (budget_ms or 0) / 1000
+  local t0 = clock()
+  local i, best, bd = job.i, job.best, job.bestd2
+  while i <= n do
+    local dx, dy, dz = gx[i] - x, gy[i] - y, gz[i] - z
+    local d2 = dx * dx + dy * dy + dz * dz
+    if d2 < bd then bd = d2; best = i end
+    i = i + 1
+    if clock() - t0 >= limit then break end
+  end
+  job.i, job.best, job.bestd2 = i, best, bd
+  if i > n then
+    job.dist = best and sqrt(bd) or nil
+    job.status = "done"
+    return "done"
+  end
+  return "running"
+end
+
+-- Binary min-heap on two flat arrays: hk (priority) and hv (node).
+local function heap_push(job, k, v)
+  local hk, hv = job.hk, job.hv
+  local n = job.hn + 1
+  job.hn = n
+  while n > 1 do
+    local p = n // 2
+    if hk[p] <= k then break end
+    hk[n] = hk[p]; hv[n] = hv[p]
+    n = p
+  end
+  hk[n] = k; hv[n] = v
+end
+
+local function heap_pop(job)
+  local hk, hv = job.hk, job.hv
+  local n = job.hn
+  local rv = hv[1]
+  local k, v = hk[n], hv[n]
+  hk[n] = nil; hv[n] = nil
+  n = n - 1
+  job.hn = n
+  if n > 0 then
+    local i = 1
+    while true do
+      local c = i * 2
+      if c > n then break end
+      if c < n and hk[c + 1] < hk[c] then c = c + 1 end
+      if hk[c] >= k then break end
+      hk[i] = hk[c]; hv[i] = hv[c]
+      i = c
+    end
+    hk[i] = k; hv[i] = v
+  end
+  return rv
+end
+
+function M.path_new(g, a, b, opt)
+  opt = opt or {}
+  local job = { g = g, a = a, b = b, cap = opt.cap or 20000,
+    weight = opt.weight or 1.2, expanded = 0, status = "running",
+    hk = {}, hv = {}, hn = 0, gs = { [a] = 0 }, parent = {}, closed = {} }
+  if a == b then
+    job.path = { a }
+    job.status = "done"
+    job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+  else
+    local dx, dy, dz = g.x[a] - g.x[b], g.y[a] - g.y[b], g.z[a] - g.z[b]
+    heap_push(job, job.weight * sqrt(dx * dx + dy * dy + dz * dz), a)
+  end
+  return job
+end
+
+function M.path_step(job, budget_ms, clock)
+  if job.status ~= "running" then return job.status end
+  local g = job.g
+  local gx, gy, gz, ls, lc, lt = g.x, g.y, g.z, g.ls, g.lc, g.lt
+  local gs, parent, closed = job.gs, job.parent, job.closed
+  local b, w, cap = job.b, job.weight, job.cap
+  local bx, by, bz = gx[b], gy[b], gz[b]
+  local limit = (budget_ms or 0) / 1000
+  local t0 = clock()
+  while true do
+    if job.hn == 0 then
+      job.status = "failed"
+      job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+      return "failed"
+    end
+    local u = heap_pop(job)
+    if not closed[u] then
+      if u == b then
+        local path, k = {}, 0
+        local c = b
+        while c do k = k + 1; path[k] = c; c = parent[c] end
+        for i = 1, k // 2 do path[i], path[k + 1 - i] = path[k + 1 - i], path[i] end
+        job.path = path
+        job.status = "done"
+        job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+        return "done"
+      end
+      closed[u] = true
+      local ex = job.expanded + 1
+      job.expanded = ex
+      if ex > cap then
+        job.status = "failed"
+        job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+        return "failed"
+      end
+      local ux, uy, uz, gu = gx[u], gy[u], gz[u], gs[u]
+      local s = ls[u]
+      for slot = s, s + lc[u] - 1 do
+        local t = lt[slot]
+        local tx, ty, tz = gx[t], gy[t], gz[t]
+        local dx, dy, dz = tx - ux, ty - uy, tz - uz
+        local ng = gu + sqrt(dx * dx + dy * dy + dz * dz)
+        local old = gs[t]
+        if old == nil or ng < old then
+          gs[t] = ng
+          parent[t] = u
+          closed[t] = nil
+          dx, dy, dz = tx - bx, ty - by, tz - bz
+          heap_push(job, ng + w * sqrt(dx * dx + dy * dy + dz * dz), t)
+        end
+      end
+      if clock() - t0 >= limit then return "running" end
+    end
+  end
+end
+
+local function drawn(s, undisc)
+  if type(s) ~= "table" then return false end
+  if s.discovered == false and not undisc then return false end
+  local p = s.pos
+  return type(p) == "table" and finite(p.x) and finite(p.y) and finite(p.z)
+end
+
+function M.route_pairs(stops, undisc)
+  local out = {}
+  local prev
+  for i = 1, #(stops or {}) do
+    if drawn(stops[i], undisc) then
+      if prev then out[#out + 1] = { prev, i } end
+      prev = i
+    end
+  end
+  return out
+end
+
+-- Fit lx = a*mx + b*mz + ox, ly = c*mx + d*mz + oy over the first n points
+-- { mx, mz, lx, ly }: uniform scale s with signs sx, sz (lower residual wins);
+-- opt.similarity adds a rotation. Result written into out.
+local function clear_fit(out)
+  if out then
+    out.s, out.sx, out.sz, out.a, out.b, out.c, out.d = nil, nil, nil, nil, nil, nil, nil
+    out.ox, out.oy, out.residual = nil, nil, nil
+  end
+end
+
+function M.fit(points, n, opt, out)
+  if type(n) ~= "number" or n < 2 then clear_fit(out); return nil end
+  local far = false
+  for i = 1, n - 1 do
+    local p = points[i]
+    for j = i + 1, n do
+      local q = points[j]
+      local dx, dy = p[3] - q[3], p[4] - q[4]
+      if dx * dx + dy * dy >= 400 then far = true; break end
+    end
+    if far then break end
+  end
+  if not far then clear_fit(out); return nil end
+  local cmx, cmz, clx, cly = 0, 0, 0, 0
+  for i = 1, n do
+    local p = points[i]
+    cmx = cmx + p[1]; cmz = cmz + p[2]; clx = clx + p[3]; cly = cly + p[4]
+  end
+  cmx, cmz, clx, cly = cmx / n, cmz / n, clx / n, cly / n
+  local similarity = opt and opt.similarity
+  local best_res = math.huge
+  local ba, bb, bc, bd, bsx, bsz, bs
+  for ci = 1, similarity and 2 or 4 do
+    local sx, sz
+    if similarity then
+      sx = 1; sz = (ci == 1) and 1 or -1
+    else
+      sx = (ci <= 2) and 1 or -1
+      sz = (ci % 2 == 1) and 1 or -1
+    end
+    local den, re, im = 0, 0, 0
+    for i = 1, n do
+      local p = points[i]
+      local dmx, dmz = sx * (p[1] - cmx), sz * (p[2] - cmz)
+      local dlx, dly = p[3] - clx, p[4] - cly
+      den = den + dmx * dmx + dmz * dmz
+      re = re + dmx * dlx + dmz * dly
+      im = im + dmx * dly - dmz * dlx
+    end
+    if den > 0 then
+      local a, b, c, d, s
+      if similarity then
+        -- complex fit w = k * z with z = mx + i*sz*mz, k = (re + i*im) / den
+        local kr, ki = re / den, im / den
+        a, b, c, d = kr, -ki * sz, ki, kr * sz
+        s = sqrt(kr * kr + ki * ki)
+      else
+        s = re / den
+        a, b, c, d = sx * s, 0, 0, sz * s
+      end
+      if s > 0 then
+        local res = 0
+        for i = 1, n do
+          local p = points[i]
+          local ex = a * (p[1] - cmx) + b * (p[2] - cmz) + clx - p[3]
+          local ey = c * (p[1] - cmx) + d * (p[2] - cmz) + cly - p[4]
+          local e = sqrt(ex * ex + ey * ey)
+          if e > res then res = e end
+        end
+        if res < best_res then
+          best_res = res
+          ba, bb, bc, bd, bsx, bsz, bs = a, b, c, d, sx, sz, s
+        end
+      end
+    end
+  end
+  if not ba then clear_fit(out); return nil end
+  out = out or {}
+  out.s, out.sx, out.sz = bs, bsx, bsz
+  out.a, out.b, out.c, out.d = ba, bb, bc, bd
+  out.ox = clx - (ba * cmx + bb * cmz)
+  out.oy = cly - (bc * cmx + bd * cmz)
+  out.residual = best_res
+  return out
+end
+
+function M.fit_apply(fit, mx, mz)
+  return fit.a * mx + fit.b * mz + fit.ox, fit.c * mx + fit.d * mz + fit.oy
+end
+
+-- Writes every pair into out as flat layout points (x, y, ...) with a false
+-- between pairs; clears out past the returned count.
+function M.route_polyline(pairs_, ends, fit, mode, out)
+  local n = 0
+  for k = 1, #pairs_ do
+    local p = pairs_[k]
+    local e1, e2 = ends[p.i], ends[p.j]
+    local x1, y1, x2, y2
+    if e1 then
+      if e1.lx then x1, y1 = e1.lx, e1.ly
+      elseif fit and e1.mx then x1, y1 = M.fit_apply(fit, e1.mx, e1.mz) end
+    end
+    if e2 then
+      if e2.lx then x2, y2 = e2.lx, e2.ly
+      elseif fit and e2.mx then x2, y2 = M.fit_apply(fit, e2.mx, e2.mz) end
+    end
+    if x1 and x2 then
+      if n > 0 then n = n + 1; out[n] = false end
+      out[n + 1] = x1; out[n + 2] = y1; n = n + 2
+      local pts = p.pts
+      if mode == 1 and pts and fit then
+        for q = 1, #pts - 2, 3 do
+          local lx, ly = M.fit_apply(fit, pts[q], pts[q + 2])
+          out[n + 1] = lx; out[n + 2] = ly; n = n + 2
+        end
+      end
+      out[n + 1] = x2; out[n + 2] = y2; n = n + 2
+    end
+  end
+  for i = #out, n + 1, -1 do out[i] = nil end
+  return n
+end
+
 return M
