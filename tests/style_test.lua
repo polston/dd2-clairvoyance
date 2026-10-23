@@ -59,6 +59,8 @@ do -- offset, alpha
   check("offset 1,0.6", S.offset(1, 0.6) == 1)
   check("offset 4,1.5", S.offset(4, 1.5) == 6)
   check("alpha", near(S.alpha(0x80000000, 0.5), 0.251, 0.002))
+  check("with_alpha clamps high", S.with_alpha(0xFF000000, 2) == 0xFF000000)
+  check("with_alpha clamps low", S.with_alpha(0xFF000000, -1) == 0x00000000)
   check("abgr", S.abgr(0xFFFF0000) == 0xFF0000FF)
 end
 
@@ -100,20 +102,17 @@ do -- quad
   for i = 1, 8 do ok = ok and near(t[i], want[i], 1e-9) end
   check("quad horizontal", ok)
   local q = { S.quad(0, 0, 10, 10, 2) }
+  local r2 = math.sqrt(2)
+  local dwant = { 0, -r2, 10 + r2, 10, 10, 10 + r2, -r2, 0 }
   ok = #q == 8
-  for i = 1, 4 do
-    local x, y = q[2 * i - 1], q[2 * i]
-    -- distance from the line y = x is |x - y| / sqrt(2); corners sit on the
-    -- long edges (distance 1) offset along the normal, so each is 1 away.
-    ok = ok and near(math.abs(x - y) / math.sqrt(2), 1, 1e-9)
-  end
-  check("quad diagonal distance", ok)
+  for i = 1, 8 do ok = ok and near(q[i], dwant[i], 1e-9) end
+  check("quad diagonal corners and caps", ok)
 end
 
 do -- line
   local d, calls = rec()
   S.line(d, 0, 0, 10, 0, 2, 0xFF00FF00)
-  check("line 9 args", #calls == 1 and #calls[1] == 9 + 0 and calls[1][9] == 0xFF00FF00)
+  check("line 9 args", #calls == 1 and #calls[1] == 9 and calls[1][9] == 0xFF00FF00)
   d, calls = rec()
   S.line(d, 3, 3, 3, 3, 2, 1)
   check("zero-length line draws nothing", #calls == 0)
@@ -127,6 +126,9 @@ do -- polyline
   S.polyline(d, { 0, 0, 10, 0, 20, 0 }, 2, 0xFF00FF00, true, 0xFF000000, 1, 1)
   check("polyline 3 pts", #calls == 4 and calls[2][9] == 0xFF000000
     and calls[3][9] == 0xFF00FF00)
+  check("polyline outline width w + 2o",
+    near(math.abs(calls[1][8] - calls[1][2]), 4, 1e-9)
+    and near(math.abs(calls[3][8] - calls[3][2]), 2, 1e-9))
   d, calls = rec()
   S.polyline(d, { 0, 0, 10, 0, false, 0, 20, 0, 30, 0 }, 2, 0xFF00FF00, true,
     0xFF000000, 1, 1)

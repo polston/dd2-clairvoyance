@@ -46,6 +46,7 @@ function M.alpha(color_argb, a)
 end
 
 function M.with_alpha(argb, a)
+  a = math.min(1, math.max(0, a))
   return (argb & 0x00FFFFFF) | (math.floor(a * 255 + 0.5) << 24)
 end
 
