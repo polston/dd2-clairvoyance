@@ -1,8 +1,9 @@
 -- settings_util.lua — pure validation; no sdk/json.
 local M = {}
+local style = require("Clairvoyance.style")
 
 function M.defaults()
-  return {
+  local t = {
     enabled = true, show_minimap = true, icon_color = 0xFFFFD34D, debug = false,
     matching_icons = true, step_icons = false, palette = 13,
     icon_startable = 52, icon_in_progress = 52, icon_completed = 42,
@@ -28,7 +29,19 @@ function M.defaults()
     color_npc_search = 0xFFF06292, color_route_stop = 0xFFF8BBD0,
     color_hint_pin = 0xFF00E676,
     icon_npc_search = 31, icon_route_stop = 25, icon_hint_pin = 58,
+    -- v14 styling and routes (SPEC 23.4)
+    outline_on = true, outline_color = 0xFF000000, outline_width = 1,
+    route_line_color = 0xFFE91E63, route_line_width = 3, route_stop_size = 100,
+    route_number_color = 0xFFFFFFFF, route_number_size = 0,
+    route_path = 1, route_world_path = false, names_color = 0xFFFFFFFF,
   }
+  for _, g in ipairs(style.GROUPS) do
+    t["style_" .. g .. "_override"] = false
+    t["style_" .. g .. "_outline_on"] = true
+    t["style_" .. g .. "_outline_color"] = 0xFF000000
+    t["style_" .. g .. "_outline_width"] = 1
+  end
+  return t
 end
 
 -- Picker choices: every icon type that has a picture on at least one
@@ -179,7 +192,7 @@ M.WORLD_BOOL_LABEL = { world_chests = M.WORLD_LABEL.chest,
 local BOOL_KEYS = { "enabled", "debug", "show_startable", "show_in_progress",
   "show_completed", "show_unavailable", "show_locked", "show_overhead", "show_minimap",
   "reveal_gate_names", "show_quest_items", "journal_spoilers",
-  "matching_icons", "step_icons", "inventory_quest_marks" }
+  "matching_icons", "step_icons", "inventory_quest_marks", "route_world_path" }
 for _, k in ipairs(M.WORLD_BOOLS) do BOOL_KEYS[#BOOL_KEYS + 1] = k end
 local COLOR_KEYS = { "icon_color", "color_in_progress", "color_completed",
   "color_unavailable", "color_locked", "color_quest_item",
@@ -192,6 +205,75 @@ local ICON_KEYS = { "icon_startable", "icon_in_progress", "icon_completed",
   "icon_token", "icon_beetle",
   "icon_npc_search", "icon_route_stop", "icon_hint_pin" }
 M.ICON_KEYS, M.COLOR_KEYS = ICON_KEYS, COLOR_KEYS
+
+-- The v14 style keys by field rule (SPEC 23.4). route_number_size and
+-- route_path have their own rules and are not in these lists.
+local STYLE_BOOL_KEYS = { "outline_on" }
+local STYLE_COLOR_KEYS = { "outline_color", "route_line_color",
+  "route_number_color", "names_color" }
+local STYLE_INT_RANGE = { outline_width = { 1, 4 }, route_line_width = { 1, 8 },
+  route_stop_size = { 50, 200 } }
+for _, g in ipairs(style.GROUPS) do
+  local p = "style_" .. g .. "_"
+  STYLE_BOOL_KEYS[#STYLE_BOOL_KEYS + 1] = p .. "override"
+  STYLE_BOOL_KEYS[#STYLE_BOOL_KEYS + 1] = p .. "outline_on"
+  STYLE_COLOR_KEYS[#STYLE_COLOR_KEYS + 1] = p .. "outline_color"
+  STYLE_INT_RANGE[p .. "outline_width"] = { 1, 4 }
+end
+M.STYLE_BOOL_KEYS, M.STYLE_COLOR_KEYS, M.STYLE_INT_RANGE =
+  STYLE_BOOL_KEYS, STYLE_COLOR_KEYS, STYLE_INT_RANGE
+
+-- Number size: non-number or below 1 -> 0 (auto); 1-11 -> 12; above 40 -> 40;
+-- else floored.
+local function number_size_field(raw, k, d)
+  local v = raw[k]
+  if type(v) ~= "number" or v ~= v or v < 1 then return 0 end
+  if v < 12 then return 12 end
+  if v > 40 then return 40 end
+  return math.floor(v)
+end
+M.number_size_field = number_size_field
+
+-- Panel order (SPEC 23.7): every settings key the panel shows, once.
+local panel_world
+do
+  local w = {}
+  for _, k in ipairs(M.WORLD_BOOLS) do w[#w + 1] = k end
+  w[#w + 1] = "world_max_markers"
+  panel_world = w
+end
+local panel_appearance = {}
+do
+  local a = panel_appearance
+  for _, t in ipairs({ STYLE_BOOL_KEYS, STYLE_COLOR_KEYS }) do
+    for _, k in ipairs(t) do a[#a + 1] = k end
+  end
+  local ks = {}
+  for k in pairs(STYLE_INT_RANGE) do ks[#ks + 1] = k end
+  table.sort(ks)
+  for _, k in ipairs(ks) do a[#a + 1] = k end
+  a[#a + 1] = "route_number_size"
+  for _, k in ipairs(ICON_KEYS) do a[#a + 1] = k end
+  for _, k in ipairs(COLOR_KEYS) do a[#a + 1] = k end
+end
+M.PANEL_ORDER = {
+  { id = "enabled", keys = { "enabled" } },
+  { id = "search", keys = { "search_text" } },
+  { id = "quests", keys = { "show_startable", "show_in_progress",
+    "show_completed", "show_unavailable", "show_locked", "show_quest_items",
+    "reveal_gate_names", "journal_spoilers", "step_icons" } },
+  { id = "world_markers", keys = panel_world },
+  { id = "npcs", keys = { "show_overhead", "overhead_distance",
+    "overhead_names", "route_path", "route_world_path" } },
+  { id = "items", keys = { "inventory_quest_marks" } },
+  { id = "map", keys = { "show_minimap", "matching_icons" } },
+  { id = "appearance", keys = panel_appearance },
+  { id = "quest_tree", keys = {} },
+  { id = "world", keys = {} },
+  { id = "status", keys = { "debug" } },
+}
+-- Settings keys that have no panel control.
+M.NO_CONTROL_KEYS = { "palette" }
 
 -- Search text: non-string -> ""; at most 64 bytes, cut back to the last
 -- complete UTF-8 character.
@@ -207,6 +289,37 @@ function M.cut_search(s)
   return s:sub(1, n)
 end
 
+-- The one rule per key, read by validate and set_key. kind: "bool", "color",
+-- "icon", "int" (floored, clamped to lo..hi), "float" (kept iff within lo..hi,
+-- else default), "size" (number_size_field), "text" (cut_search).
+local RULE = {}
+for _, k in ipairs(BOOL_KEYS) do RULE[k] = { "bool" } end
+for _, k in ipairs(STYLE_BOOL_KEYS) do RULE[k] = { "bool" } end
+for _, k in ipairs(COLOR_KEYS) do RULE[k] = { "color" } end
+for _, k in ipairs(STYLE_COLOR_KEYS) do RULE[k] = { "color" } end
+for _, k in ipairs(ICON_KEYS) do RULE[k] = { "icon" } end
+for k, r in pairs(STYLE_INT_RANGE) do RULE[k] = { "int", r[1], r[2] } end
+RULE.overhead_distance = { "float", 10, 200 }
+RULE.world_max_markers = { "int", 0, M.WORLD_MAX_MARKERS }
+RULE.overhead_names = { "int", 0, 2 }
+RULE.route_path = { "int", 0, 1 }
+RULE.route_number_size = { "size" }
+RULE.search_text = { "text" }
+
+-- The validated value of raw[k] under its rule (the default when invalid).
+local function field(raw, k, d)
+  local r = RULE[k]
+  local kind = r[1]
+  if kind == "bool" then return bool_field(raw, k, d)
+  elseif kind == "color" then return argb_field(raw, k, d)
+  elseif kind == "icon" then return M.ICON_INDEX[raw[k]] and raw[k] or d[k]
+  elseif kind == "int" then return int_field(raw, k, d, r[2], r[3])
+  elseif kind == "float" then return range_field(raw, k, d, r[2], r[3])
+  elseif kind == "size" then return number_size_field(raw, k, d)
+  end
+  return M.cut_search(raw[k])
+end
+
 function M.validate(raw)
   local d = M.defaults()
   if type(raw) ~= "table" then return d end
@@ -214,21 +327,46 @@ function M.validate(raw)
   -- One-time palette migration (21.7.6): below palette 13 a stored value
   -- equal to its v12 default takes the v13 default; a changed one stays.
   local mig = type(raw.palette) ~= "number" or raw.palette < 13
-  for _, k in ipairs(BOOL_KEYS) do out[k] = bool_field(raw, k, d) end
+  for _, k in ipairs(BOOL_KEYS) do out[k] = field(raw, k, d) end
   for _, k in ipairs(COLOR_KEYS) do
     if mig and raw[k] == M.V12_COLOR[k] then out[k] = d[k]
-    else out[k] = argb_field(raw, k, d) end
+    else out[k] = field(raw, k, d) end
   end
   for _, k in ipairs(ICON_KEYS) do
     if mig and raw[k] == M.V12_ICON[k] then out[k] = d[k]
-    else out[k] = M.ICON_INDEX[raw[k]] and raw[k] or d[k] end
+    else out[k] = field(raw, k, d) end
   end
   out.palette = 13
-  out.overhead_distance = range_field(raw, "overhead_distance", d, 10, 200)
-  out.world_max_markers = int_field(raw, "world_max_markers", d, 0, M.WORLD_MAX_MARKERS)
-  out.search_text = M.cut_search(raw.search_text)
-  out.overhead_names = int_field(raw, "overhead_names", d, 0, 2)
+  for _, k in ipairs(STYLE_BOOL_KEYS) do out[k] = field(raw, k, d) end
+  for _, k in ipairs(STYLE_COLOR_KEYS) do out[k] = field(raw, k, d) end
+  for _, k in ipairs({ "overhead_distance", "world_max_markers", "search_text",
+    "overhead_names", "route_number_size", "route_path" }) do
+    out[k] = field(raw, k, d)
+  end
+  for k in pairs(STYLE_INT_RANGE) do out[k] = field(raw, k, d) end
   return out
+end
+
+-- Validates one key through its field rule and writes it (no palette
+-- migration). False, with no write, for an unknown key or a value of the
+-- wrong type. Int keys clamp; float keys (overhead_distance) reject a value
+-- outside the range.
+local DEFAULTS
+function M.set_key(settings, key, v)
+  local r = RULE[key]
+  if not r then return false end
+  DEFAULTS = DEFAULTS or M.defaults()
+  local kind = r[1]
+  local want = (kind == "bool" and "boolean")
+    or ((kind == "int" or kind == "float" or kind == "size") and "number")
+    or (kind == "text" and "string") or nil
+  if want and (type(v) ~= want or v ~= v) then return false end
+  local out = field({ [key] = v }, key, DEFAULTS)
+  if (kind == "color" or kind == "icon" or kind == "float") and out ~= v then
+    return false
+  end
+  settings[key] = out
+  return true
 end
 
 -- Category -> settings key, and the one color / icon rule for a category.
@@ -275,12 +413,18 @@ function M.icon_for(settings, m, sheet, step, drawable)
   return id
 end
 
--- Every icon and color key back to its default.
-function M.reset_icons(settings)
+-- Every icon, color and style key back to its default; route_path,
+-- route_world_path and everything else stay.
+function M.reset_appearance(settings)
   local d = M.defaults()
   for _, k in ipairs(ICON_KEYS) do settings[k] = d[k] end
   for _, k in ipairs(COLOR_KEYS) do settings[k] = d[k] end
+  for _, k in ipairs(STYLE_BOOL_KEYS) do settings[k] = d[k] end
+  for _, k in ipairs(STYLE_COLOR_KEYS) do settings[k] = d[k] end
+  for k in pairs(STYLE_INT_RANGE) do settings[k] = d[k] end
+  settings.route_number_size = d.route_number_size
 end
+M.reset_icons = M.reset_appearance   -- alias until the panel rewrite drops it
 
 -- Marker color: the category color, alpha byte halved when the marker
 -- is done (opened / looted).

@@ -134,11 +134,11 @@ check("journal_spoilers stored false kept",
 
 -- exact defaults key count (24 after the per-category icon keys, plus
 -- journal_spoilers, plus 23 world-tracker keys (SPEC 17.5, 17.10.13),
--- plus 8 v14 keys (SPEC 22.6))
+-- plus 8 v14 keys (SPEC 22.6), plus 83 style and route keys (SPEC 23.4))
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 60", n == 60)
+  check("defaults key count is 143", n == 143)
 end
 
 -- world tracker settings
@@ -274,11 +274,11 @@ do
   for k, v in pairs(D) do S[k] = v end
   for _, k in ipairs(su.ICON_KEYS) do S[k] = 9 end
   for _, k in ipairs(su.COLOR_KEYS) do S[k] = 0xFF010203 end
-  su.reset_icons(S)
+  su.reset_appearance(S)
   local all = true
   for _, k in ipairs(su.ICON_KEYS) do if S[k] ~= D[k] then all = false end end
   for _, k in ipairs(su.COLOR_KEYS) do if S[k] ~= D[k] then all = false end end
-  check("reset_icons restores every icon and color key", all)
+  check("reset_appearance restores every icon and color key", all)
 
   -- migration
   local raw = {}
@@ -372,13 +372,13 @@ do
   for k, v in pairs(D) do R[k] = v end
   for _, k in ipairs({ "icon_npc_search", "icon_route_stop", "icon_hint_pin" }) do R[k] = 9 end
   for _, k in ipairs({ "color_npc_search", "color_route_stop", "color_hint_pin" }) do R[k] = 0xFF010203 end
-  su.reset_icons(R)
+  su.reset_appearance(R)
   local all = true
   for _, k in ipairs({ "icon_npc_search", "icon_route_stop", "icon_hint_pin",
     "color_npc_search", "color_route_stop", "color_hint_pin" }) do
     if R[k] ~= D[k] then all = false end
   end
-  check("reset_icons restores the six v14 keys", all)
+  check("reset_appearance restores the six v14 keys", all)
 end
 
 -- one-time migration: a renamed data file falls back to its old-named file
@@ -394,6 +394,128 @@ do
   local function boom(path) if path == "new.json" then error("bad") end return { a = 3 } end
   check("legacy: erroring load falls back", su.load_with_legacy(boom, "new.json", "old.json").a == 3)
   check("legacy: nil legacy path -> nil", su.load_with_legacy(load, "new.json", nil) == nil)
+end
+
+-- v14 style settings (SPEC 23.4, 23.7)
+do
+  local style = require("Clairvoyance.style")
+  local d = su.defaults()
+  check("v14 outline defaults", d.outline_on == true and d.outline_color == 0xFF000000 and d.outline_width == 1)
+  local want = { route_line_color = 0xFFE91E63, route_line_width = 3, route_stop_size = 100,
+    route_number_color = 0xFFFFFFFF, route_number_size = 0, route_path = 1,
+    route_world_path = false, names_color = 0xFFFFFFFF }
+  for k, w in pairs(want) do check("default " .. k, d[k] == w) end
+  check("18 groups", #style.GROUPS == 18)
+  for _, g in ipairs(style.GROUPS) do
+    check("style_" .. g .. "_override", d["style_" .. g .. "_override"] == false)
+    check("style_" .. g .. "_outline_on", d["style_" .. g .. "_outline_on"] == true)
+    check("style_" .. g .. "_outline_color", d["style_" .. g .. "_outline_color"] == 0xFF000000)
+    check("style_" .. g .. "_outline_width", d["style_" .. g .. "_outline_width"] == 1)
+  end
+  local function val(t) return su.validate(t) end
+  check("outline_width 9 -> 4", val({ outline_width = 9 }).outline_width == 4)
+  check("outline_width 0 -> 1", val({ outline_width = 0 }).outline_width == 1)
+  check("group width clamps", val({ style_chest_outline_width = 9 }).style_chest_outline_width == 4)
+  check("route_line_width 20 -> 8", val({ route_line_width = 20 }).route_line_width == 8)
+  check("route_stop_size 10 -> 50", val({ route_stop_size = 10 }).route_stop_size == 50)
+  local nsz = { { 0, 0 }, { -3, 0 }, { 5, 12 }, { 50, 40 }, { 17.6, 17 }, { "x", 0 }, { 12, 12 }, { 40, 40 } }
+  for _, c in ipairs(nsz) do
+    check("route_number_size " .. tostring(c[1]), val({ route_number_size = c[1] }).route_number_size == c[2])
+  end
+  check("route_path 3 -> 1", val({ route_path = 3 }).route_path == 1)
+  check("route_path 0 kept", val({ route_path = 0 }).route_path == 0)
+  check("route_world_path bool kept", val({ route_world_path = true }).route_world_path == true)
+  check("string color -> default", val({ outline_color = "red" }).outline_color == 0xFF000000)
+  check("string group color -> default", val({ style_seller_outline_color = "x" }).style_seller_outline_color == 0xFF000000)
+  check("string names_color -> default", val({ names_color = "x" }).names_color == 0xFFFFFFFF)
+
+  -- v13-shaped table: old values kept, new defaults filled
+  local old = { enabled = false, palette = 13, icon_chest = 9, color_chest = 0xFF112233,
+    overhead_distance = 77, world_max_markers = 120, search_text = "abc", show_completed = true,
+    overhead_names = 2 }
+  local o = val(old)
+  check("v13 old values kept", o.enabled == false and o.icon_chest == 9 and o.color_chest == 0xFF112233
+    and o.overhead_distance == 77 and o.world_max_markers == 120 and o.search_text == "abc"
+    and o.show_completed == true and o.overhead_names == 2)
+  local allnew = true
+  for k, w in pairs(d) do
+    if old[k] == nil and o[k] ~= w then allnew = false; print("missing default " .. k) end
+  end
+  check("v13 table gets every new default", allnew)
+  check("COLOR_KEYS still 15", #su.COLOR_KEYS == 15)
+
+  -- set_key
+  local S = su.defaults()
+  check("set_key color no migration", su.set_key(S, "color_chest", 0xFFC08040) == true and S.color_chest == 0xFFC08040)
+  check("set_key clamps", su.set_key(S, "route_line_width", 20) == true and S.route_line_width == 8)
+  local before = S.outline_color
+  check("set_key bad color", su.set_key(S, "outline_color", "red") == false and S.outline_color == before)
+  check("set_key unknown", su.set_key(S, "nope", 1) == false and S.nope == nil)
+  check("set_key bool", su.set_key(S, "outline_on", false) == true and S.outline_on == false)
+  check("set_key bool wrong type", su.set_key(S, "outline_on", 1) == false and S.outline_on == false)
+  check("set_key number size", su.set_key(S, "route_number_size", 5) == true and S.route_number_size == 12)
+  check("set_key number size bad type", su.set_key(S, "route_number_size", "x") == false and S.route_number_size == 12)
+  check("set_key icon", su.set_key(S, "icon_chest", 9) == true and S.icon_chest == 9)
+  check("set_key icon bad", su.set_key(S, "icon_chest", 61) == false and S.icon_chest == 9)
+  check("set_key route_path", su.set_key(S, "route_path", 0) == true and S.route_path == 0)
+  check("set_key route_world_path", su.set_key(S, "route_world_path", true) == true and S.route_world_path == true)
+  check("set_key NaN", su.set_key(S, "route_line_width", 0/0) == false)
+
+  -- reset_appearance
+  local R = su.defaults()
+  for _, k in ipairs(su.ICON_KEYS) do R[k] = 9 end
+  for _, k in ipairs(su.COLOR_KEYS) do R[k] = 0xFF010203 end
+  for _, k in ipairs(su.STYLE_BOOL_KEYS) do R[k] = not d[k] end
+  for _, k in ipairs(su.STYLE_COLOR_KEYS) do R[k] = 0xFF010203 end
+  for k in pairs(su.STYLE_INT_RANGE) do R[k] = 4 end
+  R.route_number_size = 20; R.route_path = 0; R.route_world_path = true; R.show_overhead = false
+  su.reset_appearance(R)
+  local ok = true
+  local function same(k) if R[k] ~= d[k] then ok = false; print("not reset " .. k) end end
+  for _, k in ipairs(su.ICON_KEYS) do same(k) end
+  for _, k in ipairs(su.COLOR_KEYS) do same(k) end
+  for _, k in ipairs(su.STYLE_BOOL_KEYS) do same(k) end
+  for _, k in ipairs(su.STYLE_COLOR_KEYS) do same(k) end
+  for k in pairs(su.STYLE_INT_RANGE) do same(k) end
+  same("route_number_size")
+  check("reset_appearance resets appearance keys", ok)
+  check("reset_appearance leaves the rest", R.route_path == 0 and R.route_world_path == true and R.show_overhead == false)
+  check("reset_icons alias", su.reset_icons == su.reset_appearance)
+
+  -- key lists cover every 23.4 key except route_path / route_world_path
+  local listed = {}
+  for _, t in ipairs({ su.STYLE_BOOL_KEYS, su.STYLE_COLOR_KEYS }) do for _, k in ipairs(t) do listed[k] = true end end
+  for k in pairs(su.STYLE_INT_RANGE) do listed[k] = true end
+  listed.route_number_size = true
+  check("route_number_size not in STYLE_INT_RANGE", su.STYLE_INT_RANGE.route_number_size == nil)
+  check("outline_width range", su.STYLE_INT_RANGE.outline_width[1] == 1 and su.STYLE_INT_RANGE.outline_width[2] == 4)
+  local cover = true
+  for k in pairs(d) do
+    local isnew = k:match("^outline_") or k:match("^style_") or k:match("^route_") or k == "names_color"
+    if isnew and k ~= "route_path" and k ~= "route_world_path" and not listed[k] then cover = false; print("unlisted " .. k) end
+  end
+  check("lists cover every 23.4 key", cover)
+
+  -- PANEL_ORDER
+  local ids = {}
+  for i, p in ipairs(su.PANEL_ORDER) do ids[i] = p.id end
+  check("panel order ids", table.concat(ids, ",") ==
+    "enabled,search,quests,world_markers,npcs,items,map,appearance,quest_tree,world,status")
+  local seen, dup = {}, false
+  for _, p in ipairs(su.PANEL_ORDER) do
+    for _, k in ipairs(p.keys) do
+      if seen[k] then dup = true; print("dup " .. k) end
+      seen[k] = true
+    end
+  end
+  check("panel keys unique", not dup)
+  local skip = {}
+  for _, k in ipairs(su.NO_CONTROL_KEYS) do skip[k] = true end
+  local eq = true
+  for k in pairs(d) do if not skip[k] and not seen[k] then eq = false; print("not in panel " .. k) end end
+  for k in pairs(seen) do if d[k] == nil or skip[k] then eq = false; print("extra in panel " .. k) end end
+  check("panel keys == defaults minus NO_CONTROL_KEYS", eq)
+  check("NO_CONTROL_KEYS", #su.NO_CONTROL_KEYS == 1 and su.NO_CONTROL_KEYS[1] == "palette")
 end
 
 if failures > 0 then os.exit(1) end

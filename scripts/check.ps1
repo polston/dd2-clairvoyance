@@ -13,7 +13,7 @@ $allowed = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread",
   "tonumber","pcall","xpcall","error","assert","select","print","package",
   "rawget","rawset","setmetatable","getmetatable","next","io","_G","coroutine","draw","d2dx")
 # Pure modules take every game access by injection: no host globals at all.
-$pure = @("core.lua","settings_util.lua","minimap.lua","jump.lua","icons.lua","npcs.lua")
+$pure = @("core.lua","settings_util.lua","minimap.lua","jump.lua","icons.lua","npcs.lua","style.lua")
 $hostGlobals = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread","draw","_G","d2dx")
 Get-ChildItem -Recurse -Filter *.lua -Path (Join-Path $root "reframework") | ForEach-Object {
     & $Lua -e "assert(loadfile([[$($_.FullName)]]))"
@@ -101,8 +101,14 @@ if (Get-Command $Luac -ErrorAction SilentlyContinue) {
 }
 if (-not $NoTests) {
 Get-ChildItem -Filter *_test.lua -Path (Join-Path $root "tests") -ErrorAction SilentlyContinue | ForEach-Object {
-    & $Lua $_.FullName
-    if ($LASTEXITCODE -ne 0) { Write-Host "TEST FAIL: $($_.FullName)"; $script:fail = $true }
+    $name = $_.BaseName
+    $out = @(& $Lua $_.FullName)
+    $code = $LASTEXITCODE
+    $out | ForEach-Object { Write-Host $_ }
+    if ($code -ne 0) { Write-Host "TEST FAIL: $($_.FullName)"; $script:fail = $true }
+    elseif (-not ($out | Where-Object { "$_" -match "^$name`: (all OK|all passed|OK)\s*$" })) {
+        Write-Host "TEST FAIL: $name printed no all OK line"; $script:fail = $true
+    }
 }
 }
 # Every script must parse (a parse error would otherwise go unnoticed until it is run).
