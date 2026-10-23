@@ -2821,7 +2821,7 @@ do
     IS.prog = { 20090, 20091 }
     IS.procs = {
       iproc(20090, { has_item({ { id = 300, num = 2, lv = 4 } }) }),
-      iproc(20091, { has_item({ { id = 300, num = 1, lv = 4 },
+      iproc(20091, { has_item({ { id = 300, num = 0, lv = 5 },
         { id = 301, num = 1, lv = 99 } }) }),
     }
     IS.dict = storage({ { key = PL, value = ilist({ sd(300, 2) }) } })
@@ -2830,6 +2830,8 @@ do
   rel_world()
   ai.refresh_items()
   assert(next(ai.item_needs()) == nil, "RL1 held 2 satisfies both needs")
+  assert(nstub.last[2].qid == 20091 and nstub.last[2].op == "morethan"
+    and nstub.last[2].num == 0, "RL1 a morethan record reaches npcs")
   assert(type(nstub.last) == "table" and #nstub.last == 3
     and nstub.last[1].qid == 20090 and nstub.last[1].id == 300
     and nstub.last[1].num == 2 and nstub.last[1].op == "more",
@@ -2848,6 +2850,17 @@ do
   assert(rel[300][2] == "Quest 20099" and ai.quest_name(20099) == nil,
     "RL3 a quest with no name gives Quest <qid>")
   nstub.override = nil
+  -- RL3b a raising related_items keeps the previous map and the round counts clean
+  rel_world()
+  ai.refresh_items()
+  local rel3b, fail3b = ai.item_related(), ai.item_stats().failed_total
+  local real_ri = nstub.related_items
+  nstub.related_items = function() error("npcs down") end
+  iclk = iclk + 10
+  ai.refresh_items()
+  nstub.related_items = real_ri
+  assert(ai.item_stats().failed_total == fail3b and #(ai.item_related()[300] or {}) == #rel3b[300],
+    "RL3b raise in related_items: round not failed, map kept")
   -- RL4 failed round keeps the table
   rel_world()
   ai.refresh_items()
@@ -3010,13 +3023,17 @@ do
   local gm = obj({}, { get_TargetQuestId = function() return tracked end,
     ["requestOpenMapMenu(via.vec3, app.AILocalAreaDefinition)"] = true })
   local cdict_calls = 0
+  local contains_calls = 0
   local cd = obj({ NameID = guid("g_name") })
   local cdict = obj({}, { get_Item = function(cid)
     cdict_calls = cdict_calls + 1
     if cid ~= 189868107 then error("KeyNotFound") end
     return obj({ ["<Normal>k__BackingField"] = obj({}, { get_Item = function(i)
       return i == 0 and cd or nil end }) })
-  end, ContainsKey = function(cid) return cid ~= 43 end })
+  end, ContainsKey = function(cid)
+    contains_calls = contains_calls + 1
+    return cid ~= 43
+  end })
   local npcm = obj({}, { get_CharacterDataDict = cdict })
   local S = { ["app.QuestLogManager"] = qlm, ["app.GuiManager"] = gm, ["app.NPCManager"] = npcm }
   sdk.get_managed_singleton = function(n) return S[n] end
@@ -3127,6 +3144,9 @@ do
     local c1, f2 = cdict_calls, failed()
     assert(a.npc_name(43) == nil and failed() == f2 and cdict_calls == c1,
       "JR12b ContainsKey false: nil, no failure counted, no get_Item")
+    local k1 = contains_calls
+    assert(a.npc_name(43) == nil and contains_calls == k1 and failed() == f2,
+      "JR12b the miss is cached: no second native call")
   end
   S["app.NPCManager"] = nil
   assert(a.npc_name(77) == nil and failed() == f1 + 1, "JR12 no NPCManager -> nil, uncounted")

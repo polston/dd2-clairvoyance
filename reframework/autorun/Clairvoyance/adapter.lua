@@ -2082,18 +2082,22 @@ function journal.npc_name(cid)
     if hit ~= nil then return hit or nil end
     local nm = sdk.get_managed_singleton("app.NPCManager")
     if nm == nil then return nil end
-    -- v14 (SPEC 22.7.2): a cid the dictionary does not hold is not a failure
-    -- and is not cached (the NPC may load later)
-    local okc, has = pcall(function()
-        return nm:call("get_CharacterDataDict"):call("ContainsKey", cid)
-    end)
-    if okc and has == false then return nil end
+    -- v14 (SPEC 22.7.2): a cid the dictionary does not hold is cached as a
+    -- miss (no repeat native calls) but is not counted as a failure
+    local absent = false
     local ok, n = pcall(function()
-        return journal.msg(nm:call("get_CharacterDataDict"):call("get_Item", cid)
+        local dict = nm:call("get_CharacterDataDict")
+        if dict:call("ContainsKey", cid) == false then
+            absent = true
+            return nil
+        end
+        return journal.msg(dict:call("get_Item", cid)
             :get_field("<Normal>k__BackingField"):call("get_Item", 0):get_field("NameID"))
     end)
     if not ok then n = nil end
-    if n == nil then journal.stats.failed = journal.stats.failed + 1 end
+    if n == nil and not (ok and absent) then
+        journal.stats.failed = journal.stats.failed + 1
+    end
     journal.names[cid] = n or false
     return n
 end
@@ -3237,7 +3241,9 @@ local function item_round_needs(now)
         skipped = skipped + hsk
     end
     -- v14: quest-related items from the same records, before the need table
-    local rel = require("Clairvoyance.npcs").related_items(records)
+    -- a raise here must not fail the need round: keep the previous map
+    local okr, rel = pcall(require("Clairvoyance.npcs").related_items, records)
+    if not okr then rel = items.related end
     local t, ignored = qnml_core.item_need_table(records, held)
     if type(t) ~= "table" then error("item_need_table: bad result") end
     commit_item_needs(t)
