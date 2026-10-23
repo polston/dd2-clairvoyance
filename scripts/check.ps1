@@ -101,8 +101,14 @@ if (Get-Command $Luac -ErrorAction SilentlyContinue) {
 }
 if (-not $NoTests) {
 Get-ChildItem -Filter *_test.lua -Path (Join-Path $root "tests") -ErrorAction SilentlyContinue | ForEach-Object {
-    & $Lua $_.FullName
-    if ($LASTEXITCODE -ne 0) { Write-Host "TEST FAIL: $($_.FullName)"; $script:fail = $true }
+    $name = $_.BaseName
+    $out = @(& $Lua $_.FullName)
+    $code = $LASTEXITCODE
+    $out | ForEach-Object { Write-Host $_ }
+    if ($code -ne 0) { Write-Host "TEST FAIL: $($_.FullName)"; $script:fail = $true }
+    elseif (-not ($out | Where-Object { "$_" -match "^$name`: (all OK|all passed|OK)\s*$" })) {
+        Write-Host "TEST FAIL: $name printed no all OK line"; $script:fail = $true
+    }
 }
 }
 # Every script must parse (a parse error would otherwise go unnoticed until it is run).
