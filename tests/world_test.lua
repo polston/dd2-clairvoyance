@@ -2494,6 +2494,36 @@ do
     local wb, slices, worst = run(0.00002)
     check("slice: copy finishes in many slices", wb.graph ~= nil and slices > 5)
     check("slice: nothing after the first read exceeds the budget", worst <= 0.002 + 1e-9)
+    -- 1 ms clock: reads time at 0 or 1 ms; a slice stays within budget + one tick
+    do
+      local f, d = gfix({ big })
+      d.node_cost = 0.000022
+      f.io.clock = function() return math.floor(f.clock_t * 1000) / 1000 end
+      local w = with_route(f, R3)
+      local worstq, g = 0, 0
+      repeat
+        local t0 = f.clock_t
+        w:path_step(2, 1, true)
+        g = g + 1
+        if f.clock_t - t0 > worstq then worstq = f.clock_t - t0 end
+      until w.graph ~= nil or g >= 2000
+      check("slice: 1 ms clock keeps each slice within budget + one tick",
+        w.graph ~= nil and worstq <= 0.003 + 1e-9)
+    end
+    -- a slow first read (mean above the budget) still lets the copy finish
+    do
+      local f, d = gfix({ big })
+      d.node_cost = 0.000022
+      local first = true
+      d.on_read = function()
+        if first then first = false; f.clock_t = f.clock_t + 0.04 end
+      end
+      local w = with_route(f, R3)
+      local g = 0
+      repeat w:path_step(2, 1, true); g = g + 1 until w.graph ~= nil or g >= 5000
+      check("slice: slow first read does not stall the copy",
+        w.graph ~= nil and w.graph.n == 1000)
+    end
     local same = wa.graph ~= nil and wb.graph ~= nil and wa.graph.n == 1000
       and wb.graph.n == 1000
     for _, key in ipairs({ "x", "y", "z", "ls", "lc" }) do
@@ -2527,7 +2557,8 @@ do
         if m:find("attempt to") then bad = true end
       end
       check("slice: shrinking block ends without an index error (" .. #target .. ")",
-        swapped and not bad and not w:path_busy())
+        swapped and not bad and not w:path_busy() and #f.logs == 0 and w.copy_tries == 0
+        and w.graph ~= nil)
     end
   end
 

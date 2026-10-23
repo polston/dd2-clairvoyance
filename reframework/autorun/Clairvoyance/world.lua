@@ -1509,14 +1509,21 @@ function M.new(a, reads, io)
       c.off, c.x, c.y, c.z, c.lc, c.lb, c.ln = {}, {}, {}, {}, {}, {}, {}
     end
     local nb = c.nb
+    local did = false
     while c.b < nb do
       -- size the read from the running mean ms a node (first read 16 nodes)
+      -- the mean is floored (a 1 ms clock reads short reads as 0) and the
+      -- read is capped, so a count is always a finite number
       local count = 16
       if (c.tn or 0) > 0 then
-        count = math.floor((limit - (clock() - t0)) / (c.tsum / c.tn))
-        if count < 1 then
-          if c.did then return end
+        local mean = c.tsum / c.tn
+        if mean < 0.00002 then mean = 0.00002 end
+        count = math.floor((limit - (clock() - t0)) / mean)
+        if not (count >= 1) then
+          if did then return end
           count = 1
+        elseif count > 128 then
+          count = 128
         end
       end
       local first = c.k or 1
@@ -1553,11 +1560,10 @@ function M.new(a, reads, io)
         c.tsum = (c.tsum or 0) + (now - tb)
         c.tn = (c.tn or 0) + filled
       end
-      c.did = true
+      did = true
       -- stop before a read that would likely overrun the budget
-      if now - t0 >= limit then c.did = nil; return end
+      if now - t0 >= limit then return end
     end
-    c.did = nil
     if c.ri == nil then
       c.ri, c.rslot, c.wslot, c.ls, c.lt = 1, 1, 0, {}, {}
     end
