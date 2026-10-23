@@ -259,7 +259,7 @@ def main(argv=None):
         print(str(e))
         return 1
     except ImportError as e:
-        print("missing module: %s (needs Pillow and texture2ddecoder)" % e.name or type(e).__name__)
+        print("missing module: %s (needs Pillow and texture2ddecoder)" % (e.name or type(e).__name__))
         return 1
     except (KeyError, IndexError, ValueError, OSError, struct.error) as e:
         print("extraction failed: %s" % type(e).__name__)

@@ -186,6 +186,21 @@ class KeyTests(unittest.TestCase):
             self.assertNotIn(secret, text)
 
 
+class ModuleMessageTests(unittest.TestCase):
+    def test_missing_module_named(self):
+        from unittest import mock
+        err = ImportError("x", name="texture2ddecoder")
+        with tempfile.TemporaryDirectory() as d:
+            key = os.path.join(d, "k.txt")
+            with open(key, "w") as f:
+                f.write("00")
+            buf = io.StringIO()
+            with mock.patch.object(ei, "extract", side_effect=err), contextlib.redirect_stdout(buf):
+                code = ei.main(["--game", d, "--key", key, "--out", d])
+        self.assertEqual(code, 1)
+        self.assertIn("missing module: texture2ddecoder (", buf.getvalue())
+
+
 class CutTests(unittest.TestCase):
     def test_cut_rectangle(self):
         px = [bytes([i, i + 1, i + 2, 255]) for i in range(0, 32, 4)]
