@@ -1633,9 +1633,9 @@ function M.new(a, reads, io)
   local function store_path(pk, entry)
     w.paths[pk] = entry
     path_order[#path_order + 1] = pk
-    if #path_order > PATH_CAP and rp ~= nil then
+    if #path_order > PATH_CAP then
       local keep = {}
-      for _, pr in ipairs(rp.pairs) do
+      for _, pr in ipairs(rp and rp.pairs or rp_empty) do
         local a, b = w.near[rp.keys[pr[1]]], w.near[rp.keys[pr[2]]]
         if a and b then keep[a * 1048576 + b] = true end
       end
@@ -1652,6 +1652,8 @@ function M.new(a, reads, io)
     end
     w.pver = w.pver + 1
   end
+
+  w.store_path = store_path
 
   local function search_slice(stops, budget_ms, undisc)
     local npcs = require("Clairvoyance.npcs")

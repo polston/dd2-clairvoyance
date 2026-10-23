@@ -2566,6 +2566,17 @@ do
       and w.paths[72 * 1048576 + 73] ~= nil and w.paths[73 * 1048576 + 74] ~= nil)
   end
 
+  -- storing with no route pair cache still caps at 64
+  do
+    local f = gfix()
+    local w = f.new()
+    for k = 1, 65 do w.store_path(k, { k }) end
+    local np = 0
+    for _ in pairs(w.paths) do np = np + 1 end
+    check("cap: 65 stored with no cache leaves 64", np == 64 and w.paths[1] == nil
+      and w.paths[65] ~= nil)
+  end
+
   -- io: only log given
   do
     local saved = json
