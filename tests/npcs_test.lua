@@ -196,6 +196,26 @@ do
   check("related float dedup", #r[5] == 1)
 end
 
+-- parse_hints items, hint_items
+do
+  local h, e = N.parse_hints({ ["1"] = { quest = "a" } })
+  check("items absent: empty list", #h[1].items == 0 and #e == 0)
+  h, e = N.parse_hints({ ["1"] = { items = { 310, 395 } } })
+  check("items kept", #h[1].items == 2 and h[1].items[1] == 310 and h[1].items[2] == 395 and #e == 0)
+  h, e = N.parse_hints({ ["1"] = { items = "x" } })
+  check("items string rejected", #h[1].items == 0 and #e == 1 and e[1]:find("items is not a list", 1, true))
+  h, e = N.parse_hints({ ["1"] = { items = { a = 1 } } })
+  check("items object rejected", #h[1].items == 0 and #e == 1 and e[1]:find("items is not a list", 1, true))
+  h, e = N.parse_hints({ ["1"] = { items = { 310, 1.5, -2, 395 } } })
+  check("bad item ids dropped", #h[1].items == 2 and h[1].items[1] == 310 and h[1].items[2] == 395
+    and #e == 2 and e[1]:find("item 2 is not an item id", 1, true)
+    and e[2]:find("item 3 is not an item id", 1, true))
+  local m = N.hint_items({ [20] = { items = { 310 } }, [10] = { items = { 310, 395, 395 } } })
+  check("hint_items map", #m[310] == 2 and m[310][1] == 10 and m[310][2] == 20
+    and #m[395] == 1 and m[395][1] == 10)
+  check("hint_items nil", next(N.hint_items(nil)) == nil)
+end
+
 -- route ties: first row read wins
 do
   local s = N.route_stops({ row(0, 24, 49), row(0, 24, 50) }, TODAY, pos_of, nil)

@@ -186,7 +186,20 @@ function M.parse_hints(t)
     elseif type(q) ~= "table" then
       errors[#errors + 1] = "hints: quest " .. tostring(k) .. " is not an object"
     else
-      local entry = { quest = type(q.quest) == "string" and q.quest or nil, steps = {} }
+      local entry = { quest = type(q.quest) == "string" and q.quest or nil, steps = {}, items = {} }
+      local its = q.items
+      if its ~= nil and (type(its) ~= "table" or (#its == 0 and next(its) ~= nil)) then
+        errors[#errors + 1] = "hints: quest " .. tostring(k) .. " items is not a list"
+      elseif type(its) == "table" then
+        for i, v in ipairs(its) do
+          if type(v) == "number" and whole_key(v) then
+            entry.items[#entry.items + 1] = v
+          else
+            errors[#errors + 1] = "hints: quest " .. tostring(k) .. " item " .. i
+              .. " is not an item id"
+          end
+        end
+      end
       if q.quest ~= nil and type(q.quest) ~= "string" then
         errors[#errors + 1] = "hints: quest " .. tostring(k) .. " hint is not text"
       end
@@ -231,6 +244,28 @@ function M.parse_hints(t)
     end
   end
   return hints, errors
+end
+
+-- { [item_id] = { qid, ... } } (ascending, unique) from the parsed hints.
+function M.hint_items(hints)
+  local out, seen = {}, {}
+  if type(hints) ~= "table" then return out end
+  for qid, q in pairs(hints) do
+    if type(q) == "table" and type(q.items) == "table" then
+      for _, id in ipairs(q.items) do
+        local s = seen[id]
+        if not s then s = {}; seen[id] = s end
+        if not s[qid] then
+          s[qid] = true
+          local list = out[id]
+          if not list then list = {}; out[id] = list end
+          list[#list + 1] = qid
+        end
+      end
+    end
+  end
+  for _, list in pairs(out) do table.sort(list) end
+  return out
 end
 
 -- quest_step is 1-based; the file's step index is 0-based.

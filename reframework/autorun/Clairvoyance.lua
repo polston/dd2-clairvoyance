@@ -2342,6 +2342,7 @@ do
     if t == nil then error("hints file missing or unreadable", 0) end
     local hints, errs = require("Clairvoyance.npcs").parse_hints(t)
     wt.hints = hints
+    adapter.set_item_quests(require("Clairvoyance.npcs").hint_items(hints))
     if #errs > 0 then error(#errs .. " hint entries dropped, first: " .. errs[1], 0) end
   end)
   if not okh then logmsg("hints: " .. tostring(why)) end

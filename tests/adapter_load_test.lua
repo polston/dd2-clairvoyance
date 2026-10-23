@@ -2896,6 +2896,29 @@ do
   ai.refresh_items()
   assert(next(ai.item_related()) == nil, "RL8 empty-wanted early return clears")
 
+  -- RS hints-file item quests join the live ones
+  rel_world()
+  ai.refresh_items()
+  ai.set_item_quests({ [310] = { 20090 } })
+  assert(ai.item_related()[310][1] == ai.quest_name(20090) and #ai.item_related()[310] == 1,
+    "RS1 static only")
+  ai.set_item_quests({ [300] = { 20090, 20091 } })
+  ai.invalidate_items()
+  rel_world()
+  iclk = iclk + 10
+  ai.refresh_items()
+  local live1 = ai.item_related()[300]
+  assert(#live1 == 2, "RS2 setup: live has two for item 300")
+  ai.set_item_quests({ [300] = { 20091, 20077 } })
+  local u = ai.item_related()[300]
+  assert(#u == 3 and u[1] == live1[1] and u[2] == live1[2] and u[3] == "Quest 20077"
+    and ai.quest_name(20077) == nil, "RS2 union: live first, static appended, no repeat")
+  ai.set_item_quests({ [311] = { 20090 } })
+  assert(ai.item_related()[311] ~= nil and #ai.item_related()[300] == 2,
+    "RS3 set_item_quests clears the cache")
+  ai.set_item_quests(nil)
+  assert(ai.item_related()[311] == nil, "RS4 nil clears the static map")
+
   -- RN needs-only round (Ruling 9)
   ifresh()
   ai.refresh_items("needs")

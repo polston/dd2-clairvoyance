@@ -3493,17 +3493,29 @@ function A.make()
   -- the next commit
   function a.item_related()
     if items.related_titles == nil then
-      local out = {}
-      for id, qids in pairs(items.related or {}) do
-        local titles = {}
-        for i, q in ipairs(qids) do
-          titles[i] = a.quest_name(q) or ("Quest " .. tostring(q))
+      local out, ids = {}, {}
+      for id in pairs(items.related or {}) do ids[id] = true end
+      for id in pairs(items.static_related or {}) do ids[id] = true end
+      for id in pairs(ids) do
+        local titles, seen = {}, {}
+        for _, src in ipairs({ items.related or {}, items.static_related or {} }) do
+          for _, q in ipairs(src[id] or {}) do
+            if not seen[q] then
+              seen[q] = true
+              titles[#titles + 1] = a.quest_name(q) or ("Quest " .. tostring(q))
+            end
+          end
         end
         out[id] = titles
       end
       items.related_titles = out
     end
     return items.related_titles
+  end
+  -- v14: { [item_id] = { qid, ... } } from the hints file; nil clears it
+  function a.set_item_quests(map)
+    items.static_related = type(map) == "table" and map or nil
+    items.related_titles = nil
   end
   -- the next refresh_items round runs at once (Ruling 9)
   function a.reset_item_throttle() ITEM_LAST_AT = -math.huge end
