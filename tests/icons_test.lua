@@ -337,6 +337,8 @@ do
   check("outline: 8 offset copies in order, black tint", ok)
   check("outline: picture last at center", d.draws[9].tint == 0xFF112233 and d.draws[9].x == 488 and d.draws[9].y == 388)
   check("outline_ms recorded", type(r.outline_ms) == "number")
+  r:draw()
+  check("a frame drawing nothing reports outline_ms 0", r.outline_ms == 0)
   local n = #d.draws
   r:push("head", 3, 500, 400, 24, 0xFF112233, 1, nil); r:draw()
   check("style nil: 1 call", #d.draws == n + 1)
@@ -366,7 +368,7 @@ do
   check("fill: route stop 1.5x with style", r.map.pool[1].size == 30 and r.map.pool[1].style == sty)
   check("fill: other category 1x no style", r.map.pool[2].size == 20 and r.map.pool[2].style == nil)
   check("fill: lx ly read_at on records", recs[1].lx == 100 and recs[1].ly == 200 and recs[2].lx == 100
-    and recs[1].read_at == 42)
+    and recs[1].read_at == 42 and recs[2].ly == 200)
   check("fill_at set", r.fill_at == 42)
   now = 0
 end

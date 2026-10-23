@@ -35,6 +35,7 @@ end
 local function draw_layer(r, layer, ox, oy, k, is_head)
   local d2dx, opts, images = r.d2dx, r.opts, r.images
   local clock = r.clock
+  local t1, outlined = clock(), false
   local pool = layer.pool
   for i = 1, layer.n do
     local rec = pool[i]
@@ -49,7 +50,7 @@ local function draw_layer(r, layer, ox, oy, k, is_head)
       end
       local style = rec.style
       if style ~= nil and style.on then
-        local t1 = clock()
+        outlined = true
         local o = math.max(1, math.floor(style.width * k + 0.5))
         local c = style.color
         opts.tint = c | 0xFF000000
@@ -57,12 +58,12 @@ local function draw_layer(r, layer, ox, oy, k, is_head)
         for j = 1, 15, 2 do
           d2dx.image_ex(entry.img, px + OFFS[j] * o, py + OFFS[j + 1] * o, s, s, opts)
         end
-        r.outline_ms = r.outline_ms + (clock() - t1) * 1000
       end
       opts.tint, opts.alpha = rec.tint, rec.alpha
       d2dx.image_ex(entry.img, px, py, s, s, opts)
     end
   end
+  if outlined then r.outline_ms = r.outline_ms + (clock() - t1) * 1000 end
 end
 
 local function draw_all(r, ox, oy, k, use_mini)
@@ -292,6 +293,7 @@ function M.create(opt)
   end
 
   function r:draw()
+    self.outline_ms = 0
     if self.mini.n > 0 and clock() - self.mini_at > MINI_STALE then
       self.mini.n = 0
     end
@@ -307,7 +309,6 @@ function M.create(opt)
       clear_queues()
       return
     end
-    self.outline_ms = 0
     local t0 = clock()
     local oks, w, h = pcall(d2dx.surface_size)
     if not oks or type(w) ~= "number" or w <= 0 or type(h) ~= "number" or h <= 0 then
