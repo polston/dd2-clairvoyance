@@ -9,6 +9,7 @@ local TRIP_AT = 30        -- consecutive failed passes before the breaker trips
 local TRIP_SECONDS = 5.0
 local TRIP_LIMIT = 3      -- the third trip keeps drawing off
 local MINI_STALE = 0.25   -- seconds without a minimap update before "mini" is dropped
+local MAX_RECORDS = 4096  -- per-layer cap: pushes past it are dropped (a layer that never gets replaced cannot grow without bound)
 
 local function new_layer()
   return { n = 0, pool = {} }
@@ -16,6 +17,7 @@ end
 
 local function layer_push(layer, id, x, y, size, tint, alpha)
   local n = layer.n + 1
+  if n > MAX_RECORDS then return end
   layer.n = n
   local rec = layer.pool[n]
   if rec == nil then
@@ -124,10 +126,16 @@ function M.create(opt)
         local entry = { img = nil, state = "pending" }
         self.images[id] = entry
         local ok, img = pcall(d2dx.Image.new, PATH_PREFIX .. id .. ".png")
-        if ok and img ~= nil then
+        local t = type(img)
+        if ok and (t == "table" or t == "userdata") then
           entry.img = img
-          self.pending_n = self.pending_n + 1
-          self.pending[self.pending_n] = id
+          local okr, is_ready = pcall(img.is_ready, img)
+          if okr and is_ready then
+            entry.state = "ready"
+          else
+            self.pending_n = self.pending_n + 1
+            self.pending[self.pending_n] = id
+          end
         else
           mark_failed(id, entry, ok and "file missing" or img)
           newly_failed = true
@@ -139,7 +147,12 @@ function M.create(opt)
 
   function r:ready(id)
     local e = self.images[id]
-    return e ~= nil and e.state == "ready"
+    if e == nil then return false end
+    if e.state == "pending" and e.img ~= nil then
+      local okr, is_ready = pcall(e.img.is_ready, e.img)
+      if okr and is_ready then e.state = "ready" end
+    end
+    return e.state == "ready"
   end
 
   function r:drawable(id)
@@ -158,6 +171,13 @@ function M.create(opt)
       local img = entry.img
       local settled = false
       local okr, is_ready = pcall(img.is_ready, img)
+      if entry.state ~= "pending" then
+        -- settled by ready() or preload since it was queued: nothing changed for the poll
+        r.pending[i] = r.pending[r.pending_n]
+        r.pending[r.pending_n] = nil
+        r.pending_n = r.pending_n - 1
+        goto continue
+      end
       if okr and is_ready then
         entry.state = "ready"
         settled = true
@@ -177,6 +197,7 @@ function M.create(opt)
       else
         i = i + 1
       end
+      ::continue::
     end
     if changed then rebuild() end
   end
@@ -206,7 +227,8 @@ function M.create(opt)
     for i = 1, #records do
       local rec = records[i]
       local ok, x, y = pcall(read, rec)
-      if ok and x ~= nil then
+      if ok and type(x) == "number" and type(y) == "number" and type(rec.argb) == "number"
+          and type(rec.size) == "number" and rec.id ~= nil then
         self:push("map", rec.id, x, y, rec.size, rec.argb, 1)
       end
     end

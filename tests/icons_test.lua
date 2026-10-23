@@ -268,7 +268,9 @@ do
     r:push("map", 1, 1, 1, 8, 0xFFFFFFFF, 1); r:draw()
   end
   check("29 failures: still active", r:active() and r.trips == 0)
+  local logs_before = #st.logs
   r:push("map", 1, 1, 1, 8, 0xFFFFFFFF, 1); r:draw()
+  check("trip logs exactly once", #st.logs == logs_before + 1)
   check("30th failure trips", not r:active() and r.trips == 1)
   check("trip requests a rebuild", st.rebuilds == base + 1)
   check("trip logs once", st.logs[#st.logs]:find("begin_frame false", 1, true) ~= nil)
@@ -382,6 +384,51 @@ do
   for _ = 1, 100 do frame() end
   check("pool size unchanged after 100 steady frames", r:pool_size() == size)
   check("pool holds the peak", size == 15)
+end
+
+-- Review fixes.
+do
+  -- (1) loaded at preload: ready before any draw, no rebuild
+  local d = fake_d2dx(); ready_image(d, 1)
+  local r, st = make(d)
+  r:preload({ 1 })
+  check("loaded at preload: ready before first draw", r:ready(1) and r:drawable(1))
+  check("loaded at preload: no rebuild", st.rebuilds == 0)
+  r:draw()
+  check("loaded at preload: poll adds no rebuild", st.rebuilds == 0)
+  -- becomes loaded between draws: ready() sees it, poll adds no rebuild
+  local img = fake_image("pending")
+  d.files["Clairvoyance/icons/2.png"] = img
+  r:preload({ 2 })
+  check("pending not ready", not r:ready(2))
+  img.state = "loaded"
+  check("ready() checks live state", r:ready(2))
+  r:draw()
+  check("ready() flip: poll adds no rebuild", st.rebuilds == 0 and r.pending_n == 0)
+  -- (2) fill with nil y, nil argb, nil size, non-number x
+  local n0 = r.fail_count
+  local recs = { { id = 1, size = 20, argb = 0xFFFFFFFF }, { id = 1, size = 20 },
+    { id = 1, argb = 0xFFFFFFFF }, { id = 1, size = 20, argb = 0xFFFFFFFF } }
+  r:fill(recs, function(rec) if rec == recs[4] then return "a", 1 end return 5, nil end)
+  check("fill skips nil y, bad x", r.map.n == 0)
+  r:fill(recs, function() return 5, 6 end)
+  check("fill skips nil argb and nil size", r.map.n == 2)
+  r:draw()
+  check("fill bad records never touch the breaker", r.fail_count == n0 and r.trips == 0)
+  -- (3) unbounded mini pushes are capped
+  for i = 1, 5000 do r:push("mini", 1, i, i, 8, 0xFFFFFFFF, 1) end
+  check("mini capped at 4096", r.mini.n == 4096 and #r.mini.pool == 4096)
+  r:mini_replace()
+  check("mini_replace resets the count", r.mini.n == 0)
+  -- (5) Image.new returning false / a number marks failed without raising
+  local d2 = fake_d2dx()
+  d2.Image.new = function(p) if p:find("7") then return false end return 42 end
+  local r2, st2 = make(d2)
+  r2:preload({ 7, 8 })
+  check("non-image results fail", not r2:ready(7) and not r2:ready(8) and r2.failed_ids == 2)
+  check("non-image results log once each", #st2.logs == 2 and st2.rebuilds == 1)
+  r2:push("map", 7, 1, 1, 8, 0xFFFFFFFF, 1)
+  check("draw does not raise on failed ids", pcall(r2.draw, r2))
 end
 
 if failures == 0 then print("icons_test: all OK") else print("icons_test: " .. failures .. " FAILED"); os.exit(1) end
