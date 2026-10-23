@@ -452,4 +452,27 @@ do
   check("draw does not raise on failed ids", pcall(r2.draw, r2))
 end
 
+-- to_screen (SPEC 22.8.5): last layout's offset and scale.
+do
+  local d = fake_d2dx(); ready_image(d, 7)
+  local r = make(d)
+  local x0, y0 = r:to_screen(100, 50)
+  check("to_screen before a pass is identity", x0 == 100 and y0 == 50)
+  r:preload({ 7 }); r:draw()
+  r:push("map", 7, 0, 0, 20, 0xFFFFFFFF, 1)
+  r:draw()
+  local sx, sy = r:to_screen(100, 50)
+  check("to_screen 1920x1080 is identity", sx == 100 and sy == 50)
+  d.w, d.h = 2560, 1080
+  r:push("map", 7, 0, 0, 20, 0xFFFFFFFF, 1)
+  r:draw()
+  sx, sy = r:to_screen(100, 50)
+  check("to_screen 2560x1080 adds ox 320", sx == 420 and sy == 50)
+  d.w, d.h = 1280, 720
+  r:push("map", 7, 0, 0, 20, 0xFFFFFFFF, 1)
+  r:draw()
+  sx, sy = r:to_screen(300, 150)
+  check("to_screen 1280x720 scales 2/3", math.abs(sx - 200) < 1e-9 and math.abs(sy - 100) < 1e-9)
+end
+
 if failures == 0 then print("icons_test: all OK") else print("icons_test: " .. failures .. " FAILED"); os.exit(1) end

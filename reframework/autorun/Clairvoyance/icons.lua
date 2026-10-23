@@ -69,7 +69,7 @@ function M.create(opt)
     mini_at = -math.huge,
     opts = {},
     map_seen = -math.huge,
-    layout_k = 1,
+    layout_k = 1, layout_ox = 0, layout_oy = 0,
     fail_count = 0, trips = 0, tripped_until = nil,
     failed_ids = 0,
     fill_ms = 0, draw_ms = 0,
@@ -241,6 +241,12 @@ function M.create(opt)
 
   function r:k() return self.layout_k end
 
+  -- 1920x1080 layout point -> screen, with the last pass's scale and offset
+  -- (SPEC 22.8.5). Identity until the first pass.
+  function r:to_screen(x, y)
+    return self.layout_ox + x * self.layout_k, self.layout_oy + y * self.layout_k
+  end
+
   function r:pool_size()
     return #self.map.pool + #self.mini.pool + #self.head.pool
   end
@@ -292,6 +298,7 @@ function M.create(opt)
     local k = math.min(w / 1920, h / 1080)
     self.layout_k = k
     local ox, oy = (w - 1920 * k) / 2, (h - 1080 * k) / 2
+    self.layout_ox, self.layout_oy = ox, oy
     local okb, began = pcall(d2dx.begin_frame)
     if not okb or not began then
       clear_queues()
