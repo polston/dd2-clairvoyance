@@ -64,7 +64,7 @@ if ($havePython) {
     $zip = Join-Path $c.Out "Clairvoyance.zip"
     $ok = ($r.Code -eq 0) -and (Test-Path $zip)
     $e = @(); if ($ok) { $e = Get-Entries $zip }
-    Assert-True "zip_contents" ($ok -and ($e -contains "reframework/data/Clairvoyance_places.json") -and ($e -contains "reframework/images/Clairvoyance/icons/index.json") -and ($e -contains "reframework/images/Clairvoyance/icons/52.png") -and -not ($e | Where-Object { $_ -match $toolsRe })) "code $($r.Code) entries $($e -join ',')"
+    Assert-True "zip_contents" ($ok -and ($e -contains "reframework/data/Clairvoyance_places.json") -and ($e -contains "reframework/images/Clairvoyance/icons/index.json") -and ($e -contains "reframework/images/Clairvoyance/icons/52.png") -and -not ($e | Where-Object { $_ -match $toolsRe }) -and -not ($e | Where-Object { $_ -match "^reframework/images/.*[^/]$" -and $_ -notmatch "^reframework/images/Clairvoyance/icons/(index\.json|[0-9]+\.png)$" })) "code $($r.Code) entries $($e -join ',')"
     # the icons folder is required: a scratch repo without it fails the build
     $c = New-Case "t2b" $stub -NoIcons
     $r = Invoke-Build $c @("-GameDir", $c.Game, "-KeyFile", $c.Key)

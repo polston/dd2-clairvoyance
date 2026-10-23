@@ -407,6 +407,21 @@ do
   info = real_info
   check("pic: raising frame_info", o_ok and #pushes == 0 and replaces == 1)
 
+  -- a persistently failing frame_info falls back to the v12 slot borrow
+  do
+    cands = { marker(10) }
+    local rf, hf, sf = setup()
+    info = setmetatable({}, { __index = function() error("x") end })
+    for _ = 1, 29 do rf:after(hf) end
+    check("pic: 29 failures still blank", sf.visible == false and rf.icons_mode == true)
+    rf:after(hf)
+    check("pic: 30th failure uses slots", sf.visible == true and rf.icons_mode == false)
+    info = real_info
+    rf:before(hf)
+    rf:after(hf)
+    check("pic: success resets the streak", rf.icons_mode == true and rf.frame_fails == 0)
+  end
+
   -- slot exhaustion on missing pictures does not stop later pictures
   not_drawable = 99
   local m1, m2 = marker(10), marker(20)

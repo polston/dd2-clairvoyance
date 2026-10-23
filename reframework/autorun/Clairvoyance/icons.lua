@@ -267,7 +267,6 @@ function M.create(opt)
   end
 
   function r:draw()
-    if avail then poll() end
     if self.mini.n > 0 and clock() - self.mini_at > MINI_STALE then
       self.mini.n = 0
     end
@@ -275,6 +274,7 @@ function M.create(opt)
       clear_queues()
       return
     end
+    if avail then poll() end
     local okm, mini_ok = pcall(opt.mini_ok or enabled_default)
     local use_mini = okm and mini_ok and true or false
     local nmap, nmini, nhead = self.map.n, use_mini and self.mini.n or 0, self.head.n

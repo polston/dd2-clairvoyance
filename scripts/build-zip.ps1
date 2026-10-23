@@ -64,8 +64,10 @@ Copy-Item (Join-Path $Root "reframework/autorun") (Join-Path $stage "reframework
 $iconsSrc = Join-Path $Root "reframework/images/Clairvoyance"
 if (-not (Test-Path -LiteralPath $iconsSrc -PathType Container)) { Stop-Build "icons folder missing: reframework/images/Clairvoyance" }
 $iconsDst = Join-Path $stage "reframework/images/Clairvoyance"
-New-Item -ItemType Directory -Force $iconsDst | Out-Null
-Copy-Item (Join-Path $iconsSrc "*") $iconsDst -Recurse -Force
+New-Item -ItemType Directory -Force (Join-Path $iconsDst "icons") | Out-Null
+# Only the tracked shapes ship: icons/*.png and icons/index.json.
+Copy-Item (Join-Path $iconsSrc "icons/*.png") (Join-Path $iconsDst "icons") -Force
+Copy-Item (Join-Path $iconsSrc "icons/index.json") (Join-Path $iconsDst "icons") -Force
 
 if ($NoPlaces) { $zip = Join-Path $OutDir "Clairvoyance-noplaces.zip" }
 else {

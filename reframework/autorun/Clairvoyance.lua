@@ -189,6 +189,9 @@ do
   -- picture is queued then, so the game glyph stays visible.
   icons.read_ok = w_visible ~= nil and s_visible ~= nil
     and s_position ~= nil and s_size ~= nil
+  -- False when a minimap frame method failed to resolve: the minimap then
+  -- keeps the v12 slot borrow instead of going blank.
+  icons.mini_read_ok = m_gpos ~= nil and m_cscale ~= nil and m_avisible ~= nil
   local function call_m(m, obj)
     return m:call(obj)   -- a nil method raises; every caller is under pcall
   end
@@ -230,10 +233,12 @@ do
   -- fade and the visible flag. Only PnlMapIconSpriteRoot is asked for a
   -- position, never the texture node under it.
   local function frame_read(ui)
-    local gp = call_m(m_gpos, ui.PnlMapIconSpriteRoot)
-    local root = ui.Root
+    local pnl, root = ui.PnlMapIconSpriteRoot, ui.Root
+    if not sdk.is_managed_object(pnl) or not sdk.is_managed_object(root) then return nil end
+    local gp = call_m(m_gpos, pnl)
     local cs = call_m(m_cscale, root)
     local vis = call_m(m_avisible, root)
+    if gp == nil or cs == nil then return nil end
     return gp.x, gp.y, cs.w, vis == true and ui_map == nil
   end
   function icons.frame_info(ui)
@@ -842,7 +847,7 @@ minimap_renderer = require("Clairvoyance.minimap").create({
   icon_for = function(m)
     return su.icon_for(settings, m, "mini", m.step, icons.drawable_fn)
   end,
-  icons_on = function() return icons:active() end,
+  icons_on = function() return icons.mini_read_ok and icons:active() end,
   frame_info = icons.frame_info,
   push = icons.mini_push,
   mini_replace = icons.mini_clear,

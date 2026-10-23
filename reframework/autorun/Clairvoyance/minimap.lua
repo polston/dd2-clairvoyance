@@ -172,6 +172,20 @@ function M.create(opt)
     self.pool_n = count
 
     local now = opt.clock()
+    -- A frame_info that keeps failing (raise or nil) falls back to the v12
+    -- slot path after 30 updates, never a blank minimap.
+    local px, py, fade, frame_ok
+    if pictures then
+      local okf, a, b, c, d = pcall(opt.frame_info, ui)
+      if okf and a ~= nil then
+        self.frame_fails = 0
+        frame_ok = d and c ~= nil and c > 0
+        px, py, fade = a, b, c
+      else
+        self.frame_fails = (self.frame_fails or 0) + 1
+        if self.frame_fails >= 30 then pictures = false end
+      end
+    end
     if pictures then
       self.icons_mode = true
       self.free_n = 0
@@ -213,14 +227,8 @@ function M.create(opt)
       return nil
     end
 
-    local px, py, fade
-    if pictures then
-      local okf, a, b, c, d = pcall(opt.frame_info, ui)
-      if okf and a ~= nil and d and c ~= nil and c > 0 then
-        px, py, fade = a, b, c
-      else
-        return  -- nothing queues: full map open, faded out, or no frame info
-      end
+    if pictures and not frame_ok then
+      return  -- nothing queues: full map open, faded out, or no frame info
     end
 
     local range2 = range * range

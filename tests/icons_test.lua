@@ -408,6 +408,18 @@ do
   check("ready() flip: poll adds no second rebuild", st.rebuilds == 1 and r.pending_n == 0)
   r:ready(2)
   check("repeat ready() adds none", st.rebuilds == 1)
+  -- off: no poll, so a pending image is not touched through D2DX
+  local img3 = fake_image("pending")
+  d.files["Clairvoyance/icons/3.png"] = img3
+  r:preload({ 3 })
+  st.enabled = false
+  local calls = 0
+  local orig = img3.is_ready
+  img3.is_ready = function(...) calls = calls + 1 return orig(...) end
+  r:draw()
+  check("off: pending image not polled", calls == 0)
+  st.enabled = true
+  st.enabled = true
   -- (2) fill with nil y, nil argb, nil size, non-number x
   local n0 = r.fail_count
   local recs = { { id = 1, size = 20, argb = 0xFFFFFFFF }, { id = 1, size = 20 },
