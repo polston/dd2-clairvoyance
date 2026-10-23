@@ -1467,7 +1467,9 @@ local function install_debug()
             end
           end
           -- v14 (SPEC 23.4.8): every style and route key, validated
-          if not hit and su.set_key(settings, key, v) then
+          if not hit and (key:find("^style_") or key:find("^outline_")
+            or key:find("^route_") or key == "names_color")
+            and su.set_key(settings, key, v) then
             want_update = true; last_tick = 0.0; save_settings()
           end
         end
@@ -1642,26 +1644,27 @@ do
   for _, r in ipairs(cat_rows) do gname[r[1]] = r[2] end
 
   -- Appearance controls: validate through su.set_key, then save. A checkbox
-  -- saves at once; a picker or slider takes the throttled settings_dirty path.
+  -- saves at once (the number size alone defers to the slider release).
   local function ck(label, key)
     local c, v = imgui.checkbox(label .. "##" .. key, settings[key])
     if c and su.set_key(settings, key, v) then want_update = true; save_settings() end
   end
   local function cc(label, key)
     local c, v = imgui.color_picker_argb(label .. "##" .. key, settings[key])
-    if c and su.set_key(settings, key, v) then want_update = true; settings_dirty = true end
+    if c and su.set_key(settings, key, v) then want_update = true; save_settings() end
   end
   local function cs(label, key, lo, hi)
     local c, v = imgui.slider_int(label .. "##" .. key, settings[key], lo, hi)
-    if c and su.set_key(settings, key, v) then want_update = true; settings_dirty = true end
+    if c and su.set_key(settings, key, v) then want_update = true; save_settings() end
   end
   -- Number size (SPEC 23.4.3): the slider edits a draft on icons; the setting
   -- is written on the frame the slider stops being active (1-11 snap to 12).
   local function number_size()
     local shown = icons.draft_active and icons.draft_number_size
       or settings.route_number_size
-    local c, v = imgui.slider_int("Number size##route_number_size", shown, 0, 40,
-      shown == 0 and "default font" or "%d px")
+    local c, v = imgui.slider_int("Number size##route_number_size", shown, 0, 40)
+    imgui.same_line()
+    imgui.text("0 = default font")
     if c then icons.draft_number_size = v; icons.draft_active = true end
     if icons.draft_active and not imgui.is_item_active() then
       icons.draft_active = false
@@ -2082,16 +2085,6 @@ do
   sec.status = function()
     local changed
     if not imgui.tree_node("Status and debug") then return end
-    changed, settings.debug = imgui.checkbox("Debug logging", settings.debug)
-    if changed then A.set_debug(settings.debug); install_debug(); save_settings() end
-
-    if imgui.button("Force refresh") then
-      committed = {}
-      snapshot = nil
-      want_update = true
-      last_tick = 0.0
-    end
-
     if snapshot ~= nil then
       local c = snapshot.counts
       imgui.text(string.format(
@@ -2131,6 +2124,16 @@ do
     else
       imgui.text("Waiting for game / save data")
     end
+    changed, settings.debug = imgui.checkbox("Debug logging", settings.debug)
+    if changed then A.set_debug(settings.debug); install_debug(); save_settings() end
+
+    if imgui.button("Force refresh") then
+      committed = {}
+      snapshot = nil
+      want_update = true
+      last_tick = 0.0
+    end
+
     if settings.debug then
       imgui.text("Collection path: " .. A.debug_probe())
       imgui.text(string.format("Hover: fires %d  hits %d  misses %d  sel_nil %d",
