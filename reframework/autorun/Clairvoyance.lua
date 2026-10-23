@@ -60,16 +60,21 @@ do
   end
   wt.styles.none = { on = false, color = 0xFF000000, width = 1 }
   wt.dk, wt.dw, wt.dh = 1, 1920, 1080   -- display scale (height / 1080) and size
-  wt.outline_acc = 0                    -- ms spent in outline draws outside icons
+  wt.outline_acc = 0                    -- ms spent in outline draws outside icons, this frame
+  wt.outline_ms_shown = 0               -- last whole frame's total (icons + outside)
+  wt.any_on = true                      -- some group has its outline on
   wt.path_draw_ms = 0
   wt.path_scr = {}                      -- reused screen buffer for the in-world path
   wt.a = function(argb) return ((argb >> 24) & 0xFF) / 255 end
   wt.refresh_styles = function()
     local gs, styles = wt.style.GROUPS, wt.styles
+    local any = false
     for i = 1, #gs do
       local st = styles[gs[i]]
       st.on, st.color, st.width = wt.style.resolve(settings, gs[i])
+      if st.on then any = true end
     end
+    wt.any_on = any
     local ok, sz = pcall(imgui.get_display_size)
     if ok and sz ~= nil and sz.y > 0 then
       wt.dk, wt.dw, wt.dh = sz.y / 1080, sz.x, sz.y
@@ -373,6 +378,7 @@ do
     local scale = settings.route_stop_size / 100
     local k = icons:k()
     local dy = px > 0 and px / 2 or 6
+    local t1 = st.on and os.clock() or nil
     for i = 1, nrr do
       local rec = rr[i]
       local sx, sy = icons:to_screen(rec.lx, rec.ly)
@@ -382,10 +388,9 @@ do
         icons.nums[rec.marker.stop] = num
       end
       local off = rec.size * scale * k / 2 + 2
-      local t1 = st.on and os.clock() or nil
       wt.style.text(draw, num, sx + off, sy - dy, abgr, st.on, st.color, o, a)
-      if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
     end
+    if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
   end
   icons.draw_numbers = function(nrr)
     local rns = settings.route_number_size
@@ -467,7 +472,7 @@ do
     for i = #rr, nrr + 1, -1 do rr[i] = nil end
     if nrr > 0 then icons.draw_numbers(nrr) end
     local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
-    if pairs_ == nil or #pairs_ == 0 then return end
+    if pairs_ == nil or #pairs_ == 0 then wt.path_draw_ms = 0; return end
     local fit = icons.npcs.fit(fp, nf, icons.fit_opt, icons.fit)
     for i = 1, nstops do
       if ends[i] == nil then
@@ -501,19 +506,21 @@ do
     return string.format(
       "Paths: copy max %.2f ms, search max %.2f ms, last expanded %s (pair %s), draw %.2f ms, outline draw %.2f ms",
       wt.copy_ms_max or 0, wt.search_ms_max or 0, tostring(wt.last_expanded),
-      tostring(wt.last_pair), wt.path_draw_ms, icons.outline_ms + wt.outline_acc)
+      tostring(wt.last_pair), wt.path_draw_ms, wt.outline_ms_shown)
   end
 
   -- The per-frame pass: fill the full-map layer from the records while the
   -- map is up, then draw everything queued (SPEC 21.2.7, 21.4.4).
   function icons.frame()
     pcall(wt.refresh_styles)
-    wt.outline_acc = 0
     if ui_map ~= nil and os.clock() - icons.map_seen < 0.25 and icons:active() then
       icons:fill(icons.recs, icons.read)
       if wt.route_on then wt.layer_run(wt.lines_layer, "route lines", icons.route_lines) end
     end
     icons:draw()
+    -- the whole frame's outline time: the other callbacks ran before this one
+    wt.outline_ms_shown = icons.outline_ms + wt.outline_acc
+    wt.outline_acc = 0
   end
   icons:preload_all()
   -- v14 (SPEC 22.10): item-menu quest marks. A missing or broken module
@@ -1363,7 +1370,6 @@ local function overhead_draw_one(marker, px, py, pz, d2, name_d2)
   local pic = icons:drawable(pid)
   local st = wt.styles[wt.style.group_of(marker.cat)] or wt.styles.none
   local o = wt.style.offset(st.width, wt.dk)
-  local t1 = st.on and os.clock() or nil
   local label_dy = 10
   if pic then
     local size = 24
@@ -1380,7 +1386,6 @@ local function overhead_draw_one(marker, px, py, pz, d2, name_d2)
     local tx, ty = sp.x - w / 2, sp.y + label_dy
     wt.style.text(draw, label, tx, ty, 0xFFFFFFFF, st.on, st.color, o)
   end
-  if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
   return 1
 end
 
@@ -1442,6 +1447,7 @@ local function overhead_frame()
   end
   overhead_drawn = drawn
   local dms = (os.clock() - t0) * 1000.0
+  if wt.any_on then wt.outline_acc = wt.outline_acc + dms end
   if dms > overhead_draw_ms then overhead_draw_ms = dms end
   if now - overhead_ms_reset >= 2.0 then
     overhead_ms_reset = now
@@ -2585,6 +2591,7 @@ wt.route_frame = function()
   if settings.route_world_path and settings.route_path == 1 then
     wt.world_path(cx, cy, cz, ox, oy, oz, max_d2)
   end
+  local t1 = wt.any_on and os.clock() or nil
   for i = 1, #pts do
     local m = pts[i]
     local px, py, pz = m.pos.x - ox, m.pos.y - oy, m.pos.z - oz
@@ -2592,6 +2599,7 @@ wt.route_frame = function()
     local d2 = dx * dx + dy * dy + dz * dz
     if d2 <= max_d2 then overhead_draw_one(m, px, py, pz, d2, max_d2) end
   end
+  if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
 end
 re.on_frame(function() wt.layer_run(wt.route_layer, "route points", wt.route_frame) end)
 
@@ -2640,6 +2648,7 @@ wt.names_frame = function()
   local no = wt.style.offset(nst.width, wt.dk)
   local ncol = settings.names_color
   local nabgr, na = A.argb_to_abgr(ncol), wt.a(ncol)
+  local t1 = nst.on and os.clock() or nil
   for i = 1, #list do
     local e = list[i]
     if set == nil or set[e.cid] then
@@ -2672,9 +2681,7 @@ wt.names_frame = function()
               end
               local w = label_width(e.txt)
               local tx, ty = sp.x - w / 2, sp.y - 30   -- above the dot
-              local t1 = nst.on and os.clock() or nil
               wt.style.text(draw, e.txt, tx, ty, nabgr, nst.on, nst.color, no, na)
-              if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
               st.drawn = st.drawn + 1
             end
           end
@@ -2682,6 +2689,7 @@ wt.names_frame = function()
       end
     end
   end
+  if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
 end
 re.on_frame(function() wt.layer_run(wt.names_layer, "names", wt.names_frame) end)
 
