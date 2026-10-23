@@ -150,9 +150,10 @@ function M.related_items(records)
   for _, r in ipairs(records) do
     if type(r) == "table" and (r.op == "more" or r.op == "morethan")
         and type(r.qid) == "number" and type(r.id) == "number" then
-      local key = r.id .. ":" .. r.qid
-      if not seen[key] then
-        seen[key] = true
+      local by_id = seen[r.id]
+      if not by_id then by_id = {}; seen[r.id] = by_id end
+      if not by_id[r.qid] then
+        by_id[r.qid] = true
         local list = out[r.id]
         if not list then list = {}; out[r.id] = list end
         list[#list + 1] = r.qid
@@ -161,6 +162,13 @@ function M.related_items(records)
   end
   for _, list in pairs(out) do table.sort(list) end
   return out
+end
+
+-- A key usable as a quest id or step index: a non-negative whole number.
+local function whole_key(k)
+  local n = tonumber(k)
+  if n and n == floor(n) and n >= 0 then return n end
+  return nil
 end
 
 -- Hints file validation (22.11.1). Malformed entries are dropped with one
@@ -172,19 +180,28 @@ function M.parse_hints(t)
     return hints, errors
   end
   for k, q in pairs(t) do
-    local qid = tonumber(k)
+    local qid = whole_key(k)
     if not qid then
       errors[#errors + 1] = "hints: bad quest id " .. tostring(k)
     elseif type(q) ~= "table" then
       errors[#errors + 1] = "hints: quest " .. tostring(k) .. " is not an object"
     else
       local entry = { quest = type(q.quest) == "string" and q.quest or nil, steps = {} }
-      if q.steps ~= nil and type(q.steps) ~= "table" then
+      if q.quest ~= nil and type(q.quest) ~= "string" then
+        errors[#errors + 1] = "hints: quest " .. tostring(k) .. " hint is not text"
+      end
+      local steps = q.steps
+      -- A JSON array has 1-based keys and would shift every step by one.
+      if type(steps) == "table" and steps[1] ~= nil
+          and steps[0] == nil and steps["0"] == nil then
+        errors[#errors + 1] = "hints: quest " .. tostring(k) .. " steps is not an object"
+        steps = nil
+      elseif steps ~= nil and type(steps) ~= "table" then
         errors[#errors + 1] = "hints: quest " .. tostring(k) .. " steps is not an object"
       end
-      if type(q.steps) == "table" then
-        for sk, s in pairs(q.steps) do
-          local idx = tonumber(sk)
+      if type(steps) == "table" then
+        for sk, s in pairs(steps) do
+          local idx = whole_key(sk)
           local label = "hints: quest " .. tostring(k) .. " step " .. tostring(sk)
           if not idx then
             errors[#errors + 1] = label .. " has a bad index"
@@ -193,6 +210,8 @@ function M.parse_hints(t)
           else
             local pins = {}
             if s.pins ~= nil and type(s.pins) ~= "table" then
+              errors[#errors + 1] = label .. " pins is not a list"
+            elseif type(s.pins) == "table" and #s.pins == 0 and next(s.pins) ~= nil then
               errors[#errors + 1] = label .. " pins is not a list"
             elseif type(s.pins) == "table" then
               for i, p in ipairs(s.pins) do

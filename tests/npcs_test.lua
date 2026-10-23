@@ -177,6 +177,31 @@ do
     and pins[1].y == 2 and pins[1].z == 3)
 end
 
+-- parse_hints validation of keys, steps shape, pins shape, quest text
+do
+  local h, e = N.parse_hints({ ["1.5"] = { quest = "a" }, ["-1"] = { quest = "a" } })
+  check("fractional/negative qid dropped", next(h) == nil and #e == 2)
+  h, e = N.parse_hints({ ["1"] = { steps = { ["1.5"] = { text = "t" }, ["x"] = { text = "t" } } } })
+  check("bad step index dropped", h[1] and next(h[1].steps) == nil and #e == 2)
+  h, e = N.parse_hints({ ["1"] = { steps = { { text = "a" } } } })
+  check("array steps rejected", h[1] and next(h[1].steps) == nil and #e == 1)
+  h, e = N.parse_hints({ ["1"] = { steps = { [0] = { text = "a" }, [1] = { text = "b" } } } })
+  check("zero-based numeric steps kept", h[1].steps[0].text == "a" and h[1].steps[1].text == "b" and #e == 0)
+  h, e = N.parse_hints({ ["1"] = { steps = { ["0"] = { text = "t", pins = { a = 1 } } } } })
+  check("object pins rejected", h[1].steps[0] and #h[1].steps[0].pins == 0 and #e == 1)
+  h, e = N.parse_hints({ ["1"] = { quest = 5 } })
+  check("non-string quest logged", h[1] and h[1].quest == nil and #e == 1)
+  local r = N.related_items({ { qid = 1, id = 5, num = 1, op = "more" },
+    { qid = 1.0, id = 5.0, num = 1, op = "more" } })
+  check("related float dedup", #r[5] == 1)
+end
+
+-- route ties: first row read wins
+do
+  local s = N.route_stops({ row(0, 24, 49), row(0, 24, 50) }, TODAY, pos_of, nil)
+  check("tie first row wins", flat(s) == "0-0:49")
+end
+
 -- hint_step
 do
   local hints = N.parse_hints({ ["7"] = { steps = { ["0"] = { text = "a" }, ["1"] = { text = "b" } } } })
