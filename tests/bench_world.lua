@@ -3,14 +3,15 @@
 -- Drives Clairvoyance/world.lua with its own copy of world_test's fixture
 -- (fake reads, adapter and io), scaled to the places file's 4,488 rows
 -- (3,248 chara, 922 chest, 240 token, 78 beetle), and prints the median of
--- 20 steady samples per step (each the mean of 10 rounds), in ms. The fakes cost almost nothing, so the
--- table is the work world.lua does itself.
+-- 20 steady samples per step (each the mean of 10 rounds), in ms. The fakes cost almost nothing except reserved_rows, which builds 3,009 throwaway rows per call to stand for the game read (SPEC 31.4.5), so the
+-- table is the work world.lua does itself plus that read.
 package.path = "./reframework/autorun/?.lua;" .. package.path
 local world = require("Clairvoyance.world")
 local K = world.K
 
 local function P(x, y, z) return { x = x, y = y, z = z } end
 
+local bench_sig = 0
 local function fixture(files)
   local f = { files = files, data = {
     reserved = {}, loaded = {}, sched = {}, icons = {}, msgs = {}, records = {},
@@ -20,7 +21,17 @@ local function fixture(files)
     drops = {} } }
   local d = f.data
   f.reads = {
-    reserved_rows = function() return d.reserved end,
+    -- 3,009 throwaway rows per call stand for the real row read's cost
+    reserved_rows = function()
+      local junk = {}
+      for i = 1, 3009 do
+        junk[i] = { uid = "junk-" .. i, pos = { x = i, y = 0, z = i }, gimmick = 10, table_ix = 1 }
+      end
+      local out = {}
+      for i, r in ipairs(d.reserved) do out[i] = r end
+      return out
+    end,
+    reserved_sig = function() return "bench" .. bench_sig end,
     loaded_gimmicks = function() return d.loaded end,
     schedule_pos = function(cid) return d.sched[cid] end,
     map_icons = function() return d.icons end,
@@ -153,8 +164,9 @@ local TG = { chests = true, treasure = true, tokens = true, beetles = true,
 
 local w = world.new(f.adapter, f.reads, f.io)
 local t = 0
-local function round()
+local function round(new_sig)
   t = t + 10
+  if new_sig ~= false then bench_sig = bench_sig + 1 end
   w:poke()
   assert(w:refresh(t, true, TG), "round did not run")
   local ms = w:stats().ms
@@ -198,3 +210,15 @@ for _, k in ipairs(keys) do
   print(string.format("%-22s %10.3f", k, m))
 end
 print(string.format("%-22s %10.3f", "(sum of step_*)", sum))
+
+-- read rounds against reuse rounds: 20 pairs, a new signature then the same one
+local st0 = w:stats()
+local r0, u0 = st0.reserved_reads, st0.reserved_reused
+local read_sum, reuse_sum = 0, 0
+for _ = 1, 20 do
+  read_sum = read_sum + round(true).step_reserved
+  reuse_sum = reuse_sum + round(false).step_reserved
+end
+local st1 = w:stats()
+print(string.format("reserved: read rounds %.3f ms, reuse rounds %.3f ms, reads %d, reused %d",
+  read_sum / 20, reuse_sum / 20, st1.reserved_reads - r0, st1.reserved_reused - u0))

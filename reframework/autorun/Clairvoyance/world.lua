@@ -12,6 +12,7 @@ M.K = {
   NPC_NAME_SLICE = 200,
   SENTIMENT_EVERY = 1.0,
   SAVE_EVERY = 60,
+  RESERVED_MAX_AGE = 60.0,
   REMOVE_RADIUS = 50,
   REMOVE_NEIGHBOURS = 3,
   ROUND_TO = 0.1,
@@ -239,7 +240,9 @@ function M.new(a, reads, io)
   local stats = { ms = {}, known = {}, monster_ids = {}, rounds = 0, saves = 0,
     save_ms = 0, last_save_reason = nil, hits = 0, misses = 0,
     eff_builds = 0, item_list_builds = 0, held_rounds = 0,
-    shop_index_runs = 0, chest_kinds_calls = 0 }
+    shop_index_runs = 0, chest_kinds_calls = 0,
+    reserved_reused = 0, reserved_reads = 0 }
+  local res_reused = false
   local S
 
   local function new_session()
@@ -253,7 +256,9 @@ function M.new(a, reads, io)
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
       route_cid = nil, route_name = nil, route_cache = nil,
-      sent = {}, walk_i = 0, walk_n = 0, walk_acc = {} }
+      sent = {}, walk_i = 0, walk_n = 0, walk_acc = {},
+      -- SPEC 31: the reserved rows kept while the selector signature holds
+      res = nil }
   end
   S = new_session()
   w.spawned = {}
@@ -458,6 +463,8 @@ function M.new(a, reads, io)
   -- next round clears it; call() adds up the ACCUM names over the round
   -- instead of keeping the last call's time.
   local ACCUM = { schedule_pos = true }
+  -- reads that run only on some rounds: their timing is cleared each round
+  local CONDITIONAL_READS = { "reserved_rows", "reserved_sig" }
   local STEP_KEY = setmetatable({}, { __index = function(t, n)
     local k = "step_" .. n
     t[n] = k
@@ -1321,6 +1328,8 @@ function M.new(a, reads, io)
       lapped[i] = nil
     end
     for k in pairs(ACCUM) do stats.ms[k] = nil end
+    for _, k in ipairs(CONDITIONAL_READS) do stats.ms[k] = nil end
+    res_reused = false
     local any_rec = tg.chests or tg.tokens or tg.beetles
     local need_shops = tg.search or tg.shops
     local t = clock()
@@ -1338,7 +1347,18 @@ function M.new(a, reads, io)
     end
 
     t = clock()
-    local rows = table_read("reserved_rows")
+    local rows
+    local sig_ok, sig = call("reserved_sig")
+    if not (sig_ok and type(sig) == "string") then sig = nil end
+    local res = S.res
+    if sig ~= nil and res ~= nil and sig == res.sig
+      and now - res.at < M.K.RESERVED_MAX_AGE then
+      rows = res.rows
+      res_reused = true
+    else
+      rows = table_read("reserved_rows")
+      S.res = (rows ~= nil and sig ~= nil) and { rows = rows, sig = sig, at = now } or nil
+    end
     lap("reserved", t)
     t = clock()
     if cast_ok and boss_ok and S.need_sort then sort_places() end
@@ -1718,6 +1738,8 @@ function M.new(a, reads, io)
     committed = true
     if again then last_round = nil end
     stats.rounds = stats.rounds + 1
+    if res_reused then stats.reserved_reused = stats.reserved_reused + 1
+    else stats.reserved_reads = stats.reserved_reads + 1 end
     if dirty and (last_save == nil or now - last_save >= M.K.SAVE_EVERY) then
       do_save("round", now)
     end
@@ -1843,6 +1865,7 @@ function M.new(a, reads, io)
       npcs_max_slice_ms = stats.npcs_max_slice_ms,
       round_ms = stats.round_ms,
       drops_first_ms = stats.drops_first_ms, drops = drops,
+      reserved_reused = stats.reserved_reused, reserved_reads = stats.reserved_reads,
       rounds = stats.rounds, saves = stats.saves, save_ms = stats.save_ms,
       eff_builds = stats.eff_builds, item_list_builds = stats.item_list_builds,
       held_rounds = stats.held_rounds,
@@ -2359,6 +2382,68 @@ function M.game_reads()
     return out
   end
 
+  local function addr_of(x) return x:get_address() end
+
+  -- One selector's signature inputs, read with plain calls under one pcall
+  -- (the caller): the table address, with each spec's row count left in
+  -- counts (-1 for a missing array or an unreadable count). nil for no Table.
+  local function read_selector_sig(sel, counts)
+    local tbl = sel:get_field("<Table>k__BackingField")
+    if tbl == nil then return nil end
+    local addr = math.tointeger(addr_of(tbl))
+    if addr == nil then error("table address unreadable") end
+    for i, spec in ipairs(RESERVED_SPECS) do
+      local info = tbl:get_field(spec[1])
+      local arr = info ~= nil and info:get_field("_BasicRowDatas") or nil
+      local n = arr ~= nil and arr:call("get_Count") or nil
+      counts[i] = type(n) == "number" and n or -1
+    end
+    return addr
+  end
+
+  -- The same reads, each guarded on its own: used only for a selector whose
+  -- fast read raised, so a raising read gives nil (no Table) or -1 (count).
+  local function read_selector_sig_guarded(sel, counts)
+    local tbl = G(sel, "<Table>k__BackingField")
+    if tbl == nil then return nil end
+    local ok, a = pcall(addr_of, tbl)
+    local addr = ok and math.tointeger(a) or nil
+    if addr == nil then error("table address unreadable") end
+    for i, spec in ipairs(RESERVED_SPECS) do
+      local n = C(G(G(tbl, spec[1]), "_BasicRowDatas"), "get_Count")
+      counts[i] = type(n) == "number" and n or -1
+    end
+    return addr
+  end
+
+  local sig_counts = {}
+
+  local function sig_selector(sel, _, parts)
+    local ok, addr = pcall(read_selector_sig, sel, sig_counts)
+    if not ok then addr = read_selector_sig_guarded(sel, sig_counts) end
+    if addr == nil then
+      parts[#parts + 1] = "0"
+      return
+    end
+    local s = string.format("%x", addr)
+    for i = 1, #RESERVED_SPECS do
+      s = s .. string.format(":%d", sig_counts[i])
+    end
+    parts[#parts + 1] = s
+  end
+
+  -- Cheap change signal for the reserved selector list (SPEC 31.3.1): the
+  -- selector count, then per selector 0 or address:count per spec.
+  function R.reserved_sig()
+    local parts = {}
+    local gm = single("app.GenerateManager")
+    local ok = each(G(G(gm, "_ReserveManager"), "_ReservedGenerateSelector"),
+      sig_selector, parts)
+    if not ok then error("reserved selectors unreadable") end
+    table.insert(parts, 1, #parts)
+    return table.concat(parts, ",")
+  end
+
   function R.loaded_gimmicks()
     local out = {}
     local gm = single("app.GimmickManager")
@@ -2488,8 +2573,6 @@ function M.game_reads()
   local MAX_DEPTH = 16
 
   local function full_name(x) return x:get_type_definition():get_full_name() end
-  local function addr_of(x) return x:get_address() end
-
   local function node_kind(x)
     local ok, n = pcall(full_name, x)
     if not ok or type(n) ~= "string" then return nil end

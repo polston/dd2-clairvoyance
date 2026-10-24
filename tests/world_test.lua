@@ -54,6 +54,7 @@ local function fixture(o)
     end
   end
   def("reserved_rows", function() return d.reserved end)
+  def("reserved_sig", function() return d.sig end)
   def("loaded_gimmicks", function() return d.loaded end)
   def("schedule_pos", function(cid) return d.sched[cid] end)
   def("map_icons", function() return d.icons end)
@@ -1052,8 +1053,12 @@ end
 
 -- ===== game_reads against a fake object model =====
 do
+  local addr_seq = 0
   local function obj(fields, methods, tname)
     local o = {}
+    addr_seq = addr_seq + 1
+    local my_addr = 0x1000 + addr_seq * 16
+    function o:get_address() return my_addr end
     function o:get_field(n) return fields and fields[n] end
     function o:call(n, ...)
       local m = methods and methods[n]
@@ -1074,7 +1079,7 @@ do
       get_Item = function(i) return items[i + 1] end })
   end
   local function array(items)
-    local o = obj()
+    local o = obj(nil, { get_Count = function() return #items end })
     function o:get_elements() return items end
     return o
   end
@@ -1128,6 +1133,64 @@ do
   singletons["app.GenerateManager"] = obj({ _ReserveManager =
     obj({ _ReservedGenerateSelector = list({}) }) })
   check("reads: no reserved rows is a failed read", not pcall(R.reserved_rows))
+
+  -- reserved signature: count, then per selector 0 or addr:gimmicks:enemies
+  local tblA = obj({
+    _GimmickSetInfo = obj({ _BasicRowDatas = array({ row_obj({}) }) }),
+    _EnemySetInfo = obj({ _BasicRowDatas = array({ row_obj({}) }) }) })
+  local tblB = obj({
+    _GimmickSetInfo = obj({ _BasicRowDatas = array({ row_obj({}), row_obj({}) }) }) })
+  local selA = obj({ ["<Table>k__BackingField"] = tblA })
+  local selB = obj({ ["<Table>k__BackingField"] = tblB })
+  local selN = obj({})
+  local addrA, addrB = tblA:get_address(), tblB:get_address()
+  local function set_sels(items)
+    singletons["app.GenerateManager"] = obj({ _ReserveManager =
+      obj({ _ReservedGenerateSelector = list(items) }) })
+  end
+  set_sels({ selA, selB })
+  local ok1, s1 = pcall(R.reserved_sig)
+  check("reads: reserved sig lists count then each table",
+    ok1 and s1 == string.format("2,%x:1:1,%x:2:-1", addrA, addrB))
+  set_sels({ selB, selA })
+  local ok2, s2 = pcall(R.reserved_sig)
+  check("reads: reserved sig follows list order", ok2 and s2 ~= s1)
+  set_sels({ selA, selN })
+  local ok3, s3 = pcall(R.reserved_sig)
+  check("reads: a selector with no table is 0 in its slot",
+    ok3 and s3 == string.format("2,%x:1:1,0", addrA))
+  singletons["app.GenerateManager"] = obj({ _ReserveManager = obj({}) })
+  check("reads: unreadable selector list errors",
+    type(R.reserved_sig) == "function" and not pcall(R.reserved_sig))
+  for label, bad in pairs({ nil_addr = function() return nil end,
+      frac_addr = function() return 1.5 end }) do
+    local tblX = obj({ _GimmickSetInfo = obj({ _BasicRowDatas = array({}) }) })
+    tblX.get_address = bad
+    set_sels({ obj({ ["<Table>k__BackingField"] = tblX }) })
+    check("reads: reserved sig errors on an unreadable table address (" .. label .. ")",
+      type(R.reserved_sig) == "function" and not pcall(R.reserved_sig))
+  end
+
+  -- a raising read gives -1 / 0 in its slot, the signature still succeeds
+  do
+    local tblC = obj({
+      _GimmickSetInfo = obj({ _BasicRowDatas = array({ row_obj({}) }) }),
+      _EnemySetInfo = obj({ _BasicRowDatas = array({}) }) })
+    local base = tblC.get_field
+    function tblC:get_field(n)
+      if n == "_EnemySetInfo" then error("raised") end
+      return base(self, n)
+    end
+    set_sels({ obj({ ["<Table>k__BackingField"] = tblC }) })
+    local okc, sc = pcall(R.reserved_sig)
+    check("reads: a raising count read is -1 in its slot",
+      okc and sc == string.format("1,%x:1:-1", tblC:get_address()))
+    local selR = obj({})
+    function selR:get_field(n) error("raised") end
+    set_sels({ selR })
+    local okr, sr = pcall(R.reserved_sig)
+    check("reads: a raising Table read is 0 in its slot", okr and sr == "1,0")
+  end
 
   -- save records: contexts one hop down, in Record or SaveData
   local function rec(ctxs, via)
@@ -4234,6 +4297,125 @@ do
   singletons["app.GimmickManager"] = nil
   check("first_seeker read: no manager gives nil", R.first_seeker() == nil)
   sdk = saved_sdk
+end
+
+-- 32. reserved rows reused while the selector signature holds (SPEC 31)
+do
+  local function rfix(sig)
+    local f = fixture()
+    f.data.reserved = { chest_row("c1", 10, 10) }
+    f.data.sig = sig
+    return f, f.new()
+  end
+  local C = on("chests")
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C); w:refresh(10, true, C)
+    check("reserved: equal signatures read once", f.reads_n.reserved_rows == 1)
+    local st = w:stats()
+    check("reserved: reuse round shows no read time",
+      st.ms.reserved_rows == nil and st.ms.reserved_sig ~= nil
+      and st.reserved_reused == 1 and st.reserved_reads == 1)
+  end
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C); f.data.sig = "b"; w:refresh(10, true, C)
+    check("reserved: changed signature reads again", f.reads_n.reserved_rows == 2)
+  end
+  do
+    local f, w = rfix("a")
+    f.reads.reserved_sig = nil
+    w:refresh(0, true, C); w:refresh(10, true, C)
+    check("reserved: no signature read reads every round", f.reads_n.reserved_rows == 2)
+    local f2, w2 = rfix(5)
+    w2:refresh(0, true, C); w2:refresh(10, true, C)
+    check("reserved: a number signature reads every round", f2.reads_n.reserved_rows == 2)
+  end
+  do
+    local f, w = rfix("a")
+    f.fail.reserved_sig = true
+    w:refresh(0, true, C); w:refresh(10, true, C)
+    check("reserved: failing signature read reads", f.reads_n.reserved_rows == 2)
+  end
+  do
+    local f, w = rfix("a")
+    local n = {}
+    w:refresh(0, true, C); n[1] = f.reads_n.reserved_rows
+    w:refresh(50, true, C); n[2] = f.reads_n.reserved_rows
+    w:refresh(60, true, C); n[3] = f.reads_n.reserved_rows
+    check("reserved: age cap", n[1] == 1 and n[2] == 1 and n[3] == 2)
+    w:refresh(70, true, C); n[4] = f.reads_n.reserved_rows
+    local st = w:stats()
+    check("reserved: a read restarts the age",
+      n[4] == 2 and st.reserved_reads == 2 and st.reserved_reused == 2)
+  end
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C)
+    f.data.sig = "b"; f.fail.reserved_rows = true
+    w:refresh(10, true, C)
+    f.fail.reserved_rows = nil; f.data.sig = "a"
+    w:refresh(20, true, C)
+    check("reserved: failed read clears the cache",
+      f.reads_n.reserved_rows == 3 and w:stats().reserved_reads == 3)
+  end
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C); w:reset(); w:refresh(10, true, C)
+    check("reserved: reset drops the cache", f.reads_n.reserved_rows == 2)
+  end
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C)
+    w:refresh(30, true, C, true)
+    w:refresh(40, true, C)
+    check("reserved: held refresh keeps the cache",
+      f.reads_n.reserved_rows == 1 and f.reads_n.reserved_sig == 2)
+  end
+  do
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "lv1", 10, 30, 30, { src = "subquest" }) }) } })
+    f.data.reserved = { chest_row("lv1", 30, 30) }
+    f.data.sig = "a"
+    local w = f.new()
+    w:refresh(0, true, C); w:refresh(10, true, C)
+    check("reserved: reuse round still draws a live-only chest",
+      f.reads_n.reserved_rows == 1 and find(w:input().chests, "lv1") ~= nil)
+    local f2 = fixture({ files = { [K.PLACES] = places({
+      prow("chara", "sq1", 5, 500, 0, { name = "ch253000_00", src = "subquest" }),
+      prow("chest", "other", 10, 9, 9) }) } })
+    f2.data.boss = { ch253 = true }
+    f2.data.reserved = { mrow("sq1", 5, "ch253000_00", 500, 0), chest_row("keep1", 1, 1) }
+    f2.data.sig = "a"
+    local w2 = f2.new()
+    w2:refresh(0, true, ALL); w2:refresh(10, true, ALL)
+    local m = w2:input().monsters
+    check("reserved: reuse round still draws a live-only monster",
+      f2.reads_n.reserved_rows == 1 and #m == 1 and m[1].pos.x == 500)
+  end
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C)
+    f.reads.reserved_sig = nil
+    w:refresh(10, true, C)
+    check("reserved: a round without a signature read clears its time",
+      w:stats().ms.reserved_sig == nil)
+  end
+  do
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "p", 10, 1, 1, { items = { { id = 7, n = 1 } } }) }) } })
+    f.data.reserved = { chest_row("c1", 10, 10) }
+    f.data.sig = "a"
+    local w = f.new()
+    w:refresh(0, true, on("chests"))
+    f.afail.item_name = true
+    local ok2 = w:refresh(10, true, on("chests"))
+    f.afail.item_name = nil
+    w:refresh(20, true, on("chests"))
+    local st = w:stats()
+    check("reserved: a failed round counts neither", ok2 == false and st.rounds == 2
+      and st.reserved_reads + st.reserved_reused == 2)
+  end
 end
 
 if failures > 0 then os.exit(1) end
