@@ -2389,6 +2389,8 @@ function M.game_reads()
     return -1
   end
 
+  local function sig_addr(o) return o:get_address() end
+
   local function sig_selector(sel, _, acc)
     acc.n = acc.n + 1
     local tbl = G(sel, "<Table>k__BackingField")
@@ -2396,7 +2398,8 @@ function M.game_reads()
       acc.parts[#acc.parts + 1] = "0"
       return
     end
-    local addr = math.tointeger(C(tbl, "get_address"))
+    local aok, a = pcall(sig_addr, tbl)
+    local addr = aok and math.tointeger(a) or nil
     if addr == nil then error("table address unreadable") end
     acc.parts[#acc.parts + 1] = string.format("%x:%d:%d", addr,
       sig_count(G(tbl, "_GimmickSetInfo")), sig_count(G(tbl, "_EnemySetInfo")))

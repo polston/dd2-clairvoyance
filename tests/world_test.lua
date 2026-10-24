@@ -1061,7 +1061,6 @@ do
     function o:get_address() return my_addr end
     function o:get_field(n) return fields and fields[n] end
     function o:call(n, ...)
-      if n == "get_address" then return my_addr end
       local m = methods and methods[n]
       if m then return m(...) end
       return nil
@@ -1163,6 +1162,14 @@ do
   singletons["app.GenerateManager"] = obj({ _ReserveManager = obj({}) })
   check("reads: unreadable selector list errors",
     type(R.reserved_sig) == "function" and not pcall(R.reserved_sig))
+  for label, bad in pairs({ nil_addr = function() return nil end,
+      frac_addr = function() return 1.5 end }) do
+    local tblX = obj({ _GimmickSetInfo = obj({ _BasicRowDatas = array({}) }) })
+    tblX.get_address = bad
+    set_sels({ obj({ ["<Table>k__BackingField"] = tblX }) })
+    check("reads: reserved sig errors on an unreadable table address (" .. label .. ")",
+      type(R.reserved_sig) == "function" and not pcall(R.reserved_sig))
+  end
 
   -- save records: contexts one hop down, in Record or SaveData
   local function rec(ctxs, via)
@@ -4368,6 +4375,21 @@ do
     w:refresh(10, true, C)
     check("reserved: a round without a signature read clears its time",
       w:stats().ms.reserved_sig == nil)
+  end
+  do
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "p", 10, 1, 1, { items = { { id = 7, n = 1 } } }) }) } })
+    f.data.reserved = { chest_row("c1", 10, 10) }
+    f.data.sig = "a"
+    local w = f.new()
+    w:refresh(0, true, on("chests"))
+    f.afail.item_name = true
+    local ok2 = w:refresh(10, true, on("chests"))
+    f.afail.item_name = nil
+    w:refresh(20, true, on("chests"))
+    local st = w:stats()
+    check("reserved: a failed round counts neither", ok2 == false and st.rounds == 2
+      and st.reserved_reads + st.reserved_reused == 2)
   end
 end
 

@@ -3,8 +3,8 @@
 -- Drives Clairvoyance/world.lua with its own copy of world_test's fixture
 -- (fake reads, adapter and io), scaled to the places file's 4,488 rows
 -- (3,248 chara, 922 chest, 240 token, 78 beetle), and prints the median of
--- 20 steady samples per step (each the mean of 10 rounds), in ms. The fakes cost almost nothing, so the
--- table is the work world.lua does itself.
+-- 20 steady samples per step (each the mean of 10 rounds), in ms. The fakes cost almost nothing except reserved_rows, which builds 3,009 throwaway rows per call to stand for the game read (SPEC 31.4.5), so the
+-- table is the work world.lua does itself plus that read.
 package.path = "./reframework/autorun/?.lua;" .. package.path
 local world = require("Clairvoyance.world")
 local K = world.K
