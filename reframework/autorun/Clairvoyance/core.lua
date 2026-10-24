@@ -224,6 +224,14 @@ function M.query_match(q, h)
 end
 local query_match = M.query_match
 
+-- The world builders' match, counted for the tests (M.world_stats is created
+-- further down; the field is read at call time).
+local function wmatch(q, h)
+  local st = M.world_stats
+  st.query_calls = st.query_calls + 1
+  return query_match(q, h)
+end
+
 local function hay_join(parts)
   for i, p in ipairs(parts) do parts[i] = tostring(p) end
   return table.concat(parts, "\n"):lower()
@@ -258,7 +266,11 @@ local function quest_hay(adapter, g)
 end
 
 function M.item_markers(adapter, shown_inprog, origin, q)
-  local needs = adapter.item_needs and adapter.item_needs() or nil
+  local needs
+  if adapter.item_needs then
+    M.world_stats.item_need_reads = M.world_stats.item_need_reads + 1
+    needs = adapter.item_needs()
+  end
   if type(needs) ~= "table" then return {}, 0 end
   local by_id = M.needs_by_item(needs, shown_inprog)   -- item id -> needing shown quests
   if next(by_id) == nil then return {}, 0 end
@@ -410,6 +422,14 @@ local WORLD_DEF = {
 }
 -- Categories whose candidates are built outside the generic per-src loops.
 local function special_cat(cat) return cat == "shop" or cat == "npc_search" end
+-- Is a generic category switched on? Monsters are a tree (SPEC 28.12.3): the
+-- category is on when either Large or Small is.
+local function cat_on(cat, show)
+  if cat == "monster" then
+    return show.world_monsters ~= false or show.world_small_monsters == true
+  end
+  return show[WORLD_DEF[cat].toggle] ~= false
+end
 local WORLD_CAT_RANK = {}
 for i, cat in ipairs(M.WORLD_CATS) do WORLD_CAT_RANK[cat] = i end
 M.WORLD_MARKER_MAX = 300
@@ -554,12 +574,22 @@ local function treasure_dups(world)
   return dups
 end
 
--- Is this entry a candidate at all (counted in `known`)?
+-- Is this entry a candidate at all (counted in `known`)? Small monsters count
+-- only while Small is on; every other entry counts whatever its category
+-- toggle says (a toggled-off category still reports `known`).
 local function included(cat, e, small_ok, dups)
   if not valid_pos(e.pos) then return false end
   if cat == "treasure" and dups[e] then return false end
   if cat == "monster" and e.small == true and not small_ok then return false end
   return true
+end
+
+-- SPEC 28.12.3: which monsters are shown. A large one needs Large
+-- (world_monsters ~= false), a small one needs Small
+-- (world_small_monsters == true).
+local function monster_shown(small, show)
+  if small then return show.world_small_monsters == true end
+  return show.world_monsters ~= false
 end
 
 local function monster_label(e)
@@ -606,7 +636,7 @@ end
 local function drop_hover(label, md, q)
   local hit = {}
   for i, low in ipairs(md.names) do
-    if query_match(q, low) then hit[#hit + 1] = md.shown[i] end
+    if wmatch(q, low) then hit[#hit + 1] = md.shown[i] end
   end
   if #hit == 0 then return nil, nil end
   local list = top3(hit, #hit)
@@ -866,7 +896,7 @@ local function entry_search(cat, e, drops, gc, q, ctx)
   end
   local m = gc.match[e]
   if m == nil then
-    m = query_match(q, rec.hay)
+    m = wmatch(q, rec.hay)
     gc.match[e] = m
   end
   if not m then return false end
@@ -893,10 +923,10 @@ end
 local function shop_listing(e, q, h)
   local items = e.items
   if type(items) ~= "table" or #items == 0 then return nil end
-  if query_match(q, h.npc) then return items end
+  if wmatch(q, h.npc) then return items end
   local out = {}
   for i, it in ipairs(items) do
-    if query_match(q, h.names[i]) then out[#out + 1] = it end
+    if wmatch(q, h.names[i]) then out[#out + 1] = it end
   end
   if #out > 0 then return out end
   return nil
@@ -952,6 +982,7 @@ local function make_cand(cat, e, ctx)
     c.hidden = c.done and not ctx.show_opened
   elseif cat == "monster" then
     c.key = "w:mon:" .. tostring(e.uid)
+    c.small = e.small == true
     c.label = monster_label(e)
     local md = ctx.mdrop and ctx.mdrop[e]
     if md then c.hover, c.why = md.hover, md.why end
@@ -1130,12 +1161,16 @@ local function world_candidates(world, show, boxes, q)
   local dups = treasure_dups(world)
   local drops = q ~= nil and world.drops or nil
   local gc = { hay = {}, match = {} }
+  known.monster_small = 0
   for _, cat in ipairs(M.WORLD_CATS) do
     known[cat] = 0
     if not special_cat(cat) then
       for _, e in ipairs(world[WORLD_DEF[cat].src] or {}) do
         if included(cat, e, small_ok, dups) then
           known[cat] = known[cat] + 1
+          if cat == "monster" and e.small == true then
+            known.monster_small = known.monster_small + 1
+          end
           if entry_search(cat, e, drops, gc, q, ctx) then
             cands[#cands + 1] = make_cand(cat, e, ctx)
           end
@@ -1166,6 +1201,7 @@ local function new_panel()
   for _, cat in ipairs(M.WORLD_CATS) do
     panel[cat] = { shown = 0, known = 0, entries = {} }
   end
+  panel.monster.small_shown, panel.monster.small_known = 0, 0   -- SPEC 28.12.3
   return panel
 end
 
@@ -1329,6 +1365,10 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       label = c.label, done = c.done, world_ord = c.world_ord, hover = c.hover,
       why = c.why, faded = c.faded }
     if c.cat == "npc_search" then m.cid = c.cid end
+    if c.cat == "monster" then
+      m.small = c.small
+      if c.small then panel.monster.small_shown = panel.monster.small_shown + 1 end
+    end
     if c.cat == "shop" then
       if #c.sells_for > 0 then m.hover = with_sells(c) end
       m.stock, m.sells_for = c.stock, c.sells_for
@@ -1377,8 +1417,10 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   local shops_on = show.world_shops == true
   local cands, known, shop_of = world_candidates(world, show, boxes, show.search)
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = known[cat] end
+  panel.monster.small_known = known.monster_small
   for _, c in ipairs(cands) do
-    if (special_cat(c.cat) or show[WORLD_DEF[c.cat].toggle] ~= false) and not c.hidden then
+    if (special_cat(c.cat) or (cat_on(c.cat, show)
+      and (c.cat ~= "monster" or monster_shown(c.small, show)))) and not c.hidden then
       world_accept(c, has_origin, origin, quest_cids, kept, merged, shops, shop_of,
         shops_on, shop_all, hits)
     end
@@ -1392,7 +1434,9 @@ end
 -- entries (x, z cells) is built once per world table and small-monster
 -- setting; sellers stay a plain list. The counters are for tests.
 local CELL = 256
-M.world_stats = { grid_builds = 0, cand_builds = 0, hay_builds = 0 }
+M.world_stats = { grid_builds = 0, cand_builds = 0, hay_builds = 0,
+  query_calls = 0, item_need_reads = 0, cell_entries = {} }
+for _, cat in ipairs(M.WORLD_CATS) do M.world_stats.cell_entries[cat] = 0 end
 local grid_cache = { world = nil, small = nil, grid = nil }
 
 local function cell_of(v) return math.floor(v / CELL) end
@@ -1400,35 +1444,84 @@ local function cell_key(ci, cj)
   return (ci + 1048576) * 2097152 + (cj + 1048576)
 end
 
-local function build_grid(world, small_ok)
-  M.world_stats.grid_builds = M.world_stats.grid_builds + 1
-  local dups = treasure_dups(world)
-  local g = { cells = {}, flat = {}, known = {} }
-  for _, cat in ipairs(M.WORLD_CATS) do
-    g.known[cat] = 0
-    g.flat[cat] = {}
-    for _, e in ipairs(not special_cat(cat) and world[WORLD_DEF[cat].src] or {}) do
-      if included(cat, e, small_ok, dups) then
-        g.known[cat] = g.known[cat] + 1
-        if cat ~= "seller" then
-          local ci, cj = cell_of(e.pos.x), cell_of(e.pos.z)
-          local key = cell_key(ci, cj)
-          local cell = g.cells[key]
-          if not cell then cell = {}; g.cells[key] = cell end
-          local l = cell[cat]
-          if not l then l = {}; cell[cat] = l end
-          l[#l + 1] = e
-          local f = g.flat[cat]
-          f[#f + 1] = e
-          if not g.mini or ci < g.mini then g.mini = ci end
-          if not g.maxi or ci > g.maxi then g.maxi = ci end
-          if not g.minj or cj < g.minj then g.minj = cj end
-          if not g.maxj or cj > g.maxj then g.maxj = cj end
-        end
+-- SPEC 28.7.2: one pass over a category's list. Counts `known` (and the small
+-- monsters among them) for every category; puts the entries in cells and the
+-- flat list only when `fill` (the category is on), widening the bounds.
+-- Sellers are never in cells (the merge needs the whole list). Returns
+-- known, small known, entries put in cells.
+local function walk_cat(g, world, cat, fill, show)
+  local known, small_known, put_n = 0, 0, 0
+  fill = fill and cat ~= "seller"
+  for _, e in ipairs(world[WORLD_DEF[cat].src] or {}) do
+    if included(cat, e, g.small_ok, g.dups) then
+      known = known + 1
+      if cat == "monster" and e.small == true then small_known = small_known + 1 end
+      if fill and (cat ~= "monster" or monster_shown(e.small == true, show)) then
+        local ci, cj = cell_of(e.pos.x), cell_of(e.pos.z)
+        local key = cell_key(ci, cj)
+        local cell = g.cells[key]
+        if not cell then cell = {}; g.cells[key] = cell end
+        local l = cell[cat]
+        if not l then l = {}; cell[cat] = l end
+        l[#l + 1] = e
+        local f = g.flat[cat]
+        f[#f + 1] = e
+        put_n = put_n + 1
+        if not g.mini or ci < g.mini then g.mini = ci end
+        if not g.maxi or ci > g.maxi then g.maxi = ci end
+        if not g.minj or cj < g.minj then g.minj = cj end
+        if not g.maxj or cj > g.maxj then g.maxj = cj end
       end
     end
   end
+  return known, small_known, put_n
+end
+
+-- What a category's cells were filled for: true, or for monsters the pair of
+-- toggles (they decide which monsters are in the cells); false when not filled.
+local function fill_key(cat, show)
+  if not cat_on(cat, show) then return false end
+  if cat == "monster" then
+    return (show.world_monsters ~= false and 1 or 0) + (show.world_small_monsters == true and 2 or 0)
+  end
+  return true
+end
+
+-- The grid is built for the small-monster setting (it decides which monsters
+-- count as known); every category toggle only decides which categories get
+-- cells, and a category is filled later by add_cat when it turns on.
+local function build_grid(world, show)
+  M.world_stats.grid_builds = M.world_stats.grid_builds + 1
+  local g = { cells = {}, flat = {}, known = {}, filled = {}, known_small = 0,
+    small_ok = show.world_small_monsters == true,
+    dups = treasure_dups(world) }
+  for _, cat in ipairs(M.WORLD_CATS) do
+    g.known[cat] = 0
+    g.flat[cat] = {}
+    M.world_stats.cell_entries[cat] = 0
+    if not special_cat(cat) then
+      local key = fill_key(cat, show)
+      local known, small_known, put_n = walk_cat(g, world, cat, key, show)
+      g.known[cat] = known
+      if cat == "monster" then g.known_small = small_known end
+      g.filled[cat] = key
+      M.world_stats.cell_entries[cat] = put_n
+    end
+  end
   return g
+end
+
+-- A category that turned on after the grid was built (or a monster toggle that
+-- changed which monsters are shown): fill its cells now, never rebuild.
+local function add_cat(g, world, cat, show)
+  g.filled[cat] = fill_key(cat, show)
+  if cat == "seller" then return end   -- sellers are a plain list, never in cells
+  if cat == "monster" then   -- drop what an earlier fill put in
+    for _, cell in pairs(g.cells) do cell.monster = nil end
+    g.flat.monster = {}
+  end
+  local _, _, put_n = walk_cat(g, world, cat, true, show)
+  M.world_stats.cell_entries[cat] = put_n
 end
 
 function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
@@ -1438,11 +1531,12 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   local small_ok = show.world_small_monsters == true
   local g = grid_cache.grid
   if grid_cache.world ~= world or grid_cache.small ~= small_ok or not g then
-    g = build_grid(world, small_ok)
+    g = build_grid(world, show)
     grid_cache.world, grid_cache.small, grid_cache.grid = world, small_ok, g
   end
   local panel = new_panel()
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = g.known[cat] end
+  panel.monster.small_known = g.known_small
   local cap = world_cap(show)
   local has_origin = valid_pos(origin)
   local ctx = world_ctx(show, boxes)
@@ -1451,7 +1545,8 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   ctx.labels = g.labels
   local on = {}
   for _, cat in ipairs(M.WORLD_CATS) do
-    if not special_cat(cat) and show[WORLD_DEF[cat].toggle] ~= false then
+    if not special_cat(cat) and cat_on(cat, show) then
+      if g.filled[cat] ~= fill_key(cat, show) then add_cat(g, world, cat, show) end
       on[#on + 1] = cat
     end
   end

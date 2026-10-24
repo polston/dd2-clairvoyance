@@ -1711,8 +1711,9 @@ do
   check("wd2 small absent by default", keys(ms) == "w:mon:g" and panel.monster.known == 1)
   ms, panel = core.world_markers(mw, sh({ world_small_monsters = true }), O, {})
   check("wd2 small present when on", #ms == 2 and panel.monster.known == 2)
+  -- SPEC 28.12.3: Large and Small are independent; Small alone shows the small ones
   ms, panel = core.world_markers(mw, sh({ world_small_monsters = true, world_monsters = false }), O, {})
-  check("wd2 monsters off drops small too", #ms == 0)
+  check("wd2 small shows with Large off", keys(ms) == "w:mon:s" and panel.monster.known == 2)
 
   -- chest_label_rules
   local function lbl(c) return core.chest_label(c) end
@@ -1966,7 +1967,7 @@ do
     -- every toggle off: zero candidate builds
     local off = sh({ world_chests = false, world_treasure = false, world_tokens = false,
       world_beetles = false, world_monsters = false, world_sellers = false,
-      world_shops = false, world_small_monsters = small })
+      world_shops = false, world_small_monsters = false })   -- Small is a toggle of its own (SPEC 28.12.3)
     local c0 = stats.cand_builds
     local mo, po, go = core.world_markers_cached(copy, off, origin, boxes, qc)
     local _, pe = core.world_markers(copy, off, origin, boxes, qc)
@@ -3516,6 +3517,156 @@ do
       listed == 0 and rows == 1 and row.merged == true
       and #merged >= 1 and #row.sells_for == 1)
   end
+end
+
+-- toggle costs (SPEC 28.7.2)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local Q = core.parse_query
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(over)
+    local s = {}
+    for k, v in pairs(SHB) do s[k] = v end
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  local stats = core.world_stats
+  local function keyset(ms)
+    local t = {}
+    for _, m in ipairs(ms) do t[m.key] = m end
+    return t
+  end
+  local function keys(ms)
+    local t = {}
+    for i, m in ipairs(ms) do t[i] = m.key end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  local paths = { { "uncached", core.world_markers }, { "cached", core.world_markers_cached } }
+  local cats_zero = true
+  for _, cat in ipairs(core.WORLD_CATS) do
+    if type(core.world_stats.cell_entries) ~= "table" or core.world_stats.cell_entries[cat] ~= 0 then
+      cats_zero = false
+    end
+  end
+  check("grid: cell_entries starts at 0 for every category", cats_zero)
+
+  -- a category that is off puts nothing in cells; turning it on adds it
+  local tw = { chests = { { uid = "gc1", pos = P(1), state = "unopened" } },
+    tokens = { { uid = "gt1", pos = P(5), name = "Tok", state = "not" } } }
+  local ms1, p1 = core.world_markers_cached(tw, sh({ world_tokens = false }), O, {})
+  local gb = stats.grid_builds
+  check("grid: off category has no cells", stats.cell_entries.token == 0)
+  check("grid: off category still counted", p1.token.known == 1)
+  check("grid: on category has cells", stats.cell_entries.chest > 0)
+  local ms2, p2 = core.world_markers_cached(tw, sh(), O, {})
+  check("grid: added without rebuild", stats.grid_builds == gb
+    and keyset(ms2)["w:tok:gt1"] ~= nil and p2.token.shown == 1)
+  check("grid: added category has cells", stats.cell_entries.token == 1)
+  -- a toggle going off never rebuilds
+  core.world_markers_cached(tw, sh({ world_chests = false }), O, {})
+  check("grid: toggle off keeps the grid", stats.grid_builds == gb)
+
+  -- the added category widens the grid bounds
+  local fw = { tokens = { { uid = "gtf", pos = P(5000, 0, 5000), name = "Far", state = "not" } } }
+  local f1 = core.world_markers_cached(fw, sh({ world_tokens = false }), O, {})
+  local f2 = core.world_markers_cached(fw, sh(), O, {})
+  check("grid: add widens bounds", #f1 == 0 and keyset(f2)["w:tok:gtf"] ~= nil)
+
+  -- no search: no haystack, no query match, no drop work
+  local nw = {
+    chests = { { uid = "gn1", pos = P(1), state = "unopened", item_name = "Potion" } },
+    monsters = { { uid = "gn2", cid = 801, cids = { 801 }, name = "Orc", pos = P(2) } },
+    drops = { [801] = { "Orc Tooth" } },
+    sellers = { { shop = 81, item = 1, item_name = "Gem", cid = 9081, npc = "Gil",
+      quest = "Qz", qids = {}, pos = P(3), discovered = true } },
+    shops = { { shop = 81, cid = 9081, npc = "Gil", pos = P(4), discovered = true,
+      items = { { name = "Potion" }, { name = "Rope" } } } },
+  }
+  for _, pa in ipairs(paths) do
+    local h0, c0 = stats.hay_builds, stats.query_calls
+    local ms = pa[2](nw, sh({ world_shops = true }), O, {})
+    check("no search: zero search work [" .. pa[1] .. "]",
+      stats.hay_builds - h0 == 0 and stats.query_calls - c0 == 0 and #ms >= 3)
+  end
+  for _, pa in ipairs(paths) do
+    local c0 = stats.query_calls
+    pa[2](nw, sh({ world_shops = true, search = Q("pot") }), O, {})
+    check("no search: query calls move under a query [" .. pa[1] .. "]",
+      stats.query_calls - c0 > 0)
+  end
+
+  -- quest items: the need read runs only with quest items and in progress on
+  do
+    local GARB = { id = 300, pos = { x = 1, y = 2, z = 3 }, src = "placed" }
+    local function reads(show)
+      local o = { progressing = { 10 }, names = { [10] = "A" },
+        item_needs = { [10] = { { id = 300, num = 1 } } },
+        item_locs = { GARB }, item_names = { [300] = "Beggar's Garb" } }
+      local r0 = stats.item_need_reads
+      core.compute(fake_adapter(o), show)
+      return stats.item_need_reads - r0
+    end
+    check("quest items off: zero", reads({ startable = true, in_progress = true,
+      quest_items = false }) == 0)
+    check("in progress off: zero", reads({ startable = true, in_progress = false,
+      quest_items = true }) == 0)
+    check("quest items and in progress on: one read", reads({ startable = true,
+      in_progress = true, quest_items = true }) == 1)
+  end
+
+  -- Monsters tree (SPEC 28.12.3): Large and Small are independent
+  local mw = { monsters = {
+    { uid = "ms", cid = 1, name = "Imp", pos = P(2), small = true },
+    { uid = "ml", cid = 2, name = "Ogre", pos = P(3), small = false } },
+    drops = { [1] = { "Imp Fang" }, [2] = { "Ogre Horn" } } }
+  for _, pa in ipairs(paths) do
+    local tag = " [" .. pa[1] .. "]"
+    local m, p = pa[2](mw, sh({ world_monsters = false, world_small_monsters = true }), O, {})
+    -- known counts every large monster whatever Large says (as a toggled-off
+    -- category always reports), and a small one only while Small is on
+    check("mtree: only Small shows the small one" .. tag, keys(m) == "w:mon:ms"
+      and p.monster.known == 2 and p.monster.small_known == 1 and p.monster.small_shown == 1)
+    m, p = pa[2](mw, sh({ world_monsters = true, world_small_monsters = false }), O, {})
+    check("mtree: only Large shows the large one" .. tag, keys(m) == "w:mon:ml"
+      and p.monster.known == 1 and p.monster.small_known == 0 and p.monster.small_shown == 0)
+    m, p = pa[2](mw, sh({ world_monsters = true, world_small_monsters = true }), O, {})
+    check("mtree: both show both" .. tag, keys(m) == "w:mon:ml,w:mon:ms"
+      and p.monster.known == 2 and p.monster.shown == 2 and p.monster.small_known == 1
+      and p.monster.small_shown == 1)
+    local flags = {}
+    for _, e in ipairs(p.monster.entries) do flags[e.key] = e.small end
+    check("mtree: entries carry small" .. tag, flags["w:mon:ms"] == true
+      and flags["w:mon:ml"] == false)
+    m, p = pa[2](mw, sh({ world_monsters = false, world_small_monsters = false }), O, {})
+    check("mtree: both off shows none" .. tag, #m == 0 and p.monster.shown == 0
+      and p.monster.known == 1 and p.monster.small_known == 0)
+    m = pa[2](mw, sh({ world_monsters = false, world_small_monsters = true,
+      search = Q("fang") }), O, {})
+    check("mtree: drop search finds the small one with only Small on" .. tag,
+      keys(m) == "w:mon:ms")
+    m = pa[2](mw, sh({ world_monsters = false, world_small_monsters = true,
+      search = Q("horn") }), O, {})
+    check("mtree: drop search skips the large one with only Small on" .. tag, #m == 0)
+  end
+  local mw2 = { monsters = mw.monsters, drops = mw.drops }
+  core.world_markers_cached(mw2, sh({ world_monsters = false, world_small_monsters = false }), O, {})
+  check("mtree: both off, monster category has no cells", stats.cell_entries.monster == 0)
+  core.world_markers_cached(mw2, sh({ world_monsters = true, world_small_monsters = true }), O, {})
+  check("mtree: both on, monster category has cells", stats.cell_entries.monster == 2)
+  -- Large flipping with Small on re-fills the monster cells, never the grid
+  local mw3 = { monsters = mw.monsters }
+  local both = core.world_markers_cached(mw3, sh({ world_monsters = true, world_small_monsters = true }), O, {})
+  local gb2 = stats.grid_builds
+  local only_s = core.world_markers_cached(mw3, sh({ world_monsters = false, world_small_monsters = true }), O, {})
+  check("mtree: Large off re-fills without a rebuild", keys(both) == "w:mon:ml,w:mon:ms"
+    and keys(only_s) == "w:mon:ms" and stats.grid_builds == gb2 and stats.cell_entries.monster == 1)
+  local both2 = core.world_markers_cached(mw3, sh({ world_monsters = true, world_small_monsters = true }), O, {})
+  check("mtree: Large back on re-fills", keys(both2) == "w:mon:ml,w:mon:ms"
+    and stats.grid_builds == gb2 and stats.cell_entries.monster == 2)
 end
 
 if failures > 0 then os.exit(1) end
