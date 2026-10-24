@@ -35,7 +35,8 @@ here and never pushed; roadmap and spec edits are committed there, not in this r
 3. Never create a remote or push without the operator's explicit instruction.
 4. Commit messages: no backticks or `$(...)` in double-quoted shell strings; use
    `git commit -F -` fed by a single-quoted heredoc.
-5. Release zips carry the places file (`Clairvoyance_places.json`) and the icon
+5. Release zips carry the places file (`Clairvoyance_places.json`), the hints file
+   (`Clairvoyance_hints.json`) and the icon
    folder (`reframework/images/Clairvoyance/icons/`), never
    the extractors (`tools/`) or the pak key. The icon folder is generated from
    game files with `tools/extract_icons.py` and the user's own key, committed,

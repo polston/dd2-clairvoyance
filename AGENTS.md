@@ -11,7 +11,8 @@
 4. Third-party reference sources live in `reference/` (gitignored, never committed).
    The icon folder `reframework/images/Clairvoyance/icons/` is generated from
    game files with `tools/extract_icons.py` and the user's own key (never
-   printed or committed); the release zip carries the folder, never `tools/`.
+   printed or committed); the release zip carries the folder and the hints file
+   (`data/Clairvoyance_hints.json`), never `tools/`.
    v13 matching icons need the D2DX plugin and
    fall back to the game glyphs without it.
 5. CI (`.github/workflows/ci.yml`) runs `check.ps1 -SkipProvenance` and builds the zip

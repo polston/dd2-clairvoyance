@@ -37,6 +37,17 @@ map and in your view.
     "quest-gated", "trap", and so on), the map search finds them by kind, and
     each kind has its own toggle.
 14. Map coordinates show beside the full map's cursor and under the minimap.
+15. NPC search: the same search box finds named NPCs, lists them under "NPCs"
+    with a "Show on map" button and a "Route" checkbox, and a routed NPC's day
+    appears as numbered stops on the map.
+16. NPC names above heads, with how they feel about you, for quest NPCs only
+    or for all named NPCs.
+17. In the item menu, quest-related items get a small dot on their slot, and
+    the selected one is labelled with its quest above the item panel.
+18. Quest hints: a Hints node in the Quest tree, closed until you open it,
+    with pins on the map and in the world for the step you are on. The shipped
+    hints file lists quest items only so far; its text and pins are still to
+    come.
 
 ## Requirements
 
@@ -86,11 +97,21 @@ chest with several kinds is hidden when any one of them is off:
 
 ### NPCs
 
+"NPC names above heads" is Off, Quest NPCs or All named NPCs. Searching an NPC
+by name lists it under "NPCs (N)" in the search results; its "Route" checkbox
+draws that NPC's day, one routed NPC at a time.
+
 "Route path" draws a searched NPC's route as straight lines or along the
 game's walking paths ("Walking path", the default). "Show route path in the
 world" draws the walking path in the world too. The path search needs a copy of
 the game's walking graph, which the mod makes over a second or two in small
 slices the first time a walking-path route is shown.
+
+### Items
+
+"Mark quest items in the item menu" puts a dot on each quest-related slot in
+the item menu and labels the selected item with its quest above the item
+panel. The dots and the label use the "Quest items" color from Appearance.
 
 ### Map and minimap
 
