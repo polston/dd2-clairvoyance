@@ -128,7 +128,13 @@ wt.rows = function(cat)
   if rows == nil then
     rows = core.world_rows(p.entries, (wt.q("input", nil) or {}).settlements,
       wt.world_origin, cat == "shop" and math.huge or nil)
+    -- SPEC 28.12.1: the Monsters node splits its rows by the entry's small flag
+    local small_of = {}
+    if cat == "monster" then
+      for _, e in ipairs(p.entries or {}) do small_of[e.key] = e.small == true end
+    end
     for _, r in ipairs(rows) do
+      if cat == "monster" and r.small == nil then r.small = small_of[r.key] == true end
       r.jump_id = "Show on map##wj_" .. cat .. "_" .. tostring(r.key)
       r.tree_id = r.text .. "###ws_" .. tostring(r.key)
     end
@@ -1885,7 +1891,7 @@ do
       local off = {}
       for _, k in ipairs(su.WORLD_BOOLS) do
         if k ~= "world_show_opened" and k ~= "world_undiscovered"
-          and k ~= "world_shops" and not settings[k] then
+          and k ~= "world_shops" and k ~= "world_first_token" and not settings[k] then
           off[#off + 1] = string.lower(su.WORLD_BOOL_LABEL[k])
         end
       end
@@ -2016,10 +2022,29 @@ do
   sec.world_markers = function()
     local changed
     if imgui.tree_node("World markers##wcfg") then
+      -- SPEC 28.9.4, 28.12.1: Tokens and Monsters each hold two checkboxes
+      -- in one tree node, drawn where the first of the pair sits
+      wt.trees = wt.trees or { world_tokens = { "Seeker's Tokens##wtok", "world_first_token" },
+        world_monsters = { "Monsters##wmon", "world_small_monsters" } }
+      local TREES = wt.trees
       for _, k in ipairs(su.WORLD_BOOLS) do
-        changed, settings[k] = imgui.checkbox(su.WORLD_BOOL_LABEL[k], settings[k])
-        if changed then want_update = true; last_tick = 0.0; save_settings() end
-        if k == "world_chests" then   -- the kind filters sit indented under Chests
+        local tr = TREES[k]
+        local open = true
+        if k == "world_first_token" or k == "world_small_monsters" then
+          open = false   -- the second box of a tree, drawn with its first
+        elseif tr ~= nil then
+          open = imgui.tree_node(tr[1])
+        end
+        if open then
+          changed, settings[k] = imgui.checkbox(su.WORLD_BOOL_LABEL[k], settings[k])
+          if changed then want_update = true; last_tick = 0.0; save_settings() end
+          if tr ~= nil then
+            changed, settings[tr[2]] = imgui.checkbox(su.WORLD_BOOL_LABEL[tr[2]], settings[tr[2]])
+            if changed then want_update = true; last_tick = 0.0; save_settings() end
+            imgui.tree_pop()
+          end
+        end
+        if open and k == "world_chests" then   -- the kind filters sit indented under Chests
           imgui.indent(20)
           for _, kk in ipairs(su.WORLD_KIND_BOOLS) do
             changed, settings[kk] = imgui.checkbox(su.WORLD_BOOL_LABEL[kk], settings[kk])
@@ -2257,8 +2282,32 @@ do
               and imgui.tree_node(string.format("%s (%d/%d)###wcat_%s",
                 title, p.shown, p.known, cat)) then
               local rows = wt.rows(cat)
-              if #rows == 0 then imgui.text("Nothing shown") end
-              for _, r in ipairs(rows) do
+              -- SPEC 28.9.4: the Finder's Token spot is listed first
+              local fst = cat == "token" and p.first or nil
+              if #rows == 0 and fst == nil then imgui.text("Nothing shown") end
+              if fst ~= nil then
+                imgui.text("Finder's Token spot")
+                if imgui.button("Show on map##wj_token_first") then jump_pending = fst.pos end
+                if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+              end
+              -- SPEC 28.12.1: Monsters holds a Large and a Small child node
+              local groups = { { rows = rows } }
+              if cat == "monster" then
+                local ss, sk = p.small_shown or 0, p.small_known or 0
+                local lg, sm = {}, {}
+                for _, r in ipairs(rows) do
+                  if r.small then sm[#sm + 1] = r else lg[#lg + 1] = r end
+                end
+                groups = {
+                  { rows = lg, title = string.format("Large monsters (%d/%d)###wmonl",
+                      p.shown - ss, p.known - sk) },
+                  { rows = sm, title = string.format("Small monsters (%d/%d)###wmons", ss, sk) },
+                }
+              end
+              for _, g in ipairs(groups) do
+              local gopen = g.title == nil or imgui.tree_node(g.title)
+              if gopen then
+              for _, r in ipairs(g.rows) do
                 local open = true
                 if cat == "shop" then
                   open = imgui.tree_node(r.tree_id)
@@ -2282,6 +2331,9 @@ do
                   if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
                   if cat == "shop" then imgui.tree_pop() end
                 end
+              end
+              if g.title ~= nil then imgui.tree_pop() end
+              end
               end
               imgui.tree_pop()
             end

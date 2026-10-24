@@ -22,6 +22,7 @@ function M.defaults()
     icon_chest = 33, icon_treasure = 36, icon_monster = 10, icon_seller = 45,
     world_max_markers = 300,
     world_tokens = true, world_beetles = true, world_small_monsters = false,
+    world_first_token = true,
     color_token = 0xFFC792EA, color_beetle = 0xFFB5E550,
     icon_token = 57, icon_beetle = 46,
     search_text = "",
@@ -172,9 +173,9 @@ local function int_field(raw, k, d, lo, hi)
   return M.clamp_int(v, lo, hi)
 end
 
--- The ten world-tracker toggles, in UI / debug-setter order.
+-- The eleven world-tracker toggles, in UI / debug-setter order.
 M.WORLD_BOOLS = { "world_chests", "world_treasure", "world_tokens",
-  "world_beetles", "world_monsters", "world_small_monsters",
+  "world_first_token", "world_beetles", "world_monsters", "world_small_monsters",
   "world_sellers", "world_shops", "world_show_opened", "world_undiscovered" }
 
 -- The five chest kind filters (SPEC 27.6), in the order of the kinds.
@@ -189,7 +190,8 @@ M.WORLD_LABEL = { chest = "Chests", treasure = "Treasure spots",
   shop = "Shop stock", shops = "Shops",
   npc_search = "NPCs", route_stop = "Route stops", hint_pin = "Hint pins" }
 M.WORLD_BOOL_LABEL = { world_chests = M.WORLD_LABEL.chest,
-  world_treasure = M.WORLD_LABEL.treasure, world_tokens = M.WORLD_LABEL.token,
+  world_treasure = M.WORLD_LABEL.treasure, world_tokens = "All Seeker's Tokens",
+  world_first_token = "Finder's Token spot (first token found)",
   world_beetles = M.WORLD_LABEL.beetle, world_monsters = "Large monsters",
   world_small_monsters = "Small monsters", world_sellers = M.WORLD_LABEL.seller,
   world_shops = M.WORLD_LABEL.shops,

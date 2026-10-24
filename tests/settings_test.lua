@@ -136,11 +136,13 @@ check("journal_spoilers stored false kept",
 -- exact defaults key count (24 after the per-category icon keys, plus
 -- journal_spoilers, plus 23 world-tracker keys (SPEC 17.5, 17.10.13),
 -- plus 8 v14 keys (SPEC 22.6), plus 83 style and route keys (SPEC 23.4),
--- plus 2 coordinate readout keys, plus 5 chest kind keys)
+-- plus 2 coordinate readout keys, plus 5 chest kind keys, plus
+-- world_first_token (SPEC 28.9.4))
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 150", n == 150)
+  check("defaults key count is 151", n == 151)
+  check("first token default on", D.world_first_token == true)
 end
 
 -- world tracker settings
@@ -164,9 +166,13 @@ do
     check(k .. " stored true kept", su.validate({ [k] = true })[k] == true)
   end
   local ORDER = { "world_chests", "world_treasure", "world_tokens",
-    "world_beetles", "world_monsters", "world_small_monsters",
+    "world_first_token", "world_beetles", "world_monsters", "world_small_monsters",
     "world_sellers", "world_shops", "world_show_opened", "world_undiscovered" }
-  check("WORLD_BOOLS has ten keys", #su.WORLD_BOOLS == #ORDER)
+  check("WORLD_BOOLS has eleven keys", #su.WORLD_BOOLS == #ORDER)
+  check("first token label",
+    su.WORLD_BOOL_LABEL.world_first_token == "Finder's Token spot (first token found)")
+  check("tokens label", su.WORLD_BOOL_LABEL.world_tokens == "All Seeker's Tokens")
+  check("monsters label", su.WORLD_BOOL_LABEL.world_monsters == "Large monsters")
   for i, k in ipairs(ORDER) do
     check("WORLD_BOOLS[" .. i .. "] is " .. k, su.WORLD_BOOLS[i] == k)
   end
@@ -540,7 +546,7 @@ do
     and su.WORLD_BOOL_LABEL.world_kind_quest == "Quest-gated"
     and su.WORLD_BOOL_LABEL.world_kind_trap == "Trap"
     and su.WORLD_BOOL_LABEL.world_kind_pawn == "Pawns can't open")
-  check("WORLD_BOOLS still ten", #su.WORLD_BOOLS == 10)
+  check("WORLD_BOOLS still eleven", #su.WORLD_BOOLS == 11)
   local c0 = su.color_of(D, "chest")
   local half = (((c0 >> 24) & 0xFF) // 2 << 24) | (c0 & 0x00FFFFFF)
   local faded = su.marker_color(D, { cat = "chest", faded = true })
