@@ -948,6 +948,39 @@ do
     w3:input().monsters[1] ~= nil and w3:input().monsters[1].kind == "Griffin")
 end
 
+-- monster families (SPEC 30.4)
+do
+  local rows = {
+    prow("chara", "f1", 101, 0, 0, { name = "ch220000_00" }),
+    prow("chara", "f2", 102, 40, 0, { name = "ch220001_00" }) }
+  local f = fixture({ files = { [K.PLACES] = places(rows) } })
+  f.data.badge = { [101] = "Goblin", [102] = "Hobgoblin" }
+  local w = f.new()
+  w:refresh(0, true, on("monsters", "small_monsters"))
+  local m = w:input().monsters
+  check("families: two kinds of one family", #m == 2)
+  check("families: first kind carries fam", m[1] ~= nil and m[1].fam == "ch220")
+  check("families: second kind carries fam", m[2] ~= nil and m[2].fam == "ch220")
+
+  local fr = fixture()
+  fr.data.respawn = { { key = "zz_0", cid = 1002, cid_name = "ch220002_00", pos = P(300, 0, 300) } }
+  fr.data.badge = { [1002] = "Goblin" }
+  local wr = fr.new()
+  wr:refresh(0, true, on("monsters", "small_monsters"))
+  local mr = wr:input().monsters
+  check("families: respawning unit carries fam",
+    mr[1] ~= nil and mr[1].respawning == true and mr[1].fam == "ch220")
+
+  local fp = fixture({ files = { [K.PLACES] = places({
+    prow("chara", "p1", 101, 0, 0, { name = "ch220000_00" }) }) } })
+  fp.data.badge = { [101] = "Goblin" }
+  local wp = fp.new()
+  wp:refresh(0, true, on("monsters", "small_monsters"))
+  local mp = wp:input().monsters
+  check("families: placed row carries fam",
+    mp[1] ~= nil and mp[1].respawning == false and mp[1].fam == "ch220")
+end
+
 -- 24. places_slow
 do
   local f = fixture()

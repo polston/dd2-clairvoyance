@@ -1607,7 +1607,7 @@ function M.new(a, reads, io)
           local nm = kind
           if c.count > 1 then nm = nm .. " x" .. c.count end
           out.monsters[#out.monsters + 1] = { uid = s.uid, cid = s.cid, name = nm,
-            kind = kind,
+            kind = kind, fam = s.fam,
             pos = pcopy(s.pos), respawning = c.respawning == true,
             small = s.small == true, count = c.count, cids = c.cids }
           ids[s.cid] = true
