@@ -1723,6 +1723,7 @@ local function install_debug()
           end
         end
         st.rows = rows
+        st.first_token = sn ~= nil and sn.token ~= nil and sn.token.first or nil
         st.cursor = ui_map ~= nil and adapter.map_cursor ~= nil
           and adapter.map_cursor(ui_map) or nil
         st.map_origin, st.map_retakes = wt.map_origin, wt.map_retakes
