@@ -1711,8 +1711,9 @@ do
   check("wd2 small absent by default", keys(ms) == "w:mon:g" and panel.monster.known == 1)
   ms, panel = core.world_markers(mw, sh({ world_small_monsters = true }), O, {})
   check("wd2 small present when on", #ms == 2 and panel.monster.known == 2)
+  -- SPEC 28.12.3: Large and Small are independent; Small alone shows the small ones
   ms, panel = core.world_markers(mw, sh({ world_small_monsters = true, world_monsters = false }), O, {})
-  check("wd2 monsters off drops small too", #ms == 0)
+  check("wd2 small shows with Large off", keys(ms) == "w:mon:s" and panel.monster.known == 2)
 
   -- chest_label_rules
   local function lbl(c) return core.chest_label(c) end
@@ -1966,7 +1967,7 @@ do
     -- every toggle off: zero candidate builds
     local off = sh({ world_chests = false, world_treasure = false, world_tokens = false,
       world_beetles = false, world_monsters = false, world_sellers = false,
-      world_shops = false, world_small_monsters = small })
+      world_shops = false, world_small_monsters = false })   -- Small is a toggle of its own (SPEC 28.12.3)
     local c0 = stats.cand_builds
     local mo, po, go = core.world_markers_cached(copy, off, origin, boxes, qc)
     local _, pe = core.world_markers(copy, off, origin, boxes, qc)
@@ -3349,6 +3350,425 @@ do
         cat = "chest", faded = faded } }, {}))
     end
     check("faded: signature differs", sig(true) ~= sig(false) and sig(nil) == sig(false))
+  end
+end
+
+-- haystacks from fields (SPEC 28.4.1)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(q)
+    local s = {}
+    for k, v in pairs(SHB) do s[k] = v end
+    s.search = core.parse_query(q)
+    return s
+  end
+  local w = {
+    monsters = { { uid = "m1", cid = 101, cids = { 101 }, name = "Goblin",
+      respawning = true, pos = P(0, 0, 0) } },
+    drops = { [101] = { "Rotten Meat" } },
+    sellers = { { shop = 7, item = 5, item_name = "Potion", npc = "Ana", quest = "Sky",
+      maybe_locked = true, pos = P(1, 0, 0), qids = {} } },
+    chests = { { uid = "c1", pos = P(2, 0, 0), state = "unopened", item_name = "Ferrystone" } },
+  }
+  local paths = { { "uncached", core.world_markers }, { "cached", core.world_markers_cached } }
+  for _, pa in ipairs(paths) do
+    local function n(q) return #pa[2](w, sh(q), O, {}) end
+    for _, q in ipairs({ "respawning", "for", "sold", "by", "may", "locked" }) do
+      check("hay45 " .. q .. " [" .. pa[1] .. "]", n(q) == 0)
+    end
+    check("hay45 monster name [" .. pa[1] .. "]", n("goblin") == 1)
+    check("hay45 drop [" .. pa[1] .. "]", n("rotten") == 1)
+    check("hay45 seller npc [" .. pa[1] .. "]", n("ana") == 1)
+    check("hay45 chest word [" .. pa[1] .. "]", n("chest") >= 1)
+  end
+end
+
+-- haystack carry (SPEC 28.4.3)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(q)
+    local s = {}
+    for k, v in pairs(SHB) do s[k] = v end
+    s.search = core.parse_query(q or "pot")
+    return s
+  end
+  local stats = core.world_stats
+  local function run(w, q) return core.world_markers_cached(w, sh(q), O, {}) end
+  local function by_key(ms)
+    local t = {}
+    for _, m in ipairs(ms) do t[m.key] = m end
+    return t
+  end
+
+  -- equal entries in fresh tables: each haystack is built once
+  local function mk_equal()
+    return {
+      chests = { { uid = "h1", pos = P(1), state = "unopened", item_name = "Potion",
+        items = { { name = "Potion", n = 1 } }, kinds = { "trap" } } },
+      treasure = { { name = "HTre", pos = P(20), items = { { name = "Elixir" } } } },
+      tokens = { { uid = "ht", pos = P(3), name = "Token A", state = "not" } },
+      monsters = { { uid = "hm", cid = 401, cids = { 401 }, name = "Mino", pos = P(4) } },
+      drops = { [401] = { "Mino Horn" } },
+      sellers = { { shop = 70, item = 5, item_name = "Potion", npc = "Ana", quest = "Q",
+        qids = {}, pos = P(5) } },
+      shops = { { shop = 71, cid = 9171, npc = "Gil", pos = P(6), discovered = true,
+        items = { { name = "Potion" }, { name = "Rope" } } } },
+    }
+  end
+  local b0 = stats.hay_builds
+  run(mk_equal())
+  local first = stats.hay_builds - b0
+  check("hay40 counter moves on first build", first >= 6)
+  b0 = stats.hay_builds
+  run(mk_equal())
+  check("hay40 built once", stats.hay_builds - b0 == 0)
+
+  -- chest item name read falls back, then succeeds
+  local function mk_chest(name)
+    return { chests = { { uid = "hc", pos = P(1), state = "unopened", item_name = name } } }
+  end
+  local ms = run(mk_chest("Item 5"))
+  check("hay40 chest fallback not matched", #ms == 0)
+  b0 = stats.hay_builds
+  ms = run(mk_chest("Potion"))
+  check("hay40 chest rebuilt", stats.hay_builds - b0 == 1)
+  check("hay40 chest matches after", #ms == 1 and ms[1].key == "w:chest:hc")
+  b0 = stats.hay_builds
+  run(mk_chest("Potion"))
+  check("hay40 chest then carried", stats.hay_builds - b0 == 0)
+
+  -- monster drop names change
+  local function mk_mon(list)
+    return { monsters = { { uid = "hd", cid = 402, cids = { 402 }, name = "Troll", pos = P(1) } },
+      drops = { [402] = list } }
+  end
+  ms = run(mk_mon({ "Rotten Meat" }), "rotten")
+  check("hay40 drop matched", #ms == 1)
+  b0 = stats.hay_builds
+  ms = run(mk_mon({ "Bone" }), "rotten")
+  check("hay40 drops rebuilt", stats.hay_builds - b0 == 1 and #ms == 0)
+  b0 = stats.hay_builds
+  ms = run(mk_mon({ "Bone" }), "bone")
+  check("hay40 drops carried", stats.hay_builds - b0 == 0 and #ms == 1)
+
+  -- a shop whose item unlocks between rounds: the label is fresh
+  local function mk_shop(locked)
+    return { shops = { { shop = 72, cid = 9172, npc = "Gil", pos = P(1), discovered = true,
+      items = { { name = "Potion", locked = locked } } } } }
+  end
+  local k1 = by_key(run(mk_shop(true)))["w:shop:72"]
+  local k2 = by_key(run(mk_shop(false)))["w:shop:72"]
+  check("hay40 shop locked r1", k1 ~= nil and k1.label:find("(may be locked)", 1, true) ~= nil)
+  check("hay40 shop label fresh", k2 ~= nil and k2.label:find("(may be locked)", 1, true) == nil)
+
+  -- sellers at one shop keep their own haystacks
+  local sw = { sellers = {
+    { shop = 77, item = 5, item_name = "Potion", npc = "N", qids = {}, quest = "", pos = P(1) },
+    { shop = 77, item = 6, item_name = "Elixir", npc = "N", qids = {}, quest = "", pos = P(2) } } }
+  local pk = by_key(run(sw, "potion"))
+  local ek = by_key(run(sw, "elixir"))
+  check("hay40 seller keys distinct", pk["w:sell:77:5"] ~= nil and pk["w:sell:77:6"] == nil
+    and ek["w:sell:77:6"] ~= nil and ek["w:sell:77:5"] == nil)
+
+  -- the drop hover follows the new entry's label
+  local function mk_resp(r)
+    return { monsters = { { uid = "hg", cid = 403, cids = { 403 }, name = "Gob",
+      respawning = r, pos = P(1) } }, drops = { [403] = { "Rotten Meat" } } }
+  end
+  run(mk_resp(false), "rotten")
+  ms = run(mk_resp(true), "rotten")
+  check("hay40 hover fresh", #ms == 1 and ms[1].hover ~= nil
+    and ms[1].hover:sub(1, 20) == "Gob (respawning)\nDro")
+
+  -- every compared field rebuilds: a seller's quest, a chest's kinds, a treasure's items
+  local function mk_sq(quest)
+    return { sellers = { { shop = 78, item = 1, item_name = "Gem", npc = "N", quest = quest,
+      qids = {}, pos = P(1) } } }
+  end
+  run(mk_sq("Alpha"), "bravo")
+  b0 = stats.hay_builds
+  ms = run(mk_sq("Bravo"), "bravo")
+  check("hay40 seller quest rebuilt", stats.hay_builds - b0 == 1 and by_key(ms)["w:sell:78:1"] ~= nil)
+  local function mk_ck(kinds)
+    return { chests = { { uid = "hk", pos = P(1), state = "unopened", kinds = kinds } } }
+  end
+  run(mk_ck(nil), "new shard each cycle")
+  b0 = stats.hay_builds
+  ms = run(mk_ck({ "ng_shard" }), "new shard each cycle")
+  check("hay40 chest kinds rebuilt", stats.hay_builds - b0 == 1 and #ms == 1)
+  local function mk_tr(name)
+    return { treasure = { { name = "HT2", pos = P(30), items = { { name = name } } } } }
+  end
+  run(mk_tr("Rope"), "elixir")
+  b0 = stats.hay_builds
+  ms = run(mk_tr("Elixir"), "elixir")
+  check("hay40 treasure items rebuilt", stats.hay_builds - b0 == 1 and #ms == 1)
+end
+
+-- merge_shops (SPEC 28.4.4)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300,
+    world_shops = true }
+  local w = {
+    shops = { { shop = 5, cid = 9500, npc = "Gil", pos = P(10), discovered = true,
+      items = { { name = "Rope" } } } },
+    sellers = { { shop = 5, item = 1, item_name = "Gem", cid = 9500, npc = "Gil",
+      quest = "Qx", qids = {}, pos = P(11), discovered = true } },
+  }
+  local qc = { [9500] = { key = "c:9500" } }   -- the shop's NPC has a quest marker
+  for _, pa in ipairs({ { "uncached", core.world_markers },
+    { "cached", core.world_markers_cached } }) do
+    local ms, panel, merged = pa[2](w, SHB, O, {}, qc)
+    local listed = 0
+    for _, m in ipairs(ms) do if m.key == "w:shop:5" then listed = listed + 1 end end
+    local rows, row = 0, nil
+    for _, e in ipairs(panel.shop.entries) do
+      if e.key == "w:shop:5" then rows = rows + 1; row = e end
+    end
+    check("merge_shops: merged shop not listed twice [" .. pa[1] .. "]",
+      listed == 0 and rows == 1 and row.merged == true
+      and #merged >= 1 and #row.sells_for == 1)
+  end
+end
+
+-- toggle costs (SPEC 28.7.2)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local Q = core.parse_query
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(over)
+    local s = {}
+    for k, v in pairs(SHB) do s[k] = v end
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  local stats = core.world_stats
+  local function keyset(ms)
+    local t = {}
+    for _, m in ipairs(ms) do t[m.key] = m end
+    return t
+  end
+  local function keys(ms)
+    local t = {}
+    for i, m in ipairs(ms) do t[i] = m.key end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  local paths = { { "uncached", core.world_markers }, { "cached", core.world_markers_cached } }
+  local cats_zero = true
+  for _, cat in ipairs(core.WORLD_CATS) do
+    if type(core.world_stats.cell_entries) ~= "table" or core.world_stats.cell_entries[cat] ~= 0 then
+      cats_zero = false
+    end
+  end
+  check("grid: cell_entries starts at 0 for every category", cats_zero)
+
+  -- a category that is off puts nothing in cells; turning it on adds it
+  local tw = { chests = { { uid = "gc1", pos = P(1), state = "unopened" } },
+    tokens = { { uid = "gt1", pos = P(5), name = "Tok", state = "not" } } }
+  local ms1, p1 = core.world_markers_cached(tw, sh({ world_tokens = false }), O, {})
+  local gb = stats.grid_builds
+  check("grid: off category has no cells", stats.cell_entries.token == 0)
+  check("grid: off category still counted", p1.token.known == 1)
+  check("grid: on category has cells", stats.cell_entries.chest > 0)
+  local ms2, p2 = core.world_markers_cached(tw, sh(), O, {})
+  check("grid: added without rebuild", stats.grid_builds == gb
+    and keyset(ms2)["w:tok:gt1"] ~= nil and p2.token.shown == 1)
+  check("grid: added category has cells", stats.cell_entries.token == 1)
+  -- a toggle going off never rebuilds
+  core.world_markers_cached(tw, sh({ world_chests = false }), O, {})
+  check("grid: toggle off keeps the grid", stats.grid_builds == gb)
+
+  -- the added category widens the grid bounds
+  local fw = { tokens = { { uid = "gtf", pos = P(5000, 0, 5000), name = "Far", state = "not" } } }
+  local f1 = core.world_markers_cached(fw, sh({ world_tokens = false }), O, {})
+  local f2 = core.world_markers_cached(fw, sh(), O, {})
+  check("grid: add widens bounds", #f1 == 0 and keyset(f2)["w:tok:gtf"] ~= nil)
+
+  -- no search: no haystack, no query match, no drop work
+  local nw = {
+    chests = { { uid = "gn1", pos = P(1), state = "unopened", item_name = "Potion" } },
+    monsters = { { uid = "gn2", cid = 801, cids = { 801 }, name = "Orc", pos = P(2) } },
+    drops = { [801] = { "Orc Tooth" } },
+    sellers = { { shop = 81, item = 1, item_name = "Gem", cid = 9081, npc = "Gil",
+      quest = "Qz", qids = {}, pos = P(3), discovered = true } },
+    shops = { { shop = 81, cid = 9081, npc = "Gil", pos = P(4), discovered = true,
+      items = { { name = "Potion" }, { name = "Rope" } } } },
+  }
+  for _, pa in ipairs(paths) do
+    local h0, c0 = stats.hay_builds, stats.query_calls
+    local ms = pa[2](nw, sh({ world_shops = true }), O, {})
+    check("no search: zero search work [" .. pa[1] .. "]",
+      stats.hay_builds - h0 == 0 and stats.query_calls - c0 == 0 and #ms >= 3)
+  end
+  for _, pa in ipairs(paths) do
+    local c0 = stats.query_calls
+    pa[2](nw, sh({ world_shops = true, search = Q("pot") }), O, {})
+    check("no search: query calls move under a query [" .. pa[1] .. "]",
+      stats.query_calls - c0 > 0)
+  end
+
+  -- quest items: the need read runs only with quest items and in progress on
+  do
+    local GARB = { id = 300, pos = { x = 1, y = 2, z = 3 }, src = "placed" }
+    local function reads(show)
+      local o = { progressing = { 10 }, names = { [10] = "A" },
+        item_needs = { [10] = { { id = 300, num = 1 } } },
+        item_locs = { GARB }, item_names = { [300] = "Beggar's Garb" } }
+      local r0 = stats.item_need_reads
+      core.compute(fake_adapter(o), show)
+      return stats.item_need_reads - r0
+    end
+    check("quest items off: zero", reads({ startable = true, in_progress = true,
+      quest_items = false }) == 0)
+    check("in progress off: zero", reads({ startable = true, in_progress = false,
+      quest_items = true }) == 0)
+    check("quest items and in progress on: one read", reads({ startable = true,
+      in_progress = true, quest_items = true }) == 1)
+  end
+
+  -- Monsters tree (SPEC 28.12.3): Large and Small are independent
+  local mw = { monsters = {
+    { uid = "ms", cid = 1, name = "Imp", pos = P(2), small = true },
+    { uid = "ml", cid = 2, name = "Ogre", pos = P(3), small = false } },
+    drops = { [1] = { "Imp Fang" }, [2] = { "Ogre Horn" } } }
+  for _, pa in ipairs(paths) do
+    local tag = " [" .. pa[1] .. "]"
+    local m, p = pa[2](mw, sh({ world_monsters = false, world_small_monsters = true }), O, {})
+    -- known counts every large monster whatever Large says (as a toggled-off
+    -- category always reports), and a small one only while Small is on
+    check("mtree: only Small shows the small one" .. tag, keys(m) == "w:mon:ms"
+      and p.monster.known == 2 and p.monster.small_known == 1 and p.monster.small_shown == 1)
+    m, p = pa[2](mw, sh({ world_monsters = true, world_small_monsters = false }), O, {})
+    check("mtree: only Large shows the large one" .. tag, keys(m) == "w:mon:ml"
+      and p.monster.known == 1 and p.monster.small_known == 0 and p.monster.small_shown == 0)
+    m, p = pa[2](mw, sh({ world_monsters = true, world_small_monsters = true }), O, {})
+    check("mtree: both show both" .. tag, keys(m) == "w:mon:ml,w:mon:ms"
+      and p.monster.known == 2 and p.monster.shown == 2 and p.monster.small_known == 1
+      and p.monster.small_shown == 1)
+    local flags = {}
+    for _, e in ipairs(p.monster.entries) do flags[e.key] = e.small end
+    check("mtree: entries carry small" .. tag, flags["w:mon:ms"] == true
+      and flags["w:mon:ml"] == false)
+    m, p = pa[2](mw, sh({ world_monsters = false, world_small_monsters = false }), O, {})
+    check("mtree: both off shows none" .. tag, #m == 0 and p.monster.shown == 0
+      and p.monster.known == 1 and p.monster.small_known == 0)
+    m = pa[2](mw, sh({ world_monsters = false, world_small_monsters = true,
+      search = Q("fang") }), O, {})
+    check("mtree: drop search finds the small one with only Small on" .. tag,
+      keys(m) == "w:mon:ms")
+    m = pa[2](mw, sh({ world_monsters = false, world_small_monsters = true,
+      search = Q("horn") }), O, {})
+    check("mtree: drop search skips the large one with only Small on" .. tag, #m == 0)
+  end
+  local mw2 = { monsters = mw.monsters, drops = mw.drops }
+  core.world_markers_cached(mw2, sh({ world_monsters = false, world_small_monsters = false }), O, {})
+  check("mtree: both off, monster category has no cells", stats.cell_entries.monster == 0)
+  core.world_markers_cached(mw2, sh({ world_monsters = true, world_small_monsters = true }), O, {})
+  check("mtree: both on, monster category has cells", stats.cell_entries.monster == 2)
+  -- Large flipping with Small on re-fills the monster cells, never the grid
+  local mw3 = { monsters = mw.monsters }
+  local both = core.world_markers_cached(mw3, sh({ world_monsters = true, world_small_monsters = true }), O, {})
+  local gb2 = stats.grid_builds
+  local only_s = core.world_markers_cached(mw3, sh({ world_monsters = false, world_small_monsters = true }), O, {})
+  check("mtree: Large off re-fills without a rebuild", keys(both) == "w:mon:ml,w:mon:ms"
+    and keys(only_s) == "w:mon:ms" and stats.grid_builds == gb2 and stats.cell_entries.monster == 1)
+  local both2 = core.world_markers_cached(mw3, sh({ world_monsters = true, world_small_monsters = true }), O, {})
+  check("mtree: Large back on re-fills", keys(both2) == "w:mon:ml,w:mon:ms"
+    and stats.grid_builds == gb2 and stats.cell_entries.monster == 2)
+end
+
+-- first token (SPEC 28.9.3)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local Q = core.parse_query
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = false, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(over)
+    local s = {}
+    for k, v in pairs(SHB) do s[k] = v end
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  local function keyset(ms)
+    local t = {}
+    for _, m in ipairs(ms) do t[m.key] = m end
+    return t
+  end
+  local function keys(ms)
+    local t = {}
+    for i, m in ipairs(ms) do t[i] = m.key end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  local function ft() return { uid = "t1", pos = P(5, 0, 5), name = "Finder's Token spot",
+    state = "collected", first_seeker = true } end
+  local function chest(uid, x) return { uid = uid, pos = P(x), state = "unopened" } end
+  for _, pa in ipairs({ { "uncached", core.world_markers },
+    { "cached", core.world_markers_cached } }) do
+    local tag = " [" .. pa[1] .. "]"
+    local w = { first_token = ft() }
+    local ms, panel = pa[2](w, sh(), O, {})
+    local m = keyset(ms)["w:tok1:t1"]
+    check("tok1 shown" .. tag, m ~= nil)
+    check("tok1 cat token" .. tag, m ~= nil and m.cat == "token")
+    check("tok1 not done" .. tag, m ~= nil and not m.done and not m.faded and not m.hidden)
+    check("tok1 not counted" .. tag, panel.token.shown == 0 and panel.token.known == 0)
+    check("tok1 not in panel rows" .. tag, #panel.token.entries == 0)
+    check("tok1 panel first" .. tag, panel.token.first ~= nil
+      and panel.token.first.key == "w:tok1:t1")
+    check("tok1 marker fields" .. tag, m ~= nil and m.first_seeker == true
+      and m.world_ord == nil and m.pos.x == 5 and m.pos.z == 5
+      and m.label == "Finder's Token spot")
+    check("tok1 absent without the world entry" .. tag,
+      keyset((pa[2]({ chests = { chest("c", 1) } }, sh(), O, {})))["w:tok1:t1"] == nil)
+    ms = pa[2](w, sh({ world_max_markers = 0 }), O, {})
+    check("tok1 cap 0" .. tag, keyset(ms)["w:tok1:t1"] ~= nil)
+    -- no cap slot: the kept chests are the same with and without it
+    local cw = { chests = { chest("ca", 1), chest("cb", 2), chest("cc", 3) } }
+    local base = pa[2](cw, sh({ world_max_markers = 2 }), O, {})
+    cw = { chests = cw.chests, first_token = ft() }
+    local with = pa[2](cw, sh({ world_max_markers = 2 }), O, {})
+    check("tok1 takes no cap slot" .. tag, keys(base) == "w:chest:ca,w:chest:cb"
+      and keys(with) == "w:chest:ca,w:chest:cb,w:tok1:t1")
+    -- searches do not filter it
+    local gw = { first_token = ft(), monsters = { { uid = "g", cid = 1, name = "Goblin", pos = P(2) } } }
+    ms = pa[2](gw, sh({ search = Q("seeker") }), O, {})
+    check("tok1 stays under a query" .. tag, keyset(ms)["w:tok1:t1"] ~= nil)
+    ms = pa[2](gw, sh({ search = Q("goblin") }), O, {})
+    check("tok1 stays under another query" .. tag,
+      keys(ms) == "w:mon:g,w:tok1:t1")
+    -- Tokens on: the spot draws once, as the first token
+    local tw = { first_token = ft(), tokens = { { uid = "t1", pos = P(5, 0, 5), name = "Token",
+      state = "collected" }, { uid = "t2", pos = P(9), name = "Other", state = "not" } } }
+    ms, panel = pa[2](tw, sh({ world_tokens = true, world_show_opened = true }), O, {})
+    local at_spot = 0
+    for _, mm in ipairs(ms) do
+      if mm.pos.x == 5 and mm.pos.z == 5 then at_spot = at_spot + 1 end
+    end
+    check("tok1 draws once with Tokens on" .. tag, at_spot == 1
+      and keyset(ms)["w:tok1:t1"] ~= nil and keyset(ms)["w:tok:t1"] == nil
+      and keyset(ms)["w:tok:t2"] ~= nil)
+    check("tok1 token still known" .. tag, panel.token.known == 2 and panel.token.shown == 1)
+    ms = pa[2](w, sh({ world_first_token = false }), O, {})
+    check("tok1 off" .. tag, keyset(ms)["w:tok1:t1"] == nil)
   end
 end
 

@@ -224,6 +224,14 @@ function M.query_match(q, h)
 end
 local query_match = M.query_match
 
+-- The world builders' match, counted for the tests (M.world_stats is created
+-- further down; the field is read at call time).
+local function wmatch(q, h)
+  local st = M.world_stats
+  st.query_calls = st.query_calls + 1
+  return query_match(q, h)
+end
+
 local function hay_join(parts)
   for i, p in ipairs(parts) do parts[i] = tostring(p) end
   return table.concat(parts, "\n"):lower()
@@ -258,7 +266,11 @@ local function quest_hay(adapter, g)
 end
 
 function M.item_markers(adapter, shown_inprog, origin, q)
-  local needs = adapter.item_needs and adapter.item_needs() or nil
+  local needs
+  if adapter.item_needs then
+    M.world_stats.item_need_reads = M.world_stats.item_need_reads + 1
+    needs = adapter.item_needs()
+  end
   if type(needs) ~= "table" then return {}, 0 end
   local by_id = M.needs_by_item(needs, shown_inprog)   -- item id -> needing shown quests
   if next(by_id) == nil then return {}, 0 end
@@ -410,6 +422,14 @@ local WORLD_DEF = {
 }
 -- Categories whose candidates are built outside the generic per-src loops.
 local function special_cat(cat) return cat == "shop" or cat == "npc_search" end
+-- Is a generic category switched on? Monsters are a tree (SPEC 28.12.3): the
+-- category is on when either Large or Small is.
+local function cat_on(cat, show)
+  if cat == "monster" then
+    return show.world_monsters ~= false or show.world_small_monsters == true
+  end
+  return show[WORLD_DEF[cat].toggle] ~= false
+end
 local WORLD_CAT_RANK = {}
 for i, cat in ipairs(M.WORLD_CATS) do WORLD_CAT_RANK[cat] = i end
 M.WORLD_MARKER_MAX = 300
@@ -554,12 +574,22 @@ local function treasure_dups(world)
   return dups
 end
 
--- Is this entry a candidate at all (counted in `known`)?
+-- Is this entry a candidate at all (counted in `known`)? Small monsters count
+-- only while Small is on; every other entry counts whatever its category
+-- toggle says (a toggled-off category still reports `known`).
 local function included(cat, e, small_ok, dups)
   if not valid_pos(e.pos) then return false end
   if cat == "treasure" and dups[e] then return false end
   if cat == "monster" and e.small == true and not small_ok then return false end
   return true
+end
+
+-- SPEC 28.12.3: which monsters are shown. A large one needs Large
+-- (world_monsters ~= false), a small one needs Small
+-- (world_small_monsters == true).
+local function monster_shown(small, show)
+  if small then return show.world_small_monsters == true end
+  return show.world_monsters ~= false
 end
 
 local function monster_label(e)
@@ -580,11 +610,12 @@ end
 -- SPEC 19.12.4: the drop names of a monster entry over its cluster's cids,
 -- one lower-cased name kept once; nil when there are none. names are the
 -- lower-cased names, shown the display names, in list order.
-local function monster_drops_of(e, drops)
+local function monster_drops_of(e, drops, pre)
   if type(drops) ~= "table" then return nil end
   local names, shown, seen = {}, {}, {}
-  for _, c in ipairs(e.cids or { e.cid }) do
-    local list = drops[c]
+  for i, c in ipairs(e.cids or { e.cid }) do
+    local list
+    if pre then list = pre[i] else list = drops[c] end   -- pre: lists already read
     if type(list) == "table" then
       for _, n in ipairs(list) do
         local low = tostring(n):lower()
@@ -605,7 +636,7 @@ end
 local function drop_hover(label, md, q)
   local hit = {}
   for i, low in ipairs(md.names) do
-    if query_match(q, low) then hit[#hit + 1] = md.shown[i] end
+    if wmatch(q, low) then hit[#hit + 1] = md.shown[i] end
   end
   if #hit == 0 then return nil, nil end
   local list = top3(hit, #hit)
@@ -636,53 +667,267 @@ local function entry_hay(cat, e, drops, md)
     end
     return hay_join(parts)
   elseif cat == "monster" then
-    local parts = { monster_label(e) }
+    local parts = { e.name }   -- the name, never the "(respawning)" label
     if md == nil then md = monster_drops_of(e, drops) end   -- false: none
     for _, n in ipairs(md and md.names or {}) do parts[#parts + 1] = n end
     return hay_join(parts)
   elseif cat == "seller" then
-    return hay_join({ seller_label(e) })
+    -- item, NPC and quest fields, never the "sold by / for / may be locked" words
+    local parts = {}
+    if e.item_name ~= nil then parts[#parts + 1] = e.item_name end
+    if e.npc ~= nil then parts[#parts + 1] = e.npc end
+    if type(e.quest) == "string" and e.quest ~= "" then parts[#parts + 1] = e.quest end
+    return hay_join(parts)
   end
   return hay_join({ e.name })
 end
 
--- Cached haystack of an entry; `cache` may be nil (uncached path). A
--- monster with drops caches a table (SPEC 19.12.4.3); the haystack is
--- returned first, that table (or nil) second.
-local function hay_of(cache, cat, e, drops)
-  local h = cache and cache[e]
-  if h == nil then
+-- SPEC 28.4.3: haystacks carry across grid rebuilds. The identity cache is
+-- keyed by category and entry identity (seller shop:item, shop id, treasure
+-- name, every other category uid) and stores only the lower-cased strings and
+-- drop-name lists, with the source fields they were built from (a flat
+-- array). A lookup compares the entry's current source fields against the
+-- stored array (same_src, no allocation) and reuses the record only when every
+-- field is equal (strings by value, a list by length and each name); only a
+-- rebuild collects them into `scratch`. Per-query memos
+-- stay keyed by entry table in the per-grid record, never here. Emptied once
+-- it passes HAY_MAX records (a bound, not a tuning knob).
+local HAY_MAX = 20000
+local hay_ids, hay_n = {}, 0
+local scratch, scratch_n = {}, 0
+local mon_lists = {}   -- the drop lists collect read for the monster, by cid index
+
+local function put(v)
+  scratch_n = scratch_n + 1
+  if v == nil then v = false end
+  scratch[scratch_n] = v
+end
+
+local function put_list(drops, i, c)
+  local list = drops[c]
+  mon_lists[i] = list
+  if type(list) == "table" then
+    put(#list)
+    for _, n in ipairs(list) do put(n) end
+  else
+    put(-1)
+  end
+end
+
+-- The source fields of an entry, in a fixed order, into `scratch`.
+local function collect(cat, e, drops)
+  scratch_n = 0
+  if cat == "chest" then
+    put(e.item_name); put(e.quest_text)
+    local kinds = type(e.kinds) == "table" and e.kinds or nil
+    put(kinds and #kinds or 0)
+    if kinds then for _, k in ipairs(kinds) do put(k) end end
+    local items = type(e.items) == "table" and e.items or nil
+    put(items and #items or 0)
+    if items then for _, it in ipairs(items) do put(it.name) end end
+  elseif cat == "treasure" then
+    local items = type(e.items) == "table" and e.items or nil
+    put(items and #items or 0)
+    if items then for _, it in ipairs(items) do put(it.name) end end
+  elseif cat == "monster" then
+    put(e.name)
+    if drops == nil then
+      put(-2)
+    else
+      -- each cid's drop list is read once; a rebuild reuses the lists read here
+      if e.cids then
+        for i, c in ipairs(e.cids) do put_list(drops, i, c) end
+      else
+        put_list(drops, 1, e.cid)
+      end
+    end
+  elseif cat == "seller" then
+    put(e.item_name); put(e.npc); put(e.quest)
+  elseif cat == "shop" then
+    put(e.npc)
+    local items = e.items
+    put(#items)
+    for _, it in ipairs(items) do put(it.name) end
+  else
+    put(e.name)
+  end
+end
+
+-- Comparisons against the stored source array `s`, from index k: each returns
+-- the next index, or false on a difference. They allocate nothing (the carry
+-- path runs once per entry per grid).
+local function same_names(s, k, items)   -- a count, then each item's name
+  local n = type(items) == "table" and #items or 0
+  if s[k] ~= n then return false end
+  for i = 1, n do
+    if s[k + i] ~= (items[i].name or false) then return false end
+  end
+  return k + n + 1
+end
+
+local function same_strs(s, k, list)   -- a count, then each string
+  local n = type(list) == "table" and #list or 0
+  if s[k] ~= n then return false end
+  for i = 1, n do
+    if s[k + i] ~= list[i] then return false end
+  end
+  return k + n + 1
+end
+
+-- Does the stored record match the entry's current source fields? Mirrors
+-- collect, field for field.
+local function same_src(cat, rec, e, drops)
+  local s = rec.src
+  local k
+  if cat == "chest" then
+    if s[1] ~= (e.item_name or false) or s[2] ~= (e.quest_text or false) then return false end
+    local kinds, items = e.kinds, e.items
+    if kinds == nil then   -- the common case, no call
+      if s[3] ~= 0 then return false end
+      k = 4
+    else
+      k = same_strs(s, 3, kinds)
+      if not k then return false end
+    end
+    local n = type(items) == "table" and #items or 0
+    if s[k] ~= n then return false end
+    for i = 1, n do
+      if s[k + i] ~= (items[i].name or false) then return false end
+    end
+    k = k + n + 1
+  elseif cat == "treasure" then
+    k = same_names(s, 1, e.items)
+  elseif cat == "monster" then
+    if s[1] ~= (e.name or false) then return false end
+    if drops == nil then
+      if s[2] ~= -2 then return false end
+      k = 3
+    else
+      k = 2
+      if e.cids then
+        for _, c in ipairs(e.cids) do
+          k = same_strs(s, k, drops[c])
+          if not k then return false end
+        end
+      else
+        k = same_strs(s, k, drops[e.cid])
+      end
+    end
+  elseif cat == "seller" then
+    if s[1] ~= (e.item_name or false) or s[2] ~= (e.npc or false)
+      or s[3] ~= (e.quest or false) then return false end
+    k = 4
+  elseif cat == "shop" then
+    if s[1] ~= (e.npc or false) then return false end
+    k = same_names(s, 2, e.items)
+  else
+    if s[1] ~= (e.name or false) then return false end
+    k = 2
+  end
+  return k == rec.sn + 1
+end
+
+-- The cached record of an entry: { hay, names, shown } for a search entry
+-- (names and shown only for a monster with drops, SPEC 19.12.4.3), or
+-- { npc, names } for a shop (SPEC 19.7). A seller is keyed shop, then item.
+local function hay_rec(cat, e, drops)
+  local bycat = hay_ids[cat]
+  if bycat == nil then bycat = {}; hay_ids[cat] = bycat end
+  local id, sub
+  if cat == "seller" then
+    id, sub = e.shop, e.item
+  elseif cat == "shop" then
+    id = e.shop
+  elseif cat == "treasure" then
+    id = e.name
+  else
+    id = e.uid
+  end
+  local keyed = id ~= nil and id == id and (cat ~= "seller" or (sub ~= nil and sub == sub))
+  local slot = bycat
+  if keyed and cat == "seller" then
+    slot = bycat[id]
+    if slot == nil then slot = {}; bycat[id] = slot end
+    id = sub
+  end
+  local rec = keyed and slot[id] or nil
+  if rec and same_src(cat, rec, e, drops) then return rec end
+  collect(cat, e, drops)
+  M.world_stats.hay_builds = M.world_stats.hay_builds + 1
+  local fresh = { sn = scratch_n, src = table.move(scratch, 1, scratch_n, 1, {}) }
+  if cat == "shop" then
+    fresh.npc = tostring(e.npc):lower()
+    fresh.names = {}
+    for i, it in ipairs(e.items) do fresh.names[i] = tostring(it.name):lower() end
+  else
     local md = false   -- false: looked up, none
     if cat == "monster" and drops ~= nil then
-      md = monster_drops_of(e, drops) or false
+      md = monster_drops_of(e, drops, mon_lists) or false
     end
-    h = entry_hay(cat, e, drops, md)
-    if md then h = { hay = h, names = md.names, shown = md.shown } end
-    if cache then cache[e] = h end
+    fresh.hay = entry_hay(cat, e, drops, md)
+    if md then fresh.names, fresh.shown = md.names, md.shown end
   end
-  if type(h) == "table" then return h.hay, h end
-  return h
+  if keyed then
+    if rec ~= nil then
+      slot[id] = fresh
+    elseif hay_n >= HAY_MAX then
+      hay_ids, hay_n = {}, 0   -- over the bound: start empty, this one is rebuilt next time
+    else
+      hay_n = hay_n + 1
+      slot[id] = fresh
+    end
+  end
+  return fresh
+end
+
+-- SPEC 28.4.2: does the entry match the query? One path for the cached and the
+-- uncached world builders. `gc` is the grid record { hay, match, mkey, dhov };
+-- the uncached path passes a fresh { hay = {}, match = {} }. The match result
+-- and the drop hover are memoised per query key, keyed by the entry table, and
+-- start empty for every new query. A drop match writes ctx.mdrop[e].
+local function entry_search(cat, e, drops, gc, q, ctx)
+  if q == nil then return true end
+  if gc.mkey ~= q.key or gc.match == nil then
+    gc.mkey, gc.match, gc.dhov = q.key, {}, {}
+  end
+  local rec = gc.hay[e]   -- per-grid memo by entry table over the identity cache
+  if rec == nil then
+    rec = hay_rec(cat, e, drops)
+    gc.hay[e] = rec
+  end
+  local m = gc.match[e]
+  if m == nil then
+    m = wmatch(q, rec.hay)
+    gc.match[e] = m
+  end
+  if not m then return false end
+  local dh = rec.names and rec or nil   -- a monster with drops
+  if dh then
+    local hv = gc.dhov[e]
+    if hv == nil then
+      local hover, why = drop_hover(monster_label(e), dh, q)
+      hv = hover and { hover = hover, why = why } or false
+      gc.dhov[e] = hv
+    end
+    if hv then ctx.mdrop[e] = hv end
+  end
+  return true
 end
 
 -- SPEC 19.7: the counting items a query selects from a shop entry, or nil.
--- hay = { npc = <lower>, names = { <lower>, ... } } (cached per entry).
-local function shop_hay(cache, e)
-  local h = cache and cache[e]
-  if h == nil then
-    h = { npc = tostring(e.npc):lower(), names = {} }
-    for i, it in ipairs(e.items) do h.names[i] = tostring(it.name):lower() end
-    if cache then cache[e] = h end
-  end
-  return h
+-- hay = { npc = <lower>, names = { <lower>, ... } } (the identity cache,
+-- SPEC 28.4.3; only a search reads it).
+local function shop_hay(e)
+  return hay_rec("shop", e)
 end
 
 local function shop_listing(e, q, h)
   local items = e.items
   if type(items) ~= "table" or #items == 0 then return nil end
-  if query_match(q, h.npc) then return items end
+  if wmatch(q, h.npc) then return items end
   local out = {}
   for i, it in ipairs(items) do
-    if query_match(q, h.names[i]) then out[#out + 1] = it end
+    if wmatch(q, h.names[i]) then out[#out + 1] = it end
   end
   if #out > 0 then return out end
   return nil
@@ -738,6 +983,7 @@ local function make_cand(cat, e, ctx)
     c.hidden = c.done and not ctx.show_opened
   elseif cat == "monster" then
     c.key = "w:mon:" .. tostring(e.uid)
+    c.small = e.small == true
     c.label = monster_label(e)
     local md = ctx.mdrop and ctx.mdrop[e]
     if md then c.hover, c.why = md.hover, md.why end
@@ -868,20 +1114,28 @@ end
 -- entries) or show.world_shops is on (every entry with stock). With neither
 -- the shop list is not read at all. Returns the list, the entry count and
 -- the shop-id -> visible-candidate set.
-local function shop_cands(world, q, ctx, cache, shops_on)
+local function shop_cands(world, q, ctx, gc, shops_on)
   local out, shop_of = {}, {}
   local list = (q ~= nil or shops_on) and type(world.shops) == "table"
     and world.shops or {}
   ctx.slabel = {}
+  -- the listing and label memo: one record per entry table in the per-grid
+  -- record (no lower-cased names in it; the uncached path passes none)
+  local memo = gc and gc.shop
+  if memo == nil then
+    memo = {}
+    if gc then gc.shop = memo end
+  end
   -- no-search key "" is distinct from every query key (a query has a term)
   local qkey = q ~= nil and q.key or ""
   for _, e in ipairs(list) do
     if valid_pos(e.pos) and type(e.items) == "table" then
-      local h = shop_hay(cache, e)
+      local h = memo[e]
+      if h == nil then h = {}; memo[e] = h end
       if h.qkey ~= qkey then   -- listing and label change only with the query
         h.qkey = qkey
         if q ~= nil then
-          h.list = shop_listing(e, q, h) or false
+          h.list = shop_listing(e, q, shop_hay(e)) or false
           h.label = h.list and shop_label(e, h.list) or nil
         else
           h.list = (#e.items > 0) and e.items or false
@@ -901,27 +1155,26 @@ end
 
 -- Uncached candidates: every included entry counts in `known`; with a
 -- query only the matching ones become candidates (before make_cand).
-local function world_candidates(world, show, boxes, q)
+local function world_candidates(world, show, boxes, q, ft)
   local cands, known = {}, {}
   local ctx = world_ctx(show, boxes)
   local small_ok = show.world_small_monsters == true
   local dups = treasure_dups(world)
   local drops = q ~= nil and world.drops or nil
+  local gc = { hay = {}, match = {} }
+  known.monster_small = 0
   for _, cat in ipairs(M.WORLD_CATS) do
     known[cat] = 0
     if not special_cat(cat) then
       for _, e in ipairs(world[WORLD_DEF[cat].src] or {}) do
         if included(cat, e, small_ok, dups) then
           known[cat] = known[cat] + 1
-          local md = false
-          if cat == "monster" and drops ~= nil then
-            md = monster_drops_of(e, drops) or false
+          if cat == "monster" and e.small == true then
+            known.monster_small = known.monster_small + 1
           end
-          if q == nil or query_match(q, entry_hay(cat, e, drops, md)) then
-            if md then
-              local hv, why = drop_hover(monster_label(e), md, q)
-              if hv then ctx.mdrop[e] = { hover = hv, why = why } end
-            end
+          -- the ordinary token at the first token's spot is skipped (it still counts)
+          local skip = ft and ft.skip_uid ~= nil and cat == "token" and e.uid == ft.skip_uid
+          if not skip and entry_search(cat, e, drops, gc, q, ctx) then
             cands[#cands + 1] = make_cand(cat, e, ctx)
           end
         end
@@ -940,6 +1193,19 @@ local function world_candidates(world, show, boxes, q)
   return cands, known, shop_of
 end
 
+-- SPEC 28.9.3: the First Seeker's Token spot, from world.first_token while
+-- show.world_first_token ~= false. One candidate in the token category with no
+-- world_ord (map GUID slot 0), held apart from `kept`: no cap slot, no toggle
+-- or query filter, never done, faded or hidden.
+local function first_token_cand(world, show)
+  local t = world.first_token
+  if show.world_first_token == false or type(t) ~= "table" or not valid_pos(t.pos) then
+    return nil
+  end
+  return { cat = "token", qids = {}, key = "w:tok1:" .. tostring(t.uid),
+    pos = t.pos, label = tostring(t.name), skip_uid = t.uid }
+end
+
 local function world_cap(show)
   local cap = show.world_max_markers
   if type(cap) ~= "number" then cap = M.WORLD_MARKER_MAX end
@@ -951,6 +1217,7 @@ local function new_panel()
   for _, cat in ipairs(M.WORLD_CATS) do
     panel[cat] = { shown = 0, known = 0, entries = {} }
   end
+  panel.monster.small_shown, panel.monster.small_known = 0, 0   -- SPEC 28.12.3
   return panel
 end
 
@@ -960,8 +1227,10 @@ end
 -- shops_on shops compete for the cap like any category; with it off (a
 -- search only) they go to their own list (`shops`) and fill what the cap
 -- leaves (SPEC 19.7.5). Every shop accepted is also listed in `shop_all`.
+-- A seller whose shop is visible is only noted in `hits`; merge_shops adds its
+-- line and promotes the shop (SPEC 28.4.4).
 local function world_accept(c, has_origin, origin, quest_cids, kept, merged,
-                            shops, shop_of, shops_on, shop_all)
+                            shops, shop_of, shops_on, shop_all, hits)
   if c.cat == "npc_search" then
     -- v14: NPC matches only ever fill the leftover slots (SPEC 22.7.4)
     c.d = has_origin and dist2(c.pos, origin) or 0
@@ -972,24 +1241,7 @@ local function world_accept(c, has_origin, origin, quest_cids, kept, merged,
   if c.cat == "shop" then shop_all[#shop_all + 1] = c end
   if c.cat == "seller" and shop_of and shop_of[c.shop] then
     -- SPEC 19.7.7: the shop marker stands in for its seller
-    local sc = shop_of[c.shop]
-    if type(c.quest) == "string" and c.quest ~= "" then
-      sc.sells_for[#sc.sells_for + 1] = tostring(c.item_name)
-        .. " (for " .. c.quest .. ")"
-    end
-    -- The shop stands in for this seller: it competes for the cap at its
-    -- own distance (ruling), not for the leftover slots.
-    if not sc.promoted then
-      sc.promoted = true
-      sc.rank_cat = "seller"
-      if sc.in_shops then
-        for i, x in ipairs(shops) do
-          if x == sc then table.remove(shops, i); break end
-        end
-        sc.in_shops = false
-        kept[#kept + 1] = sc
-      end
-    end
+    hits[#hits + 1] = c
     return
   end
   if (c.cat == "seller" or c.cat == "shop") and type(c.cid) == "number"
@@ -998,11 +1250,35 @@ local function world_accept(c, has_origin, origin, quest_cids, kept, merged,
     if c.cat == "shop" then c.merged = true end
   else
     c.d = has_origin and dist2(c.pos, origin) or 0
-    if c.cat == "shop" and not c.promoted and not shops_on then
+    if c.cat == "shop" and not shops_on then
       shops[#shops + 1] = c
       c.in_shops = true
     else
       kept[#kept + 1] = c
+    end
+  end
+end
+
+-- SPEC 28.4.4: one step, run before world_finish on both paths. Each seller
+-- candidate that hit a visible shop adds its quest line to the shop and gives
+-- the shop its seller's rank. The shop stands in for the seller, so it
+-- competes for the cap at its own distance (ruling), not for the leftover
+-- slots: a shop still in `shops` moves to `kept`. A shop merged into a quest
+-- marker is in neither list, and one already kept (Shops on) is not moved.
+local function merge_shops(kept, shops, shop_of, hits)
+  for _, h in ipairs(hits) do
+    local sc = shop_of[h.shop]
+    if type(h.quest) == "string" and h.quest ~= "" then
+      sc.sells_for[#sc.sells_for + 1] = tostring(h.item_name)
+        .. " (for " .. h.quest .. ")"
+    end
+    sc.rank_cat = "seller"
+    if sc.in_shops then
+      for i, x in ipairs(shops) do
+        if x == sc then table.remove(shops, i); break end
+      end
+      sc.in_shops = false
+      kept[#kept + 1] = sc
     end
   end
 end
@@ -1022,7 +1298,7 @@ end
 -- the cap left out an `offmap` entry (SPEC 20.5.5, 20.5.7); neither is a
 -- marker or counted in `shown`.
 local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-                            quest_cids)
+                            quest_cids, ft)
   -- Nearest win the cap (ties by key); no origin: (category, key) order.
   local function by_pick(x, y)
     if has_origin then
@@ -1105,6 +1381,10 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       label = c.label, done = c.done, world_ord = c.world_ord, hover = c.hover,
       why = c.why, faded = c.faded }
     if c.cat == "npc_search" then m.cid = c.cid end
+    if c.cat == "monster" then
+      m.small = c.small
+      if c.small then panel.monster.small_shown = panel.monster.small_shown + 1 end
+    end
     if c.cat == "shop" then
       if #c.sells_for > 0 then m.hover = with_sells(c) end
       m.stock, m.sells_for = c.stock, c.sells_for
@@ -1134,6 +1414,14 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       end
     end
   end
+  -- SPEC 28.9.3: the First Seeker's Token spot goes last, after the cap trim
+  -- and the leftover fill; the token panel's counts and entries are untouched.
+  if ft then
+    local m = { key = ft.key, cat = "token", qids = ft.qids, pos = pos_copy(ft.pos),
+      label = ft.label, first_seeker = true }
+    markers[#markers + 1] = m
+    panel.token.first = m
+  end
   return markers, panel, merged, cover
 end
 
@@ -1149,25 +1437,31 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   local cap = world_cap(show)
   local has_origin = valid_pos(origin)
 
-  local kept, merged, shops, shop_all = {}, {}, {}, {}
+  local kept, merged, shops, shop_all, hits = {}, {}, {}, {}, {}
   local shops_on = show.world_shops == true
-  local cands, known, shop_of = world_candidates(world, show, boxes, show.search)
+  local ft = first_token_cand(world, show)
+  local cands, known, shop_of = world_candidates(world, show, boxes, show.search, ft)
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = known[cat] end
+  panel.monster.small_known = known.monster_small
   for _, c in ipairs(cands) do
-    if (special_cat(c.cat) or show[WORLD_DEF[c.cat].toggle] ~= false) and not c.hidden then
+    if (special_cat(c.cat) or (cat_on(c.cat, show)
+      and (c.cat ~= "monster" or monster_shown(c.small, show)))) and not c.hidden then
       world_accept(c, has_origin, origin, quest_cids, kept, merged, shops, shop_of,
-        shops_on, shop_all)
+        shops_on, shop_all, hits)
     end
   end
+  merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids)
+    quest_cids, ft)
 end
 
 -- Cached entry point (SPEC 17.10.10). A 256-unit grid of the world's
 -- entries (x, z cells) is built once per world table and small-monster
 -- setting; sellers stay a plain list. The counters are for tests.
 local CELL = 256
-M.world_stats = { grid_builds = 0, cand_builds = 0 }
+M.world_stats = { grid_builds = 0, cand_builds = 0, hay_builds = 0,
+  query_calls = 0, item_need_reads = 0, cell_entries = {} }
+for _, cat in ipairs(M.WORLD_CATS) do M.world_stats.cell_entries[cat] = 0 end
 local grid_cache = { world = nil, small = nil, grid = nil }
 
 local function cell_of(v) return math.floor(v / CELL) end
@@ -1175,35 +1469,84 @@ local function cell_key(ci, cj)
   return (ci + 1048576) * 2097152 + (cj + 1048576)
 end
 
-local function build_grid(world, small_ok)
-  M.world_stats.grid_builds = M.world_stats.grid_builds + 1
-  local dups = treasure_dups(world)
-  local g = { cells = {}, flat = {}, known = {} }
-  for _, cat in ipairs(M.WORLD_CATS) do
-    g.known[cat] = 0
-    g.flat[cat] = {}
-    for _, e in ipairs(not special_cat(cat) and world[WORLD_DEF[cat].src] or {}) do
-      if included(cat, e, small_ok, dups) then
-        g.known[cat] = g.known[cat] + 1
-        if cat ~= "seller" then
-          local ci, cj = cell_of(e.pos.x), cell_of(e.pos.z)
-          local key = cell_key(ci, cj)
-          local cell = g.cells[key]
-          if not cell then cell = {}; g.cells[key] = cell end
-          local l = cell[cat]
-          if not l then l = {}; cell[cat] = l end
-          l[#l + 1] = e
-          local f = g.flat[cat]
-          f[#f + 1] = e
-          if not g.mini or ci < g.mini then g.mini = ci end
-          if not g.maxi or ci > g.maxi then g.maxi = ci end
-          if not g.minj or cj < g.minj then g.minj = cj end
-          if not g.maxj or cj > g.maxj then g.maxj = cj end
-        end
+-- SPEC 28.7.2: one pass over a category's list. Counts `known` (and the small
+-- monsters among them) for every category; puts the entries in cells and the
+-- flat list only when `fill` (the category is on), widening the bounds.
+-- Sellers are never in cells (the merge needs the whole list). Returns
+-- known, small known, entries put in cells.
+local function walk_cat(g, world, cat, fill, show)
+  local known, small_known, put_n = 0, 0, 0
+  fill = fill and cat ~= "seller"
+  for _, e in ipairs(world[WORLD_DEF[cat].src] or {}) do
+    if included(cat, e, g.small_ok, g.dups) then
+      known = known + 1
+      if cat == "monster" and e.small == true then small_known = small_known + 1 end
+      if fill and (cat ~= "monster" or monster_shown(e.small == true, show)) then
+        local ci, cj = cell_of(e.pos.x), cell_of(e.pos.z)
+        local key = cell_key(ci, cj)
+        local cell = g.cells[key]
+        if not cell then cell = {}; g.cells[key] = cell end
+        local l = cell[cat]
+        if not l then l = {}; cell[cat] = l end
+        l[#l + 1] = e
+        local f = g.flat[cat]
+        f[#f + 1] = e
+        put_n = put_n + 1
+        if not g.mini or ci < g.mini then g.mini = ci end
+        if not g.maxi or ci > g.maxi then g.maxi = ci end
+        if not g.minj or cj < g.minj then g.minj = cj end
+        if not g.maxj or cj > g.maxj then g.maxj = cj end
       end
     end
   end
+  return known, small_known, put_n
+end
+
+-- What a category's cells were filled for: true, or for monsters the pair of
+-- toggles (they decide which monsters are in the cells); false when not filled.
+local function fill_key(cat, show)
+  if not cat_on(cat, show) then return false end
+  if cat == "monster" then
+    return (show.world_monsters ~= false and 1 or 0) + (show.world_small_monsters == true and 2 or 0)
+  end
+  return true
+end
+
+-- The grid is built for the small-monster setting (it decides which monsters
+-- count as known); every category toggle only decides which categories get
+-- cells, and a category is filled later by add_cat when it turns on.
+local function build_grid(world, show)
+  M.world_stats.grid_builds = M.world_stats.grid_builds + 1
+  local g = { cells = {}, flat = {}, known = {}, filled = {}, known_small = 0,
+    small_ok = show.world_small_monsters == true,
+    dups = treasure_dups(world) }
+  for _, cat in ipairs(M.WORLD_CATS) do
+    g.known[cat] = 0
+    g.flat[cat] = {}
+    M.world_stats.cell_entries[cat] = 0
+    if not special_cat(cat) then
+      local key = fill_key(cat, show)
+      local known, small_known, put_n = walk_cat(g, world, cat, key, show)
+      g.known[cat] = known
+      if cat == "monster" then g.known_small = small_known end
+      g.filled[cat] = key
+      M.world_stats.cell_entries[cat] = put_n
+    end
+  end
   return g
+end
+
+-- A category that turned on after the grid was built (or a monster toggle that
+-- changed which monsters are shown): fill its cells now, never rebuild.
+local function add_cat(g, world, cat, show)
+  g.filled[cat] = fill_key(cat, show)
+  if cat == "seller" then return end   -- sellers are a plain list, never in cells
+  if cat == "monster" then   -- drop what an earlier fill put in
+    for _, cell in pairs(g.cells) do cell.monster = nil end
+    g.flat.monster = {}
+  end
+  local _, _, put_n = walk_cat(g, world, cat, true, show)
+  M.world_stats.cell_entries[cat] = put_n
 end
 
 function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
@@ -1213,11 +1556,12 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   local small_ok = show.world_small_monsters == true
   local g = grid_cache.grid
   if grid_cache.world ~= world or grid_cache.small ~= small_ok or not g then
-    g = build_grid(world, small_ok)
+    g = build_grid(world, show)
     grid_cache.world, grid_cache.small, grid_cache.grid = world, small_ok, g
   end
   local panel = new_panel()
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = g.known[cat] end
+  panel.monster.small_known = g.known_small
   local cap = world_cap(show)
   local has_origin = valid_pos(origin)
   local ctx = world_ctx(show, boxes)
@@ -1226,30 +1570,29 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   ctx.labels = g.labels
   local on = {}
   for _, cat in ipairs(M.WORLD_CATS) do
-    if not special_cat(cat) and show[WORLD_DEF[cat].toggle] ~= false then
+    if not special_cat(cat) and cat_on(cat, show) then
+      if g.filled[cat] ~= fill_key(cat, show) then add_cat(g, world, cat, show) end
       on[#on + 1] = cat
     end
   end
 
   -- SPEC 19.8.3: with a query only entries whose cached haystack matches
-  -- reach make_cand; haystacks live as long as the grid.
+  -- reach make_cand; the per-query memos live as long as the grid, the
+  -- haystacks themselves carry across grids in the identity cache (SPEC 28.4.3).
   local q = show.search
   g.hay = g.hay or {}
-  if q ~= nil and (g.mkey ~= q.key or g.match == nil) then
-    g.mkey, g.match = q.key, {}
-  end
-  local kept, merged, shops, shop_all = {}, {}, {}, {}
+  local kept, merged, shops, shop_all, hits = {}, {}, {}, {}, {}
   local shop_of = {}
   local shops_on = show.world_shops == true
   if q ~= nil or shops_on then
     local sc, n
-    sc, n, shop_of = shop_cands(world, q, ctx, g.hay, shops_on)
+    sc, n, shop_of = shop_cands(world, q, ctx, g, shops_on)
     panel.shop.known = n
     for _, c in ipairs(sc) do
       stats.cand_builds = stats.cand_builds + 1
       if not c.hidden then
         world_accept(c, has_origin, origin, quest_cids, kept, merged, shops, shop_of,
-          shops_on, shop_all)
+          shops_on, shop_all, hits)
       end
     end
   end
@@ -1262,34 +1605,21 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
       stats.cand_builds = stats.cand_builds + 1
       if not c.hidden then
         world_accept(c, has_origin, origin, quest_cids, kept, merged, shops,
-          shop_of, shops_on, shop_all)
+          shop_of, shops_on, shop_all, hits)
       end
     end
   end
   local drops = q ~= nil and world.drops or nil
-  local qkey = q ~= nil and q.key or nil
+  local ft = first_token_cand(world, show)
+  local skip_uid = ft and ft.skip_uid   -- its ordinary token is skipped (still known)
   local function take(cat, e)
-    if q ~= nil then
-      local hay, dh = hay_of(g.hay, cat, e, drops)
-      local m = g.match[e]   -- match result, memoised per query key
-      if m == nil then
-        m = query_match(q, hay)
-        g.match[e] = m
-      end
-      if not m then return end
-      if dh then
-        if dh.qkey ~= qkey then   -- hover and why change only with the query
-          dh.qkey = qkey
-          dh.hover, dh.why = drop_hover(monster_label(e), dh, q)
-        end
-        if dh.hover then ctx.mdrop[e] = dh end
-      end
-    end
+    if skip_uid ~= nil and cat == "token" and e.uid == skip_uid then return end
+    if not entry_search(cat, e, drops, g, q, ctx) then return end
     stats.cand_builds = stats.cand_builds + 1
     local c = make_cand(cat, e, ctx)
     if not c.hidden then
       world_accept(c, has_origin, origin, quest_cids, kept, merged, shops, shop_of,
-        shops_on, shop_all)
+        shops_on, shop_all, hits)
     end
   end
 
@@ -1347,8 +1677,9 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
       end
     end
   end
+  merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids)
+    quest_cids, ft)
 end
 
 -- The settlement nearest to pos by 3D distance (first wins a tie), or nil.
