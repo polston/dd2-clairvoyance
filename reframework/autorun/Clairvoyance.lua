@@ -789,7 +789,8 @@ re.on_frame(function()
           end
         end
       end
-      logmsg(string.format("Tick: %.1f ms", last_tick_ms))
+      logmsg(string.format("Tick: %.1f ms (median %.1f)", last_tick_ms,
+        su.median(wt.tick_ring or {}) or 0.0))
       logmsg(string.format("Rebuild: ms=%.1f max=%.1f", wt.rebuild_ms, wt.rebuild_max))
       logmsg(wt.line())
       if snapshot ~= nil and adapter.journal_stats ~= nil then
@@ -970,6 +971,11 @@ re.on_frame(function()
       pcall(adapter.invalidate_tree_gates)
     end
     last_tick_ms = (os.clock() - t0) * 1000.0
+    if settings.debug then   -- SPEC 28.11.2: the last 20 ticks, for the median
+      wt.tick_ring = wt.tick_ring or {}
+      wt.tick_n = ((wt.tick_n or 0) % 20) + 1
+      wt.tick_ring[wt.tick_n] = last_tick_ms
+    end
     if result == nil then return end   -- game state unavailable: keep last snapshot
     -- SPEC 20.12.2: one signature over the markers then the full-map world
     -- markers, so committed positions are kept for both
@@ -1745,6 +1751,7 @@ local function install_debug()
           tracked_qid = snapshot and snapshot.tracked_qid or nil,
           map_ctor_n = map_ctor_n, setup_icon_n = setup_icon_n,
           same_fallback_n = hover_stats.same_fallback_n,
+          tick_median = su.median(wt.tick_ring or {}),
           draw = icons:stats_line(),
           item_menu = icons.itemmenu ~= nil and icons.itemmenu:stats_line() or nil,
           names = string.format("Names: spawned %d, drawn %d, skipped %d",

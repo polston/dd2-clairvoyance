@@ -178,6 +178,16 @@ M.WORLD_BOOLS = { "world_chests", "world_treasure", "world_tokens",
   "world_first_token", "world_beetles", "world_monsters", "world_small_monsters",
   "world_sellers", "world_shops", "world_show_opened", "world_undiscovered" }
 
+-- Median of a list of numbers (SPEC 28.11.2): the lower middle element for
+-- an even count, nil for an empty list. Sorts a copy.
+function M.median(list)
+  local n = #list
+  if n == 0 then return nil end
+  local s = table.move(list, 1, n, 1, {})
+  table.sort(s)
+  return s[(n + 1) // 2]
+end
+
 -- True when any world toggle is on in `settings` and was not on in `prev`
 -- (SPEC 28.7.3); then records every toggle's current value into `prev`.
 function M.world_turned_on(prev, settings)

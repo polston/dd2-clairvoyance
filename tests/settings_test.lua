@@ -568,5 +568,16 @@ do
     su.world_turned_on(p2, { world_chests = true, world_first_token = true }) == true)
   check("turned_on: no settings false", su.world_turned_on({}, {}) == false)
 end
+-- median (SPEC 28.11.2)
+do
+  check("median empty", su.median({}) == nil)
+  local l3 = { 3, 1, 2 }
+  check("median odd", su.median(l3) == 2)
+  check("median input unchanged", l3[1] == 3 and l3[2] == 1 and l3[3] == 2)
+  local l4 = { 4, 1, 3, 2 }
+  check("median even is the lower middle", su.median(l4) == 2)
+  check("median even input unchanged", l4[1] == 4 and l4[4] == 2)
+  check("median one", su.median({ 7 }) == 7)
+end
 if failures > 0 then os.exit(1) end
 print("settings_test: all OK")
