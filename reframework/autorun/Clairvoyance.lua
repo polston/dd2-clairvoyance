@@ -120,21 +120,27 @@ local snapshot = nil      -- { markers, unresolved, unnamed, counts, resolved_co
 -- The World panel rows of one category, cached on the snapshot (the debug
 -- dump reads the same rows). Each row carries its "Show on map" button id.
 wt.rows = function(cat)
-  local p = snapshot ~= nil and snapshot.world ~= nil and snapshot.world[cat] or nil
+  -- SPEC 28.12.1: "monster_large" / "monster_small" are the Monsters node's
+  -- two children, each its own nearest list over the matching entries
+  local size = cat == "monster_large" and 0 or cat == "monster_small" and 1 or nil
+  local p = snapshot ~= nil and snapshot.world ~= nil
+    and snapshot.world[size ~= nil and "monster" or cat] or nil
   if p == nil then return {} end
   local cache = snapshot.world_rows
   if cache == nil then cache = {}; snapshot.world_rows = cache end
   local rows = cache[cat]
   if rows == nil then
-    rows = core.world_rows(p.entries, (wt.q("input", nil) or {}).settlements,
-      wt.world_origin, cat == "shop" and math.huge or nil)
-    -- SPEC 28.12.1: the Monsters node splits its rows by the entry's small flag
-    local small_of = {}
-    if cat == "monster" then
-      for _, e in ipairs(p.entries or {}) do small_of[e.key] = e.small == true end
+    local ents = p.entries
+    if size ~= nil then
+      ents = {}
+      for _, e in ipairs(p.entries or {}) do
+        if (e.small == true) == (size == 1) then ents[#ents + 1] = e end
+      end
     end
+    rows = core.world_rows(ents, (wt.q("input", nil) or {}).settlements,
+      wt.world_origin, cat == "shop" and math.huge or nil)
     for _, r in ipairs(rows) do
-      if cat == "monster" and r.small == nil then r.small = small_of[r.key] == true end
+      if size ~= nil then r.small = size == 1 end
       r.jump_id = "Show on map##wj_" .. cat .. "_" .. tostring(r.key)
       r.tree_id = r.text .. "###ws_" .. tostring(r.key)
     end
@@ -2303,19 +2309,16 @@ do
               local groups = { { rows = rows } }
               if cat == "monster" then
                 local ss, sk = p.small_shown or 0, p.small_known or 0
-                local lg, sm = {}, {}
-                for _, r in ipairs(rows) do
-                  if r.small then sm[#sm + 1] = r else lg[#lg + 1] = r end
-                end
                 groups = {
-                  { rows = lg, title = string.format("Large monsters (%d/%d)###wmonl",
+                  { rows = wt.rows("monster_large"), title = string.format("Large monsters (%d/%d)###wmonl",
                       p.shown - ss, p.known - sk) },
-                  { rows = sm, title = string.format("Small monsters (%d/%d)###wmons", ss, sk) },
+                  { rows = wt.rows("monster_small"), title = string.format("Small monsters (%d/%d)###wmons", ss, sk) },
                 }
               end
               for _, g in ipairs(groups) do
               local gopen = g.title == nil or imgui.tree_node(g.title)
               if gopen then
+              if g.title ~= nil and #g.rows == 0 then imgui.text("Nothing shown") end
               for _, r in ipairs(g.rows) do
                 local open = true
                 if cat == "shop" then
