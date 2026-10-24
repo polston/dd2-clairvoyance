@@ -79,7 +79,7 @@ Status and debug.
 
 One checkbox per category (chests, treasure, beetles, sellers, shops, show
 opened and collected, undiscovered areas) and a cap on the number of markers.
-Two categories are trees with two checkboxes each. Seeker's Tokens holds "All
+Two categories are trees. Seeker's Tokens holds "All
 Seeker's Tokens" and "Finder's Token spot (first token found)": the spot where
 you picked up your first Seeker's Token this playthrough, which a Sphinx riddle
 asks for. It shows even when the other tokens are off. Monsters is a tree of
