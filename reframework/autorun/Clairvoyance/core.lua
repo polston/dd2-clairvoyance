@@ -607,10 +607,10 @@ end
 
 -- SPEC 29.5.3: known monsters per class and kind, by `included`'s rule.
 -- Returns { large = { [kind] = n }, small = { [kind] = n } }.
-local function kind_counts(world, small_ok, dups)
+local function kind_counts(world, small_ok)
   local out = { large = {}, small = {} }
   for _, e in ipairs(world.monsters or {}) do
-    if included("monster", e, small_ok, dups) then
+    if included("monster", e, small_ok, nil) then
       local cls = out[e.small == true and "small" or "large"]
       local k = kind_of(e)
       cls[k] = (cls[k] or 0) + 1
@@ -1404,6 +1404,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
     return x.key < y.key
   end)
   local markers = {}
+  local shown = { large = {}, small = {} }   -- SPEC 29.5.3 per-kind shown
   local in_kept = shop_all and #shop_all > 0 and {} or nil
   for _, c in ipairs(kept) do
     if in_kept then in_kept[c] = true end
@@ -1416,6 +1417,8 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       m.small = c.small
       m.kind = c.kind
       if c.small then panel.monster.small_shown = panel.monster.small_shown + 1 end
+      local cls = shown[c.small and "small" or "large"]
+      cls[c.kind] = (cls[c.kind] or 0) + 1
     end
     if c.cat == "shop" then
       if #c.sells_for > 0 then m.hover = with_sells(c) end
@@ -1430,13 +1433,6 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
     mg.line = with_sells(mg.cand)
   end
   -- SPEC 29.5.3: per-kind counts, large first then by kind
-  local shown = { large = {}, small = {} }
-  for _, c in ipairs(kept) do
-    if c.cat == "monster" then
-      local cls = shown[c.small and "small" or "large"]
-      cls[c.kind] = (cls[c.kind] or 0) + 1
-    end
-  end
   local kinds = {}
   for _, class in ipairs({ "large", "small" }) do
     local names = {}
@@ -1503,7 +1499,7 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids, ft, kind_counts(world, monster_shown(true, show), treasure_dups(world)))
+    quest_cids, ft, kind_counts(world, monster_shown(true, show)))
 end
 
 -- Cached entry point (SPEC 17.10.10). A 256-unit grid of the world's
@@ -1571,7 +1567,7 @@ local function build_grid(world, show)
   local g = { cells = {}, flat = {}, known = {}, filled = {}, known_small = 0,
     small_ok = monster_shown(true, show),
     dups = treasure_dups(world) }
-  g.kinds = kind_counts(world, g.small_ok, g.dups)
+  g.kinds = kind_counts(world, g.small_ok)
   for _, cat in ipairs(M.WORLD_CATS) do
     g.known[cat] = 0
     g.flat[cat] = {}

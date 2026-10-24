@@ -1892,6 +1892,14 @@ do
       or merged_sig(g1) ~= merged_sig(g2) then
       all_same = false
     end
+    do   -- both paths agree under a kind off set
+      local so = {}
+      for k, v in pairs(s) do so[k] = v end
+      so.world_monster_off = { large = { K3 = true }, small = { K5 = true } }
+      local o1, q1 = core.world_markers(rw, so, origin, boxes, qc)
+      local o2, q2 = core.world_markers_cached(rw, so, origin, boxes, qc)
+      if ser(o1) ~= ser(o2) or panel_ser(q1) ~= panel_ser(q2) then all_same = false end
+    end
     if #m1 ~= 300 or not merged_sig(g2):find("99999", 1, true) then all_same = false end
     -- warm call: the ring cull must stop early, well short of a full scan
     local cb0 = stats.cand_builds
@@ -3759,7 +3767,7 @@ do
   end
   do
     local kw = kmw()
-    pcall(core.world_markers_cached, kw, kshow(nil), O, {})
+    core.world_markers_cached(kw, kshow(nil), O, {})
     local gb0 = stats.grid_builds
     local mo = core.world_markers_cached(kw, kshow({ small = { Goblin = true } }), O, {})
     local mi = core.world_markers_cached(kw, kshow({ small = {} }), O, {})
