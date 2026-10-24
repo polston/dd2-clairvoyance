@@ -3776,6 +3776,61 @@ do
     check("kinds: untick and re-tick run no grid rebuild", stats.grid_builds == gb0)
   end
 
+  -- monster families (SPEC 30.5)
+  local function fmw()
+    return { monsters = {
+      { uid = "g", cid = 1, name = "Goblin", kind = "Goblin", fam = "ch220", pos = P(2), small = true },
+      { uid = "h", cid = 2, name = "Hobgoblin", kind = "Hobgoblin", fam = "ch220", pos = P(3), small = true },
+      { uid = "w", cid = 3, name = "Wolf", kind = "Wolf", fam = "ch223", pos = P(4), small = true } } }
+  end
+  for _, pa in ipairs(paths) do
+    local tag = " [" .. pa[1] .. "]"
+    local fw = fmw()
+    local _, p0 = pa[2](fw, kshow(nil), O, {})
+    local m, p = pa[2](fw, kshow({ small = { ["fam:ch220"] = true } }), O, {})
+    local ks = keys(m)
+    check("fam: family off hides both kinds" .. tag,
+      ks:find("w:mon:g", 1, true) == nil and ks:find("w:mon:h", 1, true) == nil)
+    check("fam: family off keeps Wolf" .. tag, ks:find("w:mon:w", 1, true) ~= nil)
+    check("fam: family off known unchanged" .. tag, p.monster.known == p0.monster.known
+      and p.monster.known == 3)
+    m = pa[2](fw, kshow({ small = { ["fam:ch220"] = true } }, { search = Q("goblin") }), O, {})
+    check("fam: query goblin finds no monster when the family is off" .. tag, #m == 0)
+    local by_key = {}
+    for _, e in ipairs(p0.monster.entries) do by_key[e.key] = e.fam end
+    check("fam: entries carry fam" .. tag, #p0.monster.entries == 3
+      and by_key["w:mon:g"] == "ch220" and by_key["w:mon:w"] == "ch223")
+    local bad = { monsters = {
+      { uid = "b1", cid = 1, name = "A", kind = "A", fam = 5, pos = P(2), small = false },
+      { uid = "b2", cid = 2, name = "B", kind = "B", pos = P(3), small = false } } }
+    local _, pb = pa[2](bad, kshow(nil), O, {})
+    local q_ok = #pb.monster.entries == 2
+    for _, e in ipairs(pb.monster.entries) do
+      if e.fam ~= "?" then q_ok = false end
+    end
+    check("fam: missing or non-string fam is ?" .. tag, q_ok)
+  end
+  do
+    local fw = fmw()
+    core.world_markers_cached(fw, kshow(nil), O, {})
+    local gb0 = stats.grid_builds
+    local mo = core.world_markers_cached(fw, kshow({ small = { ["fam:ch220"] = true } }), O, {})
+    local mi = core.world_markers_cached(fw, kshow({ small = {} }), O, {})
+    check("fam: untick hides on the cached path", keys(mo) == "w:mon:w")
+    check("fam: re-tick brings them back", keys(mi) == "w:mon:g,w:mon:h,w:mon:w")
+    check("fam: untick and re-tick run no grid rebuild", stats.grid_builds == gb0)
+  end
+  check("fam: family_name shortest", type(core.family_name) == "function"
+    and core.family_name({ "Hobgoblin", "Goblin", "Chopper" }) == "Goblin")
+  check("fam: family_name byte-order tie", type(core.family_name) == "function"
+    and core.family_name({ "Garm", "Warg" }) == "Garm")
+  check("fam: family_name leaves Monster out", type(core.family_name) == "function"
+    and core.family_name({ "Minotaur", "Goreminotaur", "Monster" }) == "Minotaur")
+  check("fam: family_name Monster alone", type(core.family_name) == "function"
+    and core.family_name({ "Monster" }) == "Monster")
+  check("fam: family_name empty is Other", type(core.family_name) == "function"
+    and core.family_name({}) == "Other")
+
   -- per-kind counts (SPEC 29.5.3)
   local function kinds_ser(p)
     local t = {}
