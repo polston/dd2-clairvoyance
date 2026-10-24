@@ -2401,16 +2401,35 @@ function M.game_reads()
     return addr
   end
 
+  -- The same reads, each guarded on its own: used only for a selector whose
+  -- fast read raised, so a raising read gives nil (no Table) or -1 (count).
+  local function read_selector_sig_guarded(sel, counts)
+    local tbl = G(sel, "<Table>k__BackingField")
+    if tbl == nil then return nil end
+    local ok, a = pcall(addr_of, tbl)
+    local addr = ok and math.tointeger(a) or nil
+    if addr == nil then error("table address unreadable") end
+    for i, spec in ipairs(RESERVED_SPECS) do
+      local n = C(G(G(tbl, spec[1]), "_BasicRowDatas"), "get_Count")
+      counts[i] = type(n) == "number" and n or -1
+    end
+    return addr
+  end
+
   local sig_counts = {}
 
   local function sig_selector(sel, _, parts)
     local ok, addr = pcall(read_selector_sig, sel, sig_counts)
-    if not ok then error(addr, 0) end
+    if not ok then addr = read_selector_sig_guarded(sel, sig_counts) end
     if addr == nil then
       parts[#parts + 1] = "0"
       return
     end
-    parts[#parts + 1] = string.format("%x:%s", addr, table.concat(sig_counts, ":", 1, #RESERVED_SPECS))
+    local s = string.format("%x", addr)
+    for i = 1, #RESERVED_SPECS do
+      s = s .. string.format(":%d", sig_counts[i])
+    end
+    parts[#parts + 1] = s
   end
 
   -- Cheap change signal for the reserved selector list (SPEC 31.3.1): the

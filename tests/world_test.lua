@@ -1171,6 +1171,27 @@ do
       type(R.reserved_sig) == "function" and not pcall(R.reserved_sig))
   end
 
+  -- a raising read gives -1 / 0 in its slot, the signature still succeeds
+  do
+    local tblC = obj({
+      _GimmickSetInfo = obj({ _BasicRowDatas = array({ row_obj({}) }) }),
+      _EnemySetInfo = obj({ _BasicRowDatas = array({}) }) })
+    local base = tblC.get_field
+    function tblC:get_field(n)
+      if n == "_EnemySetInfo" then error("raised") end
+      return base(self, n)
+    end
+    set_sels({ obj({ ["<Table>k__BackingField"] = tblC }) })
+    local okc, sc = pcall(R.reserved_sig)
+    check("reads: a raising count read is -1 in its slot",
+      okc and sc == string.format("1,%x:1:-1", tblC:get_address()))
+    local selR = obj({})
+    function selR:get_field(n) error("raised") end
+    set_sels({ selR })
+    local okr, sr = pcall(R.reserved_sig)
+    check("reads: a raising Table read is 0 in its slot", okr and sr == "1,0")
+  end
+
   -- save records: contexts one hop down, in Record or SaveData
   local function rec(ctxs, via)
     local l = list(ctxs)
