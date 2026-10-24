@@ -135,10 +135,12 @@ def rows_of(insts):
             yield kind_of[inst.idx], inst
 
 
-def chest_items(data, layouts):
-    """({ParamId: [(item id, count)]} with the first entry winning, set of conflicting ParamIds)."""
-    insts = _decode(data, layouts)
-    items, conflicts = {}, set()
+def params_of(insts):
+    """({ParamId: {"items": [(id, n)], "trap": bool, "pawn": bool}}, set of disagreeing ParamIds).
+
+    The first entry for a ParamId wins; a later one with different items or flags is a conflict.
+    """
+    params, conflicts = {}, set()
     for inst in insts:
         if inst.type != "app.Gm80_001Param":
             continue
@@ -147,22 +149,58 @@ def chest_items(data, layouts):
         for r in inst.fields["ItemList"]:
             ip = qnml_rsz.deref(insts, r)
             lst.append((ip.fields["ItemId"], ip.fields["ItemNum"]))
-        if pid in items:
-            if items[pid] != lst:
+        entry = {"items": lst,
+                 "trap": qnml_rsz.deref(insts, inst.fields["TrapGenerateData"]) is not None,
+                 "pawn": bool(inst.fields["IsPawnRestrict"])}
+        if pid in params:
+            if params[pid] != entry:
                 conflicts.add(pid)
         else:
-            items[pid] = lst
-    return items, conflicts
+            params[pid] = entry
+    return params, conflicts
+
+
+def chest_items(data, layouts):
+    """(params, conflicts) for the chest contents file; see params_of."""
+    return params_of(_decode(data, layouts))
+
+
+QUEST_FLAG = "app.GenerateManager.QuestFlagInfos.QuestFlagInfo"
+QUEST_VAR = "app.GenerateManager.QuestFlagInfos.QuestVariableInfo"
+
+
+def quest_of(insts, cont):
+    """The quest-gate dict for a container, or None when it has no flag elements."""
+    sf = qnml_rsz.deref(insts, cont.fields.get("_SetFlagSetting")) if cont else None
+    qi = qnml_rsz.deref(insts, sf.fields.get("_QuestFlagInfos")) if sf else None
+    if qi is None:
+        return None
+    q, var = [], False
+    for r in qi.fields.get("_Infos", []):
+        el = qnml_rsz.deref(insts, r)
+        if el is None:
+            continue
+        if el.type == QUEST_FLAG:
+            q.append([el.fields["_QuestID"], bool(el.fields["_IsFinishCheck"])])
+        elif el.type == QUEST_VAR:
+            var = True
+    if not q and not var:
+        return None
+    out = {"any": qi.fields.get("_CheckType") == 1, "q": q}
+    if var:
+        out["var"] = True
+    return out
 
 
 def _round1(pos):
     return [round(float(v), 1) for v in pos]
 
 
-def collect_rows(decoded, items, conflicts, chara_names):
+def collect_rows(decoded, params, conflicts, chara_names):
     """Rows of the tracked kinds from decoded table files {rel: instances}.
 
-    Returns (rows, count of chest rows without an item list, gimmick id counts).
+    Returns (rows, count of chest rows without an item list, gimmick id counts,
+    Counter of quest, trap, pawn and key location chest rows).
     """
     src_of = {}
     for insts in decoded.values():
@@ -177,6 +215,7 @@ def collect_rows(decoded, items, conflicts, chara_names):
     rows, seen = [], {}
     gimmick_ids = collections.Counter()
     unjoined = 0
+    kinds = collections.Counter()
     for rel in sorted(decoded):
         insts = decoded[rel]
         for kind, r in rows_of(insts):
@@ -200,11 +239,20 @@ def collect_rows(decoded, items, conflicts, chara_names):
                 pid = gs.fields.get("_ParamId") if gs else None
                 if pid in conflicts:
                     raise ExtractError("a chest row uses a ParamId with conflicting item lists")
-                if pid in items:
-                    row["items"] = [{"id": i, "n": n} for i, n in items[pid]]
+                keyloc = bool(gs and gs.fields.get("_KeyLocationId"))
+                if pid in params:
+                    p = params[pid]
+                    row["items"] = [{"id": i, "n": n} for i, n in p["items"]]
+                    if p["trap"]:
+                        row["trap"] = True
+                    if p["pawn"]:
+                        row["pawn"] = True
                 else:
                     row["items"] = []
                     unjoined += 1
+                quest = quest_of(insts, cont)
+                if quest:
+                    row["quest"] = quest
             if k == "chara":
                 name = chara_names.get(str(rid))
                 if name:
@@ -220,7 +268,13 @@ def collect_rows(decoded, items, conflicts, chara_names):
                 continue
             seen[key] = ident
             rows.append(row)
-    return rows, unjoined, gimmick_ids
+            if k == "chest":
+                for name in ("quest", "trap", "pawn"):
+                    if name in row:
+                        kinds[name] += 1
+                if keyloc:
+                    kinds["key locations"] += 1
+    return rows, unjoined, gimmick_ids, kinds
 
 
 def extract(game, key_hex, layouts):
@@ -250,9 +304,10 @@ def extract(game, key_hex, layouts):
         raise ExtractError("only %d generate files found (expected at least %d)" % (len(files), MIN_FILES))
     if gm is None:
         raise ExtractError("chest contents file missing from the archive")
-    items, conflicts = chest_items(gm, layouts)
+    params, conflicts = chest_items(gm, layouts)
     decoded = {rel: _decode(data, layouts) for rel, data in files.items()}
-    rows, unjoined, gimmick_ids = collect_rows(decoded, items, conflicts, layouts["enums"]["CharacterID"])
+    rows, unjoined, gimmick_ids, kinds = collect_rows(
+        decoded, params, conflicts, layouts["enums"]["CharacterID"])
     by_k = collections.Counter(r["k"] for r in rows)
     for k in ("token", "beetle", "chest"):
         gid = FIRST_GIMMICK[k]
@@ -271,6 +326,8 @@ def extract(game, key_hex, layouts):
         "chests %d (%s), without item list %d" % (
             by_k["chest"], ", ".join("%d: %d" % (g, chests[g]) for g in CHEST_GIMMICKS),
             unjoined),
+        "kinds: quest %d, trap %d, pawn %d, key locations %d" % (
+            kinds["quest"], kinds["trap"], kinds["pawn"], kinds["key locations"]),
         "chara rows %d, ids %d" % (len(chara), len({r["id"] for r in chara})),
         "chara src: " + ", ".join("%s %d" % (s, sum(1 for r in chara if r["src"] == s))
                                   for s in ("normal", "subquest", "mainquest", "random")),

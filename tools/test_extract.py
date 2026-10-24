@@ -133,7 +133,7 @@ class RowTests(unittest.TestCase):
         lst = [inst(1, "app.GenerateTableData", path="t.user"),
                inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)], _SubQuestTableList=[],
                     _MainQuestTableList=[], _RandomNormalTableList=[])]
-        rows, unjoined, _ids = ew.collect_rows({"t.user": table, "l.user": lst}, {}, set(), {"5": "ch5"})
+        rows, unjoined, _ids, _kinds = ew.collect_rows({"t.user": table, "l.user": lst}, {}, set(), {"5": "ch5"})
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0]["k"], rows[0]["uid"], rows[0]["id"], rows[0]["name"], rows[0]["src"]),
                          ("chara", "g1", 5, "ch5", "normal"))
@@ -158,12 +158,107 @@ class RowTests(unittest.TestCase):
                 lst = [inst(1, "app.GenerateTableData", path="t.user"),
                        inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)], _SubQuestTableList=[],
                             _MainQuestTableList=[], _RandomNormalTableList=[])]
-                rows, unjoined, _ids = ew.collect_rows({"t.user": table, "l.user": lst},
-                                                       {1: [(500, 2)]}, set(), {})
+                rows, unjoined, _ids, _kinds = ew.collect_rows(
+                    {"t.user": table, "l.user": lst},
+                    {1: {"items": [(500, 2)], "trap": False, "pawn": False}}, set(), {})
                 self.assertEqual(len(rows), 1)
                 self.assertEqual((rows[0]["k"], rows[0]["id"], rows[0]["items"]),
                                  ("chest", gid, [{"id": 500, "n": 2}]))
                 self.assertEqual(unjoined, 0)
+
+    def test_params_of_flags(self):
+        def inst(i, t, **fields):
+            n = qnml_rsz.Inst(i, t)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        insts = [
+            inst(1, "app.Gm80_001Param", ParamId=1, ItemList=[R(3)], TrapGenerateData=R(4),
+                 IsPawnRestrict=True),
+            inst(2, "app.Gm80_001Param", ParamId=2, ItemList=[R(3)], TrapGenerateData=R(0),
+                 IsPawnRestrict=False),
+            inst(3, "app.Gm80_001Param.ItemParam", ItemId=7, ItemNum=1),
+            inst(4, "app.TrapGenerateData"),
+        ]
+        params, conflicts = ew.params_of(insts)
+        self.assertEqual(params[1], {"items": [(7, 1)], "trap": True, "pawn": True})
+        self.assertEqual(params[2], {"items": [(7, 1)], "trap": False, "pawn": False})
+        self.assertEqual(conflicts, set())
+
+    def test_params_of_flag_conflict(self):
+        def inst(i, t, **fields):
+            n = qnml_rsz.Inst(i, t)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        insts = [
+            inst(1, "app.Gm80_001Param", ParamId=1, ItemList=[], TrapGenerateData=R(0), IsPawnRestrict=True),
+            inst(2, "app.Gm80_001Param", ParamId=1, ItemList=[], TrapGenerateData=R(0), IsPawnRestrict=False),
+        ]
+        params, conflicts = ew.params_of(insts)
+        self.assertEqual(conflicts, {1})
+
+    def test_collect_rows_kind_fields(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        QF = "app.GenerateManager.QuestFlagInfos.QuestFlagInfo"
+        QV = "app.GenerateManager.QuestFlagInfos.QuestVariableInfo"
+        # (guid, ParamId, set-flag instances, expected quest/var)
+        table = [inst(1, "app.GenerateTable", _GimmickSetInfo=R(2)),
+                 inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(10 + i) for i in range(6)])]
+        base = 100
+
+        def chest(n, guid, pid, check_type=None, infos=()):
+            sf = R(0)
+            extra = []
+            if check_type is not None:
+                sf = R(base + n * 10 + 1)
+                extra = [inst(base + n * 10 + 1, "app.SetFlagSetting", _QuestFlagInfos=R(base + n * 10 + 2)),
+                         inst(base + n * 10 + 2, "app.QuestFlagInfos", _CheckType=check_type,
+                              _Infos=[R(base + n * 10 + 3 + j) for j in range(len(infos))])]
+                for j, (t, f) in enumerate(infos):
+                    extra.append(inst(base + n * 10 + 3 + j, t, **f))
+            return [inst(10 + n, "app.GenerateRowData", _GimmickID=10, _ManualSetGuid=guid,
+                         _ManualPos=(1.0, 2.0, 3.0), _Container=R(base + n * 10)),
+                    inst(base + n * 10, "app.Container", _GimmickSetting=R(base + n * 10 + 9),
+                         _SetFlagSetting=sf),
+                    inst(base + n * 10 + 9, "app.GimmickSetting", _ParamId=pid)] + extra
+        body = []
+        body += chest(0, "plain", 1)
+        body += chest(1, "all", 1, 0, [(QF, dict(_QuestID=11020, _IsFinishCheck=True))])
+        body += chest(2, "any", 1, 1, [(QF, dict(_QuestID=5, _IsFinishCheck=False)),
+                                       (QF, dict(_QuestID=6, _IsFinishCheck=True))])
+        body += chest(3, "var", 1, 0, [(QV, {})])
+        body += chest(4, "trap", 2)
+        body += chest(5, "pawn", 3)
+        insts = table + body
+        insts.sort(key=lambda i: i.idx)
+        by = {i.idx: i for i in insts}
+        top = max(by)
+        full = [by.get(k) or inst(k, "app.Filler") for k in range(1, top + 1)]
+        lst = [inst(1, "app.GenerateTableData", path="t.user"),
+               inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)], _SubQuestTableList=[],
+                    _MainQuestTableList=[], _RandomNormalTableList=[])]
+        params = {1: {"items": [], "trap": False, "pawn": False},
+                  2: {"items": [], "trap": True, "pawn": False},
+                  3: {"items": [], "trap": False, "pawn": True}}
+        rows, _unj, _ids, kinds = ew.collect_rows({"t.user": full, "l.user": lst}, params, set(), {})
+        r = {x["uid"]: x for x in rows}
+        for k in ("quest", "trap", "pawn"):
+            self.assertNotIn(k, r["plain"])
+        self.assertEqual(r["all"]["quest"], {"any": False, "q": [[11020, True]]})
+        self.assertEqual(r["any"]["quest"], {"any": True, "q": [[5, False], [6, True]]})
+        self.assertEqual(r["var"]["quest"], {"any": False, "q": [], "var": True})
+        self.assertTrue(r["trap"]["trap"])
+        self.assertNotIn("pawn", r["trap"])
+        self.assertTrue(r["pawn"]["pawn"])
+        self.assertEqual((kinds["quest"], kinds["trap"], kinds["pawn"]), (3, 1, 1))
+        with self.assertRaises(ew.ExtractError):
+            ew.collect_rows({"t.user": full, "l.user": lst}, params, {2}, {})
+        ew.collect_rows({"t.user": full, "l.user": lst}, params, {99}, {})
 
     def test_missing_key_fails(self):
         with tempfile.TemporaryDirectory() as d:
