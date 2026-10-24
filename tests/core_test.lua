@@ -3756,8 +3756,9 @@ do
     check("tok1 stays under another query" .. tag,
       keys(ms) == "w:mon:g,w:tok1:t1")
     -- Tokens on: the spot draws once, as the first token
+    -- the world marks the ordinary token at the spot first_seeker
     local tw = { first_token = ft(), tokens = { { uid = "t1", pos = P(5, 0, 5), name = "Token",
-      state = "collected" }, { uid = "t2", pos = P(9), name = "Other", state = "not" } } }
+      state = "collected", first_seeker = true }, { uid = "t2", pos = P(9), name = "Other", state = "not" } } }
     ms, panel = pa[2](tw, sh({ world_tokens = true, world_show_opened = true }), O, {})
     local at_spot = 0
     for _, mm in ipairs(ms) do
@@ -3773,7 +3774,18 @@ do
     ms = pa[2](w, sh({ search = Q("minotaur") }), O, {})
     check("tok1 kept under a query that matches nothing" .. tag, keyset(ms)["w:tok1:t1"] ~= nil)
     check("tok1 is not a search result row" .. tag, #core.world_rows(ms, {}, O) == 0)
+    -- a first_seeker entry never becomes a marker, with or without a query
+    local hw = { tokens = { { uid = "h1", pos = P(7), name = "Hidden", state = "not",
+      first_seeker = true }, { uid = "h2", pos = P(8), name = "Shown", state = "not" } } }
+    ms = pa[2](hw, sh({ world_tokens = true }), O, {})
+    check("first_seeker entry hidden" .. tag, keys(ms) == "w:tok:h2")
+    ms = pa[2](hw, sh({ world_tokens = true, search = Q("hidden") }), O, {})
+    check("first_seeker entry hidden under a query" .. tag, keys(ms) == "")
   end
+  check("is_result: ordinary marker", core.is_result({ cat = "chest" }) == true)
+  check("is_result: route stop", core.is_result({ cat = "route_stop" }) == false)
+  check("is_result: hint pin", core.is_result({ cat = "hint_pin" }) == false)
+  check("is_result: first seeker", core.is_result({ cat = "token", first_seeker = true }) == false)
 end
 
 if failures > 0 then os.exit(1) end

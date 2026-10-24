@@ -996,6 +996,9 @@ local function make_cand(cat, e, ctx)
     c.item_name = e.item_name
     c.hidden = (e.discovered == false) and not ctx.undisc
   end
+  -- the ordinary token at the First Seeker's Token spot draws as the spot
+  -- (SPEC 28.9.3); it stays in `known`, never becomes a marker
+  if e.first_seeker then c.hidden = true end
   return c
 end
 
@@ -1140,7 +1143,7 @@ end
 
 -- Uncached candidates: every included entry counts in `known`; with a
 -- query only the matching ones become candidates (before make_cand).
-local function world_candidates(world, show, boxes, q, ft)
+local function world_candidates(world, show, boxes, q)
   local cands, known = {}, {}
   local ctx = world_ctx(show, boxes)
   local small_ok = monster_shown(true, show)
@@ -1157,9 +1160,7 @@ local function world_candidates(world, show, boxes, q, ft)
           if cat == "monster" and e.small == true then
             known.monster_small = known.monster_small + 1
           end
-          -- the ordinary token at the first token's spot is skipped (it still counts)
-          local skip = ft and ft.skip_uid ~= nil and cat == "token" and e.uid == ft.skip_uid
-          if not skip and entry_search(cat, e, drops, gc, q, ctx) then
+          if entry_search(cat, e, drops, gc, q, ctx) then
             cands[#cands + 1] = make_cand(cat, e, ctx)
           end
         end
@@ -1188,7 +1189,7 @@ local function first_token_cand(world, show)
     return nil
   end
   return { cat = "token", qids = {}, key = "w:tok1:" .. tostring(t.uid),
-    pos = t.pos, label = tostring(t.name), skip_uid = t.uid }
+    pos = t.pos, label = tostring(t.name) }
 end
 
 local function world_cap(show)
@@ -1425,7 +1426,7 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   local kept, merged, shops, shop_all, hits = {}, {}, {}, {}, {}
   local shops_on = show.world_shops == true
   local ft = first_token_cand(world, show)
-  local cands, known, shop_of = world_candidates(world, show, boxes, show.search, ft)
+  local cands, known, shop_of = world_candidates(world, show, boxes, show.search)
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = known[cat] end
   panel.monster.small_known = known.monster_small
   for _, c in ipairs(cands) do
@@ -1596,9 +1597,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   end
   local drops = q ~= nil and world.drops or nil
   local ft = first_token_cand(world, show)
-  local skip_uid = ft and ft.skip_uid   -- its ordinary token is skipped (still known)
   local function take(cat, e)
-    if skip_uid ~= nil and cat == "token" and e.uid == skip_uid then return end
     if not entry_search(cat, e, drops, g, q, ctx) then return end
     stats.cand_builds = stats.cand_builds + 1
     local c = make_cand(cat, e, ctx)
@@ -1680,6 +1679,12 @@ function M.nearest_settlement(pos, settlements)
   return best
 end
 
+-- Is a marker a search result? v14: route and hint pins are not; the First
+-- Seeker's Token spot is kept as a marker but listed nowhere (SPEC 28.9.3).
+function M.is_result(m)
+  return m.cat ~= "route_stop" and m.cat ~= "hint_pin" and not m.first_seeker
+end
+
 -- The `limit` (default WORLD_ROWS, ten) nearest entries to origin as panel
 -- rows (SPEC 17.4g); all of them in list order when origin is nil.
 -- Settlement = nearest by 3D distance. Shop entries carry stock, sells_for,
@@ -1687,8 +1692,7 @@ end
 function M.world_rows(entries, settlements, origin, limit)
   local list = {}
   for _, e in ipairs(entries or {}) do
-    -- v14: route and hint pins are not search results
-    if e.cat ~= "route_stop" and e.cat ~= "hint_pin" and not e.first_seeker then
+    if M.is_result(e) then
       local i = #list + 1
       list[i] = { e = e, i = i, d = valid_pos(origin) and dist2(e.pos, origin) or 0 }
     end
