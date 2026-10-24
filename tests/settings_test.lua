@@ -540,10 +540,12 @@ do
     and su.WORLD_BOOL_LABEL.world_kind_trap == "Trap"
     and su.WORLD_BOOL_LABEL.world_kind_pawn == "Pawns can't open")
   check("WORLD_BOOLS still ten", #su.WORLD_BOOLS == 10)
+  local c0 = su.color_of(D, "chest")
+  local half = (((c0 >> 24) & 0xFF) // 2 << 24) | (c0 & 0x00FFFFFF)
   local faded = su.marker_color(D, { cat = "chest", faded = true })
-  check("marker_color faded halves alpha", faded == 0x7FC8A27A)
+  check("marker_color faded halves alpha", faded == half)
   check("marker_color faded and done halves once",
-    su.marker_color(D, { cat = "chest", faded = true, done = true }) == 0x7FC8A27A)
+    su.marker_color(D, { cat = "chest", faded = true, done = true }) == half)
 end
 if failures > 0 then os.exit(1) end
 print("settings_test: all OK")

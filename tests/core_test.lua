@@ -3317,6 +3317,19 @@ do
       and pn.treasure.known == 0 and pn.chest.known == 1 and pn.chest.shown == 0)
   end
 
+  -- a name seen later relabels (new world table, same uid)
+  do
+    local function lab(text)
+      local ms = core.world_markers_cached({ chests = { chest("r", 1, { "quest" },
+        { quest_text = text }) } }, sh(), O, {})
+      return ms[1].label
+    end
+    local l1 = lab("after another quest")
+    local l2 = lab("after Foo")
+    check("kinds: quest_text change relabels", l1:find("after another quest", 1, true)
+      and l2:find("after Foo", 1, true) and not l2:find("another", 1, true))
+  end
+
   -- faded
   do
     local fw = { chests = { chest("m", 1, { "quest" }, { quest_met = false }),

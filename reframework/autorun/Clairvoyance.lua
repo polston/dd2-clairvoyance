@@ -1634,12 +1634,14 @@ local function install_debug()
               break
             end
           end
-          for _, k in ipairs(su.WORLD_KIND_BOOLS) do
-            if key == k then
-              settings[k] = v == true
-              want_update = true; last_tick = 0.0; save_settings()
-              hit = true
-              break
+          if not hit then
+            for _, k in ipairs(su.WORLD_KIND_BOOLS) do
+              if key == k then
+                settings[k] = v == true
+                want_update = true; last_tick = 0.0; save_settings()
+                hit = true
+                break
+              end
             end
           end
           -- v14 (SPEC 23.4.8): every style and route key, validated
@@ -2013,10 +2015,12 @@ do
         changed, settings[k] = imgui.checkbox(su.WORLD_BOOL_LABEL[k], settings[k])
         if changed then want_update = true; last_tick = 0.0; save_settings() end
         if k == "world_chests" then   -- the kind filters sit indented under Chests
+          imgui.indent(20)
           for _, kk in ipairs(su.WORLD_KIND_BOOLS) do
-            changed, settings[kk] = imgui.checkbox("    " .. su.WORLD_BOOL_LABEL[kk], settings[kk])
+            changed, settings[kk] = imgui.checkbox(su.WORLD_BOOL_LABEL[kk], settings[kk])
             if changed then want_update = true; last_tick = 0.0; save_settings() end
           end
+          imgui.unindent(20)
         end
       end
       local wc, wv = imgui.slider_int("Max world markers",
