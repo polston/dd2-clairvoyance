@@ -757,6 +757,10 @@ do
     type(t4) == "table" and #t4 == 1 and t4[1].plain == true and #t4[1].kinds == 2
     and t4[1].kinds[1].kind == "Cyclops" and t4[1].kinds[1].box == "off"
     and t4[1].kinds[2].kind == "Monster" and t4[1].kinds[2].box == "on")
+  local t4b = tree({ ch220 = { Goblin = true, ["fam:abcde"] = true } }, { ch220 = "Goblin" }, {}, true)
+  check("tree: a seen kind named like a family entry is left out of its family",
+    type(t4b) == "table" and #t4b == 1 and #t4b[1].kinds == 1
+    and t4b[1].kinds[1].kind == "Goblin" and t4b[1].node == false)
   local t5 = tree({}, {}, { ["fam:ch299"] = true }, true)
   check("tree: off family not seen gives an unseen entry",
     type(t5) == "table" and #t5 == 1 and t5[1].fam == "ch299" and t5[1].unseen == true
