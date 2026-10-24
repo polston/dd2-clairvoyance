@@ -3530,6 +3530,21 @@ do
     text({ any = false, q = { { 1, true }, { 2, false } } }, nm) == "after X and Y")
 
   core.gate_name = saved_gate
+
+  -- the real core.gate_name across the lane seam: the full name only
+  -- with reveal_gate_names on, never an id
+  do
+    local rows = { prow("chest", "g1", 10, 1, 1,
+      { quest = { any = false, q = { { 11020, true } } } }) }
+    local _, w = world_of(rows, nil, nil, { [11020] = "Agamen Dig" })
+    w:refresh(0, true, on("chests"))
+    check("real gate_name: hidden name", find(w:input().chests, "g1").quest_text
+      == "after another quest")
+    local _, w2 = world_of(rows, nil, nil, { [11020] = "Agamen Dig" })
+    w2:refresh(0, true, on("chests", "reveal_gate_names"))
+    check("real gate_name: revealed name", find(w2:input().chests, "g1").quest_text
+      == "after Agamen Dig")
+  end
 end
 
 if failures > 0 then os.exit(1) end
