@@ -120,42 +120,52 @@ local snapshot = nil      -- { markers, unresolved, unnamed, counts, resolved_co
 -- Last frame's world toggles (su.world_toggled) and the debug tick ring.
 wt.prev_tg, wt.tick_ring = {}, {}
 -- Monster kinds seen this save, per class, for the World markers tree
--- (SPEC 29.6.3); filled once per tick from the published kind counts.
+-- (SPEC 29.6.3, 30.6.3): { [fam] = { [kind] = true } } per class; filled once
+-- per tick from the published kind counts. fam_names holds the last published
+-- family name per class and fam.
 wt.kinds_seen = { large = {}, small = {} }
+wt.fam_names = { large = {}, small = {} }
 -- The World panel rows of one category, cached on the snapshot (the debug
 -- dump reads the same rows). Each row carries its "Show on map" button id.
-wt.rows = function(cat, class, kind)
-  -- SPEC 29.6.6: with class ("large" or "small") and kind, the nearest rows
-  -- of that one monster kind, filtered before the row limit; with one
-  -- argument "monster" is still every monster row (the debug dump)
+wt.rows = function(cat, class, kind, fam)
+  -- SPEC 29.6.6, 30.6.6: with class ("large" or "small"), kind and fam, the
+  -- nearest rows of that one monster kind in that family, filtered before
+  -- the row limit; with one argument "monster" is still every monster row
+  -- (the debug dump)
   local p = snapshot ~= nil and snapshot.world ~= nil and snapshot.world[cat] or nil
   if p == nil then return {} end
   local cache = snapshot.world_rows
   if cache == nil then cache = {}; snapshot.world_rows = cache end
-  local slot, key = cache, cat   -- a kind list has its own two-level slot
+  local slot, key = cache, cat   -- a kind list has its own three-level slot
   if cat == "monster" and kind ~= nil then
+    fam = fam or "?"
     slot = cache.kind_rows
     if slot == nil then slot = { large = {}, small = {} }; cache.kind_rows = slot end
-    slot, key = slot[class], kind
+    slot = slot[class]
+    if slot[fam] == nil then slot[fam] = {} end
+    slot, key = slot[fam], kind
   end
   local rows = slot[key]
   if rows == nil then
     local ents = p.entries
     if cat == "monster" and kind ~= nil then
-      -- partition the entries by class and kind once per snapshot
+      -- partition the entries by class, family and kind once per snapshot
       local by = snapshot.world_kind_ents
       if by == nil then
         by = { large = {}, small = {} }
         for _, e in ipairs(p.entries or {}) do
           local cls = by[e.small == true and "small" or "large"]
+          local f = type(e.fam) == "string" and e.fam or "?"
+          local fl = cls[f]
+          if fl == nil then fl = {}; cls[f] = fl end
           local k = core.kind_of(e)
-          local l = cls[k]
-          if l == nil then l = {}; cls[k] = l end
+          local l = fl[k]
+          if l == nil then l = {}; fl[k] = l end
           l[#l + 1] = e
         end
         snapshot.world_kind_ents = by
       end
-      ents = by[class][kind] or {}
+      ents = (by[class][fam] or {})[kind] or {}
     end
     rows = core.world_rows(ents, (wt.q("input", nil) or {}).settlements,
       wt.world_origin, cat == "shop" and math.huge or nil)
@@ -847,6 +857,7 @@ re.on_frame(function()
       pcall(wt.reset, wt)
       wt.world_origin = nil
       wt.kinds_seen = { large = {}, small = {} }
+      wt.fam_names = { large = {}, small = {} }
       wt.map_origin, wt.map_origin_at = nil, nil
       if wt.route_cid ~= nil then logmsg("route cleared: save or session changed") end
       wt.hints_open, wt.route_cid = {}, nil   -- SPEC 22.6.6
@@ -1021,9 +1032,18 @@ re.on_frame(function()
     local changed = snapshot == nil or sig ~= snapshot.sig
     result.sig = sig
     snapshot = result   -- always replace: counts/unresolved stay fresh
-    for _, k in ipairs((result.world and result.world.monster
-      and result.world.monster.kinds) or {}) do
-      wt.kinds_seen[k.small and "small" or "large"][k.kind] = true
+    local wm = result.world and result.world.monster or nil
+    for _, k in ipairs((wm and wm.kinds) or {}) do
+      local seen = wt.kinds_seen[k.small and "small" or "large"]
+      local fam = type(k.fam) == "string" and k.fam or "?"
+      local set = seen[fam]
+      if set == nil then set = {}; seen[fam] = set end
+      set[k.kind] = true
+    end
+    for _, f in ipairs((wm and wm.families) or {}) do
+      if type(f.fam) == "string" and type(f.name) == "string" then
+        wt.fam_names[f.small and "small" or "large"][f.fam] = f.name
+      end
     end
     if changed and ui_map ~= nil then want_update = true end
   end)
@@ -1738,6 +1758,14 @@ local function install_debug()
         save_settings(); want_update = true; last_tick = 0.0
         return true
       end,
+      -- same effect as ticking one family checkbox (SPEC 30.6.7); false and no
+      -- change unless class is "large" or "small" and fam is a 5-byte string
+      monster_family = function(fam, class, off)
+        if type(fam) ~= "string" or #fam ~= 5 then return false end
+        if not su.set_kind_off(settings, class, "fam:" .. fam, off) then return false end
+        save_settings(); want_update = true; last_tick = 0.0
+        return true
+      end,
       -- stats plus at most 20 rows (counts and labels); positions go to the log only
       world = function()
         local st = wt.q("stats", {})
@@ -1761,7 +1789,14 @@ local function install_debug()
         end
         st.rows = rows
         st.monster_kinds = sn ~= nil and type(sn.monster) == "table" and sn.monster.kinds or nil
+        st.monster_families = sn ~= nil and type(sn.monster) == "table" and sn.monster.families or nil
         st.kinds_seen = wt.kinds_seen
+        local wmo = settings.world_monster_off
+        st.monster_tree = {
+          large = su.monster_tree(wt.kinds_seen.large, wt.fam_names.large, wmo.large,
+            settings.world_monsters == true),
+          small = su.monster_tree(wt.kinds_seen.small, wt.fam_names.small, wmo.small,
+            settings.world_small_monsters == true) }
         st.first_token = sn ~= nil and sn.token ~= nil and sn.token.first or nil
         st.cursor = ui_map ~= nil and adapter.map_cursor ~= nil
           and adapter.map_cursor(ui_map) or nil
@@ -1943,14 +1978,7 @@ do
       settings_dirty = true; want_update = true; last_tick = 0.0
     end
     if wt.search_on then
-      local off = {}
-      for _, k in ipairs(su.WORLD_BOOLS) do
-        if not su.WORLD_NO_SEARCH[k] and not settings[k] then
-          off[#off + 1] = string.lower(su.WORLD_BOOL_LABEL[k])
-        end
-      end
-      local kn = su.monster_off_count(settings.world_monster_off)
-      if kn > 0 then off[#off + 1] = kn .. " monster kinds" end
+      local off = su.not_searched(settings)
       if #off > 0 then imgui.text("Not searched (off): " .. table.concat(off, ", ")) end
       if snapshot == nil then
         imgui.text("No results yet")
@@ -2086,25 +2114,48 @@ do
     if changed then want_update = true; last_tick = 0.0; save_settings() end
   end
 
-  -- SPEC 29.2: one monster class node: its class checkbox, then one
-  -- checkbox per kind seen or switched off.
+  -- SPEC 29.2, 30.3.1: one monster class node: its class checkbox, then the
+  -- draw list su.monster_tree returns (family nodes with their kinds, plain
+  -- kind checkboxes, off families not seen yet).
   wt.kind_tree = function(title, class, key)
     if not imgui.tree_node(title) then return end
     wt.wbox(key)
     local class_on = settings[key] == true
     local offs = settings.world_monster_off[class]
-    local n_off = su.monster_class_off_count(offs)
-    local list = su.monster_kind_list(wt.kinds_seen[class], offs)
-    if #list == 0 then imgui.text(su.kind_empty_text(class_on)) end
-    for i, kind in ipairs(list) do
-      local is_off = offs[kind] == true
-      local st = su.kind_box(kind, class_on, n_off, is_off)
+    local tree = su.monster_tree(wt.kinds_seen[class], wt.fam_names[class], offs, class_on)
+    if #tree == 0 then imgui.text(su.kind_empty_text(class_on)) end
+    -- one checkbox for the entry `name` (a kind, or "fam:" .. fam); ticked = shown
+    local function box(label, st, name)
+      local is_off = offs[name] == true
       imgui.begin_disabled(st == "disabled")
-      local changed, v = imgui.checkbox(kind .. "##wk_" .. class .. "_" .. i, not is_off)
+      local changed, v = imgui.checkbox(label, not is_off)
       imgui.end_disabled()
       if changed and st ~= "disabled" then
-        su.set_kind_off(settings, class, kind, not v)
+        su.set_kind_off(settings, class, name, not v)
         save_settings(); want_update = true; last_tick = 0.0
+      end
+    end
+    for _, e in ipairs(tree) do
+      if e.plain then
+        for _, k in ipairs(e.kinds) do
+          box(k.kind .. "##wku_" .. class .. "_" .. k.kind, k.box, k.kind)
+        end
+      elseif e.unseen then
+        box("Family " .. e.fam .. " (none seen yet)##wfu_" .. class .. "_" .. e.fam,
+          e.family_box, "fam:" .. e.fam)
+      elseif e.node then
+        if imgui.tree_node(e.name .. "###wf_" .. class .. "_" .. e.fam) then
+          box("All " .. e.name .. "###wfa_" .. class .. "_" .. e.fam,
+            e.family_box, "fam:" .. e.fam)
+          for _, k in ipairs(e.kinds) do
+            box(k.kind .. "##wk_" .. class .. "_" .. e.fam .. "_" .. k.kind, k.box, k.kind)
+          end
+          imgui.tree_pop()
+        end
+      else
+        for _, k in ipairs(e.kinds) do
+          box(k.kind .. "##wk_" .. class .. "_" .. e.fam .. "_" .. k.kind, k.box, k.kind)
+        end
       end
     end
     imgui.tree_pop()
@@ -2398,32 +2449,63 @@ do
                 if #rows == 0 then imgui.text("Nothing shown") end
                 draw_rows(cat, rows)
               else
-                -- SPEC 29.6.6: Monsters holds a Large and a Small node, each
-                -- holding one node per kind
+                -- SPEC 29.6.6, 30.3.3: Monsters holds a Large and a Small node,
+                -- each holding one node per family with two or more kinds
+                -- (that family's kind nodes inside) and the other kinds directly
                 if p.shown == 0 then imgui.text("Nothing shown") end
                 local ss, sk = p.small_shown or 0, p.small_known or 0
                 local sub = { { "large", string.format("Large monsters (%d/%d)###wmonl",
                     p.shown - ss, p.known - sk), p.shown - ss },
                   { "small", string.format("Small monsters (%d/%d)###wmons", ss, sk), ss } }
+                -- per snapshot: family node titles, and each family's kind rows in
+                -- published order (kept on the snapshot, never in the published rows)
+                local flbls, fkinds = snapshot.world_fam_lbls, snapshot.world_fam_kinds
+                if flbls == nil then
+                  flbls, fkinds = {}, { large = {}, small = {} }
+                  for _, k in ipairs(p.kinds or {}) do
+                    local f = type(k.fam) == "string" and k.fam or "?"
+                    local byfam = fkinds[k.small == true and "small" or "large"]
+                    if byfam[f] == nil then byfam[f] = {} end
+                    byfam[f][#byfam[f] + 1] = k
+                  end
+                  for _, row in ipairs(p.families or {}) do
+                    local c = row.small == true and "small" or "large"
+                    flbls[row] = string.format("%s (%d/%d)###wfp_%s_%s", tostring(row.name),
+                      row.shown or 0, row.known or 0, c, tostring(row.fam))
+                  end
+                  snapshot.world_fam_lbls, snapshot.world_fam_kinds = flbls, fkinds
+                end
+                local function draw_kind(g, f, k)
+                  -- the label is built once per snapshot, not per frame
+                  -- (kept on the snapshot, never written into the published kinds)
+                  local lbls = snapshot.world_kind_lbls
+                  if lbls == nil then lbls = {}; snapshot.world_kind_lbls = lbls end
+                  local lbl = lbls[k]
+                  if lbl == nil then
+                    lbl = string.format("%s (%d/%d)###wkp_%s_%s_%s",
+                      k.kind, k.shown or 0, k.known or 0, g, f, k.kind)
+                    lbls[k] = lbl
+                  end
+                  if imgui.tree_node(lbl) then
+                    local rows = wt.rows("monster", g, k.kind, f)
+                    if #rows == 0 then imgui.text("Nothing shown") end
+                    draw_rows(cat, rows)
+                    imgui.tree_pop()
+                  end
+                end
                 for _, g in ipairs(sub) do
                   if imgui.tree_node(g[2]) then
-                    for _, k in ipairs(p.kinds or {}) do
-                      if (k.small == true) == (g[1] == "small") then
-                        -- the label is built once per snapshot, not per frame
-                        -- (kept on the snapshot, never written into the published kinds)
-                        local lbls = snapshot.world_kind_lbls
-                        if lbls == nil then lbls = {}; snapshot.world_kind_lbls = lbls end
-                        local lbl = lbls[k]
-                        if lbl == nil then
-                          lbl = string.format("%s (%d/%d)###wkp_%s_%s",
-                            k.kind, k.shown or 0, k.known or 0, g[1], k.kind)
-                          lbls[k] = lbl
-                        end
-                        if imgui.tree_node(lbl) then
-                          local rows = wt.rows("monster", g[1], k.kind)
-                          if #rows == 0 then imgui.text("Nothing shown") end
-                          draw_rows(cat, rows)
-                          imgui.tree_pop()
+                    for _, row in ipairs(p.families or {}) do
+                      if (row.small == true) == (g[1] == "small") then
+                        local f = type(row.fam) == "string" and row.fam or "?"
+                        local ks = fkinds[g[1]][f] or {}
+                        if (row.n_kinds or #ks) >= 2 then
+                          if imgui.tree_node(flbls[row]) then
+                            for _, k in ipairs(ks) do draw_kind(g[1], f, k) end
+                            imgui.tree_pop()
+                          end
+                        else
+                          for _, k in ipairs(ks) do draw_kind(g[1], f, k) end
                         end
                       end
                     end
