@@ -554,5 +554,19 @@ do
   check("marker_color faded and done halves once",
     su.marker_color(D, { cat = "chest", faded = true, done = true }) == half)
 end
+-- world_turned_on (SPEC 28.7.3)
+do
+  local prev = {}
+  check("turned_on: first call true", su.world_turned_on(prev, { world_chests = true }) == true)
+  check("turned_on: same again false", su.world_turned_on(prev, { world_chests = true }) == false)
+  check("turned_on: on to off false", su.world_turned_on(prev, { world_chests = false }) == false)
+  check("turned_on: off to on true", su.world_turned_on(prev, { world_chests = true }) == true)
+  check("turned_on: prev copied", prev.world_chests == true)
+  local p2 = {}
+  su.world_turned_on(p2, { world_chests = true })
+  check("turned_on: another key true",
+    su.world_turned_on(p2, { world_chests = true, world_first_token = true }) == true)
+  check("turned_on: no settings false", su.world_turned_on({}, {}) == false)
+end
 if failures > 0 then os.exit(1) end
 print("settings_test: all OK")

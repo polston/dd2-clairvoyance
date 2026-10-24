@@ -872,9 +872,9 @@ re.on_frame(function()
     -- SPEC 19.4c: the first tick of a search asks the world for a round now
     if show.search ~= nil and not wt.search_on then wt.q("poke", nil) end
     wt.search_on = show.search ~= nil
-    -- SPEC 20.1.4: turning Shops on pokes the round the same way
-    if settings.world_shops == true and not wt.shops_on then wt.q("poke", nil) end
-    wt.shops_on = settings.world_shops == true
+    -- SPEC 20.1.4, 28.7.3: any world toggle turning on pokes the round the same way
+    wt.prev_tg = wt.prev_tg or {}
+    if su.world_turned_on(wt.prev_tg, settings) then wt.q("poke", nil) end
     local t0 = os.clock()
     -- v10 (SPEC 17.3a): world round, own pcall so a raise never skips compute;
     -- inside the timed window. The gate (evaluated here) is: a snapshot from
@@ -904,7 +904,9 @@ re.on_frame(function()
       tg.reveal_gate_names = settings.reveal_gate_names   -- chest quest names (SPEC 27.4.2)
       tg.search = show.search ~= nil
       tg.npc_cids = snapshot ~= nil and snapshot.npc_match_cids or nil   -- Ruling 10
-      if wt:refresh(now, gate, tg) then wt.line_txt = nil end
+      -- SPEC 28.8.2: the full map's UI object or the game's paused-GUI read holds throttled rounds
+      local hold = ui_map ~= nil or adapter.map_menu_open() == true
+      if wt:refresh(now, gate, tg, hold) then wt.line_txt = nil end
     end)
     if not ok_w then logerr("world round: " .. tostring(err_w)) end
     for _, k in ipairs(su.WORLD_BOOLS) do show[k] = settings[k] end

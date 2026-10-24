@@ -178,6 +178,18 @@ M.WORLD_BOOLS = { "world_chests", "world_treasure", "world_tokens",
   "world_first_token", "world_beetles", "world_monsters", "world_small_monsters",
   "world_sellers", "world_shops", "world_show_opened", "world_undiscovered" }
 
+-- True when any world toggle is on in `settings` and was not on in `prev`
+-- (SPEC 28.7.3); then records every toggle's current value into `prev`.
+function M.world_turned_on(prev, settings)
+  local turned = false
+  for _, k in ipairs(M.WORLD_BOOLS) do
+    local on = settings[k] == true
+    if on and prev[k] ~= true then turned = true end
+    prev[k] = on
+  end
+  return turned
+end
+
 -- The five chest kind filters (SPEC 27.6), in the order of the kinds.
 M.WORLD_KIND_BOOLS = { "world_kind_ng_shard", "world_kind_kept",
   "world_kind_quest", "world_kind_trap", "world_kind_pawn" }
