@@ -1593,8 +1593,9 @@ function M.new(a, reads, io)
       -- clustering per family (SPEC 17.10.9)
       local fams = {}
       for uid, it in pairs(items) do
-        local l = fams[it.fam]
-        if l == nil then l = {}; fams[it.fam] = l end
+        local key = it.fam .. "\0" .. badge(it.cid)
+        local l = fams[key]
+        if l == nil then l = {}; fams[key] = l end
         l[#l + 1] = uid
       end
       local ids = {}
@@ -1605,6 +1606,7 @@ function M.new(a, reads, io)
           local nm = badge(s.cid)
           if c.count > 1 then nm = nm .. " x" .. c.count end
           out.monsters[#out.monsters + 1] = { uid = s.uid, cid = s.cid, name = nm,
+            kind = badge(s.cid),
             pos = pcopy(s.pos), respawning = c.respawning == true,
             small = s.small == true, count = c.count, cids = c.cids }
           ids[s.cid] = true

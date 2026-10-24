@@ -897,6 +897,57 @@ do
     and m2[2].count == 1)
 end
 
+-- monster kinds (SPEC 29.4)
+do
+  local function kinds_of(m)
+    local t = {}
+    for _, e in ipairs(m) do t[#t + 1] = tostring(e.kind) end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  local rows = {
+    prow("chara", "k1", 101, 0, 0, { name = "ch221000_00" }),
+    prow("chara", "k2", 102, 2, 0, { name = "ch221000_00" }) }
+  local f = fixture({ files = { [K.PLACES] = places(rows) } })
+  f.data.badge = { [101] = "Goblin", [102] = "Hobgoblin" }
+  local w = f.new()
+  w:refresh(0, true, on("monsters", "small_monsters"))
+  local m = w:input().monsters
+  check("kinds: two clusters", #m == 2)
+  check("kinds: own kind", kinds_of(m) == "Goblin,Hobgoblin")
+  check("kinds: each count 1", m[1] ~= nil and m[2] ~= nil and m[1].count == 1
+    and m[2].count == 1)
+
+  local rows2 = {
+    prow("chara", "g1", 101, 0, 0, { name = "ch221000_00" }),
+    prow("chara", "g2", 101, 2, 0, { name = "ch221000_00" }) }
+  local f2 = fixture({ files = { [K.PLACES] = places(rows2) } })
+  f2.data.badge = { [101] = "Goblin" }
+  local w2 = f2.new()
+  w2:refresh(0, true, on("monsters", "small_monsters"))
+  local m2 = w2:input().monsters
+  check("kinds: one kind one cluster", #m2 == 1 and m2[1].count == 2)
+  check("kinds: label with count", m2[1] ~= nil and m2[1].name == "Goblin x2")
+  check("kinds: kind has no count", m2[1] ~= nil and m2[1].kind == "Goblin"
+    and not tostring(m2[1].kind):find(" x", 1, true))
+
+  f2.data.badge_default = ""
+  f2.data.badge = {}
+  w2:reset()
+  w2:refresh(10, true, on("monsters", "small_monsters"))
+  check("kinds: failed badge gives Monster",
+    w2:input().monsters[1] ~= nil and w2:input().monsters[1].kind == "Monster")
+
+  local rows3 = {
+    prow("chara", "a1", 1, 0, 0, { name = "ch253000_00" }) }
+  local f3 = fixture({ files = { [K.PLACES] = places(rows3) } })
+  f3.data.boss = { ch253 = true }
+  local w3 = f3.new()
+  w3:refresh(0, true, on("monsters"))
+  check("kinds: large entry carries kind",
+    w3:input().monsters[1] ~= nil and w3:input().monsters[1].kind == "Griffin")
+end
+
 -- 24. places_slow
 do
   local f = fixture()
