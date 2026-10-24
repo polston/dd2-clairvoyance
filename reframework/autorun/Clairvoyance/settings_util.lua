@@ -38,6 +38,8 @@ function M.defaults()
     route_line_color = 0xFFE91E63, route_line_width = 3, route_stop_size = 100,
     route_number_color = 0xFFFFFFFF, route_number_size = 0,
     route_path = 1, route_world_path = false, names_color = 0xFFFFFFFF,
+    -- monster kinds switched off, per class (SPEC 29.2.1)
+    world_monster_off = { large = {}, small = {} },
   }
   for _, g in ipairs(style.GROUPS) do
     t["style_" .. g .. "_override"] = false
@@ -287,6 +289,7 @@ local panel_world = {}
 for _, k in ipairs(M.WORLD_BOOLS) do panel_world[#panel_world + 1] = k end
 for _, k in ipairs(M.WORLD_KIND_BOOLS) do panel_world[#panel_world + 1] = k end
 panel_world[#panel_world + 1] = "world_max_markers"
+panel_world[#panel_world + 1] = "world_monster_off"
 local panel_appearance = {}
 do
   local a = panel_appearance
@@ -366,6 +369,66 @@ local function field(raw, k, d)
   return M.cut_search(raw[k])
 end
 
+-- The off sets of one class: string keys of 1 to 64 bytes with the value
+-- true; at most MONSTER_OFF_MAX kept, the first in byte order.
+M.MONSTER_OFF_MAX = 200
+M.MONSTER_KIND_MAX = 64
+local function off_class(t)
+  local out = {}
+  if type(t) ~= "table" then return out end
+  local keys = {}
+  for k, v in pairs(t) do
+    if type(k) == "string" and v == true and #k >= 1 and #k <= M.MONSTER_KIND_MAX then
+      keys[#keys + 1] = k
+    end
+  end
+  table.sort(keys)
+  for i = 1, math.min(#keys, M.MONSTER_OFF_MAX) do out[keys[i]] = true end
+  return out
+end
+function M.monster_off_field(v)
+  local t = type(v) == "table" and v or {}
+  return { large = off_class(t.large), small = off_class(t.small) }
+end
+
+-- Sorted union of the kinds seen and the kinds switched off in one class
+-- (nil inputs read as empty).
+function M.monster_kind_list(seen, off)
+  local set, list = {}, {}
+  for _, t in ipairs({ seen or {}, off or {} }) do
+    for k in pairs(t) do
+      if type(k) == "string" and not set[k] then set[k] = true; list[#list + 1] = k end
+    end
+  end
+  table.sort(list)
+  return list
+end
+
+-- Number of off kinds over both classes (0 for anything but a table).
+function M.monster_off_count(off)
+  if type(off) ~= "table" then return 0 end
+  local n = 0
+  for _, c in ipairs({ "large", "small" }) do
+    if type(off[c]) == "table" then
+      for _, v in pairs(off[c]) do if v == true then n = n + 1 end end
+    end
+  end
+  return n
+end
+
+-- State of one kind checkbox: "disabled" when its class is off, the name
+-- is too long to store, or the class is at the off cap and the kind is
+-- still on; else "off" or "on". off_count counts this class only.
+function M.kind_box(name, class_on, off_count, is_off)
+  if not class_on or #name > M.MONSTER_KIND_MAX then return "disabled" end
+  if not is_off and off_count >= M.MONSTER_OFF_MAX then return "disabled" end
+  return is_off and "off" or "on"
+end
+
+function M.kind_empty_text(class_on)
+  return class_on and "No kinds seen yet" or "Turn on to list kinds"
+end
+
 function M.validate(raw)
   local d = M.defaults()
   if type(raw) ~= "table" then return d end
@@ -388,6 +451,7 @@ function M.validate(raw)
     out[k] = field(raw, k, d)
   end
   for k in pairs(STYLE_INT_RANGE) do out[k] = field(raw, k, d) end
+  out.world_monster_off = M.monster_off_field(raw.world_monster_off)
   return out
 end
 
