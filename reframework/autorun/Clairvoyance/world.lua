@@ -242,7 +242,7 @@ function M.new(a, reads, io)
     eff_builds = 0, item_list_builds = 0, held_rounds = 0,
     shop_index_runs = 0, chest_kinds_calls = 0,
     reserved_reused = 0, reserved_reads = 0 }
-  local res_path = nil
+  local res_reused = false
   local S
 
   local function new_session()
@@ -258,7 +258,7 @@ function M.new(a, reads, io)
       route_cid = nil, route_name = nil, route_cache = nil,
       sent = {}, walk_i = 0, walk_n = 0, walk_acc = {},
       -- SPEC 31: the reserved rows kept while the selector signature holds
-      res_rows = nil, res_sig = nil, res_at = nil }
+      res = nil }
   end
   S = new_session()
   w.spawned = {}
@@ -463,6 +463,8 @@ function M.new(a, reads, io)
   -- next round clears it; call() adds up the ACCUM names over the round
   -- instead of keeping the last call's time.
   local ACCUM = { schedule_pos = true }
+  -- reads that run only on some rounds: their timing is cleared each round
+  local CONDITIONAL_READS = { "reserved_rows", "reserved_sig" }
   local STEP_KEY = setmetatable({}, { __index = function(t, n)
     local k = "step_" .. n
     t[n] = k
@@ -1326,7 +1328,8 @@ function M.new(a, reads, io)
       lapped[i] = nil
     end
     for k in pairs(ACCUM) do stats.ms[k] = nil end
-    stats.ms.reserved_rows, stats.ms.reserved_sig = nil, nil
+    for _, k in ipairs(CONDITIONAL_READS) do stats.ms[k] = nil end
+    res_reused = false
     local any_rec = tg.chests or tg.tokens or tg.beetles
     local need_shops = tg.search or tg.shops
     local t = clock()
@@ -1346,18 +1349,15 @@ function M.new(a, reads, io)
     t = clock()
     local rows
     local sig_ok, sig = call("reserved_sig")
-    if sig_ok and type(sig) == "string" and sig == S.res_sig and S.res_rows ~= nil
-      and now - S.res_at < M.K.RESERVED_MAX_AGE then
-      rows = S.res_rows
-      res_path = "reused"
+    if not (sig_ok and type(sig) == "string") then sig = nil end
+    local res = S.res
+    if sig ~= nil and res ~= nil and sig == res.sig
+      and now - res.at < M.K.RESERVED_MAX_AGE then
+      rows = res.rows
+      res_reused = true
     else
       rows = table_read("reserved_rows")
-      res_path = "read"
-      if rows ~= nil and sig_ok and type(sig) == "string" then
-        S.res_rows, S.res_sig, S.res_at = rows, sig, now
-      else
-        S.res_rows, S.res_sig, S.res_at = nil, nil, nil
-      end
+      S.res = (rows ~= nil and sig ~= nil) and { rows = rows, sig = sig, at = now } or nil
     end
     lap("reserved", t)
     t = clock()
@@ -1738,7 +1738,7 @@ function M.new(a, reads, io)
     committed = true
     if again then last_round = nil end
     stats.rounds = stats.rounds + 1
-    if res_path == "reused" then stats.reserved_reused = stats.reserved_reused + 1
+    if res_reused then stats.reserved_reused = stats.reserved_reused + 1
     else stats.reserved_reads = stats.reserved_reads + 1 end
     if dirty and (last_save == nil or now - last_save >= M.K.SAVE_EVERY) then
       do_save("round", now)
@@ -2382,38 +2382,47 @@ function M.game_reads()
     return out
   end
 
-  -- A row array's get_Count; -1 for a missing array or unreadable count.
-  local function sig_count(info)
-    local n = C(G(info, "_BasicRowDatas"), "get_Count")
-    if type(n) == "number" then return n end
-    return -1
+  local function addr_of(x) return x:get_address() end
+
+  -- One selector's signature inputs, read with plain calls under one pcall
+  -- (the caller): the table address, with each spec's row count left in
+  -- counts (-1 for a missing array or an unreadable count). nil for no Table.
+  local function read_selector_sig(sel, counts)
+    local tbl = sel:get_field("<Table>k__BackingField")
+    if tbl == nil then return nil end
+    local addr = math.tointeger(addr_of(tbl))
+    if addr == nil then error("table address unreadable") end
+    for i, spec in ipairs(RESERVED_SPECS) do
+      local info = tbl:get_field(spec[1])
+      local arr = info ~= nil and info:get_field("_BasicRowDatas") or nil
+      local n = arr ~= nil and arr:call("get_Count") or nil
+      counts[i] = type(n) == "number" and n or -1
+    end
+    return addr
   end
 
-  local function sig_addr(o) return o:get_address() end
+  local sig_counts = {}
 
-  local function sig_selector(sel, _, acc)
-    acc.n = acc.n + 1
-    local tbl = G(sel, "<Table>k__BackingField")
-    if tbl == nil then
-      acc.parts[#acc.parts + 1] = "0"
+  local function sig_selector(sel, _, parts)
+    local ok, addr = pcall(read_selector_sig, sel, sig_counts)
+    if not ok then error(addr, 0) end
+    if addr == nil then
+      parts[#parts + 1] = "0"
       return
     end
-    local aok, a = pcall(sig_addr, tbl)
-    local addr = aok and math.tointeger(a) or nil
-    if addr == nil then error("table address unreadable") end
-    acc.parts[#acc.parts + 1] = string.format("%x:%d:%d", addr,
-      sig_count(G(tbl, "_GimmickSetInfo")), sig_count(G(tbl, "_EnemySetInfo")))
+    parts[#parts + 1] = string.format("%x:%s", addr, table.concat(sig_counts, ":", 1, #RESERVED_SPECS))
   end
 
   -- Cheap change signal for the reserved selector list (SPEC 31.3.1): the
-  -- selector count, then per selector 0 or address:gimmick count:enemy count.
+  -- selector count, then per selector 0 or address:count per spec.
   function R.reserved_sig()
-    local acc = { n = 0, parts = {} }
+    local parts = {}
     local gm = single("app.GenerateManager")
     local ok = each(G(G(gm, "_ReserveManager"), "_ReservedGenerateSelector"),
-      sig_selector, acc)
+      sig_selector, parts)
     if not ok then error("reserved selectors unreadable") end
-    return acc.n .. (#acc.parts > 0 and "," or "") .. table.concat(acc.parts, ",")
+    table.insert(parts, 1, #parts)
+    return table.concat(parts, ",")
   end
 
   function R.loaded_gimmicks()
@@ -2545,8 +2554,6 @@ function M.game_reads()
   local MAX_DEPTH = 16
 
   local function full_name(x) return x:get_type_definition():get_full_name() end
-  local function addr_of(x) return x:get_address() end
-
   local function node_kind(x)
     local ok, n = pcall(full_name, x)
     if not ok or type(n) ~= "string" then return nil end

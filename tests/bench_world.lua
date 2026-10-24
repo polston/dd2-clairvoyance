@@ -164,9 +164,9 @@ local TG = { chests = true, treasure = true, tokens = true, beetles = true,
 
 local w = world.new(f.adapter, f.reads, f.io)
 local t = 0
-local function round()
+local function round(new_sig)
   t = t + 10
-  bench_sig = bench_sig + 1
+  if new_sig ~= false then bench_sig = bench_sig + 1 end
   w:poke()
   assert(w:refresh(t, true, TG), "round did not run")
   local ms = w:stats().ms
@@ -212,19 +212,12 @@ end
 print(string.format("%-22s %10.3f", "(sum of step_*)", sum))
 
 -- read rounds against reuse rounds: 20 pairs, a new signature then the same one
-local function pair_round(new_sig)
-  t = t + 10
-  if new_sig then bench_sig = bench_sig + 1 end
-  w:poke()
-  assert(w:refresh(t, true, TG), "round did not run")
-  return w:stats().ms.step_reserved
-end
 local st0 = w:stats()
 local r0, u0 = st0.reserved_reads, st0.reserved_reused
 local read_sum, reuse_sum = 0, 0
 for _ = 1, 20 do
-  read_sum = read_sum + pair_round(true)
-  reuse_sum = reuse_sum + pair_round(false)
+  read_sum = read_sum + round(true).step_reserved
+  reuse_sum = reuse_sum + round(false).step_reserved
 end
 local st1 = w:stats()
 print(string.format("reserved: read rounds %.3f ms, reuse rounds %.3f ms, reads %d, reused %d",
