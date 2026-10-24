@@ -3669,5 +3669,84 @@ do
     and stats.grid_builds == gb2 and stats.cell_entries.monster == 2)
 end
 
+-- first token (SPEC 28.9.3)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local Q = core.parse_query
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = false, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(over)
+    local s = {}
+    for k, v in pairs(SHB) do s[k] = v end
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  local function keyset(ms)
+    local t = {}
+    for _, m in ipairs(ms) do t[m.key] = m end
+    return t
+  end
+  local function keys(ms)
+    local t = {}
+    for i, m in ipairs(ms) do t[i] = m.key end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  local function ft() return { uid = "t1", pos = P(5, 0, 5), name = "Finder's Token spot",
+    state = "collected", first_seeker = true } end
+  local function chest(uid, x) return { uid = uid, pos = P(x), state = "unopened" } end
+  for _, pa in ipairs({ { "uncached", core.world_markers },
+    { "cached", core.world_markers_cached } }) do
+    local tag = " [" .. pa[1] .. "]"
+    local w = { first_token = ft() }
+    local ms, panel = pa[2](w, sh(), O, {})
+    local m = keyset(ms)["w:tok1:t1"]
+    check("tok1 shown" .. tag, m ~= nil)
+    check("tok1 cat token" .. tag, m ~= nil and m.cat == "token")
+    check("tok1 not done" .. tag, m ~= nil and not m.done and not m.faded and not m.hidden)
+    check("tok1 not counted" .. tag, panel.token.shown == 0 and panel.token.known == 0)
+    check("tok1 not in panel rows" .. tag, #panel.token.entries == 0)
+    check("tok1 panel first" .. tag, panel.token.first ~= nil
+      and panel.token.first.key == "w:tok1:t1")
+    check("tok1 marker fields" .. tag, m ~= nil and m.first_seeker == true
+      and m.world_ord == nil and m.pos.x == 5 and m.pos.z == 5
+      and m.label == "Finder's Token spot")
+    check("tok1 absent without the world entry" .. tag,
+      keyset((pa[2]({ chests = { chest("c", 1) } }, sh(), O, {})))["w:tok1:t1"] == nil)
+    ms = pa[2](w, sh({ world_max_markers = 0 }), O, {})
+    check("tok1 cap 0" .. tag, keyset(ms)["w:tok1:t1"] ~= nil)
+    -- no cap slot: the kept chests are the same with and without it
+    local cw = { chests = { chest("ca", 1), chest("cb", 2), chest("cc", 3) } }
+    local base = pa[2](cw, sh({ world_max_markers = 2 }), O, {})
+    cw = { chests = cw.chests, first_token = ft() }
+    local with = pa[2](cw, sh({ world_max_markers = 2 }), O, {})
+    check("tok1 takes no cap slot" .. tag, keys(base) == "w:chest:ca,w:chest:cb"
+      and keys(with) == "w:chest:ca,w:chest:cb,w:tok1:t1")
+    -- searches do not filter it
+    local gw = { first_token = ft(), monsters = { { uid = "g", cid = 1, name = "Goblin", pos = P(2) } } }
+    ms = pa[2](gw, sh({ search = Q("seeker") }), O, {})
+    check("tok1 stays under a query" .. tag, keyset(ms)["w:tok1:t1"] ~= nil)
+    ms = pa[2](gw, sh({ search = Q("goblin") }), O, {})
+    check("tok1 stays under another query" .. tag,
+      keys(ms) == "w:mon:g,w:tok1:t1")
+    -- Tokens on: the spot draws once, as the first token
+    local tw = { first_token = ft(), tokens = { { uid = "t1", pos = P(5, 0, 5), name = "Token",
+      state = "collected" }, { uid = "t2", pos = P(9), name = "Other", state = "not" } } }
+    ms, panel = pa[2](tw, sh({ world_tokens = true, world_show_opened = true }), O, {})
+    local at_spot = 0
+    for _, mm in ipairs(ms) do
+      if mm.pos.x == 5 and mm.pos.z == 5 then at_spot = at_spot + 1 end
+    end
+    check("tok1 draws once with Tokens on" .. tag, at_spot == 1
+      and keyset(ms)["w:tok1:t1"] ~= nil and keyset(ms)["w:tok:t1"] == nil
+      and keyset(ms)["w:tok:t2"] ~= nil)
+    check("tok1 token still known" .. tag, panel.token.known == 2 and panel.token.shown == 1)
+    ms = pa[2](w, sh({ world_first_token = false }), O, {})
+    check("tok1 off" .. tag, keyset(ms)["w:tok1:t1"] == nil)
+  end
+end
+
 if failures > 0 then os.exit(1) end
 print("core_test: all OK")

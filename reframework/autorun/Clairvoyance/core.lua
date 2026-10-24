@@ -1154,7 +1154,7 @@ end
 
 -- Uncached candidates: every included entry counts in `known`; with a
 -- query only the matching ones become candidates (before make_cand).
-local function world_candidates(world, show, boxes, q)
+local function world_candidates(world, show, boxes, q, ft)
   local cands, known = {}, {}
   local ctx = world_ctx(show, boxes)
   local small_ok = show.world_small_monsters == true
@@ -1171,7 +1171,9 @@ local function world_candidates(world, show, boxes, q)
           if cat == "monster" and e.small == true then
             known.monster_small = known.monster_small + 1
           end
-          if entry_search(cat, e, drops, gc, q, ctx) then
+          -- the ordinary token at the first token's spot is skipped (it still counts)
+          local skip = ft and ft.skip_uid ~= nil and cat == "token" and e.uid == ft.skip_uid
+          if not skip and entry_search(cat, e, drops, gc, q, ctx) then
             cands[#cands + 1] = make_cand(cat, e, ctx)
           end
         end
@@ -1188,6 +1190,19 @@ local function world_candidates(world, show, boxes, q)
     for _, c in ipairs(npc_cands(matches, ctx)) do cands[#cands + 1] = c end
   end
   return cands, known, shop_of
+end
+
+-- SPEC 28.9.3: the First Seeker's Token spot, from world.first_token while
+-- show.world_first_token ~= false. One candidate in the token category with no
+-- world_ord (map GUID slot 0), held apart from `kept`: no cap slot, no toggle
+-- or query filter, never done, faded or hidden.
+local function first_token_cand(world, show)
+  local t = world.first_token
+  if show.world_first_token == false or type(t) ~= "table" or not valid_pos(t.pos) then
+    return nil
+  end
+  return { cat = "token", qids = {}, key = "w:tok1:" .. tostring(t.uid),
+    pos = t.pos, label = tostring(t.name), skip_uid = t.uid }
 end
 
 local function world_cap(show)
@@ -1282,7 +1297,7 @@ end
 -- the cap left out an `offmap` entry (SPEC 20.5.5, 20.5.7); neither is a
 -- marker or counted in `shown`.
 local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-                            quest_cids)
+                            quest_cids, ft)
   -- Nearest win the cap (ties by key); no origin: (category, key) order.
   local function by_pick(x, y)
     if has_origin then
@@ -1398,6 +1413,14 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       end
     end
   end
+  -- SPEC 28.9.3: the First Seeker's Token spot goes last, after the cap trim
+  -- and the leftover fill; the token panel's counts and entries are untouched.
+  if ft then
+    local m = { key = ft.key, cat = "token", qids = ft.qids, pos = pos_copy(ft.pos),
+      label = ft.label, first_seeker = true }
+    markers[#markers + 1] = m
+    panel.token.first = m
+  end
   return markers, panel, merged, cover
 end
 
@@ -1415,7 +1438,8 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
 
   local kept, merged, shops, shop_all, hits = {}, {}, {}, {}, {}
   local shops_on = show.world_shops == true
-  local cands, known, shop_of = world_candidates(world, show, boxes, show.search)
+  local ft = first_token_cand(world, show)
+  local cands, known, shop_of = world_candidates(world, show, boxes, show.search, ft)
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = known[cat] end
   panel.monster.small_known = known.monster_small
   for _, c in ipairs(cands) do
@@ -1427,7 +1451,7 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids)
+    quest_cids, ft)
 end
 
 -- Cached entry point (SPEC 17.10.10). A 256-unit grid of the world's
@@ -1584,7 +1608,10 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
     end
   end
   local drops = q ~= nil and world.drops or nil
+  local ft = first_token_cand(world, show)
+  local skip_uid = ft and ft.skip_uid   -- its ordinary token is skipped (still known)
   local function take(cat, e)
+    if skip_uid ~= nil and cat == "token" and e.uid == skip_uid then return end
     if not entry_search(cat, e, drops, g, q, ctx) then return end
     stats.cand_builds = stats.cand_builds + 1
     local c = make_cand(cat, e, ctx)
@@ -1650,7 +1677,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids)
+    quest_cids, ft)
 end
 
 -- The settlement nearest to pos by 3D distance (first wins a tie), or nil.
