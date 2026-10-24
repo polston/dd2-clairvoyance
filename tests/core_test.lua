@@ -1824,7 +1824,11 @@ do
       t[#t + 1] = cat .. ":" .. p[cat].shown .. "/" .. p[cat].known .. ":" .. ser(p[cat].entries)
     end
     for _, k in ipairs(p.monster.kinds or {}) do
-      t[#t + 1] = tostring(k.kind) .. ":" .. tostring(k.small) .. ":" .. tostring(k.shown) .. ":" .. tostring(k.known)
+      t[#t + 1] = tostring(k.kind) .. ":" .. tostring(k.fam) .. ":" .. tostring(k.small) .. ":" .. tostring(k.shown) .. ":" .. tostring(k.known)
+    end
+    for _, f in ipairs(p.monster.families or {}) do
+      t[#t + 1] = "F" .. tostring(f.fam) .. ":" .. tostring(f.small) .. ":" .. tostring(f.name) .. ":"
+        .. tostring(f.shown) .. ":" .. tostring(f.known) .. ":" .. tostring(f.n_kinds)
     end
     return table.concat(t, "#")
   end
@@ -1845,7 +1849,7 @@ do
       elseif r == 4 then rw.beetles[#rw.beetles + 1] = { uid = "b" .. i, pos = rp(), name = "B" .. i,
         state = "not" }
       elseif r == 5 then rw.monsters[#rw.monsters + 1] = { uid = "m" .. i, cid = i, name = "M" .. i,
-        kind = "K" .. (i % 7), pos = rp(), small = math.random() < 0.3 }
+        kind = "K" .. (i % 7), fam = "f" .. (i % 3), pos = rp(), small = math.random() < 0.3 }
       else rw.sellers[#rw.sellers + 1] = { shop = i, item = i, item_name = "I" .. i, cid = i,
         npc = "N", qids = {}, quest = "", pos = rp(), maybe_locked = false, discovered = true } end
     end
@@ -1895,7 +1899,7 @@ do
     do   -- both paths agree under a kind off set
       local so = {}
       for k, v in pairs(s) do so[k] = v end
-      so.world_monster_off = { large = { K3 = true }, small = { K5 = true } }
+      so.world_monster_off = { large = { K3 = true }, small = { K5 = true, ["fam:f1"] = true } }
       local o1, q1 = core.world_markers(rw, so, origin, boxes, qc)
       local o2, q2 = core.world_markers_cached(rw, so, origin, boxes, qc)
       if ser(o1) ~= ser(o2) or panel_ser(q1) ~= panel_ser(q2) then all_same = false end
@@ -3830,6 +3834,77 @@ do
     and core.family_name({ "Monster" }) == "Monster")
   check("fam: family_name empty is Other", type(core.family_name) == "function"
     and core.family_name({}) == "Other")
+
+  -- per-family counts (SPEC 30.5.3, 30.5.4)
+  local function fam_ser(p)
+    local t = {}
+    if type(p.monster.families) ~= "table" then return "none" end
+    for i, f in ipairs(p.monster.families) do
+      t[i] = tostring(f.fam) .. ":" .. tostring(f.small) .. ":" .. tostring(f.name) .. ":"
+        .. tostring(f.shown) .. ":" .. tostring(f.known) .. ":" .. tostring(f.n_kinds)
+    end
+    return table.concat(t, ",")
+  end
+  local function kfam_ser(p)
+    local t = {}
+    if type(p.monster.kinds) ~= "table" then return "none" end
+    for i, k in ipairs(p.monster.kinds) do
+      t[i] = tostring(k.kind) .. "/" .. tostring(k.fam) .. ":" .. tostring(k.small) .. ":"
+        .. tostring(k.shown) .. ":" .. tostring(k.known)
+    end
+    return table.concat(t, ",")
+  end
+  local function cfw()
+    local w = fmw()
+    w.monsters[#w.monsters + 1] = { uid = "c", cid = 4, name = "Cyclops", kind = "Cyclops",
+      fam = "ch250", pos = P(5), small = false }
+    return w
+  end
+  local want_fk = "Cyclops/ch250:false:1:1,Goblin/ch220:true:1:1,Hobgoblin/ch220:true:1:1,Wolf/ch223:true:1:1"
+  local want_fam = "ch250:false:Cyclops:1:1:1,ch220:true:Goblin:2:2:2,ch223:true:Wolf:1:1:1"
+  local want_fam_off = "ch250:false:Cyclops:1:1:1,ch220:true:Goblin:0:2:2,ch223:true:Wolf:1:1:1"
+  local fam_paths_p = {}
+  for _, pa in ipairs(paths) do
+    local tag = " [" .. pa[1] .. "]"
+    local _, p = pa[2](cfw(), kshow(nil), O, {})
+    fam_paths_p[#fam_paths_p + 1] = p
+    check("fam panel: kind rows and families" .. tag, type(p.monster.families) == "table"
+      and kfam_ser(p) == want_fk and fam_ser(p) == want_fam)
+    local _, po = pa[2](cfw(), kshow({ small = { ["fam:ch220"] = true } }), O, {})
+    check("fam panel: family off shows 0 of known" .. tag, type(po.monster.families) == "table"
+      and fam_ser(po) == want_fam_off)
+    local mm = { monsters = {
+      { uid = "a", cid = 1, name = "Goblin", kind = "Goblin", fam = "ch220", pos = P(2), small = true },
+      { uid = "b", cid = 2, name = "Monster", kind = "Monster", fam = "ch220", pos = P(3), small = true },
+      { uid = "c", cid = 3, name = "Wolf", kind = "Wolf", fam = "ch223", pos = P(4), small = true },
+      { uid = "d", cid = 4, name = "Monster", kind = "Monster", fam = "ch223", pos = P(5), small = true } } }
+    local _, pm = pa[2](mm, kshow(nil), O, {})
+    local mon_fams = {}
+    for _, k in ipairs(pm.monster.kinds or {}) do
+      if k.kind == "Monster" then mon_fams[#mon_fams + 1] = tostring(k.fam) end
+    end
+    check("fam panel: Monster in two families is two rows" .. tag,
+      table.concat(mon_fams, ",") == "ch220,ch223")
+    -- fixtures without fam
+    local _, pq = pa[2](kmw(), kshow(nil), O, {})
+    local all_q = type(pq.monster.kinds) == "table" and #pq.monster.kinds == 5
+    for _, k in ipairs(pq.monster.kinds or {}) do
+      if k.fam ~= "?" then all_q = false end
+    end
+    check("fam panel: kinds without fam carry ?" .. tag, all_q)
+    check("fam panel: no-fam fixture has one Other row per class" .. tag,
+      type(pq.monster.families) == "table"
+      and fam_ser(pq) == "?:false:Other:2:2:2,?:true:Other:3:3:3")
+    local qw = kmw()
+    qw.monsters[#qw.monsters + 1] = { uid = "z", cid = 9, name = "Z", kind = "Zed", fam = 5,
+      pos = P(7), small = false }
+    local _, pz = pa[2](qw, kshow(nil), O, {})
+    check("fam panel: fam of 5 counts in the ? row" .. tag, type(pz.monster.families) == "table"
+      and fam_ser(pz) == "?:false:Other:3:3:3,?:true:Other:3:3:3")
+  end
+  check("fam panel: both paths agree", type(fam_paths_p[1].monster.families) == "table"
+    and fam_ser(fam_paths_p[1]) == fam_ser(fam_paths_p[2])
+    and kfam_ser(fam_paths_p[1]) == kfam_ser(fam_paths_p[2]))
 
   -- per-kind counts (SPEC 29.5.3)
   local function kinds_ser(p)

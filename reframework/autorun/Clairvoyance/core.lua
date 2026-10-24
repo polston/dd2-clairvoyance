@@ -633,8 +633,10 @@ end
 -- SPEC 29.5.3: count one known monster into kc = { large = {}, small = {} }.
 local function count_kind(kc, e)
   local cls = kc[class_of(e.small == true)]
-  local k = kind_of(e)
-  cls[k] = (cls[k] or 0) + 1
+  local f, k = fam_of(e), kind_of(e)
+  local fc = cls[f]
+  if not fc then fc = {}; cls[f] = fc end
+  fc[k] = (fc[k] or 0) + 1
 end
 
 local function monster_label(e)
@@ -1440,7 +1442,9 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       m.fam = c.fam
       if c.small then panel.monster.small_shown = panel.monster.small_shown + 1 end
       local cls = shown[class_of(c.small)]
-      cls[c.kind] = (cls[c.kind] or 0) + 1
+      local fc = cls[c.fam]
+      if not fc then fc = {}; cls[c.fam] = fc end
+      fc[c.kind] = (fc[c.kind] or 0) + 1
     end
     if c.cat == "shop" then
       if #c.sells_for > 0 then m.hover = with_sells(c) end
@@ -1454,18 +1458,39 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
   for _, mg in ipairs(merged) do
     mg.line = with_sells(mg.cand)
   end
-  -- SPEC 29.5.3: per-kind counts, large first then by kind
-  local kinds = {}
+  -- SPEC 29.5.3, 30.5.3, 30.5.4: per-(class, fam, kind) rows and per-family
+  -- rows, large first, then family name, then fam, then kind.
+  local kinds, families = {}, {}
   for _, class in ipairs({ "large", "small" }) do
-    local names = {}
-    for k in pairs(kcounts[class]) do names[#names + 1] = k end
-    table.sort(names)
-    for _, k in ipairs(names) do
-      kinds[#kinds + 1] = { kind = k, small = class == "small",
-        shown = shown[class][k] or 0, known = kcounts[class][k] }
+    local rows = {}
+    for f, fc in pairs(kcounts[class]) do
+      local names = {}
+      for k in pairs(fc) do names[#names + 1] = k end
+      table.sort(names)
+      local sf = shown[class][f] or {}
+      local row = { fam = f, small = class == "small", shown = 0, known = 0,
+        n_kinds = #names, kinds = {} }
+      row.name = (f == "?") and "Other" or M.family_name(names)
+      for _, k in ipairs(names) do
+        local kr = { kind = k, fam = f, small = row.small, shown = sf[k] or 0, known = fc[k] }
+        row.kinds[#row.kinds + 1] = kr
+        row.shown = row.shown + kr.shown
+        row.known = row.known + kr.known
+      end
+      rows[#rows + 1] = row
+    end
+    table.sort(rows, function(a, b)
+      if a.name ~= b.name then return a.name < b.name end
+      return a.fam < b.fam
+    end)
+    for _, row in ipairs(rows) do
+      for _, kr in ipairs(row.kinds) do kinds[#kinds + 1] = kr end
+      families[#families + 1] = { fam = row.fam, small = row.small, name = row.name,
+        shown = row.shown, known = row.known, n_kinds = row.n_kinds }
     end
   end
   panel.monster.kinds = kinds
+  panel.monster.families = families
   if shop_all and #shop_all > 0 then
     local entries = panel.shop.entries
     for _, c in ipairs(shop_all) do
