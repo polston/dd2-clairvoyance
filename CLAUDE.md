@@ -36,11 +36,14 @@ here and never pushed; roadmap and spec edits are committed there, not in this r
 4. Commit messages: no backticks or `$(...)` in double-quoted shell strings; use
    `git commit -F -` fed by a single-quoted heredoc.
 5. Release zips carry the places file (`Clairvoyance_places.json`), the hints file
-   (`Clairvoyance_hints.json`) and the icon
+   (`Clairvoyance_hints.json`), the quests file (`Clairvoyance_quests.json`) and the icon
    folder (`reframework/images/Clairvoyance/icons/`), never
    the extractors (`tools/`) or the pak key. The icon folder is generated from
    game files with `tools/extract_icons.py` and the user's own key, committed,
-   and regenerated after a game patch; never hand-edit the pictures. The key lives only in the
+   and regenerated after a game patch; never hand-edit the pictures. The quests
+   file is generated from game files with `tools/extract_quests.py` and the
+   user's own key, committed, and regenerated after a game patch, like the icon
+   folder. The key lives only in the
    gitignored `tools/pak_key.local.txt`; it is never printed, committed or
    zipped.
 6. CI (`.github/workflows/ci.yml`) runs `check.ps1 -SkipProvenance` and builds the zip
