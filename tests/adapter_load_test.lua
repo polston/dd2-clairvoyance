@@ -2900,8 +2900,14 @@ do
   rel_world()
   ai.refresh_items()
   ai.set_item_quests({ [310] = { 20090 } })
-  assert(ai.item_related()[310][1] == ai.quest_name(20090) and #ai.item_related()[310] == 1,
-    "RS1 static only")
+  assert(ai.quest_name(20090) ~= nil and ai.seen_quest_name(20090) == nil,
+    "RS1 setup: a named quest the player has not met")
+  assert(ai.item_related()[310][1] == "another quest" and #ai.item_related()[310] == 1,
+    "RS1 static only, reveal off: the gate-name rule hides the full name")
+  assert(ai.item_related(true)[310][1] == ai.quest_name(20090),
+    "RS1 static only, reveal on: the full name")
+  assert(ai.item_related()[310][1] == "another quest",
+    "RS1 the reveal flag changes the cached titles back")
   ai.set_item_quests({ [300] = { 20090, 20091 } })
   ai.invalidate_items()
   rel_world()
@@ -2911,7 +2917,7 @@ do
   assert(#live1 == 2, "RS2 setup: live has two for item 300")
   ai.set_item_quests({ [300] = { 20091, 20077 } })
   local u = ai.item_related()[300]
-  assert(#u == 3 and u[1] == live1[1] and u[2] == live1[2] and u[3] == "Quest 20077"
+  assert(#u == 3 and u[1] == live1[1] and u[2] == live1[2] and u[3] == "another quest"
     and ai.quest_name(20077) == nil, "RS2 union: live first, static appended, no repeat")
   ai.set_item_quests({ [311] = { 20090 } })
   assert(ai.item_related()[311] ~= nil and #ai.item_related()[300] == 2,

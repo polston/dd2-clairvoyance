@@ -529,7 +529,7 @@ do
     return require("Clairvoyance.itemmenu").create{
       sdk = sdk, draw = draw,
       enabled = function() return settings.enabled and settings.inventory_quest_marks end,
-      related = adapter.item_related,
+      related = function() return adapter.item_related(settings.reveal_gate_names) end,
       quest_flag = function(d) return d ~= nil and d:get_field("_SubCategory") == 4 end,
       color_abgr = function() return A.argb_to_abgr(settings.color_quest_item) end,
       screen_h = function() local sz = imgui.get_display_size(); return sz and sz.y or 1080 end,
@@ -538,15 +538,18 @@ do
       imgui = imgui,
       style = function() local st = wt.styles.items; return st.on, st.color, st.width end,
       label_color = function() return A.argb_to_abgr(settings.color_quest_item) end,
-      -- the label font, loaded once on first use (a failure is cached as false)
+      -- the label font, one per pixel size (a failure is cached as false)
       font = (function()
-        local cached = nil
+        local cache = {}
         return function()
+          local sz = imgui.get_display_size()
+          local k = (sz and sz.y or 1080) / 1080
+          local px = math.floor(22 * k + 0.5)
+          local cached = cache[px]
           if cached == nil then
-            local sz = imgui.get_display_size()
-            local k = (sz and sz.y or 1080) / 1080
-            local okf, f = pcall(imgui.load_font, nil, math.floor(22 * k + 0.5))
+            local okf, f = pcall(imgui.load_font, nil, px)
             cached = (okf and f) or false
+            cache[px] = cached
           end
           return cached or nil
         end
@@ -1646,9 +1649,9 @@ local function install_debug()
             end
           end
           -- v14 (SPEC 23.4.8): every style and route key, validated
-          if not hit and (key:find("^style_") or key:find("^outline_")
-            or key:find("^route_") or key == "names_color")
-            and su.set_key(settings, key, v) then
+          -- v14: every remaining key (style, outline, route, names, colors,
+          -- icons, coordinates), validated; a non-string key is ignored
+          if not hit and type(key) == "string" and su.set_key(settings, key, v) then
             want_update = true; last_tick = 0.0; save_settings()
           end
         end
@@ -1775,7 +1778,8 @@ local function draw_detail(label, rec, qid, j, ja, spoilers)
     -- v14 (SPEC 22.11.2): the Hints node. Opening it is the spoiler gate;
     -- the step in its id starts a new step's node closed.
     local hq = wt.hints[qid]
-    if hq ~= nil and rec ~= nil and rec.cat ~= "locked" and adapter.is_side(qid) then
+    if hq ~= nil and require("Clairvoyance.npcs").has_text(hq)
+        and rec ~= nil and rec.cat ~= "locked" and adapter.is_side(qid) then
       local jr = j[qid]
       local idx = rec.cat == "in_progress" and jr ~= nil
         and type(jr.step_index) == "number" and jr.step_index or nil
@@ -2750,17 +2754,19 @@ wt.coords_frame = function()
     local gp = pc ~= nil and pc:call("get_GlobalPosition") or nil
     if c ~= nil and gp ~= nil then
       -- up and to the right of the cursor, clear of the hover label above it
-      wt.coord_text(string.format("X %.0f  Z %.0f", c.x, c.z),
-        gp.x + wt.CURSOR_DX, gp.y + wt.CURSOR_DY)
+      local sx, sy = wt.style.layout_to_screen(gp.x + wt.CURSOR_DX, gp.y + wt.CURSOR_DY,
+        wt.dw, wt.dh)
+      wt.coord_text(string.format("X %.0f  Z %.0f", c.x, c.z), sx, sy)
     end
   elseif settings.coords_minimap and settings.show_minimap and ui_map == nil
       and wt.mini_vis and wt.mini_t ~= nil and now - wt.mini_t < 0.2
       and (wt.mini_fade or 0) > 0.02 and player_origin ~= nil then
     -- below and to the left of the minimap circle, clear of its rim;
     -- fades out with the minimap
+    local sx, sy = wt.style.layout_to_screen(wt.mini_x + wt.MINI_DX, wt.mini_y + wt.MINI_DY,
+      wt.dw, wt.dh)
     wt.coord_text(string.format("X %.0f  Z %.0f  H %.0f",
-      player_origin.x, player_origin.z, player_origin.y),
-      wt.mini_x + wt.MINI_DX, wt.mini_y + wt.MINI_DY, wt.mini_fade)
+      player_origin.x, player_origin.z, player_origin.y), sx, sy, wt.mini_fade)
   end
 end
 -- Outlined text, its top-left corner at x, y; a (0..1, default 1)
@@ -2768,7 +2774,8 @@ end
 wt.coord_text = function(s, x, y, a)
   a = math.min(1, math.max(0, a or 1))
   local alpha = math.floor(0xFF * a + 0.5) << 24
-  wt.style.text(draw, s, x, y, alpha | 0x00E8E0D0, true, 0xFF000000, 1, a)
+  wt.style.text(draw, s, x, y, alpha | 0x00E8E0D0, true, 0xFF000000,
+    wt.style.offset(1, wt.dk), a)
 end
 wt.CURSOR_DX, wt.CURSOR_DY = 18, -34
 wt.MINI_DX, wt.MINI_DY = -245, 118

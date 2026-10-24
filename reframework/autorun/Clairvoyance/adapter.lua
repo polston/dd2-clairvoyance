@@ -3491,18 +3491,28 @@ function A.make()
   function a.item_needs() return ITEM_NEEDS end
   -- v14 (SPEC 22.10.1): { [item_id] = { quest title, ... } }, cached until
   -- the next commit
-  function a.item_related()
+  function a.item_related(reveal)
+    if items.related_titles ~= nil and items.related_reveal ~= (reveal == true) then
+      items.related_titles = nil
+    end
     if items.related_titles == nil then
+      items.related_reveal = reveal == true
       local out, ids = {}, {}
       for id in pairs(items.related or {}) do ids[id] = true end
       for id in pairs(items.static_related or {}) do ids[id] = true end
       for id in pairs(ids) do
         local titles, seen = {}, {}
-        for _, src in ipairs({ items.related or {}, items.static_related or {} }) do
+        -- the live lists name quests with an in-progress need; the static
+        -- hints-file lists follow the gate-name rule (SPEC 13.3d)
+        for si, src in ipairs({ items.related or {}, items.static_related or {} }) do
           for _, q in ipairs(src[id] or {}) do
             if not seen[q] then
               seen[q] = true
-              titles[#titles + 1] = a.quest_name(q) or ("Quest " .. tostring(q))
+              if si == 1 then
+                titles[#titles + 1] = a.quest_name(q) or ("Quest " .. tostring(q))
+              else
+                titles[#titles + 1] = qnml_core.gate_name(q, a, reveal == true)
+              end
             end
           end
         end

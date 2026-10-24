@@ -140,6 +140,37 @@ do -- polyline
   check("polyline off", #calls == 1)
 end
 
+-- resolve reads each group's own override keys (final review M2)
+do
+  for _, g in ipairs(S.GROUPS) do
+    local s = { outline_on = true, outline_color = 0xFF111111, outline_width = 1 }
+    s["style_" .. g .. "_override"] = true
+    s["style_" .. g .. "_outline_on"] = false
+    s["style_" .. g .. "_outline_color"] = 0xFF222222
+    s["style_" .. g .. "_outline_width"] = 3
+    local on, color, width = S.resolve(s, g)
+    check("resolve override " .. g, on == false and color == 0xFF222222 and width == 3)
+    s["style_" .. g .. "_override"] = false
+    on, color, width = S.resolve(s, g)
+    check("resolve no override " .. g, on == true and color == 0xFF111111 and width == 1)
+  end
+  local s = { style_x_override = true, style_x_outline_width = 4 }
+  local _, _, w = S.resolve(s, "x")
+  check("resolve group outside GROUPS", w == 4)
+end
+
+-- layout_to_screen: 1920x1080 layout units -> screen pixels (final review S3)
+do
+  local x, y, k = S.layout_to_screen(960, 540, 1920, 1080)
+  check("layout identity at 1080p", x == 960 and y == 540 and k == 1)
+  x, y, k = S.layout_to_screen(960, 540, 3840, 2160)
+  check("layout 4K doubles", x == 1920 and y == 1080 and k == 2)
+  x, y = S.layout_to_screen(0, 0, 2560, 1080)
+  check("layout ultrawide centres", x == 320 and y == 0)
+  x, y = S.layout_to_screen(18, -34, 2560, 1440)
+  check("layout offsets scale", near(x, 18 * 4 / 3, 1e-9) and near(y, -34 * 4 / 3, 1e-9))
+end
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)

@@ -275,6 +275,12 @@ function M.parse_hints(t)
   return hints, errors
 end
 
+-- True when a parsed hints entry has any text to show (a quest hint or a step).
+function M.has_text(entry)
+  return type(entry) == "table"
+    and (entry.quest ~= nil or (type(entry.steps) == "table" and next(entry.steps) ~= nil))
+end
+
 -- { [item_id] = { qid, ... } } (ascending, unique) from the parsed hints.
 function M.hint_items(hints)
   local out, seen = {}, {}

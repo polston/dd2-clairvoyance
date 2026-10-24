@@ -7,7 +7,14 @@ M.GROUPS = { "startable", "in_progress", "completed", "unavailable", "locked",
   "npc_search", "route_stop", "hint_pin", "route_line", "names", "items" }
 
 local IS_GROUP = {}
-for _, g in ipairs(M.GROUPS) do IS_GROUP[g] = true end
+-- per-group key names, built once so resolve concatenates nothing per call
+local KEYS = {}
+for _, g in ipairs(M.GROUPS) do
+  IS_GROUP[g] = true
+  local p = "style_" .. g .. "_outline_"
+  KEYS[g] = { over = "style_" .. g .. "_override", on = p .. "on",
+    color = p .. "color", width = p .. "width" }
+end
 
 function M.group_of(cat)
   if cat == "shop" then return "seller" end
@@ -18,16 +25,29 @@ end
 function M.resolve(settings, group)
   local on, color, width = settings.outline_on, settings.outline_color,
     settings.outline_width
-  if group ~= nil and settings["style_" .. group .. "_override"] == true then
+  local k = group ~= nil and KEYS[group] or nil
+  if k == nil and group ~= nil then
+    -- a group outside GROUPS: build its names (rare, never in the frame loop)
     local p = "style_" .. group .. "_outline_"
-    if settings[p .. "on"] ~= nil then on = settings[p .. "on"] end
-    if settings[p .. "color"] ~= nil then color = settings[p .. "color"] end
-    if settings[p .. "width"] ~= nil then width = settings[p .. "width"] end
+    k = { over = "style_" .. group .. "_override", on = p .. "on",
+      color = p .. "color", width = p .. "width" }
+  end
+  if k ~= nil and settings[k.over] == true then
+    if settings[k.on] ~= nil then on = settings[k.on] end
+    if settings[k.color] ~= nil then color = settings[k.color] end
+    if settings[k.width] ~= nil then width = settings[k.width] end
   end
   if on == nil then on = true end
   if color == nil then color = 0xFF000000 end
   if width == nil then width = 1 end
   return on, color, width
+end
+
+-- A point in the 1920x1080 GUI layout -> screen pixels on a w x h display:
+-- uniform scale, centred (the conversion icons:to_screen applies).
+function M.layout_to_screen(x, y, w, h)
+  local k = math.min(w / 1920, h / 1080)
+  return (w - 1920 * k) / 2 + x * k, (h - 1080 * k) / 2 + y * k, k
 end
 
 function M.offset(width, k)

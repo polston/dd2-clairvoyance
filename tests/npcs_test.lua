@@ -547,6 +547,16 @@ do
   check("no row picked unmatched", m6 == false)
 end
 
+-- has_text: an items-only entry has nothing to show (final review S1)
+do
+  local h = N.parse_hints({ ["1"] = { items = { 300 } }, ["2"] = { quest = "q" },
+    ["3"] = { steps = { ["0"] = { text = "t" } } } })
+  check("has_text items only", N.has_text(h[1]) == false)
+  check("has_text quest text", N.has_text(h[2]) == true)
+  check("has_text step text", N.has_text(h[3]) == true)
+  check("has_text nil", N.has_text(nil) == false)
+end
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)
