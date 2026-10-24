@@ -940,6 +940,8 @@ function M.new(a, reads, io)
   local KEPT_ITEMS = { [77] = true, [78] = true, [81] = true }
 
   -- kinds in spec order: ng_shard, kept, quest, trap, pawn
+  local round_errs = {}
+
   local function chest_kinds(row, e, recs)
     local id = row.id
     local items = row.items or e.items
@@ -986,11 +988,14 @@ function M.new(a, reads, io)
     return nil
   end
 
+  -- mixed finish checks (some true, some false) use the "after" wording;
+  -- only an all-false set says "until"
   local function quest_text_of(quest, reveal)
     local names, seen = {}, {}
     local until_form = #quest.q > 0
     for _, p in ipairs(quest.q) do
-      local nm = core.gate_name(p[1], a, reveal)
+      local ok, nm = pcall(core.gate_name, p[1], a, reveal)
+      if not ok or type(nm) ~= "string" or nm == "" then nm = "another quest" end
       if not seen[nm] then seen[nm] = true; names[#names + 1] = nm end
       if p[2] then until_form = false end
     end
@@ -1500,6 +1505,13 @@ function M.new(a, reads, io)
     local rt0 = clock()
     local ok, res = pcall(round, now, tg)
     stats.round_ms = (clock() - rt0) * 1000
+    if not ok then
+      local msg = tostring(res)
+      if not round_errs[msg] then
+        round_errs[msg] = true
+        pcall(io.log, "round failed: " .. msg)
+      end
+    end
     if not ok or type(res) ~= "table" then return false end
     if published_on(res) and not published_on(input_tbl) then w.route_gen = w.route_gen + 1 end
     input_tbl = res

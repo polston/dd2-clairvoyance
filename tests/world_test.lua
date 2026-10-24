@@ -1058,7 +1058,7 @@ do
   end
   local recs = {
     rec({ ctx("UniqueIDContext", { UniqueID = guid("C1_0") }),
-      ctx("GmItemContext", { _IsPick = true }),
+      ctx("GmItemContext", { _IsPick = true, _IsKeep = true }),
       ctx("TreasureBoxGimmickContext", { _ItemId = 305 }) }),
     rec({ ctx("UniqueIDContext", { UniqueID = guid("T1_0") }),
       ctx("GimmickContext", { _GimmickId = 167, _FreeBit = 65536 }) }, "SaveData"),
@@ -1080,6 +1080,7 @@ do
   for _, r in ipairs(ok2 and sr or {}) do by[r.key] = r end
   check("reads: save records join chest, token and beetle",
     ok2 and #sr == 3 and by.c1_0 and by.c1_0.picked == true and by.c1_0.item == 305
+    and by.c1_0.keep == true
     and by.t1_0 and by.t1_0.free_bit == 65536 and by.b1_0 and by.b1_0.gather_num == 0)
 
   singletons["app.GenerateManager"] = obj({ _RepopManager = obj({ _Units = array({
@@ -1148,13 +1149,14 @@ do
   local r1 = { rec({ ctx("UniqueIDContext", { UniqueID = guid("C1_0") }),
     ctx("GmItemContext", { _IsPick = true }) }) }
   local r2 = { rec({ ctx("UniqueIDContext", { UniqueID = guid("C1_0") }),
-    ctx("GmItemContext", { _IsPick = false }) }) }
+    ctx("GmItemContext", { _IsPick = false, _IsKeep = false }) }) }
   singletons["app.ContextDBMS"] = obj({ OfflineDB = obj({ Records = addr_list(r1, 100) }) })
   local s1 = R.save_records()
   check("reload: first read", s1[1] and s1[1].picked == true)
   singletons["app.ContextDBMS"] = obj({ OfflineDB = obj({ Records = addr_list(r2, 200) }) })
   local s2 = R.save_records()
   check("reload: same count, new list object, records re-read", s2[1] and s2[1].picked == false)
+  check("keep: _IsKeep false reads false", s2[1] and s2[1].keep == false)
   singletons["app.ContextDBMS"] = obj({ OfflineDB = obj({ Records = addr_list(r1, 200) }) })
   check("reload: same address and count keeps the cache", R.save_records()[1].picked == false)
   R.reset()
@@ -3455,6 +3457,77 @@ do
   check("text: reveal passed false", #calls >= 1 and calls[1].reveal == false)
   text({ any = false, q = { { 1, true } } }, nm)
   check("text: reveal nil treated as false", #calls >= 1 and calls[1].reveal == false)
+
+  -- fix round 1: a missing or raising core.gate_name must not drop the round
+  do
+    local function round_with(gn)
+      core.gate_name = gn
+      local f, w = world_of({
+        prow("chest", "plain", 10, 1, 1, {}),
+        prow("chest", "qc", 10, 2, 2, { quest = { any = false, q = { { 1, true } } } }) })
+      w:refresh(0, true, on("chests"))
+      local ch = w:input() and w:input().chests
+      return ch, f
+    end
+    local ch = round_with(nil)
+    check("gate_name nil: plain chest survives", ch ~= nil and find(ch, "plain") ~= nil)
+    check("gate_name nil: quest chest reads another quest",
+      ch ~= nil and find(ch, "qc") ~= nil and find(ch, "qc").quest_text == "after another quest")
+    ch = round_with(function() error("boom") end)
+    check("gate_name raises: plain chest survives", ch ~= nil and find(ch, "plain") ~= nil)
+    check("gate_name raises: quest chest reads another quest",
+      ch ~= nil and find(ch, "qc") ~= nil and find(ch, "qc").quest_text == "after another quest")
+    ch = round_with(function() return 5 end)
+    check("gate_name non-string: another quest",
+      ch ~= nil and find(ch, "qc").quest_text == "after another quest")
+    ch = round_with(function() return "" end)
+    check("gate_name empty: another quest",
+      ch ~= nil and find(ch, "qc").quest_text == "after another quest")
+    core.gate_name = function(qid, adapter, reveal) return adapter.quest_name(qid) or "another quest" end
+  end
+
+  -- fix round 1: a failing round is logged once per distinct message
+  do
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "p", 10, 1, 1, { items = { { id = 7, n = 1 } } }) }) } })
+    f.logs = {}
+    f.io.log = function(m) f.logs[#f.logs + 1] = m end
+    local w = f.new()
+    f.afail.item_name = true
+    w:refresh(0, true, on("chests"))
+    w:refresh(10, true, on("chests"))
+    local n = 0
+    for _, m in ipairs(f.logs) do if tostring(m):find("round failed", 1, true) then n = n + 1 end end
+    check("round error: logged once per distinct message", n == 1)
+  end
+
+  -- fix round 1: a learned chest reloaded from disk at a moved position
+  do
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "m1", 10, 1, 1, { items = { { id = 77, n = 1 } }, trap = true, pawn = true,
+        quest = { any = true, q = { { 1, true } } } }) }),
+      [K.ATLAS] = { version = K.FILE_VERSION, pak = "1:1", entries = {
+        m1 = { k = "chest", id = 10, x = 50, y = 0, z = 60 } } } } })
+    local w = f.new()
+    w:refresh(0, true, on("chests"))
+    local c = find(w:input().chests, "m1")
+    check("reloaded: moved position and row kinds",
+      c ~= nil and c.pos.x == 50 and kinds_of(c) == "kept,quest,trap,pawn")
+  end
+
+  -- fix round 1: a chest with no static row
+  do
+    local f, w = world_of({}, { { key = "n2_0", picked = false, keep = true } })
+    f.data.reserved = { chest_row("n1", 10, 10, 1, 692), chest_row("n2", 20, 20, 2, 10) }
+    w:refresh(0, true, on("chests"))
+    local ch = w:input().chests
+    check("no static row: gimmick 692 is ng_shard", kinds_of(find(ch, "n1")) == "ng_shard")
+    check("no static row: keep-true record gives kept", kinds_of(find(ch, "n2")) == "kept")
+  end
+
+  -- fix round 1: mixed finish checks use the after wording
+  check("text: mixed finish checks say after",
+    text({ any = false, q = { { 1, true }, { 2, false } } }, nm) == "after X and Y")
 
   core.gate_name = saved_gate
 end
