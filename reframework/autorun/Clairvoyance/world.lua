@@ -413,8 +413,19 @@ function M.new(a, reads, io)
     if type(f) ~= "function" then return false, nil end
     local t0 = clock()
     local ok, v = pcall(f, ...)
-    stats.ms[name] = (clock() - t0) * 1000
+    local dt = (clock() - t0) * 1000
+    -- schedule_pos is a per-round total, not the last call's time (SPEC 28.5.2)
+    if name == "schedule_pos" then dt = (stats.ms[name] or 0) + dt end
+    stats.ms[name] = dt
     return ok, v
+  end
+
+  -- Times fn under stats.ms["step_" .. name] (SPEC 28.5.2); one result.
+  local function step(name, fn, ...)
+    local t0 = clock()
+    local r = fn(...)
+    stats.ms["step_" .. name] = (clock() - t0) * 1000
+    return r
   end
 
   local function table_read(name, ...)
@@ -1196,49 +1207,63 @@ function M.new(a, reads, io)
   local function round(now, tg)
     stats.hits, stats.misses = 0, 0
     S.live = {}
+    -- the per-round timings start empty (one-shot read timings stay)
+    for k in pairs(stats.ms) do
+      if k == "schedule_pos" or k:sub(1, 5) == "step_" then stats.ms[k] = nil end
+    end
     local any_rec = tg.chests or tg.tokens or tg.beetles
     local need_shops = tg.search or tg.shops
-    local cast_ok = ensure_cast()
-    ensure_boss()
+    local cast_ok = step("cast", ensure_cast)
+    step("boss", ensure_boss)
     local boss_ok = S.boss ~= nil
-    if tg.monsters then read_loaded_boss() end
+    if tg.monsters then step("loaded_boss", read_loaded_boss) end
 
-    local rows = table_read("reserved_rows")
-    if cast_ok and boss_ok and S.need_sort then sort_places() end
+    local rows = step("reserved", table_read, "reserved_rows")
+    step("sort", function()
+      if cast_ok and boss_ok and S.need_sort then sort_places() end
+    end)
     local reserved_uids = nil
-    if rows ~= nil then reserved_uids = learn_reserved(rows, cast_ok and boss_ok) end
-    local loaded_seen = read_loaded(reserved_uids)
-    if rows ~= nil then remove_patched(rows, reserved_uids) end
+    step("learn", function()
+      if rows ~= nil then reserved_uids = learn_reserved(rows, cast_ok and boss_ok) end
+    end)
+    local loaded_seen = step("loaded", read_loaded, reserved_uids)
+    step("patched", function()
+      if rows ~= nil then remove_patched(rows, reserved_uids) end
+    end)
 
-    ensure_settlements()
+    step("settlements", ensure_settlements)
 
     -- schedule positions of cast NPCs (SPEC 17.3b.1.2)
     local schedule = {}
-    if S.cast ~= nil and type(reads.schedule_pos) == "function" then
-      local t0 = clock()
-      for _, cid in ipairs(S.cast_list) do
-        local ok, p = pcall(reads.schedule_pos, cid)
-        if ok and valid_pos(p) and not near_zero(p) then
-          schedule[cid] = { x = p.x, y = p.y, z = p.z }
+    step("schedule", function()
+      if S.cast ~= nil and type(reads.schedule_pos) == "function" then
+        local t0 = clock()
+        for _, cid in ipairs(S.cast_list) do
+          local ok, p = call("schedule_pos", cid)
+          if ok and valid_pos(p) and not near_zero(p) then
+            schedule[cid] = { x = p.x, y = p.y, z = p.z }
+          end
         end
+        stats.ms.schedule_loop = (clock() - t0) * 1000
       end
-      stats.ms.schedule_loop = (clock() - t0) * 1000
-    end
+    end)
 
     local rec_idx = nil
     if any_rec then
-      rec_idx = guarded("records", function()
+      rec_idx = step("records", guarded, "records", function()
         return build_records(need_table("save_records"))
       end)
     end
-    if loaded_seen ~= nil and rec_idx ~= nil then
-      for uid in pairs(loaded_seen) do
-        if rec_idx[uid] ~= nil then stats.hits = stats.hits + 1
-        else stats.misses = stats.misses + 1 end
+    step("seen", function()
+      if loaded_seen ~= nil and rec_idx ~= nil then
+        for uid in pairs(loaded_seen) do
+          if rec_idx[uid] ~= nil then stats.hits = stats.hits + 1
+          else stats.misses = stats.misses + 1 end
+        end
       end
-    end
+    end)
 
-    local eff = effective()
+    local eff = step("effective", effective)
     local out = { chests = {}, treasure = {}, tokens = {}, beetles = {},
       monsters = {}, sellers = {}, schedule = schedule, settlements = {} }
 
@@ -1249,6 +1274,7 @@ function M.new(a, reads, io)
     end
 
     -- chests, tokens, beetles
+    local collect_t0 = clock()
     local uids = sorted_keys(eff)
     local chest_qs = nil
     for _, uid in ipairs(uids) do
@@ -1301,8 +1327,11 @@ function M.new(a, reads, io)
       end
     end
 
+    stats.ms.step_collect = (clock() - collect_t0) * 1000
+
     -- treasure
-    if tg.treasure or tg.sellers or need_shops then refresh_discovery() end
+    if tg.treasure or tg.sellers or need_shops then step("discovery", refresh_discovery) end
+    local treasure_t0 = clock()
     if tg.treasure then
       if S.nodes == nil then
         local v = table_read("treasure_nodes")
@@ -1348,6 +1377,7 @@ function M.new(a, reads, io)
         end
       end
       table.sort(out.treasure, function(p, q) return p.name < q.name end)
+      stats.ms.step_treasure = (clock() - treasure_t0) * 1000
     end
 
     -- shop stock index for map search or the Shops toggle (SPEC 19.7.1, 20.2);
@@ -1356,7 +1386,7 @@ function M.new(a, reads, io)
     local first_shops = stats.search_first_ms == nil
     if need_shops then
       local t0 = clock()
-      local list = guarded("shop_index", compute_shops)
+      local list = step("shop_index", guarded, "shop_index", compute_shops)
       out.shops = list or {}
       if stats.search_first_ms == nil and list ~= nil then
         stats.search_first_ms = (clock() - t0) * 1000
@@ -1365,7 +1395,7 @@ function M.new(a, reads, io)
 
     -- sellers
     if tg.sellers then
-      local list = guarded("sellers", compute_sellers)
+      local list = step("sellers", guarded, "sellers", compute_sellers)
       for _, s in ipairs(list or {}) do
         local c = {}
         for k, v in pairs(s) do c[k] = v end
@@ -1376,6 +1406,7 @@ function M.new(a, reads, io)
 
     -- monsters
     if tg.monsters and cast_ok and boss_ok then
+      local monsters_t0 = clock()
       local units = guarded("respawn", function() return need_table("respawn_units") end)
       local items = {}
       for uid, e in pairs(eff) do
@@ -1429,10 +1460,12 @@ function M.new(a, reads, io)
       end
       table.sort(out.monsters, function(p, q) return p.uid < q.uid end)
       stats.monster_ids = sorted_keys(ids)
+      stats.ms.step_monsters = (clock() - monsters_t0) * 1000
     end
 
     -- drops: deferred past the round whose shop index first succeeds (19.12.3.3)
     if tg.search and tg.monsters then
+      local drops_t0 = clock()
       if first_shops and stats.search_first_ms ~= nil and S.drop_ids == nil then
         rerun = true
       elseif #out.monsters > 0 then
@@ -1445,13 +1478,14 @@ function M.new(a, reads, io)
           stats.ms.drop_names = (clock() - t0) * 1000
         end
       end
+      stats.ms.step_drops = (clock() - drops_t0) * 1000
     end
 
     for _, cat in ipairs({ "chests", "treasure", "tokens", "beetles", "monsters", "sellers" }) do
       stats.known[cat] = #out[cat]
     end
-    if tg.search then out.npcs = npc_round(tg) end
-    out.route = route_round()
+    if tg.search then out.npcs = step("npcs", npc_round, tg) end
+    out.route = step("route", route_round)
     return out
   end
 

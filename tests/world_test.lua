@@ -3548,5 +3548,70 @@ do
   end
 end
 
+-- 29. per-step round timing (SPEC 28.5.2)
+do
+  local function timed_world()
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chara", "m5", 5, 0, 0, { name = "ch253000_00" }) }) } })
+    local d = f.data
+    d.boss = { ch253 = true }
+    d.catalog = { 1 }
+    d.cast = { [1] = { 2058, 2059 } }
+    d.sched_ids = { 2058, 2059 }
+    d.shop = { [2058] = 41, [2059] = 42 }
+    d.sched = { [2058] = P(100, 0, 100), [2059] = P(200, 0, 100) }
+    d.shops = { [41] = { { item = 378, release_qid = 0 } },
+      [42] = { { item = 379, release_qid = 0 } } }
+    d.reserved = { chest_row("c1", 10, 10) }
+    return f, f.new()
+  end
+  local ALLS = { chests = true, treasure = true, tokens = true, beetles = true,
+    monsters = true, sellers = true, search = true, shops = true }
+  local STEPS = { "cast", "boss", "loaded_boss", "reserved", "sort", "learn", "loaded",
+    "patched", "settlements", "schedule", "records", "seen", "effective", "collect",
+    "discovery", "treasure", "shop_index", "sellers", "monsters", "drops", "npcs",
+    "route" }
+  local f, w = timed_world()
+  w:refresh(0, true, ALLS)
+  w:refresh(0, true, ALLS)
+  local st = w:stats()
+  for _, n in ipairs(STEPS) do
+    check("step: " .. n, type(st.ms["step_" .. n]) == "number")
+  end
+  w:refresh(10, true, on("chests", "tokens", "beetles"))
+  st = w:stats()
+  check("step: cleared", st.ms.step_monsters == nil and st.ms.step_drops == nil
+    and st.ms.step_npcs == nil and st.ms.step_shop_index == nil)
+  check("step: still timed", type(st.ms.step_collect) == "number")
+
+  -- schedule_pos is a per-round total over every call, the loop's included
+  local f2 = fixture()
+  local d2 = f2.data
+  d2.catalog = { 1 }
+  d2.cast = { [1] = { 2058, 2059 } }
+  d2.sched_ids = { 2058, 2059 }
+  d2.shop = { [2058] = 41, [2059] = 42 }
+  d2.sched = { [2058] = P(100, 0, 100), [2059] = P(200, 0, 100) }
+  d2.shops = { [41] = { { item = 378, release_qid = 0 } },
+    [42] = { { item = 379, release_qid = 0 } } }
+  d2.alive = false
+  d2.needs = { { quest = 1, item = 378, n = 1 } }
+  local inner = f2.reads.schedule_pos
+  f2.reads.schedule_pos = function(cid)
+    f2.clock_t = f2.clock_t + 0.001
+    return inner(cid)
+  end
+  local w2 = f2.new()
+  w2:refresh(0, true, { shops = true, sellers = true })
+  local calls = f2.reads_n.schedule_pos
+  local sp = w2:stats().ms.schedule_pos
+  check("schedule_pos total", type(sp) == "number" and calls > 2
+    and math.abs(sp - calls * 1.0) < 1e-6)
+  w2:refresh(10, true, { shops = true, sellers = true })
+  local calls2 = f2.reads_n.schedule_pos - calls
+  check("schedule_pos cleared per round",
+    math.abs(w2:stats().ms.schedule_pos - calls2 * 1.0) < 1e-6)
+end
+
 if failures > 0 then os.exit(1) end
 print("world_test: all OK")
