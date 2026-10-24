@@ -1175,8 +1175,10 @@ end
 -- shops_on shops compete for the cap like any category; with it off (a
 -- search only) they go to their own list (`shops`) and fill what the cap
 -- leaves (SPEC 19.7.5). Every shop accepted is also listed in `shop_all`.
+-- A seller whose shop is visible is only noted in `hits`; merge_shops adds its
+-- line and promotes the shop (SPEC 28.4.4).
 local function world_accept(c, has_origin, origin, quest_cids, kept, merged,
-                            shops, shop_of, shops_on, shop_all)
+                            shops, shop_of, shops_on, shop_all, hits)
   if c.cat == "npc_search" then
     -- v14: NPC matches only ever fill the leftover slots (SPEC 22.7.4)
     c.d = has_origin and dist2(c.pos, origin) or 0
@@ -1187,24 +1189,7 @@ local function world_accept(c, has_origin, origin, quest_cids, kept, merged,
   if c.cat == "shop" then shop_all[#shop_all + 1] = c end
   if c.cat == "seller" and shop_of and shop_of[c.shop] then
     -- SPEC 19.7.7: the shop marker stands in for its seller
-    local sc = shop_of[c.shop]
-    if type(c.quest) == "string" and c.quest ~= "" then
-      sc.sells_for[#sc.sells_for + 1] = tostring(c.item_name)
-        .. " (for " .. c.quest .. ")"
-    end
-    -- The shop stands in for this seller: it competes for the cap at its
-    -- own distance (ruling), not for the leftover slots.
-    if not sc.promoted then
-      sc.promoted = true
-      sc.rank_cat = "seller"
-      if sc.in_shops then
-        for i, x in ipairs(shops) do
-          if x == sc then table.remove(shops, i); break end
-        end
-        sc.in_shops = false
-        kept[#kept + 1] = sc
-      end
-    end
+    hits[#hits + 1] = c
     return
   end
   if (c.cat == "seller" or c.cat == "shop") and type(c.cid) == "number"
@@ -1213,11 +1198,35 @@ local function world_accept(c, has_origin, origin, quest_cids, kept, merged,
     if c.cat == "shop" then c.merged = true end
   else
     c.d = has_origin and dist2(c.pos, origin) or 0
-    if c.cat == "shop" and not c.promoted and not shops_on then
+    if c.cat == "shop" and not shops_on then
       shops[#shops + 1] = c
       c.in_shops = true
     else
       kept[#kept + 1] = c
+    end
+  end
+end
+
+-- SPEC 28.4.4: one step, run before world_finish on both paths. Each seller
+-- candidate that hit a visible shop adds its quest line to the shop and gives
+-- the shop its seller's rank. The shop stands in for the seller, so it
+-- competes for the cap at its own distance (ruling), not for the leftover
+-- slots: a shop still in `shops` moves to `kept`. A shop merged into a quest
+-- marker is in neither list, and one already kept (Shops on) is not moved.
+local function merge_shops(kept, shops, shop_of, hits)
+  for _, h in ipairs(hits) do
+    local sc = shop_of[h.shop]
+    if type(h.quest) == "string" and h.quest ~= "" then
+      sc.sells_for[#sc.sells_for + 1] = tostring(h.item_name)
+        .. " (for " .. h.quest .. ")"
+    end
+    sc.rank_cat = "seller"
+    if sc.in_shops then
+      for i, x in ipairs(shops) do
+        if x == sc then table.remove(shops, i); break end
+      end
+      sc.in_shops = false
+      kept[#kept + 1] = sc
     end
   end
 end
@@ -1364,16 +1373,17 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   local cap = world_cap(show)
   local has_origin = valid_pos(origin)
 
-  local kept, merged, shops, shop_all = {}, {}, {}, {}
+  local kept, merged, shops, shop_all, hits = {}, {}, {}, {}, {}
   local shops_on = show.world_shops == true
   local cands, known, shop_of = world_candidates(world, show, boxes, show.search)
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = known[cat] end
   for _, c in ipairs(cands) do
     if (special_cat(c.cat) or show[WORLD_DEF[c.cat].toggle] ~= false) and not c.hidden then
       world_accept(c, has_origin, origin, quest_cids, kept, merged, shops, shop_of,
-        shops_on, shop_all)
+        shops_on, shop_all, hits)
     end
   end
+  merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
     quest_cids)
 end
@@ -1450,7 +1460,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   -- reach make_cand; haystacks live as long as the grid.
   local q = show.search
   g.hay = g.hay or {}
-  local kept, merged, shops, shop_all = {}, {}, {}, {}
+  local kept, merged, shops, shop_all, hits = {}, {}, {}, {}, {}
   local shop_of = {}
   local shops_on = show.world_shops == true
   if q ~= nil or shops_on then
@@ -1461,7 +1471,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
       stats.cand_builds = stats.cand_builds + 1
       if not c.hidden then
         world_accept(c, has_origin, origin, quest_cids, kept, merged, shops, shop_of,
-          shops_on, shop_all)
+          shops_on, shop_all, hits)
       end
     end
   end
@@ -1474,7 +1484,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
       stats.cand_builds = stats.cand_builds + 1
       if not c.hidden then
         world_accept(c, has_origin, origin, quest_cids, kept, merged, shops,
-          shop_of, shops_on, shop_all)
+          shop_of, shops_on, shop_all, hits)
       end
     end
   end
@@ -1485,7 +1495,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
     local c = make_cand(cat, e, ctx)
     if not c.hidden then
       world_accept(c, has_origin, origin, quest_cids, kept, merged, shops, shop_of,
-        shops_on, shop_all)
+        shops_on, shop_all, hits)
     end
   end
 
@@ -1543,6 +1553,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
       end
     end
   end
+  merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
     quest_cids)
 end

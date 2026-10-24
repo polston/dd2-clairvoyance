@@ -3488,5 +3488,35 @@ do
     and ms[1].hover:sub(1, 20) == "Gob (respawning)\nDro")
 end
 
+-- merge_shops (SPEC 28.4.4)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300,
+    world_shops = true }
+  local w = {
+    shops = { { shop = 5, cid = 9500, npc = "Gil", pos = P(10), discovered = true,
+      items = { { name = "Rope" } } } },
+    sellers = { { shop = 5, item = 1, item_name = "Gem", cid = 9500, npc = "Gil",
+      quest = "Qx", qids = {}, pos = P(11), discovered = true } },
+  }
+  local qc = { [9500] = { key = "c:9500" } }   -- the shop's NPC has a quest marker
+  for _, pa in ipairs({ { "uncached", core.world_markers },
+    { "cached", core.world_markers_cached } }) do
+    local ms, panel, merged = pa[2](w, SHB, O, {}, qc)
+    local listed = 0
+    for _, m in ipairs(ms) do if m.key == "w:shop:5" then listed = listed + 1 end end
+    local rows, row = 0, nil
+    for _, e in ipairs(panel.shop.entries) do
+      if e.key == "w:shop:5" then rows = rows + 1; row = e end
+    end
+    check("merge_shops: merged shop not listed twice [" .. pa[1] .. "]",
+      listed == 0 and rows == 1 and row.merged == true
+      and #merged >= 1 and #row.sells_for == 1)
+  end
+end
+
 if failures > 0 then os.exit(1) end
 print("core_test: all OK")
