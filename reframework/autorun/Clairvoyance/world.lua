@@ -997,8 +997,8 @@ function M.new(a, reads, io)
   -- The static + file monsters + learned merge and its sorted keys are kept
   -- until the learned set (rev) or the file monsters table changes (SPEC
   -- 28.5.3.1: sort_places and w:reset() each replace S.file_monsters). The
-  -- live rows are laid over it by the readers (S.live[uid] first). Returns
-  -- the merge and the sorted keys, live uids included.
+  -- live rows are laid over it (S.live first, the merge behind it). Returns
+  -- that map and the sorted keys, live uids included.
   local eff_cache = nil
   local function effective()
     local c = eff_cache
@@ -1020,22 +1020,33 @@ function M.new(a, reads, io)
       eff_cache = c
     end
     if next(S.live) == nil then return c.map, c.keys end
-    -- live rows are not copied into the map: the loops read S.live[uid] first.
-    -- Only the live uids the merge lacks go into a copy of the keys, each
-    -- by binary search.
-    local keys = nil
-    for uid in pairs(S.live) do
+    -- the live rows are laid over the cached merge once, here: the returned
+    -- map is S.live itself with the merge behind it, so a reader does one
+    -- lookup. Only the live uids the merge lacks join the key list: sorted
+    -- on their own, then merged into a new array in one pass.
+    local live = S.live
+    local extra = nil
+    for uid in pairs(live) do
       if c.map[uid] == nil then
-        keys = keys or table.move(c.keys, 1, #c.keys, 1, {})
-        local lo, hi = 1, #keys + 1
-        while lo < hi do
-          local mid = (lo + hi) // 2
-          if keys[mid] < uid then lo = mid + 1 else hi = mid end
-        end
-        table.insert(keys, lo, uid)
+        extra = extra or {}
+        extra[#extra + 1] = uid
       end
     end
-    return c.map, keys or c.keys
+    local keys = c.keys
+    if extra ~= nil then
+      table.sort(extra)
+      keys = {}
+      local n, i, j, ck, ne = 0, 1, 1, c.keys, #extra
+      while i <= #ck and j <= ne do
+        n = n + 1
+        if ck[i] < extra[j] then keys[n] = ck[i]; i = i + 1
+        else keys[n] = extra[j]; j = j + 1 end
+      end
+      while i <= #ck do n = n + 1; keys[n] = ck[i]; i = i + 1 end
+      while j <= ne do n = n + 1; keys[n] = extra[j]; j = j + 1 end
+    end
+    c.mt = c.mt or { __index = c.map }
+    return setmetatable(live, c.mt), keys
   end
 
   local KEPT_ITEMS = { [77] = true, [78] = true, [81] = true }
@@ -1410,7 +1421,7 @@ function M.new(a, reads, io)
     local collect_t0 = clock()
     local chest_qs = nil
     for _, uid in ipairs(uids) do
-      local e = S.live[uid] or eff[uid]
+      local e = eff[uid]
       if e.k == "chest" and tg.chests then
         local state, item = "unknown", nil
         local recs = rec_idx and rec_idx[uid] or nil
@@ -1560,10 +1571,7 @@ function M.new(a, reads, io)
           end
         end
       end
-      for uid, e in pairs(eff) do add_monster(uid, S.live[uid] or e) end
-      for uid, e in pairs(S.live) do
-        if eff[uid] == nil then add_monster(uid, e) end
-      end
+      for _, uid in ipairs(uids) do add_monster(uid, eff[uid]) end
       for _, u in ipairs(units or {}) do
         if type(u) == "table" and type(u.key) == "string" and to_int(u.cid) ~= nil then
           local uid = guid_of(u.key)
