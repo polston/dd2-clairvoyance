@@ -1925,7 +1925,7 @@ do
           snapshot.search_rows = srows
           local nres = 0
           for _, m in ipairs(snapshot.markers) do
-            if m.cat ~= "route_stop" and m.cat ~= "hint_pin" then nres = nres + 1 end
+            if m.cat ~= "route_stop" and m.cat ~= "hint_pin" and not m.first_seeker then nres = nres + 1 end
           end
           snapshot.search_n = nres
         end

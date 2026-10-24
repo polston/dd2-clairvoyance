@@ -1703,7 +1703,7 @@ function M.world_rows(entries, settlements, origin, limit)
   local list = {}
   for _, e in ipairs(entries or {}) do
     -- v14: route and hint pins are not search results
-    if e.cat ~= "route_stop" and e.cat ~= "hint_pin" then
+    if e.cat ~= "route_stop" and e.cat ~= "hint_pin" and not e.first_seeker then
       local i = #list + 1
       list[i] = { e = e, i = i, d = valid_pos(origin) and dist2(e.pos, origin) or 0 }
     end

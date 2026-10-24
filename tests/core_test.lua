@@ -3769,6 +3769,10 @@ do
     check("tok1 token still known" .. tag, panel.token.known == 2 and panel.token.shown == 1)
     ms = pa[2](w, sh({ world_first_token = false }), O, {})
     check("tok1 off" .. tag, keyset(ms)["w:tok1:t1"] == nil)
+    -- the spot is not a search result: it is kept as a marker but listed nowhere
+    ms = pa[2](w, sh({ search = Q("minotaur") }), O, {})
+    check("tok1 kept under a query that matches nothing" .. tag, keyset(ms)["w:tok1:t1"] ~= nil)
+    check("tok1 is not a search result row" .. tag, #core.world_rows(ms, {}, O) == 0)
   end
 end
 
