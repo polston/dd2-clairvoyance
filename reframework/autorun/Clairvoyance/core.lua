@@ -669,6 +669,35 @@ local function hay_of(cache, cat, e, drops)
   return h
 end
 
+-- SPEC 28.4.2: does the entry match the query? One path for the cached and the
+-- uncached world builders. `gc` is the grid record { hay, match, mkey, dhov };
+-- the uncached path passes a fresh { hay = {}, match = {} }. The match result
+-- and the drop hover are memoised per query key, keyed by the entry table, and
+-- start empty for every new query. A drop match writes ctx.mdrop[e].
+local function entry_search(cat, e, drops, gc, q, ctx)
+  if q == nil then return true end
+  if gc.mkey ~= q.key or gc.match == nil then
+    gc.mkey, gc.match, gc.dhov = q.key, {}, {}
+  end
+  local hay, dh = hay_of(gc.hay, cat, e, drops)
+  local m = gc.match[e]
+  if m == nil then
+    m = query_match(q, hay)
+    gc.match[e] = m
+  end
+  if not m then return false end
+  if dh then
+    local hv = gc.dhov[e]
+    if hv == nil then
+      local hover, why = drop_hover(monster_label(e), dh, q)
+      hv = hover and { hover = hover, why = why } or false
+      gc.dhov[e] = hv
+    end
+    if hv then ctx.mdrop[e] = hv end
+  end
+  return true
+end
+
 -- SPEC 19.7: the counting items a query selects from a shop entry, or nil.
 -- hay = { npc = <lower>, names = { <lower>, ... } } (cached per entry).
 local function shop_hay(cache, e)
@@ -912,21 +941,14 @@ local function world_candidates(world, show, boxes, q)
   local small_ok = show.world_small_monsters == true
   local dups = treasure_dups(world)
   local drops = q ~= nil and world.drops or nil
+  local gc = { hay = {}, match = {} }
   for _, cat in ipairs(M.WORLD_CATS) do
     known[cat] = 0
     if not special_cat(cat) then
       for _, e in ipairs(world[WORLD_DEF[cat].src] or {}) do
         if included(cat, e, small_ok, dups) then
           known[cat] = known[cat] + 1
-          local md = false
-          if cat == "monster" and drops ~= nil then
-            md = monster_drops_of(e, drops) or false
-          end
-          if q == nil or query_match(q, entry_hay(cat, e, drops, md)) then
-            if md then
-              local hv, why = drop_hover(monster_label(e), md, q)
-              if hv then ctx.mdrop[e] = { hover = hv, why = why } end
-            end
+          if entry_search(cat, e, drops, gc, q, ctx) then
             cands[#cands + 1] = make_cand(cat, e, ctx)
           end
         end
@@ -1240,9 +1262,6 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   -- reach make_cand; haystacks live as long as the grid.
   local q = show.search
   g.hay = g.hay or {}
-  if q ~= nil and (g.mkey ~= q.key or g.match == nil) then
-    g.mkey, g.match = q.key, {}
-  end
   local kept, merged, shops, shop_all = {}, {}, {}, {}
   local shop_of = {}
   local shops_on = show.world_shops == true
@@ -1272,24 +1291,8 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
     end
   end
   local drops = q ~= nil and world.drops or nil
-  local qkey = q ~= nil and q.key or nil
   local function take(cat, e)
-    if q ~= nil then
-      local hay, dh = hay_of(g.hay, cat, e, drops)
-      local m = g.match[e]   -- match result, memoised per query key
-      if m == nil then
-        m = query_match(q, hay)
-        g.match[e] = m
-      end
-      if not m then return end
-      if dh then
-        if dh.qkey ~= qkey then   -- hover and why change only with the query
-          dh.qkey = qkey
-          dh.hover, dh.why = drop_hover(monster_label(e), dh, q)
-        end
-        if dh.hover then ctx.mdrop[e] = dh end
-      end
-    end
+    if not entry_search(cat, e, drops, g, q, ctx) then return end
     stats.cand_builds = stats.cand_builds + 1
     local c = make_cand(cat, e, ctx)
     if not c.hidden then
