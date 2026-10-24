@@ -422,11 +422,18 @@ local WORLD_DEF = {
 }
 -- Categories whose candidates are built outside the generic per-src loops.
 local function special_cat(cat) return cat == "shop" or cat == "npc_search" end
+-- SPEC 28.12.3: which monsters are shown. A large one needs Large
+-- (world_monsters ~= false), a small one needs Small
+-- (world_small_monsters == true). The one place the rule is written.
+local function monster_shown(small, show)
+  if small then return show.world_small_monsters == true end
+  return show.world_monsters ~= false
+end
 -- Is a generic category switched on? Monsters are a tree (SPEC 28.12.3): the
 -- category is on when either Large or Small is.
 local function cat_on(cat, show)
   if cat == "monster" then
-    return show.world_monsters ~= false or show.world_small_monsters == true
+    return monster_shown(false, show) or monster_shown(true, show)
   end
   return show[WORLD_DEF[cat].toggle] ~= false
 end
@@ -582,14 +589,6 @@ local function included(cat, e, small_ok, dups)
   if cat == "treasure" and dups[e] then return false end
   if cat == "monster" and e.small == true and not small_ok then return false end
   return true
-end
-
--- SPEC 28.12.3: which monsters are shown. A large one needs Large
--- (world_monsters ~= false), a small one needs Small
--- (world_small_monsters == true).
-local function monster_shown(small, show)
-  if small then return show.world_small_monsters == true end
-  return show.world_monsters ~= false
 end
 
 local function monster_label(e)
@@ -908,12 +907,8 @@ local function entry_search(cat, e, drops, gc, q, ctx)
 end
 
 -- SPEC 19.7: the counting items a query selects from a shop entry, or nil.
--- hay = { npc = <lower>, names = { <lower>, ... } } (the identity cache,
+-- h = { npc = <lower>, names = { <lower>, ... } } (the identity cache,
 -- SPEC 28.4.3; only a search reads it).
-local function shop_hay(e)
-  return hay_rec("shop", e)
-end
-
 local function shop_listing(e, q, h)
   local items = e.items
   if type(items) ~= "table" or #items == 0 then return nil end
@@ -1113,12 +1108,9 @@ local function shop_cands(world, q, ctx, gc, shops_on)
     and world.shops or {}
   ctx.slabel = {}
   -- the listing and label memo: one record per entry table in the per-grid
-  -- record (no lower-cased names in it; the uncached path passes none)
-  local memo = gc and gc.shop
-  if memo == nil then
-    memo = {}
-    if gc then gc.shop = memo end
-  end
+  -- record (no lower-cased names in it)
+  gc.shop = gc.shop or {}
+  local memo = gc.shop
   -- no-search key "" is distinct from every query key (a query has a term)
   local qkey = q ~= nil and q.key or ""
   for _, e in ipairs(list) do
@@ -1128,7 +1120,7 @@ local function shop_cands(world, q, ctx, gc, shops_on)
       if h.qkey ~= qkey then   -- listing and label change only with the query
         h.qkey = qkey
         if q ~= nil then
-          h.list = shop_listing(e, q, shop_hay(e)) or false
+          h.list = shop_listing(e, q, hay_rec("shop", e)) or false
           h.label = h.list and shop_label(e, h.list) or nil
         else
           h.list = (#e.items > 0) and e.items or false
@@ -1151,7 +1143,7 @@ end
 local function world_candidates(world, show, boxes, q, ft)
   local cands, known = {}, {}
   local ctx = world_ctx(show, boxes)
-  local small_ok = show.world_small_monsters == true
+  local small_ok = monster_shown(true, show)
   local dups = treasure_dups(world)
   local drops = q ~= nil and world.drops or nil
   local gc = { hay = {}, match = {} }
@@ -1174,7 +1166,7 @@ local function world_candidates(world, show, boxes, q, ft)
       end
     end
   end
-  local sc, n, shop_of = shop_cands(world, q, ctx, nil,
+  local sc, n, shop_of = shop_cands(world, q, ctx, gc,
     show.world_shops == true)
   known.shop = n
   for _, c in ipairs(sc) do cands[#cands + 1] = c end
@@ -1500,7 +1492,7 @@ end
 local function fill_key(cat, show)
   if not cat_on(cat, show) then return false end
   if cat == "monster" then
-    return (show.world_monsters ~= false and 1 or 0) + (show.world_small_monsters == true and 2 or 0)
+    return (monster_shown(false, show) and 1 or 0) + (monster_shown(true, show) and 2 or 0)
   end
   return true
 end
@@ -1511,7 +1503,7 @@ end
 local function build_grid(world, show)
   M.world_stats.grid_builds = M.world_stats.grid_builds + 1
   local g = { cells = {}, flat = {}, known = {}, filled = {}, known_small = 0,
-    small_ok = show.world_small_monsters == true,
+    small_ok = monster_shown(true, show),
     dups = treasure_dups(world) }
   for _, cat in ipairs(M.WORLD_CATS) do
     g.known[cat] = 0
@@ -1546,7 +1538,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   world = world or {}
   show = show or {}
   stats = stats or M.world_stats
-  local small_ok = show.world_small_monsters == true
+  local small_ok = monster_shown(true, show)
   local g = grid_cache.grid
   if grid_cache.world ~= world or grid_cache.small ~= small_ok or not g then
     g = build_grid(world, show)
