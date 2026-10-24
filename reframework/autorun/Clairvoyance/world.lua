@@ -114,6 +114,12 @@ function M.kind_of_gimmick(id)
   return nil
 end
 
+-- Whether any toggle needs a world round (SPEC 28.7.1).
+function M.wants_round(tg)
+  return (tg.chests or tg.treasure or tg.tokens or tg.beetles or tg.monsters
+    or tg.sellers or tg.search or tg.shops or tg.first_token) and true or false
+end
+
 -- An item list kept per key in `cache` (SPEC 28.5.3.3): { { name, n }, ... }
 -- for `items` ({ { id, n }, ... }) with names from name_of(id). Returns the
 -- list and whether it was built this call. It is rebuilt when the id list
@@ -216,12 +222,11 @@ function M.new(a, reads, io)
   local givers_cache, givers_rev = nil, -1
   local names = {}         -- cid -> enum name, from every row seen
   local last_round, last_now, last_save = nil, 0, nil
-  local rerun = false      -- the round deferred the drop read: run the next tick
   local input_tbl = nil
   local unlisted = 0
   local stats = { ms = {}, known = {}, monster_ids = {}, rounds = 0, saves = 0,
     save_ms = 0, last_save_reason = nil, hits = 0, misses = 0,
-    eff_builds = 0, item_list_builds = 0 }
+    eff_builds = 0, item_list_builds = 0, held_rounds = 0 }
   local S
 
   local function new_session()
@@ -1127,11 +1132,12 @@ function M.new(a, reads, io)
     return nil
   end
 
-  -- builds up to NPC_NAME_SLICE more names; sets rerun until the list is done
+  -- builds up to NPC_NAME_SLICE more names; returns true while the list is
+  -- unfinished and more can be built (the round then asks to run again)
   local function build_names()
-    if S.npc_done then return end
+    if S.npc_done then return false end
     local ids = sched_ids_list()
-    if ids == nil then return end
+    if ids == nil then return false end
     local last = math.min(S.npc_next + M.K.NPC_NAME_SLICE - 1, #ids)
     for i = S.npc_next, last do
       local cid = ids[i]
@@ -1143,14 +1149,15 @@ function M.new(a, reads, io)
     S.npc_next = last + 1
     if S.npc_next > #ids then
       S.npc_done = true
-    else
-      rerun = true
+      return false
     end
+    return true
   end
 
+  -- returns the NPC list and whether the name list wants another round
   local function npc_round(tg)
     local t0 = clock()
-    build_names()
+    local more = build_names()
     local dt = (clock() - t0) * 1000
     S.npc_ms = S.npc_ms + dt
     if dt > (stats.npcs_max_slice_ms or 0) then stats.npcs_max_slice_ms = dt end
@@ -1174,7 +1181,7 @@ function M.new(a, reads, io)
       end
       out[i] = n
     end
-    return out
+    return out, more
   end
 
   local ROUTE_ERR = "route unavailable"
@@ -1262,7 +1269,10 @@ function M.new(a, reads, io)
   end
 
   -- ----- the round -----
+  -- returns the round's output and whether it wants another round at once
+  -- (an unfinished NPC name list, a deferred drop read; SPEC 28.6)
   local function round(now, tg)
+    local again = false
     stats.hits, stats.misses = 0, 0
     S.live = {}
     fsc_memo = {}
@@ -1523,7 +1533,7 @@ function M.new(a, reads, io)
     if tg.search and tg.monsters then
       local drops_t0 = clock()
       if first_shops and stats.search_first_ms ~= nil and S.drop_ids == nil then
-        rerun = true
+        again = true
       elseif #out.monsters > 0 then
         local ids = guarded("drops", ensure_drops)
         if ids ~= nil then
@@ -1540,9 +1550,13 @@ function M.new(a, reads, io)
     for _, cat in ipairs({ "chests", "treasure", "tokens", "beetles", "monsters", "sellers" }) do
       stats.known[cat] = #out[cat]
     end
-    if tg.search then out.npcs = step("npcs", npc_round, tg) end
+    if tg.search then
+      local more
+      out.npcs, more = step("npcs", npc_round, tg)
+      again = again or more == true
+    end
     out.route = step("route", route_round)
-    return out
+    return out, again
   end
 
   -- ----- save -----
@@ -1578,22 +1592,25 @@ function M.new(a, reads, io)
   end
 
   -- ----- public -----
-  function w:refresh(now, gate, toggles)
+  -- hold (the full map is open or the game is paused) skips a round that is
+  -- merely due; a round whose throttle was cleared (a poke, the run-again
+  -- flag, set_route) or whose NPC list changed still runs (SPEC 28.8.1)
+  function w:refresh(now, gate, toggles, hold)
     if not gate or type(toggles) ~= "table" then return false end
     local tg = toggles
-    if not (tg.chests or tg.treasure or tg.tokens or tg.beetles or tg.monsters
-      or tg.sellers or tg.search or tg.shops) then
-      return false
-    end
-    if last_round ~= nil and now - last_round < M.K.WORLD_ROUND
+    if not M.wants_round(tg) then return false end
+    if last_round ~= nil
       and not (tg.search and cid_signature(tg.npc_cids) ~= S.npc_sig) then
-      return false
+      if now - last_round < M.K.WORLD_ROUND then return false end
+      if hold then
+        stats.held_rounds = stats.held_rounds + 1
+        return false
+      end
     end
     last_round, last_now = now, now
-    rerun = false
     if tg.search then S.npc_sig = cid_signature(tg.npc_cids) end
     local rt0 = clock()
-    local ok, res = pcall(round, now, tg)
+    local ok, res, again = pcall(round, now, tg)
     stats.round_ms = (clock() - rt0) * 1000
     if not ok then
       local msg = tostring(res)
@@ -1606,7 +1623,7 @@ function M.new(a, reads, io)
     if published_on(res) and not published_on(input_tbl) then w.route_gen = w.route_gen + 1 end
     input_tbl = res
     committed = true
-    if rerun then rerun = false; last_round = nil end
+    if again then last_round = nil end
     stats.rounds = stats.rounds + 1
     if dirty and (last_save == nil or now - last_save >= M.K.SAVE_EVERY) then
       do_save("round", now)
@@ -1735,6 +1752,7 @@ function M.new(a, reads, io)
       drops_first_ms = stats.drops_first_ms, drops = drops,
       rounds = stats.rounds, saves = stats.saves, save_ms = stats.save_ms,
       eff_builds = stats.eff_builds, item_list_builds = stats.item_list_builds,
+      held_rounds = stats.held_rounds,
       last_save_reason = stats.last_save_reason,
     }
   end

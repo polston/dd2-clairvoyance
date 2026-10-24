@@ -3741,5 +3741,79 @@ do
   end
 end
 
+-- 31. wants_round, hold, run-again flag (SPEC 28.6, 28.7.1, 28.8.1)
+do
+  check("wants: first_token alone", world.wants_round({ first_token = true }) == true)
+  check("wants: none", world.wants_round({}) == false)
+  for _, k in ipairs({ "chests", "treasure", "tokens", "beetles", "monsters", "sellers",
+    "search", "shops" }) do
+    check("wants: " .. k, world.wants_round({ [k] = true }) == true)
+  end
+  check("wants: unrelated toggle", world.wants_round({ reveal_gate_names = true }) == false)
+
+  local function held_world()
+    local f = fixture()
+    f.data.reserved = { chest_row("c1", 10, 10) }
+    return f, f.new()
+  end
+  local TG = on("chests")
+  local f, w = held_world()
+  check("hold: first round runs", w:refresh(0, true, TG, true) == true)
+  check("hold: counter starts at zero", w:stats().held_rounds == 0)
+  check("hold: inside the throttle, nothing", w:refresh(3, true, TG, true) == false)
+  check("hold: inside the throttle, not counted", w:stats().held_rounds == 0)
+  local n = w:stats().rounds
+  check("hold: throttle elapsed, skipped", w:refresh(10, true, TG, true) == false
+    and w:stats().rounds == n)
+  check("hold: throttle elapsed, counted", w:stats().held_rounds == 1)
+  check("hold: counted per call", w:refresh(11, true, TG, true) == false
+    and w:stats().held_rounds == 2)
+  check("hold: released runs at once", w:refresh(12, true, TG) == true)
+  check("hold: no hold, throttle as before", w:refresh(13, true, TG) == false
+    and w:stats().held_rounds == 2)
+
+  -- a cleared throttle still runs under hold, once
+  w:poke()
+  check("hold: poke runs once", w:refresh(14, true, TG, true) == true)
+  check("hold: then held again", w:refresh(30, true, TG, true) == false)
+  w:set_route(2058, "Dudley")
+  check("hold: set_route runs once", w:refresh(31, true, TG, true) == true)
+  check("hold: and then not again", w:refresh(32, true, TG, true) == false)
+
+  -- a changed NPC list under search runs inside the throttle
+  local f2, w2 = held_world()
+  local STG = { search = true, npc_cids = { 1 } }
+  check("hold: search round", w2:refresh(0, true, STG, true) == true)
+  check("hold: same list inside the throttle", w2:refresh(2, true,
+    { search = true, npc_cids = { 1 } }, true) == false)
+  check("hold: changed list runs", w2:refresh(3, true,
+    { search = true, npc_cids = { 2 } }, true) == true)
+  check("hold: changed list not counted as held", w2:stats().held_rounds == 0)
+
+  -- the run-again flag: the unfinished NPC name list
+  do
+    local f3 = fixture()
+    f3.data.sched_ids = {}
+    for i = 1, K.NPC_NAME_SLICE + 3 do
+      f3.data.sched_ids[i] = 5000 + i
+      f3.data.npcname[5000 + i] = "N" .. i
+    end
+    local w3 = f3.new()
+    check("again: first slice runs", w3:refresh(0, true, { search = true }) == true)
+    check("again: unfinished list runs inside the throttle, even held",
+      w3:refresh(0, true, { search = true }, true) == true)
+    check("again: finished list waits for the throttle",
+      w3:refresh(1, true, { search = true }, true) == false)
+  end
+  -- ids unavailable: the list never finishes, and must not loop every tick
+  do
+    local f4 = fixture()
+    f4.fail.schedule_ids = true
+    local w4 = f4.new()
+    w4:refresh(0, true, { search = true })
+    check("again: no ids does not loop", w4:refresh(1, true, { search = true }) == false)
+  end
+end
+
 if failures > 0 then os.exit(1) end
 print("world_test: all OK")
