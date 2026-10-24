@@ -242,6 +242,20 @@ function M.new(a, reads, io)
             end
             if #items > 0 then e.items = items end
           end
+          if r.k == "chest" then
+            local q = r.quest
+            if type(q) == "table" then
+              local qs = {}
+              for _, p in ipairs(type(q.q) == "table" and q.q or {}) do
+                if type(p) == "table" and to_int(p[1]) ~= nil then
+                  qs[#qs + 1] = { to_int(p[1]), p[2] == true }
+                end
+              end
+              e.quest = { any = q.any == true, q = qs, var = q.var == true or nil }
+            end
+            if r.trap == true then e.trap = true end
+            if r.pawn == true then e.pawn = true end
+          end
           static[uid] = e
         end
       end
@@ -911,13 +925,85 @@ function M.new(a, reads, io)
     for uid, e in pairs(static) do eff[uid] = e end
     for uid, e in pairs(S.file_monsters) do eff[uid] = e end
     for uid, e in pairs(learned) do
-      if e.k == "chest" and e.items == nil and eff[uid] ~= nil then
-        e.items = eff[uid].items
+      if e.k == "chest" and eff[uid] ~= nil then
+        if e.items == nil then e.items = eff[uid].items end
+        if e.quest == nil then e.quest = eff[uid].quest end
+        if e.trap == nil then e.trap = eff[uid].trap end
+        if e.pawn == nil then e.pawn = eff[uid].pawn end
       end
       eff[uid] = e
     end
     for uid, e in pairs(S.live) do eff[uid] = e end
     return eff
+  end
+
+  local KEPT_ITEMS = { [77] = true, [78] = true, [81] = true }
+
+  -- kinds in spec order: ng_shard, kept, quest, trap, pawn
+  local function chest_kinds(row, e, recs)
+    local id = row.id
+    local items = row.items or e.items
+    local kinds = {}
+    if id == 692 or id == 693 or id == 694 then kinds[#kinds + 1] = "ng_shard" end
+    local kept = false
+    if id == 10 or id == 11 or id == 12 then
+      for _, it in ipairs(items or {}) do
+        if KEPT_ITEMS[it.id] then kept = true end
+      end
+    end
+    if not kept then
+      for _, r in ipairs(recs or {}) do
+        if r.keep == true then kept = true end
+      end
+    end
+    if kept then kinds[#kinds + 1] = "kept" end
+    if type(row.quest) == "table" then kinds[#kinds + 1] = "quest" end
+    if row.trap == true then kinds[#kinds + 1] = "trap" end
+    if row.pawn == true then kinds[#kinds + 1] = "pawn" end
+    return kinds
+  end
+
+  -- an info is known only when its quest has a known finish (spec 27.4.1)
+  local function quest_met_of(quest, quest_state)
+    if quest.var then return nil end
+    local vals = {}
+    for i, p in ipairs(quest.q) do
+      local st = quest_state(p[1])
+      if st == nil then vals[i] = "nil" else vals[i] = p[2] and "true" or "false" end
+    end
+    if #vals == 0 then return nil end
+    local nt, nf = 0, 0
+    for _, v in ipairs(vals) do
+      if v == "true" then nt = nt + 1 elseif v == "false" then nf = nf + 1 end
+    end
+    if quest.any then
+      if nt > 0 then return true end
+      if nf > 0 then return false end
+      return nil
+    end
+    if nf > 0 then return false end
+    if nt == #vals then return true end
+    return nil
+  end
+
+  local function quest_text_of(quest, reveal)
+    local names, seen = {}, {}
+    local until_form = #quest.q > 0
+    for _, p in ipairs(quest.q) do
+      local nm = core.gate_name(p[1], a, reveal)
+      if not seen[nm] then seen[nm] = true; names[#names + 1] = nm end
+      if p[2] then until_form = false end
+    end
+    if #names == 0 then return "quest-gated" end
+    local joined = names[1]
+    if #names >= 2 then
+      joined = joined .. (quest.any and " or " or " and ") .. names[2]
+    end
+    if #names > 2 then joined = joined .. ", ..." end
+    if until_form then
+      return "until " .. joined .. (#names >= 2 and " end" or " ends") .. ", missable"
+    end
+    return "after " .. joined
   end
 
   local function badge(cid)
@@ -1159,6 +1245,7 @@ function M.new(a, reads, io)
 
     -- chests, tokens, beetles
     local uids = sorted_keys(eff)
+    local chest_qs = nil
     for _, uid in ipairs(uids) do
       local e = eff[uid]
       if e.k == "chest" and tg.chests then
@@ -1176,6 +1263,17 @@ function M.new(a, reads, io)
         end
         local c = { uid = uid, pos = pcopy(e), gimmick = e.id, state = state,
           item = item, item_name = item ~= nil and item_name(item) or nil }
+        local row = static[uid] or e
+        c.kinds = chest_kinds(row, e, recs)
+        if type(row.quest) == "table" then
+          c.quest_text = quest_text_of(row.quest, tg.reveal_gate_names == true)
+          chest_qs = chest_qs or quest_state_cache()
+          c.quest_met = quest_met_of(row.quest, function(q)
+            local ok, v = pcall(chest_qs, q)
+            if ok then return v end
+            return nil
+          end)
+        end
         if e.items ~= nil then
           c.items = {}
           for _, it in ipairs(e.items) do
@@ -2456,7 +2554,10 @@ function M.game_reads()
     for _, it in ipairs(relevant_records()) do
       local m = it.ctx
       local r = { key = it.key, guid = it.guid }
-      if m.GmItemContext ~= nil then r.picked = G(m.GmItemContext, "_IsPick") == true end
+      if m.GmItemContext ~= nil then
+        r.picked = G(m.GmItemContext, "_IsPick") == true
+        r.keep = G(m.GmItemContext, "_IsKeep") == true
+      end
       if m.TreasureBoxGimmickContext ~= nil then
         r.item = int_value(G(m.TreasureBoxGimmickContext, "_ItemId"))
       end

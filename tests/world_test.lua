@@ -3332,5 +3332,132 @@ do
   package.loaded["Clairvoyance.npcs"] = saved_loaded
 end
 
+-- 28. chest kinds, quest state, quest text (spec 27.2, 27.4)
+do
+  local core = require("Clairvoyance.core")
+  local saved_gate = core.gate_name
+  local calls = {}
+  core.gate_name = function(qid, adapter, reveal)
+    calls[#calls + 1] = { qid = qid, reveal = reveal }
+    return adapter.quest_name(qid) or "another quest"
+  end
+
+  local function kinds_of(c) return table.concat(c.kinds, ",") end
+  local function world_of(rows, records, qstate, qname)
+    local f = fixture({ files = { [K.PLACES] = places(rows) } })
+    f.data.records = records or {}
+    f.data.qstate = qstate or {}
+    f.data.qname = qname or {}
+    local w = f.new()
+    return f, w
+  end
+
+  -- kinds from each field, id and item rule
+  do
+    local f, w = world_of({
+      prow("chest", "k_quest", 10, 1, 1, { quest = { any = true, q = { { 11020, true } } } }),
+      prow("chest", "k_trap", 10, 2, 2, { trap = true }),
+      prow("chest", "k_pawn", 11, 3, 3, { pawn = true }),
+      prow("chest", "k_692", 692, 4, 4, { items = { { id = 78, n = 1 } } }),
+      prow("chest", "k_693", 693, 5, 5, {}),
+      prow("chest", "k_694", 694, 6, 6, {}),
+      prow("chest", "k_k77", 10, 7, 7, { items = { { id = 77, n = 1 } } }),
+      prow("chest", "k_k78", 11, 8, 8, { items = { { id = 78, n = 1 } } }),
+      prow("chest", "k_k81", 12, 9, 9, { items = { { id = 81, n = 1 } } }),
+      prow("chest", "k_k5", 10, 10, 10, { items = { { id = 5, n = 1 } } }),
+      prow("chest", "k_all", 10, 11, 11, { items = { { id = 77, n = 1 } }, trap = true,
+        pawn = true, quest = { any = false, q = {}, var = true } }),
+    }, nil)
+    w:refresh(0, true, on("chests"))
+    local ch = w:input().chests
+    check("kinds: no records at all, quest", kinds_of(find(ch, "k_quest")) == "quest")
+    check("kinds: trap", kinds_of(find(ch, "k_trap")) == "trap")
+    check("kinds: pawn", kinds_of(find(ch, "k_pawn")) == "pawn")
+    check("kinds: 692 with 78 is ng_shard only", kinds_of(find(ch, "k_692")) == "ng_shard")
+    check("kinds: 693, 694 ng_shard", kinds_of(find(ch, "k_693")) == "ng_shard"
+      and kinds_of(find(ch, "k_694")) == "ng_shard")
+    check("kinds: kept 77/78/81", kinds_of(find(ch, "k_k77")) == "kept"
+      and kinds_of(find(ch, "k_k78")) == "kept" and kinds_of(find(ch, "k_k81")) == "kept")
+    check("kinds: other item has none", #find(ch, "k_k5").kinds == 0)
+    check("kinds: spec order", kinds_of(find(ch, "k_all")) == "kept,quest,trap,pawn")
+    check("kinds: no quest fields on a plain chest",
+      find(ch, "k_trap").quest_met == nil and find(ch, "k_trap").quest_text == nil)
+  end
+
+  -- live keep adds kept once, false removes nothing
+  do
+    local f, w = world_of({
+      prow("chest", "r1", 10, 1, 1, { items = { { id = 5, n = 1 } } }),
+      prow("chest", "r2", 10, 2, 2, { items = { { id = 77, n = 1 } } }),
+    }, { { key = "r1_0", picked = false, keep = true }, { key = "r1_1", picked = false, keep = true },
+      { key = "r2_0", picked = false, keep = false } })
+    w:refresh(0, true, on("chests"))
+    local ch = w:input().chests
+    check("keep: true adds kept once", kinds_of(find(ch, "r1")) == "kept")
+    check("keep: false leaves the item-rule kept", kinds_of(find(ch, "r2")) == "kept")
+  end
+
+  -- a learned entry at a moved position keeps its row kinds
+  do
+    local f, w = world_of({
+      prow("chest", "m1", 10, 1, 1, { trap = true, pawn = true,
+        quest = { any = true, q = { { 1, true } } } }) })
+    f.data.reserved = { chest_row("m1", 50, 60) }
+    w:refresh(0, true, on("chests"))
+    local c = find(w:input().chests, "m1")
+    check("moved: learned at the new position", c ~= nil and c.pos.x == 50)
+    check("moved: keeps quest, trap, pawn", c ~= nil and kinds_of(c) == "quest,trap,pawn")
+  end
+
+  -- quest_met
+  local function met(q, qstate)
+    local rows = { prow("chest", "q1", 10, 1, 1, { quest = q }) }
+    local f, w = world_of(rows, nil, qstate)
+    w:refresh(0, true, on("chests"))
+    return find(w:input().chests, "q1").quest_met
+  end
+  check("met: finish true, completed", met({ any = false, q = { { 1, true } } }, { [1] = "completed" }) == true)
+  check("met: finish true, nil state", met({ any = false, q = { { 1, true } } }, {}) == nil)
+  check("met: finish false, completed", met({ any = false, q = { { 1, false } } }, { [1] = "completed" }) == false)
+  check("met: finish false, nil state", met({ any = false, q = { { 1, false } } }, {}) == nil)
+  check("met: any over (true, nil)", met({ any = true, q = { { 1, true }, { 2, true } } }, { [1] = "completed" }) == true)
+  check("met: any over (false, nil)", met({ any = true, q = { { 1, false }, { 2, true } } }, { [1] = "failed" }) == false)
+  check("met: any over (nil, nil)", met({ any = true, q = { { 1, true }, { 2, true } } }, {}) == nil)
+  check("met: all over (true, false)", met({ any = false, q = { { 1, true }, { 2, false } } },
+    { [1] = "completed", [2] = "completed" }) == false)
+  check("met: all over (true, nil)", met({ any = false, q = { { 1, true }, { 2, true } } }, { [1] = "completed" }) == nil)
+  check("met: all over (true, true)", met({ any = false, q = { { 1, true }, { 2, true } } },
+    { [1] = "completed", [2] = "canceled" }) == true)
+  check("met: all with a false and a nil is false", met({ any = false, q = { { 1, false }, { 2, true } } },
+    { [1] = "completed" }) == false)
+  check("met: var gives nil", met({ any = false, q = { { 1, true } }, var = true }, { [1] = "completed" }) == nil)
+
+  -- quest_text
+  local function text(q, qname, reveal)
+    local rows = { prow("chest", "q1", 10, 1, 1, { quest = q }) }
+    local f, w = world_of(rows, nil, nil, qname)
+    calls = {}
+    w:refresh(0, true, reveal ~= nil and { chests = true, reveal_gate_names = reveal } or on("chests"))
+    return find(w:input().chests, "q1").quest_text
+  end
+  local nm = { [1] = "X", [2] = "Y", [3] = "Z", [4] = "another quest", [5] = "another quest" }
+  check("text: one after", text({ any = false, q = { { 1, true } } }, nm) == "after X")
+  check("text: one until", text({ any = false, q = { { 1, false } } }, nm) == "until X ends, missable")
+  check("text: any of two", text({ any = true, q = { { 1, true }, { 2, true } } }, nm) == "after X or Y")
+  check("text: all of two", text({ any = false, q = { { 1, true }, { 2, true } } }, nm) == "after X and Y")
+  check("text: three", text({ any = true, q = { { 1, true }, { 2, true }, { 3, true } } }, nm) == "after X or Y, ...")
+  check("text: names deduped", text({ any = false, q = { { 4, true }, { 5, true } } }, nm) == "after another quest")
+  check("text: until two", text({ any = true, q = { { 1, false }, { 2, false } } }, nm) == "until X or Y end, missable")
+  check("text: var without names", text({ any = false, q = {}, var = true }, nm) == "quest-gated")
+  text({ any = false, q = { { 1, true } } }, nm, true)
+  check("text: reveal passed true", #calls >= 1 and calls[1].reveal == true and calls[1].qid == 1)
+  text({ any = false, q = { { 1, true } } }, nm, false)
+  check("text: reveal passed false", #calls >= 1 and calls[1].reveal == false)
+  text({ any = false, q = { { 1, true } } }, nm)
+  check("text: reveal nil treated as false", #calls >= 1 and calls[1].reveal == false)
+
+  core.gate_name = saved_gate
+end
+
 if failures > 0 then os.exit(1) end
 print("world_test: all OK")
