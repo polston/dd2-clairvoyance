@@ -8,12 +8,15 @@ M.GROUPS = { "startable", "in_progress", "completed", "unavailable", "locked",
 
 local IS_GROUP = {}
 -- per-group key names, built once so resolve concatenates nothing per call
+local function keys_of(g)
+  local p = "style_" .. g .. "_outline_"
+  return { over = "style_" .. g .. "_override", on = p .. "on",
+    color = p .. "color", width = p .. "width" }
+end
 local KEYS = {}
 for _, g in ipairs(M.GROUPS) do
   IS_GROUP[g] = true
-  local p = "style_" .. g .. "_outline_"
-  KEYS[g] = { over = "style_" .. g .. "_override", on = p .. "on",
-    color = p .. "color", width = p .. "width" }
+  KEYS[g] = keys_of(g)
 end
 
 function M.group_of(cat)
@@ -25,13 +28,8 @@ end
 function M.resolve(settings, group)
   local on, color, width = settings.outline_on, settings.outline_color,
     settings.outline_width
-  local k = group ~= nil and KEYS[group] or nil
-  if k == nil and group ~= nil then
-    -- a group outside GROUPS: build its names (rare, never in the frame loop)
-    local p = "style_" .. group .. "_outline_"
-    k = { over = "style_" .. group .. "_override", on = p .. "on",
-      color = p .. "color", width = p .. "width" }
-  end
+  -- a group outside GROUPS builds its names (rare, never in the frame loop)
+  local k = group ~= nil and (KEYS[group] or keys_of(group)) or nil
   if k ~= nil and settings[k.over] == true then
     if settings[k.on] ~= nil then on = settings[k.on] end
     if settings[k.color] ~= nil then color = settings[k.color] end

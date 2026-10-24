@@ -1,6 +1,7 @@
 -- NPC routes, affinity tiers, quest-item relations and quest hints
 -- (SPEC 22.5, 22.8.2-22.8.3, 22.9.4, 22.10.1, 22.11). Pure: no host global
 -- is read; game access arrives through arguments.
+local core = require("Clairvoyance.core")
 local M = {}
 
 local floor = math.floor
@@ -41,12 +42,6 @@ local function same_place(r, cur)
   if kr > 0 or kc > 0 then return kr > 0 and kc > 0 and kr == kc end
   return r.area == cur.area and r.location == cur.location
     and not (r.area == -1 and r.location == -1)
-end
-
--- The hour h is covered by a stop {from, to}: to <= from wraps midnight.
-local function stop_covers(s, h)
-  if s.from < s.to then return h >= s.from and h < s.to end
-  return h >= s.from or h < s.to
 end
 
 -- Ruling 2: the route level is the lowest priority P > 0 with an applicable
@@ -123,7 +118,7 @@ function M.route_stops(rows, today, area_pos, cur)
   for _, s in ipairs(runs) do
     local pos
     if type(cur) == "table" and cur.pos ~= nil and same_place(s, cur)
-        and stop_covers(s, today.hour) then
+        and in_hours(today.hour, s.from, s.to) then
       pos = cur.pos
     else
       pos = area_pos(s.row)
@@ -319,10 +314,6 @@ end
 
 local sqrt = math.sqrt
 
-local function finite(v)
-  return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
-end
-
 function M.nearest_new(g, x, y, z)
   return { g = g, x = x, y = y, z = z, i = 1, best = nil, bestd2 = math.huge,
     dist = nil, status = "running" }
@@ -389,6 +380,12 @@ local function heap_pop(job)
   return rv
 end
 
+-- Settle a path job: set its final status and drop the search state.
+local function finish(job, status)
+  job.status = status
+  job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+end
+
 function M.path_new(g, a, b, opt)
   opt = opt or {}
   local job = { g = g, a = a, b = b, cap = opt.cap or 20000,
@@ -396,8 +393,7 @@ function M.path_new(g, a, b, opt)
     hk = {}, hv = {}, hn = 0, gs = { [a] = 0 }, parent = {}, closed = {} }
   if a == b then
     job.path = { a }
-    job.status = "done"
-    job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+    finish(job, "done")
   else
     local dx, dy, dz = g.x[a] - g.x[b], g.y[a] - g.y[b], g.z[a] - g.z[b]
     heap_push(job, job.weight * sqrt(dx * dx + dy * dy + dz * dz), a)
@@ -416,8 +412,7 @@ function M.path_step(job, budget_ms, clock)
   local t0 = clock()
   while true do
     if job.hn == 0 then
-      job.status = "failed"
-      job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+      finish(job, "failed")
       return "failed"
     end
     local u = heap_pop(job)
@@ -428,16 +423,14 @@ function M.path_step(job, budget_ms, clock)
         while c do k = k + 1; path[k] = c; c = parent[c] end
         for i = 1, k // 2 do path[i], path[k + 1 - i] = path[k + 1 - i], path[i] end
         job.path = path
-        job.status = "done"
-        job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+        finish(job, "done")
         return "done"
       end
       closed[u] = true
       local ex = job.expanded + 1
       job.expanded = ex
       if ex > cap then
-        job.status = "failed"
-        job.gs, job.parent, job.closed, job.hk, job.hv = nil, nil, nil, nil, nil
+        finish(job, "failed")
         return "failed"
       end
       local ux, uy, uz, gu = gx[u], gy[u], gz[u], gs[u]
@@ -464,8 +457,7 @@ end
 local function drawn(s, undisc)
   if type(s) ~= "table" then return false end
   if s.discovered == false and not undisc then return false end
-  local p = s.pos
-  return type(p) == "table" and finite(p.x) and finite(p.y) and finite(p.z)
+  return core.valid_pos(s.pos)
 end
 
 function M.route_pairs(stops, undisc)

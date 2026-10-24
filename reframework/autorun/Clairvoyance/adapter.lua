@@ -1657,11 +1657,7 @@ end
 
 -- ===== Color channel order =====
 -- SPEC 5.12.5: swap the red and blue bytes of a packed color.
-local function argb_to_abgr(value)
-    local red = (value >> 16) & 0xFF
-    local blue = value & 0xFF
-    return (value & 0xFF00FF00) | (blue << 16) | red
-end
+local argb_to_abgr = require("Clairvoyance.style").abgr
 
 -- ===== glue =====
 local function set_debug(v) DEBUG = v end

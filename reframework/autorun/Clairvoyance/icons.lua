@@ -2,6 +2,7 @@
 -- icon art, converted to white, tinted with the category color, on the full
 -- map, the minimap and above heads. No host globals here: the D2DX table,
 -- the clock and every game access arrive through opt.
+local sty = require("Clairvoyance.style")
 local M = {}
 
 local PATH_PREFIX = "Clairvoyance/icons/"
@@ -51,10 +52,10 @@ local function draw_layer(r, layer, ox, oy, k, is_head)
       local style = rec.style
       if style ~= nil and style.on then
         outlined = true
-        local o = math.max(1, math.floor(style.width * k + 0.5))
+        local o = sty.offset(style.width, k)
         local c = style.color
         opts.tint = c | 0xFF000000
-        opts.alpha = ((c >> 24) & 0xFF) / 255 * rec.alpha
+        opts.alpha = sty.alpha(c, rec.alpha)
         for j = 1, 15, 2 do
           d2dx.image_ex(entry.img, px + OFFS[j] * o, py + OFFS[j + 1] * o, s, s, opts)
         end

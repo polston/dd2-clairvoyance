@@ -237,24 +237,19 @@ M.STYLE_BOOL_KEYS, M.STYLE_COLOR_KEYS, M.STYLE_INT_RANGE =
 
 -- Number size: non-number or below 1 -> 0 (auto); 1-11 -> 12; above 40 -> 40;
 -- else floored.
-local function number_size_field(raw, k, d)
+local function number_size_field(raw, k)
   local v = raw[k]
   if type(v) ~= "number" or v ~= v or v < 1 then return 0 end
   if v < 12 then return 12 end
   if v > 40 then return 40 end
   return math.floor(v)
 end
-M.number_size_field = number_size_field
 
 -- Panel order (SPEC 23.7): every settings key the panel shows, once.
-local panel_world
-do
-  local w = {}
-  for _, k in ipairs(M.WORLD_BOOLS) do w[#w + 1] = k end
-  for _, k in ipairs(M.WORLD_KIND_BOOLS) do w[#w + 1] = k end
-  w[#w + 1] = "world_max_markers"
-  panel_world = w
-end
+local panel_world = {}
+for _, k in ipairs(M.WORLD_BOOLS) do panel_world[#panel_world + 1] = k end
+for _, k in ipairs(M.WORLD_KIND_BOOLS) do panel_world[#panel_world + 1] = k end
+panel_world[#panel_world + 1] = "world_max_markers"
 local panel_appearance = {}
 do
   local a = panel_appearance
@@ -329,7 +324,7 @@ local function field(raw, k, d)
   elseif kind == "icon" then return M.ICON_INDEX[raw[k]] and raw[k] or d[k]
   elseif kind == "int" then return int_field(raw, k, d, r[2], r[3])
   elseif kind == "float" then return range_field(raw, k, d, r[2], r[3])
-  elseif kind == "size" then return number_size_field(raw, k, d)
+  elseif kind == "size" then return number_size_field(raw, k)
   end
   return M.cut_search(raw[k])
 end
@@ -342,13 +337,11 @@ function M.validate(raw)
   -- equal to its v12 default takes the v13 default; a changed one stays.
   local mig = type(raw.palette) ~= "number" or raw.palette < 13
   for _, k in ipairs(BOOL_KEYS) do out[k] = field(raw, k, d) end
-  for _, k in ipairs(COLOR_KEYS) do
-    if mig and raw[k] == M.V12_COLOR[k] then out[k] = d[k]
-    else out[k] = field(raw, k, d) end
-  end
-  for _, k in ipairs(ICON_KEYS) do
-    if mig and raw[k] == M.V12_ICON[k] then out[k] = d[k]
-    else out[k] = field(raw, k, d) end
+  for _, p in ipairs({ { COLOR_KEYS, M.V12_COLOR }, { ICON_KEYS, M.V12_ICON } }) do
+    for _, k in ipairs(p[1]) do
+      if mig and raw[k] == p[2][k] then out[k] = d[k]
+      else out[k] = field(raw, k, d) end
+    end
   end
   out.palette = 13
   for _, k in ipairs(STYLE_BOOL_KEYS) do out[k] = field(raw, k, d) end
@@ -431,10 +424,9 @@ end
 -- route_world_path and everything else stay.
 function M.reset_appearance(settings)
   local d = M.defaults()
-  for _, k in ipairs(ICON_KEYS) do settings[k] = d[k] end
-  for _, k in ipairs(COLOR_KEYS) do settings[k] = d[k] end
-  for _, k in ipairs(STYLE_BOOL_KEYS) do settings[k] = d[k] end
-  for _, k in ipairs(STYLE_COLOR_KEYS) do settings[k] = d[k] end
+  for _, list in ipairs({ ICON_KEYS, COLOR_KEYS, STYLE_BOOL_KEYS, STYLE_COLOR_KEYS }) do
+    for _, k in ipairs(list) do settings[k] = d[k] end
+  end
   for k in pairs(STYLE_INT_RANGE) do settings[k] = d[k] end
   settings.route_number_size = d.route_number_size
 end

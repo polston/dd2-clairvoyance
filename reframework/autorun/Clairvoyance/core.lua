@@ -500,7 +500,7 @@ function M.chest_label(chest)
     text = items_text(e.items, false)
   end
   local out = text and ("Chest - " .. text) or "Chest"
-  if type(e.kinds) == "table" and #e.kinds > 0 then
+  if type(e.kinds) == "table" then
     local ph = {}
     for _, k in ipairs(e.kinds) do
       local p = kind_phrase(e, k)
