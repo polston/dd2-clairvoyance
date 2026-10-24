@@ -40,6 +40,9 @@ function M.defaults()
     route_path = 1, route_world_path = false, names_color = 0xFFFFFFFF,
     -- monster kinds switched off, per class (SPEC 29.2.1)
     world_monster_off = { large = {}, small = {} },
+    -- quest focus (SPEC 32)
+    focus_qids = {}, focus_tracked = false, focus_unrelated = 0, focus_routes = 1,
+    color_focus_place = 0xFFFFAB40, icon_focus_place = 26,
   }
   for _, g in ipairs(style.GROUPS) do
     t["style_" .. g .. "_override"] = false
@@ -123,7 +126,8 @@ M.V12_ICON = { icon_startable = 52, icon_in_progress = 0, icon_completed = 42,
   icon_unavailable = 21, icon_locked = 41, icon_quest_item = 53,
   icon_chest = 31, icon_treasure = 58, icon_monster = 29, icon_seller = 13,
   icon_token = 57, icon_beetle = 73,
-  icon_npc_search = 31, icon_route_stop = 25, icon_hint_pin = 58 }
+  icon_npc_search = 31, icon_route_stop = 25, icon_hint_pin = 58,
+  icon_focus_place = 26 }
 M.V12_COLOR = { icon_color = 0xFF960707, color_in_progress = 0xFFD7A500,
   color_completed = 0xFF2E8B57, color_unavailable = 0xFF787878,
   color_locked = 0xFF46468C, color_quest_item = 0xFF00C8FF,
@@ -242,19 +246,19 @@ local BOOL_KEYS = { "enabled", "debug", "show_startable", "show_in_progress",
   "show_completed", "show_unavailable", "show_locked", "show_overhead", "show_minimap",
   "reveal_gate_names", "show_quest_items", "journal_spoilers",
   "matching_icons", "step_icons", "inventory_quest_marks", "route_world_path",
-  "coords_map_cursor", "coords_minimap" }
+  "coords_map_cursor", "coords_minimap", "focus_tracked" }
 for _, k in ipairs(M.WORLD_BOOLS) do BOOL_KEYS[#BOOL_KEYS + 1] = k end
 for _, k in ipairs(M.WORLD_KIND_BOOLS) do BOOL_KEYS[#BOOL_KEYS + 1] = k end
 local COLOR_KEYS = { "icon_color", "color_in_progress", "color_completed",
   "color_unavailable", "color_locked", "color_quest_item",
   "color_chest", "color_treasure", "color_monster", "color_seller",
   "color_token", "color_beetle",
-  "color_npc_search", "color_route_stop", "color_hint_pin" }
+  "color_npc_search", "color_route_stop", "color_hint_pin", "color_focus_place" }
 local ICON_KEYS = { "icon_startable", "icon_in_progress", "icon_completed",
   "icon_unavailable", "icon_locked", "icon_quest_item",
   "icon_chest", "icon_treasure", "icon_monster", "icon_seller",
   "icon_token", "icon_beetle",
-  "icon_npc_search", "icon_route_stop", "icon_hint_pin" }
+  "icon_npc_search", "icon_route_stop", "icon_hint_pin", "icon_focus_place" }
 M.ICON_KEYS, M.COLOR_KEYS = ICON_KEYS, COLOR_KEYS
 
 -- The v14 style keys by field rule (SPEC 23.4). route_number_size and
@@ -317,7 +321,8 @@ M.PANEL_ORDER = {
   { id = "map", keys = { "show_minimap", "matching_icons",
     "coords_map_cursor", "coords_minimap" } },
   { id = "appearance", keys = panel_appearance },
-  { id = "quest_tree", keys = {} },
+  { id = "quest_tree", keys = { "focus_qids", "focus_tracked", "focus_unrelated",
+    "focus_routes" } },
   { id = "world", keys = {} },
   { id = "status", keys = { "debug" } },
 }
@@ -354,8 +359,29 @@ RULE.overhead_names = { "int", 0, 2 }
 RULE.route_path = { "int", 0, 1 }
 RULE.route_number_size = { "size" }
 RULE.search_text = { "text" }
+RULE.focus_unrelated = { "int", 0, 1 }
+RULE.focus_routes = { "int", 0, 2 }
+RULE.focus_qids = { "qid_list" }
 
 -- The validated value of raw[k] under its rule (the default when invalid).
+local QID_MAX = 16
+local function qid_list_field(v)
+  local out = {}
+  if type(v) ~= "table" then return out end
+  local seen = {}
+  for _, x in ipairs(v) do
+    if type(x) == "number" then
+      local n = math.tointeger(x)
+      if n and n > 0 and not seen[n] then
+        seen[n] = true
+        out[#out + 1] = n
+        if #out >= QID_MAX then break end
+      end
+    end
+  end
+  return out
+end
+
 local function field(raw, k, d)
   local r = RULE[k]
   local kind = r[1]
@@ -365,6 +391,7 @@ local function field(raw, k, d)
   elseif kind == "int" then return int_field(raw, k, d, r[2], r[3])
   elseif kind == "float" then return range_field(raw, k, d, r[2], r[3])
   elseif kind == "size" then return number_size_field(raw, k)
+  elseif kind == "qid_list" then return qid_list_field(raw[k])
   end
   return M.cut_search(raw[k])
 end
@@ -568,7 +595,8 @@ function M.validate(raw)
   for _, k in ipairs(STYLE_BOOL_KEYS) do out[k] = field(raw, k, d) end
   for _, k in ipairs(STYLE_COLOR_KEYS) do out[k] = field(raw, k, d) end
   for _, k in ipairs({ "overhead_distance", "world_max_markers", "search_text",
-    "overhead_names", "route_number_size", "route_path" }) do
+    "overhead_names", "route_number_size", "route_path", "focus_qids",
+    "focus_unrelated", "focus_routes" }) do
     out[k] = field(raw, k, d)
   end
   for k in pairs(STYLE_INT_RANGE) do out[k] = field(raw, k, d) end
@@ -589,7 +617,7 @@ function M.set_key(settings, key, v)
   local kind = r[1]
   local want = (kind == "bool" and "boolean")
     or ((kind == "int" or kind == "float" or kind == "size") and "number")
-    or (kind == "text" and "string") or nil
+    or (kind == "text" and "string") or (kind == "qid_list" and "table") or nil
   if want and (type(v) ~= want or v ~= v) then return false end
   local out = field({ [key] = v }, key, DEFAULTS)
   if (kind == "color" or kind == "icon" or kind == "float") and out ~= v then
@@ -609,6 +637,7 @@ M.COLOR_KEY = {
   token = "color_token", beetle = "color_beetle",
   npc_search = "color_npc_search", route_stop = "color_route_stop",
   hint_pin = "color_hint_pin",
+  focus_npc = "color_npc_search", focus_place = "color_focus_place",
 }
 M.ICON_KEY = {
   startable = "icon_startable", in_progress = "icon_in_progress",
@@ -619,6 +648,7 @@ M.ICON_KEY = {
   token = "icon_token", beetle = "icon_beetle",
   npc_search = "icon_npc_search", route_stop = "icon_route_stop",
   hint_pin = "icon_hint_pin",
+  focus_npc = "icon_npc_search", focus_place = "icon_focus_place",
 }
 function M.color_of(settings, cat)
   return settings[M.COLOR_KEY[cat]] or settings.icon_color
@@ -658,7 +688,7 @@ end
 -- is done (opened / looted) or faded (SPEC 27.6); once when both.
 function M.marker_color(settings, m)
   local c = M.color_of(settings, m.cat)
-  if not (m.done or m.faded) then return c end
+  if not (m.done or m.faded or m.dim) then return c end
   local a = (c >> 24) & 0xFF
   return ((a // 2) << 24) | (c & 0x00FFFFFF)
 end
