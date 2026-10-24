@@ -3487,6 +3487,30 @@ do
   ms = run(mk_resp(true), "rotten")
   check("hay40 hover fresh", #ms == 1 and ms[1].hover ~= nil
     and ms[1].hover:sub(1, 20) == "Gob (respawning)\nDro")
+
+  -- every compared field rebuilds: a seller's quest, a chest's kinds, a treasure's items
+  local function mk_sq(quest)
+    return { sellers = { { shop = 78, item = 1, item_name = "Gem", npc = "N", quest = quest,
+      qids = {}, pos = P(1) } } }
+  end
+  run(mk_sq("Alpha"), "bravo")
+  b0 = stats.hay_builds
+  ms = run(mk_sq("Bravo"), "bravo")
+  check("hay40 seller quest rebuilt", stats.hay_builds - b0 == 1 and by_key(ms)["w:sell:78:1"] ~= nil)
+  local function mk_ck(kinds)
+    return { chests = { { uid = "hk", pos = P(1), state = "unopened", kinds = kinds } } }
+  end
+  run(mk_ck(nil), "new shard each cycle")
+  b0 = stats.hay_builds
+  ms = run(mk_ck({ "ng_shard" }), "new shard each cycle")
+  check("hay40 chest kinds rebuilt", stats.hay_builds - b0 == 1 and #ms == 1)
+  local function mk_tr(name)
+    return { treasure = { { name = "HT2", pos = P(30), items = { { name = name } } } } }
+  end
+  run(mk_tr("Rope"), "elixir")
+  b0 = stats.hay_builds
+  ms = run(mk_tr("Elixir"), "elixir")
+  check("hay40 treasure items rebuilt", stats.hay_builds - b0 == 1 and #ms == 1)
 end
 
 -- merge_shops (SPEC 28.4.4)
