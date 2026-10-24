@@ -18,7 +18,8 @@ local function on(...)
   for _, k in ipairs({ ... }) do t[k] = true end
   return t
 end
-local ALL = on("chests", "treasure", "tokens", "beetles", "monsters", "sellers")
+local ALL = on("chests", "treasure", "tokens", "beetles", "monsters", "small_monsters",
+  "sellers")
 local NONE = {}
 
 local function total(t)
@@ -3546,6 +3547,600 @@ do
     check("real gate_name: revealed name", find(w2:input().chests, "g1").quest_text
       == "after Agamen Dig")
   end
+end
+
+-- 29. per-step round timing (SPEC 28.5.2)
+do
+  local function timed_world()
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chara", "m5", 5, 0, 0, { name = "ch253000_00" }) }) } })
+    local d = f.data
+    d.boss = { ch253 = true }
+    d.catalog = { 1 }
+    d.cast = { [1] = { 2058, 2059 } }
+    d.sched_ids = { 2058, 2059 }
+    d.shop = { [2058] = 41, [2059] = 42 }
+    d.sched = { [2058] = P(100, 0, 100), [2059] = P(200, 0, 100) }
+    d.shops = { [41] = { { item = 378, release_qid = 0 } },
+      [42] = { { item = 379, release_qid = 0 } } }
+    d.reserved = { chest_row("c1", 10, 10) }
+    return f, f.new()
+  end
+  local ALLS = { chests = true, treasure = true, tokens = true, beetles = true,
+    monsters = true, sellers = true, search = true, shops = true }
+  local STEPS = { "cast", "boss", "loaded_boss", "reserved", "sort", "learn", "loaded",
+    "patched", "settlements", "schedule", "records", "seen", "effective", "collect",
+    "discovery", "treasure", "shop_index", "sellers", "monsters", "drops", "npcs",
+    "route" }
+  local f, w = timed_world()
+  w:refresh(0, true, ALLS)
+  w:refresh(0, true, ALLS)
+  local st = w:stats()
+  for _, n in ipairs(STEPS) do
+    check("step: " .. n, type(st.ms["step_" .. n]) == "number")
+  end
+  w:refresh(10, true, on("chests", "tokens", "beetles"))
+  st = w:stats()
+  check("step: cleared", st.ms.step_monsters == nil and st.ms.step_drops == nil
+    and st.ms.step_npcs == nil and st.ms.step_shop_index == nil)
+  check("step: still timed", type(st.ms.step_collect) == "number")
+
+  -- schedule_pos is a per-round total over every call, the loop's included
+  local f2 = fixture()
+  local d2 = f2.data
+  d2.catalog = { 1 }
+  d2.cast = { [1] = { 2058, 2059 } }
+  d2.sched_ids = { 2058, 2059 }
+  d2.shop = { [2058] = 41, [2059] = 42 }
+  d2.sched = { [2058] = P(100, 0, 100), [2059] = P(200, 0, 100) }
+  d2.shops = { [41] = { { item = 378, release_qid = 0 } },
+    [42] = { { item = 379, release_qid = 0 } } }
+  d2.alive = false
+  d2.needs = { [100] = { { id = 378, num = 1 } } }
+  local inner = f2.reads.schedule_pos
+  f2.reads.schedule_pos = function(cid)
+    f2.clock_t = f2.clock_t + 0.001
+    return inner(cid)
+  end
+  local w2 = f2.new()
+  w2:refresh(0, true, { shops = true, sellers = true })
+  local calls = f2.reads_n.schedule_pos
+  local sp = w2:stats().ms.schedule_pos
+  check("schedule_pos total", type(sp) == "number" and calls > 2
+    and math.abs(sp - calls * 1.0) < 1e-6)
+  w2:refresh(10, true, { shops = true, sellers = true })
+  local calls2 = f2.reads_n.schedule_pos - calls
+  check("schedule_pos cleared per round",
+    math.abs(w2:stats().ms.schedule_pos - calls2 * 1.0) < 1e-6)
+end
+
+-- 30. round caches (SPEC 28.5.3)
+do
+  local function cache_world()
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "f1", 10, 1, 1),
+      prow("chest", "f2", 10, 2, 2, { src = "subquest" }),
+      prow("chara", "m1", 1, 100, 0, { name = "ch253000_00" }) }) } })
+    f.data.boss = { ch253 = true }
+    f.data.catalog = { 1 }
+    f.data.cast = { [1] = { 2058 } }
+    return f, f.new()
+  end
+
+  -- effective(): merged once per change
+  do
+    local f, w = cache_world()
+    w:refresh(0, true, ALL)
+    local b0 = w:stats().eff_builds
+    check("eff counter wired", b0 == 1)
+    w:refresh(10, true, ALL)
+    check("eff cached", w:stats().eff_builds - b0 == 0)
+    f.data.reserved = { chest_row("n1", 50, 50) }
+    w:refresh(20, true, ALL)
+    check("eff learn rebuilds", w:stats().eff_builds - b0 == 1)
+    check("eff learn shows the new chest", find(w:input().chests, "n1") ~= nil)
+    w:refresh(30, true, ALL)
+    check("eff cached after learn", w:stats().eff_builds - b0 == 1)
+
+    -- a live-only row changing does not rebuild, and shows the change
+    f.data.reserved = { chest_row("f2", 5, 5) }
+    w:refresh(40, true, ALL)
+    local b1 = w:stats().eff_builds
+    local c1 = find(w:input().chests, "f2")
+    check("eff live row shown", c1 ~= nil and c1.pos.x == 5)
+    f.data.reserved = { chest_row("f2", 9, 9) }
+    w:refresh(50, true, ALL)
+    local c2 = find(w:input().chests, "f2")
+    check("eff live row change shown", c2 ~= nil and c2.pos.x == 9)
+    check("eff live row change does not rebuild", w:stats().eff_builds - b1 == 0)
+    f.data.reserved = {}
+    w:refresh(60, true, ALL)
+    check("eff live row gone", find(w:input().chests, "f2") == nil)
+    check("eff live row gone does not rebuild", w:stats().eff_builds - b1 == 0)
+  end
+
+  -- one live row: same output as the same row in the places file
+  do
+    local function chest_uids(live)
+      local rows = { prow("chest", "a1", 10, 1, 1), prow("chest", "c1", 10, 9, 9) }
+      if not live then
+        rows[#rows + 1] = prow("chest", "b1", 10, 5, 5)
+        rows[#rows + 1] = prow("chest", "z1", 10, 20, 20)
+      end
+      local f = fixture({ files = { [K.PLACES] = places(rows) } })
+      if live then
+        rows[#rows + 1] = prow("chest", "z1", 10, 0, 0, { src = "subquest" })
+        f.data.reserved = { chest_row("b1", 5, 5), chest_row("z1", 20, 20) }
+        -- a listed-but-not-file row (subquest) is the live-only case
+        rows[#rows + 1] = prow("chest", "b1", 10, 0, 0, { src = "subquest" })
+      end
+      local w = f.new()
+      w:refresh(0, true, ALL)
+      w:refresh(10, true, ALL)
+      local t = {}
+      for _, c in ipairs(w:input().chests) do t[#t + 1] = c.uid .. "@" .. c.pos.x end
+      return table.concat(t, ","), w
+    end
+    local want = chest_uids(false)
+    local got, w = chest_uids(true)
+    check("live one row: same output as a file row", got == want)
+    check("live one row: sorted between the cached uids", got == "a1@1.0,b1@5.0,c1@9.0,z1@20.0")
+    local b0 = w:stats().eff_builds
+    w:refresh(20, true, ALL)
+    check("live one row: cache hit kept", w:stats().eff_builds == b0)
+  end
+
+  -- a live monster row over a uid the merge already holds: the live row wins
+  do
+    local f = fixture({ files = {
+      [K.PLACES] = places({ prow("chara", "ov1", 5, 1, 1, { name = "ch299000_00" }),
+        prow("chest", "c1", 10, 9, 9) }),
+      [K.ATLAS] = { version = K.FILE_VERSION, pak = "1:1", entries = {
+        ov1 = { k = "monster", id = 5, x = 1, y = 0, z = 1, name = "ch299000_00", table_ix = 1 } } } } })
+    f.data.boss = { ch253 = true }
+    f.data.reserved = { mrow("ov1", 5, "ch220000_00", 500, 500) }
+    local w = f.new()
+    w:refresh(0, true, ALL)
+    w:refresh(10, true, ALL)
+    local m = w:input().monsters
+    check("live row over a learned uid: live row wins", #m == 1 and m[1].pos.x == 500)
+  end
+
+  -- reset invalidates the merge: no file monsters while the cast is unavailable
+  do
+    local f, w = cache_world()
+    w:refresh(0, true, ALL)
+    check("eff reset: file monster before", #w:input().monsters == 1)
+    local b0 = w:stats().eff_builds
+    w:reset()
+    f.afail.catalog_ids = true
+    w:refresh(10, true, ALL)
+    check("eff reset: rebuilt", w:stats().eff_builds - b0 == 1)
+    check("eff reset: no file monsters", #w:input().monsters == 0)
+  end
+
+  -- first_seller_cid is read once per round for shops and sellers together
+  do
+    local function sched_calls(tg)
+      local f = fixture()
+      local d = f.data
+      d.needs = { [100] = { { id = 378, num = 1 } } }
+      d.iname = { [378] = "Grimoire" }
+      d.sched_ids = { 2058, 2059 }
+      d.shop = { [2058] = 41, [2059] = 42 }
+      d.npcname = { [2058] = "Dudley", [2059] = "Ana" }
+      d.sched = { [2058] = P(100, 0, 100), [2059] = P(200, 0, 100) }
+      d.alive = false
+      d.shops = { [41] = { { item = 378, release_qid = 0 } },
+        [42] = { { item = 379, release_qid = 0 } } }
+      local w = f.new()
+      w:refresh(0, true, tg)
+      return f.reads_n.schedule_pos or 0, w
+    end
+    local both, wb = sched_calls({ shops = true, sellers = true })
+    local alone = sched_calls({ shops = true })
+    check("fsc: sellers appeared", #wb:input().sellers == 1)
+    check("fsc: shops with sellers reads as shops alone", both == alone and alone > 0)
+
+    -- the memo is per round: a seller that moves moves its markers
+    local f = fixture()
+    local d = f.data
+    d.needs = { [100] = { { id = 378, num = 1 } } }
+    d.iname = { [378] = "Grimoire" }
+    d.sched_ids = { 2058 }
+    d.shop = { [2058] = 41 }
+    d.npcname = { [2058] = "Dudley" }
+    d.sched = { [2058] = P(100, 0, 100) }
+    d.alive = false
+    d.shops = { [41] = { { item = 378, release_qid = 0 } } }
+    local w = f.new()
+    local tg = { shops = true, sellers = true }
+    w:refresh(0, true, tg)
+    check("fsc: first position", w:input().shops[1].pos.x == 100
+      and w:input().sellers[1].pos.x == 100)
+    d.sched[2058] = P(200, 0, 200)
+    w:poke()
+    w:refresh(1, true, tg)
+    check("fsc: memo is per round, shop", w:input().shops[1].pos.x == 200)
+    check("fsc: memo is per round, seller", w:input().sellers[1].pos.x == 200)
+  end
+
+  -- item lists: kept per key, rebuilt on a changed id list or a fallback name
+  do
+    local nm = { [5] = "Potion", [6] = "Tonic" }
+    local cache = {}
+    local function name_of(id) return nm[id] or ("Item " .. id) end
+    local l1, b1 = world.item_list(cache, "k", { { id = 5, n = 1 } }, name_of)
+    check("item_list: first build", b1 == true and l1[1].name == "Potion")
+    local l2, b2 = world.item_list(cache, "k", { { id = 5, n = 1 } }, name_of)
+    check("item_list: kept", b2 == false and l2 == l1)
+    local l3, b3 = world.item_list(cache, "k", { { id = 5, n = 1 }, { id = 6, n = 1 } }, name_of)
+    check("item_list: ids {5} then {5,6} rebuilds", b3 == true and #l3 == 2)
+    local _, b4 = world.item_list(cache, "k", { { id = 5, n = 1 }, { id = 7, n = 1 } }, name_of)
+    check("item_list: a changed id rebuilds", b4 == true)
+    local _, b5 = world.item_list(cache, "k", { { id = 5, n = 1 }, { id = 7, n = 1 } }, name_of)
+    check("item_list: fallback name retries", b5 == true)
+    nm[7] = "Elixir"
+    local l6, b6 = world.item_list(cache, "k", { { id = 5, n = 1 }, { id = 7, n = 1 } }, name_of)
+    check("item_list: retry takes the real name", b6 == true and l6[2].name == "Elixir")
+    local _, b7 = world.item_list(cache, "k", { { id = 5, n = 1 }, { id = 7, n = 1 } }, name_of)
+    check("item_list: kept after the real name", b7 == false)
+  end
+
+  -- chests and treasure through the round: a fallback name, then the real one
+  do
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "f1", 10, 1, 1, { items = { { id = 5, n = 1 } } }) }) } })
+    f.data.iname = { [5] = "Item 5" }
+    f.data.nodes = { { name = "Node A", pos = P(1, 0, 1) } }
+    local w = f.new()
+    local tg = on("chests", "treasure")
+    w:refresh(0, true, tg)
+    local b0 = w:stats().item_list_builds
+    check("item lists counter wired", b0 == 2)
+    check("item retry: fallback shown first", find(w:input().chests, "f1").items[1].name == "Item 5")
+    f.data.iname[5] = "Potion"
+    w:refresh(10, true, tg)
+    local b1 = w:stats().item_list_builds
+    check("item retry", find(w:input().chests, "f1").items[1].name == "Potion")
+    check("item retry: treasure", w:input().treasure[1].items[1].name == "Potion")
+    check("item retry rebuilt once each", b1 - b0 == 2)
+    w:refresh(20, true, tg)
+    check("item list kept", w:stats().item_list_builds - b1 == 0)
+    check("item list kept: still named", find(w:input().chests, "f1").items[1].name == "Potion")
+  end
+end
+
+-- 31. wants_round, hold, run-again flag (SPEC 28.6, 28.7.1, 28.8.1)
+do
+  check("wants: first_token alone", world.wants_round({ first_token = true }) == true)
+  check("wants: none", world.wants_round({}) == false)
+  for _, k in ipairs({ "chests", "treasure", "tokens", "beetles", "monsters", "sellers",
+    "search", "shops" }) do
+    check("wants: " .. k, world.wants_round({ [k] = true }) == true)
+  end
+  check("wants: unrelated toggle", world.wants_round({ reveal_gate_names = true }) == false)
+
+  local function held_world()
+    local f = fixture()
+    f.data.reserved = { chest_row("c1", 10, 10) }
+    return f, f.new()
+  end
+  local TG = on("chests")
+  local f, w = held_world()
+  check("hold: first round runs", w:refresh(0, true, TG, true) == true)
+  check("hold: counter starts at zero", w:stats().held_rounds == 0)
+  check("hold: inside the throttle, nothing", w:refresh(3, true, TG, true) == false)
+  check("hold: inside the throttle, not counted", w:stats().held_rounds == 0)
+  local n = w:stats().rounds
+  check("hold: throttle elapsed, skipped", w:refresh(10, true, TG, true) == false
+    and w:stats().rounds == n)
+  check("hold: throttle elapsed, counted", w:stats().held_rounds == 1)
+  check("hold: counted per call", w:refresh(11, true, TG, true) == false
+    and w:stats().held_rounds == 2)
+  check("hold: released runs at once", w:refresh(12, true, TG) == true)
+  check("hold: no hold, throttle as before", w:refresh(13, true, TG) == false
+    and w:stats().held_rounds == 2)
+
+  -- a cleared throttle still runs under hold, once
+  w:poke()
+  check("hold: poke runs once", w:refresh(14, true, TG, true) == true)
+  check("hold: then held again", w:refresh(30, true, TG, true) == false)
+  w:set_route(2058, "Dudley")
+  check("hold: set_route runs once", w:refresh(31, true, TG, true) == true)
+  check("hold: and then not again", w:refresh(32, true, TG, true) == false)
+
+  -- a changed NPC list under search runs inside the throttle
+  local f2, w2 = held_world()
+  local STG = { search = true, npc_cids = { 1 } }
+  check("hold: search round", w2:refresh(0, true, STG, true) == true)
+  check("hold: same list inside the throttle", w2:refresh(2, true,
+    { search = true, npc_cids = { 1 } }, true) == false)
+  check("hold: changed list runs", w2:refresh(3, true,
+    { search = true, npc_cids = { 2 } }, true) == true)
+  check("hold: changed list not counted as held", w2:stats().held_rounds == 0)
+
+  -- the run-again flag: the unfinished NPC name list
+  do
+    local f3 = fixture()
+    f3.data.sched_ids = {}
+    for i = 1, K.NPC_NAME_SLICE + 3 do
+      f3.data.sched_ids[i] = 5000 + i
+      f3.data.npcname[5000 + i] = "N" .. i
+    end
+    local w3 = f3.new()
+    check("again: first slice runs", w3:refresh(0, true, { search = true }) == true)
+    check("again: unfinished list runs inside the throttle, even held",
+      w3:refresh(0, true, { search = true }, true) == true)
+    check("again: finished list waits for the throttle",
+      w3:refresh(1, true, { search = true }, true) == false)
+  end
+  -- ids unavailable: the list never finishes, and must not loop every tick
+  do
+    local f4 = fixture()
+    f4.fail.schedule_ids = true
+    local w4 = f4.new()
+    w4:refresh(0, true, { search = true })
+    check("again: no ids does not loop", w4:refresh(1, true, { search = true }) == false)
+  end
+end
+
+-- 32. toggle costs, small monsters, kept-set pin (SPEC 28.7.1, 28.10.1, 28.12.2)
+do
+  local function cost_world()
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "f1", 10, 1, 1, { items = { { id = 5, n = 1 } } }),
+      prow("token", "t1", K.TOKEN_ID, 2, 2),
+      prow("beetle", "b1", K.BEETLE_ID, 3, 3),
+      prow("chara", "m1", 1, 100, 0, { name = "ch253000_00" }),
+      prow("chara", "m2", 2, 104, 0, { name = "ch253000_00" }),
+      prow("chara", "s1", 3, 400, 0, { name = "ch220000_00" }),
+      prow("chara", "s2", 4, 402, 0, { name = "ch220000_00" }),
+      prow("chara", "s3", 5, 900, 0, { name = "ch221000_00" }) }) } })
+    local d = f.data
+    d.boss = { ch253 = true }
+    d.catalog = { 1 }
+    d.cast = { [1] = { 2058 } }
+    d.iname = { [378] = "Grimoire", [5] = "Potion" }
+    d.sched_ids = { 2058 }
+    d.shop = { [2058] = 41 }
+    d.npcname = { [2058] = "Dudley" }
+    d.sched = { [2058] = P(100, 0, 100) }
+    d.alive = false
+    d.shops = { [41] = { { item = 378, release_qid = 0 } } }
+    d.needs = { [100] = { { id = 378, num = 1 } } }
+    d.nodes = { { name = "Node A", pos = P(1, 0, 1) } }
+    d.records = { { key = "f1", guid = "f1", picked = false } }
+    d.loaded_boss = {}
+    d.respawn = { { key = "r1_0", cid = 1001, cid_name = "ch253000_00", pos = P(10, 0, 10) },
+      { key = "r2_0", cid = 1002, cid_name = "ch220000_00", pos = P(700, 0, 700) } }
+    return f, f.new()
+  end
+  local BASE = { chests = true, treasure = true, tokens = true, beetles = true,
+    monsters = true, small_monsters = true, sellers = true, shops = true }
+  local function run(drop, add)
+    local tg = {}
+    for k, v in pairs(BASE) do tg[k] = v end
+    for _, k in ipairs(drop or {}) do tg[k] = nil end
+    for k, v in pairs(add or {}) do tg[k] = v end
+    local f, w = cost_world()
+    w:refresh(0, true, tg)
+    return f, w
+  end
+
+  local f, w = run({ "treasure" })
+  check("cost: treasure off, nodes", (f.reads_n.treasure_nodes or 0) == 0)
+  check("cost: treasure off, checked", (f.reads_n.checked_nodes or 0) == 0)
+  f, w = run()
+  check("cost: treasure on reads", f.reads_n.treasure_nodes == 1 and f.reads_n.checked_nodes == 1)
+
+  f, w = run({ "monsters", "small_monsters" })
+  check("cost: monsters off, respawn", (f.reads_n.respawn_units or 0) == 0)
+  check("cost: monsters off, loaded boss", (f.reads_n.loaded_boss_families or 0) == 0)
+  f, w = run()
+  check("cost: monsters on reads", f.reads_n.respawn_units == 1
+    and f.reads_n.loaded_boss_families == 1)
+
+  f, w = run({ "sellers" })
+  check("cost: sellers off, needs", (f.adapter_n.item_needs or 0) == 0)
+  check("cost: sellers off, locations", (f.adapter_n.item_locations or 0) == 0)
+  f, w = run()
+  check("cost: sellers on reads", f.adapter_n.item_needs == 1 and f.adapter_n.item_locations == 1)
+
+  f, w = run({ "shops" })
+  check("cost: shops off, no index", w:stats().shop_index_runs == 0)
+  f, w = run()
+  check("cost: shops on, one index run", w:stats().shop_index_runs == 1)
+  f, w = run({ "shops" }, { search = true })
+  check("cost: search alone runs the index", w:stats().shop_index_runs == 1)
+
+  f, w = run({ "chests" })
+  check("cost: chests off, no kinds", w:stats().chest_kinds_calls == 0)
+  f, w = run()
+  check("cost: chests on, kinds computed", w:stats().chest_kinds_calls > 0)
+
+  f, w = run({ "chests", "tokens", "beetles" })
+  check("cost: records off, no read", (f.reads_n.save_records or 0) == 0)
+  f, w = run({ "tokens", "beetles" })
+  check("cost: chests alone read records", f.reads_n.save_records == 1)
+
+  -- small monsters
+  local function shape(out)
+    local t = {}
+    for _, m in ipairs(out.monsters) do
+      t[#t + 1] = m.uid .. ":" .. m.count .. ":" .. tostring(m.small)
+    end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  local function only(small)
+    local t = {}
+    for _, m in ipairs(small.list) do
+      if (m.small == true) == small.want then t[#t + 1] = m.uid .. ":" .. m.count end
+    end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  local _, wb = run()
+  local both = wb:input()
+  local large_ref = only({ list = both.monsters, want = false })
+  local small_ref = only({ list = both.monsters, want = true })
+  check("small: fixture has both classes", large_ref ~= "" and small_ref ~= "")
+  local fo, wo = run({ "small_monsters" })
+  check("small off: skipped", only({ list = wo:input().monsters, want = true }) == "")
+  check("small off: large clusters same", only({ list = wo:input().monsters, want = false })
+    == large_ref)
+  local fs, ws = run({ "monsters" })
+  check("small only: large clusters none", only({ list = ws:input().monsters, want = false }) == "")
+  check("small only: small clusters same", only({ list = ws:input().monsters, want = true })
+    == small_ref)
+  check("small only: respawn units read", fs.reads_n.respawn_units == 1
+    and fs.reads_n.loaded_boss_families == 1)
+  check("small only: wants_round", world.wants_round({ small_monsters = true }) == true)
+  local fn, wn = run({ "monsters", "small_monsters" })
+  check("both off: no monsters", #wn:input().monsters == 0)
+
+  -- drops need either toggle
+  local function drops_world(tg)
+    local g = fixture({ files = { [K.PLACES] = places({
+      prow("chara", "s1", 5, 400, 0, { name = "ch220000_00" }) }) } })
+    g.data.iname = { [230] = "Rotten Meat" }
+    g.data.drops = { [5] = { 230 } }
+    local gw = g.new()
+    gw:refresh(0, true, tg)
+    gw:refresh(0, true, tg)
+    return gw
+  end
+  local gd = drops_world({ search = true, small_monsters = true })
+  check("small only: drops published", gd:input().drops ~= nil and gd:input().drops[5] ~= nil)
+  check("drops: neither toggle, none", drops_world({ search = true }):input().drops == nil)
+
+  -- 38a pin: a reserved large-class row whose places chara row is neither
+  -- large nor small is live-only (never learned, never saved)
+  do
+    local g = fixture({ files = { [K.PLACES] = places({
+      prow("chara", "r1", 1, 100, 0, { name = "ch410000_00" }) }) } })
+    g.data.boss = { ch253 = true }
+    g.data.catalog = { 1 }
+    g.data.cast = { [1] = {} }
+    g.data.reserved = { mrow("r1", 1, "ch253000_00", 100, 0) }
+    local gw = g.new()
+    local before = gw:stats().atlas.learned
+    gw:refresh(0, true, on("monsters"))
+    check("38a pin: draws that round", #gw:input().monsters == 1)
+    check("38a pin: not learned", gw:stats().atlas.learned == before)
+    check("38a pin: nothing to save", gw:save("test") == false and g:dumps_of(K.ATLAS) == 0)
+  end
+end
+
+-- 33. the First Seeker's Token (SPEC 28.9.1-2)
+do
+  local UID = "72821825-5dd3-41a6-86b4-3e75e3b50e0a"
+  local function token_world(seeker, rows)
+    local f = fixture({ files = { [K.PLACES] = places(rows or {
+      { k = "token", uid = UID, id = K.TOKEN_ID, x = -413.1, y = 100.3, z = -1961.7,
+        src = "normal" },
+      prow("token", "other", K.TOKEN_ID, 5, 5) }) } })
+    f.data.first_seeker = seeker
+    f.reads.first_seeker = function()
+      f.reads_n.first_seeker = (f.reads_n.first_seeker or 0) + 1
+      if f.fail.first_seeker then error("fake read failure: first_seeker") end
+      return f.data.first_seeker
+    end
+    return f, f.new()
+  end
+  local FT = { first_token = true }
+
+  local f, w = token_world(UID)
+  check("tok1 round runs on the toggle alone", w:refresh(0, true, FT) == true)
+  local ft = w:input().first_token
+  check("tok1 published", ft ~= nil and ft.uid == UID and ft.first_seeker == true)
+  check("tok1 name", ft and ft.name == "Finder's Token spot")
+  check("tok1 pos", ft and ft.pos.x == -413.1 and ft.pos.y == 100.3 and ft.pos.z == -1961.7)
+  check("tok1 state without records", ft and ft.state == "unknown")
+  check("tok1 read once", f.reads_n.first_seeker == 1)
+  check("tok1 step timed", type(w:stats().ms.step_first_token) == "number")
+  check("tok1 not in the token list", #w:input().tokens == 0)
+
+  -- with Tokens on and the save record collected
+  f, w = token_world(UID)
+  f.data.records = { { key = UID .. "_0", guid = UID, free_bit = 1 << K.TOKEN_BIT } }
+  w:refresh(0, true, { first_token = true, tokens = true })
+  check("tok1 state collected", w:input().first_token.state == "collected")
+  check("tok1 token list still holds it", find(w:input().tokens, UID) ~= nil)
+  f.data.records = { { key = UID .. "_0", guid = UID, free_bit = 0 } }
+  w:refresh(10, true, { first_token = true, tokens = true })
+  check("tok1 state not collected", w:input().first_token.state == "not")
+
+  -- an upper-case guid still matches
+  f, w = token_world(UID:upper())
+  w:refresh(0, true, FT)
+  check("tok1 upper-case read matches", w:input().first_token ~= nil
+    and w:input().first_token.uid == UID)
+
+  -- nil read, unknown guid, failing read
+  f, w = token_world(nil)
+  w:refresh(0, true, FT)
+  check("tok1 nil read gives none", w:input().first_token == nil)
+  f, w = token_world("00000000-0000-0000-0000-000000000000")
+  w:refresh(0, true, FT)
+  check("tok1 no row gives none", w:input().first_token == nil)
+  f, w = token_world(UID)
+  f.fail.first_seeker = true
+  check("tok1 failing read does not fail the round", w:refresh(0, true, FT) == true
+    and w:input().first_token == nil)
+  f, w = token_world(UID, { prow("chest", UID, 10, 1, 1) })
+  w:refresh(0, true, FT)
+  check("tok1 a row that is not a token gives none", w:input().first_token == nil)
+
+  -- toggle off: the read is not made
+  f, w = token_world(UID)
+  w:refresh(0, true, on("tokens", "chests"))
+  check("tok1 toggle off: no read", (f.reads_n.first_seeker or 0) == 0)
+  check("tok1 toggle off: none", w:input().first_token == nil)
+
+  -- the game read, against a fake object model
+  local function obj(fields, methods)
+    local o = {}
+    function o:get_field(n) return fields and fields[n] end
+    function o:call(n, ...)
+      local m = methods and methods[n]
+      if m then return m(...) end
+      return nil
+    end
+    return o
+  end
+  local function guid(text)
+    return obj(nil, { ["ToString()"] = function() return text end })
+  end
+  local singletons = {}
+  local saved_sdk = sdk
+  sdk = {
+    get_managed_singleton = function(n) return singletons[n] end,
+    find_type_definition = function() return nil end,
+  }
+  local R = world.game_reads()
+  local function manager(exists, proof)
+    singletons["app.GimmickManager"] = obj(
+      { ["<FirstSeekerProof>k__BackingField"] = proof },
+      { isExistFirstSeekerProof = function()
+        if exists == "raise" then error("boom") end
+        return exists
+      end })
+  end
+  manager(true, obj({ _RowID = guid("72821825-5DD3-41A6-86B4-3E75E3B50E0A") }))
+  check("first_seeker read: lower-case uid", R.first_seeker() == UID)
+  manager(false, obj({ _RowID = guid(UID) }))
+  check("first_seeker read: exist call false gives nil", R.first_seeker() == nil)
+  manager(true, nil)
+  check("first_seeker read: nil backing field gives nil", R.first_seeker() == nil)
+  manager(true, obj({}))
+  check("first_seeker read: no row id gives nil", R.first_seeker() == nil)
+  manager("raise", obj({ _RowID = guid(UID) }))
+  check("first_seeker read: a raise gives nil", R.first_seeker() == nil)
+  singletons["app.GimmickManager"] = nil
+  check("first_seeker read: no manager gives nil", R.first_seeker() == nil)
+  sdk = saved_sdk
 end
 
 if failures > 0 then os.exit(1) end
