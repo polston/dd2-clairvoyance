@@ -978,7 +978,8 @@ function M.new(a, reads, io)
   -- The static + file monsters + learned merge and its sorted keys are kept
   -- until the learned set (rev) or the file monsters table changes (SPEC
   -- 28.5.3.1: sort_places and w:reset() each replace S.file_monsters). The
-  -- live rows are laid over a copy each round. Returns eff, sorted keys.
+  -- live rows are laid over it by the readers (S.live[uid] first). Returns
+  -- the merge and the sorted keys, live uids included.
   local eff_cache = nil
   local function effective()
     local c = eff_cache
@@ -1000,18 +1001,22 @@ function M.new(a, reads, io)
       eff_cache = c
     end
     if next(S.live) == nil then return c.map, c.keys end
-    local eff, keys, extra = {}, c.keys, nil
-    for uid, e in pairs(c.map) do eff[uid] = e end
-    for uid, e in pairs(S.live) do
-      if c.map[uid] == nil then extra = extra or {}; extra[#extra + 1] = uid end
-      eff[uid] = e
+    -- live rows are not copied into the map: the loops read S.live[uid] first.
+    -- Only the live uids the merge lacks go into a copy of the keys, each
+    -- by binary search.
+    local keys = nil
+    for uid in pairs(S.live) do
+      if c.map[uid] == nil then
+        keys = keys or table.move(c.keys, 1, #c.keys, 1, {})
+        local lo, hi = 1, #keys + 1
+        while lo < hi do
+          local mid = (lo + hi) // 2
+          if keys[mid] < uid then lo = mid + 1 else hi = mid end
+        end
+        table.insert(keys, lo, uid)
+      end
     end
-    if extra ~= nil then
-      keys = table.move(c.keys, 1, #c.keys, 1, {})
-      table.move(extra, 1, #extra, #keys + 1, keys)
-      table.sort(keys)
-    end
-    return eff, keys
+    return c.map, keys or c.keys
   end
 
   local KEPT_ITEMS = { [77] = true, [78] = true, [81] = true }
@@ -1373,7 +1378,7 @@ function M.new(a, reads, io)
     local collect_t0 = clock()
     local chest_qs = nil
     for _, uid in ipairs(uids) do
-      local e = eff[uid]
+      local e = S.live[uid] or eff[uid]
       if e.k == "chest" and tg.chests then
         local state, item = "unknown", nil
         local recs = rec_idx and rec_idx[uid] or nil
@@ -1505,7 +1510,7 @@ function M.new(a, reads, io)
       local want_large, want_small = tg.monsters == true, tg.small_monsters == true
       local units = guarded("respawn", function() return need_table("respawn_units") end)
       local items = {}
-      for uid, e in pairs(eff) do
+      local function add_monster(uid, e)
         if e.k == "monster" then
           local nm = e.name or names[e.id]
           local fam = fam_of(nm)
@@ -1515,6 +1520,10 @@ function M.new(a, reads, io)
               small = cls == "small", respawning = false }
           end
         end
+      end
+      for uid, e in pairs(eff) do add_monster(uid, S.live[uid] or e) end
+      for uid, e in pairs(S.live) do
+        if eff[uid] == nil then add_monster(uid, e) end
       end
       for _, u in ipairs(units or {}) do
         if type(u) == "table" and type(u.key) == "string" and to_int(u.cid) ~= nil then
