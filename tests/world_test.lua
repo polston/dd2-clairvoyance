@@ -18,7 +18,8 @@ local function on(...)
   for _, k in ipairs({ ... }) do t[k] = true end
   return t
 end
-local ALL = on("chests", "treasure", "tokens", "beetles", "monsters", "sellers")
+local ALL = on("chests", "treasure", "tokens", "beetles", "monsters", "small_monsters",
+  "sellers")
 local NONE = {}
 
 local function total(t)
@@ -3812,6 +3813,153 @@ do
     local w4 = f4.new()
     w4:refresh(0, true, { search = true })
     check("again: no ids does not loop", w4:refresh(1, true, { search = true }) == false)
+  end
+end
+
+-- 32. toggle costs, small monsters, kept-set pin (SPEC 28.7.1, 28.10.1, 28.12.2)
+do
+  local function cost_world()
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "f1", 10, 1, 1, { items = { { id = 5, n = 1 } } }),
+      prow("token", "t1", K.TOKEN_ID, 2, 2),
+      prow("beetle", "b1", K.BEETLE_ID, 3, 3),
+      prow("chara", "m1", 1, 100, 0, { name = "ch253000_00" }),
+      prow("chara", "m2", 2, 104, 0, { name = "ch253000_00" }),
+      prow("chara", "s1", 3, 400, 0, { name = "ch220000_00" }),
+      prow("chara", "s2", 4, 402, 0, { name = "ch220000_00" }),
+      prow("chara", "s3", 5, 900, 0, { name = "ch221000_00" }) }) } })
+    local d = f.data
+    d.boss = { ch253 = true }
+    d.catalog = { 1 }
+    d.cast = { [1] = { 2058 } }
+    d.iname = { [378] = "Grimoire", [5] = "Potion" }
+    d.sched_ids = { 2058 }
+    d.shop = { [2058] = 41 }
+    d.npcname = { [2058] = "Dudley" }
+    d.sched = { [2058] = P(100, 0, 100) }
+    d.alive = false
+    d.shops = { [41] = { { item = 378, release_qid = 0 } } }
+    d.needs = { [100] = { { id = 378, num = 1 } } }
+    d.nodes = { { name = "Node A", pos = P(1, 0, 1) } }
+    d.records = { { key = "f1", guid = "f1", picked = false } }
+    d.loaded_boss = {}
+    d.respawn = { { key = "r1_0", cid = 1001, cid_name = "ch253000_00", pos = P(10, 0, 10) } }
+    return f, f.new()
+  end
+  local BASE = { chests = true, treasure = true, tokens = true, beetles = true,
+    monsters = true, small_monsters = true, sellers = true, shops = true }
+  local function run(drop, add)
+    local tg = {}
+    for k, v in pairs(BASE) do tg[k] = v end
+    for _, k in ipairs(drop or {}) do tg[k] = nil end
+    for k, v in pairs(add or {}) do tg[k] = v end
+    local f, w = cost_world()
+    w:refresh(0, true, tg)
+    return f, w
+  end
+
+  local f, w = run({ "treasure" })
+  check("cost: treasure off, nodes", (f.reads_n.treasure_nodes or 0) == 0)
+  check("cost: treasure off, checked", (f.reads_n.checked_nodes or 0) == 0)
+  f, w = run()
+  check("cost: treasure on reads", f.reads_n.treasure_nodes == 1 and f.reads_n.checked_nodes == 1)
+
+  f, w = run({ "monsters", "small_monsters" })
+  check("cost: monsters off, respawn", (f.reads_n.respawn_units or 0) == 0)
+  check("cost: monsters off, loaded boss", (f.reads_n.loaded_boss_families or 0) == 0)
+  f, w = run()
+  check("cost: monsters on reads", f.reads_n.respawn_units == 1
+    and f.reads_n.loaded_boss_families == 1)
+
+  f, w = run({ "sellers" })
+  check("cost: sellers off, needs", (f.adapter_n.item_needs or 0) == 0)
+  check("cost: sellers off, locations", (f.adapter_n.item_locations or 0) == 0)
+  f, w = run()
+  check("cost: sellers on reads", f.adapter_n.item_needs == 1 and f.adapter_n.item_locations == 1)
+
+  f, w = run({ "shops" })
+  check("cost: shops off, no index", w:stats().shop_index_runs == 0)
+  f, w = run()
+  check("cost: shops on, one index run", w:stats().shop_index_runs == 1)
+  f, w = run({ "shops" }, { search = true })
+  check("cost: search alone runs the index", w:stats().shop_index_runs == 1)
+
+  f, w = run({ "chests" })
+  check("cost: chests off, no kinds", w:stats().chest_kinds_calls == 0)
+  f, w = run()
+  check("cost: chests on, kinds computed", w:stats().chest_kinds_calls > 0)
+
+  f, w = run({ "chests", "tokens", "beetles" })
+  check("cost: records off, no read", (f.reads_n.save_records or 0) == 0)
+  f, w = run({ "tokens", "beetles" })
+  check("cost: chests alone read records", f.reads_n.save_records == 1)
+
+  -- small monsters
+  local function shape(out)
+    local t = {}
+    for _, m in ipairs(out.monsters) do
+      t[#t + 1] = m.uid .. ":" .. m.count .. ":" .. tostring(m.small)
+    end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  local function only(small)
+    local t = {}
+    for _, m in ipairs(small.list) do
+      if (m.small == true) == small.want then t[#t + 1] = m.uid .. ":" .. m.count end
+    end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  local _, wb = run()
+  local both = wb:input()
+  local large_ref = only({ list = both.monsters, want = false })
+  local small_ref = only({ list = both.monsters, want = true })
+  check("small: fixture has both classes", large_ref ~= "" and small_ref ~= "")
+  local fo, wo = run({ "small_monsters" })
+  check("small off: skipped", only({ list = wo:input().monsters, want = true }) == "")
+  check("small off: large clusters same", only({ list = wo:input().monsters, want = false })
+    == large_ref)
+  local fs, ws = run({ "monsters" })
+  check("small only: large clusters none", only({ list = ws:input().monsters, want = false }) == "")
+  check("small only: small clusters same", only({ list = ws:input().monsters, want = true })
+    == small_ref)
+  check("small only: respawn units read", fs.reads_n.respawn_units == 1
+    and fs.reads_n.loaded_boss_families == 1)
+  check("small only: wants_round", world.wants_round({ small_monsters = true }) == true)
+  local fn, wn = run({ "monsters", "small_monsters" })
+  check("both off: no monsters", #wn:input().monsters == 0)
+
+  -- drops need either toggle
+  local function drops_world(tg)
+    local g = fixture({ files = { [K.PLACES] = places({
+      prow("chara", "s1", 5, 400, 0, { name = "ch220000_00" }) }) } })
+    g.data.iname = { [230] = "Rotten Meat" }
+    g.data.drops = { [5] = { 230 } }
+    local gw = g.new()
+    gw:refresh(0, true, tg)
+    gw:refresh(0, true, tg)
+    return gw
+  end
+  local gd = drops_world({ search = true, small_monsters = true })
+  check("small only: drops published", gd:input().drops ~= nil and gd:input().drops[5] ~= nil)
+  check("drops: neither toggle, none", drops_world({ search = true }):input().drops == nil)
+
+  -- 38a pin: a reserved large-class row whose places chara row is neither
+  -- large nor small is live-only (never learned, never saved)
+  do
+    local g = fixture({ files = { [K.PLACES] = places({
+      prow("chara", "r1", 1, 100, 0, { name = "ch410000_00" }) }) } })
+    g.data.boss = { ch253 = true }
+    g.data.catalog = { 1 }
+    g.data.cast = { [1] = {} }
+    g.data.reserved = { mrow("r1", 1, "ch253000_00", 100, 0) }
+    local gw = g.new()
+    local before = gw:stats().atlas.learned
+    gw:refresh(0, true, on("monsters"))
+    check("38a pin: draws that round", #gw:input().monsters == 1)
+    check("38a pin: not learned", gw:stats().atlas.learned == before)
+    check("38a pin: nothing to save", gw:save("test") == false and g:dumps_of(K.ATLAS) == 0)
   end
 end
 

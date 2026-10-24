@@ -117,7 +117,8 @@ end
 -- Whether any toggle needs a world round (SPEC 28.7.1).
 function M.wants_round(tg)
   return (tg.chests or tg.treasure or tg.tokens or tg.beetles or tg.monsters
-    or tg.sellers or tg.search or tg.shops or tg.first_token) and true or false
+    or tg.small_monsters or tg.sellers or tg.search or tg.shops
+    or tg.first_token) and true or false
 end
 
 -- An item list kept per key in `cache` (SPEC 28.5.3.3): { { name, n }, ... }
@@ -226,7 +227,8 @@ function M.new(a, reads, io)
   local unlisted = 0
   local stats = { ms = {}, known = {}, monster_ids = {}, rounds = 0, saves = 0,
     save_ms = 0, last_save_reason = nil, hits = 0, misses = 0,
-    eff_builds = 0, item_list_builds = 0, held_rounds = 0 }
+    eff_builds = 0, item_list_builds = 0, held_rounds = 0,
+    shop_index_runs = 0, chest_kinds_calls = 0 }
   local S
 
   local function new_session()
@@ -923,6 +925,7 @@ function M.new(a, reads, io)
   -- Query-independent: core does the matching and the labelling. One entry per shop that has a
   -- seller position and at least one counting buy row.
   local function compute_shops()
+    stats.shop_index_runs = stats.shop_index_runs + 1
     ensure_shops()
     ensure_shop_cids()
     local quest_state = quest_state_cache()
@@ -1017,6 +1020,7 @@ function M.new(a, reads, io)
   local round_errs = {}
 
   local function chest_kinds(row, e, recs)
+    stats.chest_kinds_calls = stats.chest_kinds_calls + 1
     local id = row.id
     local items = row.items or e.items
     local kinds = {}
@@ -1285,7 +1289,8 @@ function M.new(a, reads, io)
     local cast_ok = step("cast", ensure_cast)
     step("boss", ensure_boss)
     local boss_ok = S.boss ~= nil
-    if tg.monsters then step("loaded_boss", read_loaded_boss) end
+    local any_monsters = tg.monsters or tg.small_monsters
+    if any_monsters then step("loaded_boss", read_loaded_boss) end
 
     local rows = step("reserved", table_read, "reserved_rows")
     step("sort", function()
@@ -1471,8 +1476,11 @@ function M.new(a, reads, io)
     end
 
     -- monsters
-    if tg.monsters and cast_ok and boss_ok then
+    if any_monsters and cast_ok and boss_ok then
       local monsters_t0 = clock()
+      -- each class is skipped before clustering when its own toggle is off
+      -- (SPEC 28.7.1, 28.12.2)
+      local want_large, want_small = tg.monsters == true, tg.small_monsters == true
       local units = guarded("respawn", function() return need_table("respawn_units") end)
       local items = {}
       for uid, e in pairs(eff) do
@@ -1480,7 +1488,7 @@ function M.new(a, reads, io)
           local nm = e.name or names[e.id]
           local fam = fam_of(nm)
           local cls = family_class(fam)
-          if cls ~= "drop" then
+          if (cls == "small" and want_small) or (cls ~= "small" and cls ~= "drop" and want_large) then
             items[uid] = { uid = uid, cid = e.id, fam = fam or "?", pos = pcopy(e),
               small = cls == "small", respawning = false }
           end
@@ -1492,7 +1500,7 @@ function M.new(a, reads, io)
           local cid = to_int(u.cid)
           if type(u.cid_name) == "string" and u.cid_name ~= "" then names[cid] = u.cid_name end
           local cls = classify(cid, u.cid_name, nil, nil)
-          if cls == "large" or cls == "small" then
+          if (cls == "small" and want_small) or (cls == "large" and want_large) then
             if items[uid] ~= nil then
               items[uid].respawning = true
             elseif valid_pos(u.pos) and not near_zero(u.pos) then
@@ -1530,7 +1538,7 @@ function M.new(a, reads, io)
     end
 
     -- drops: deferred past the round whose shop index first succeeds (19.12.3.3)
-    if tg.search and tg.monsters then
+    if tg.search and any_monsters then
       local drops_t0 = clock()
       if first_shops and stats.search_first_ms ~= nil and S.drop_ids == nil then
         again = true
@@ -1753,6 +1761,7 @@ function M.new(a, reads, io)
       rounds = stats.rounds, saves = stats.saves, save_ms = stats.save_ms,
       eff_builds = stats.eff_builds, item_list_builds = stats.item_list_builds,
       held_rounds = stats.held_rounds,
+      shop_index_runs = stats.shop_index_runs, chest_kinds_calls = stats.chest_kinds_calls,
       last_save_reason = stats.last_save_reason,
     }
   end
