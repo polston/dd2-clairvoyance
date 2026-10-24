@@ -686,9 +686,10 @@ end
 -- keyed by category and entry identity (seller shop:item, shop id, treasure
 -- name, every other category uid) and stores only the lower-cased strings and
 -- drop-name lists, with the source fields they were built from (a flat
--- array). A lookup collects the entry's current source fields into `scratch`
--- and reuses the record only when every field compares equal (strings by
--- value, a list by length and each name), else rebuilds it. Per-query memos
+-- array). A lookup compares the entry's current source fields against the
+-- stored array (same_src, no allocation) and reuses the record only when every
+-- field is equal (strings by value, a list by length and each name); only a
+-- rebuild collects them into `scratch`. Per-query memos
 -- stay keyed by entry table in the per-grid record, never here. Emptied once
 -- it passes HAY_MAX records (a bound, not a tuning knob).
 local HAY_MAX = 20000
@@ -1576,7 +1577,8 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   end
 
   -- SPEC 19.8.3: with a query only entries whose cached haystack matches
-  -- reach make_cand; haystacks live as long as the grid.
+  -- reach make_cand; the per-query memos live as long as the grid, the
+  -- haystacks themselves carry across grids in the identity cache (SPEC 28.4.3).
   local q = show.search
   g.hay = g.hay or {}
   local kept, merged, shops, shop_all, hits = {}, {}, {}, {}, {}
