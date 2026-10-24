@@ -1328,6 +1328,27 @@ function M.new(a, reads, io)
         return build_records(need_table("save_records"))
       end)
     end
+    -- the First Seeker's Token spot (SPEC 28.9.2): straight from the places
+    -- row, so it exists with the Tokens toggle off
+    local first_token = nil
+    if tg.first_token then
+      first_token = step("first_token", function()
+        local ok, v = call("first_seeker")
+        if not ok or type(v) ~= "string" then return nil end
+        local uid = v:lower()
+        local row = static[uid]
+        if row == nil or row.k ~= "token" then return nil end
+        local state = "unknown"
+        if rec_idx ~= nil then
+          state = "not"
+          for _, r in ipairs(rec_idx[uid] or {}) do
+            if COLLECT.token.done(r) then state = "collected" end
+          end
+        end
+        return { uid = uid, pos = pcopy(row), name = "Finder's Token spot",
+          state = state, first_seeker = true }
+      end)
+    end
     step("seen", function()
       if loaded_seen ~= nil and rec_idx ~= nil then
         for uid in pairs(loaded_seen) do
@@ -1339,7 +1360,8 @@ function M.new(a, reads, io)
 
     local eff, uids = step("effective", effective)
     local out = { chests = {}, treasure = {}, tokens = {}, beetles = {},
-      monsters = {}, sellers = {}, schedule = schedule, settlements = {} }
+      monsters = {}, sellers = {}, schedule = schedule, settlements = {},
+      first_token = first_token }
 
     if S.settle ~= nil then
       for _, s in ipairs(S.settle) do
@@ -2722,6 +2744,14 @@ function M.game_reads()
     end
     if #out == 0 then error("no treasure nodes") end
     return out
+  end
+
+  -- The uid of the first Seeker's Token's gimmick (SPEC 28.9.1); nil on any
+  -- failure, never a raise (the world round just publishes no marker).
+  function R.first_seeker()
+    local gm = single("app.GimmickManager")
+    if C(gm, "isExistFirstSeekerProof") ~= true then return nil end
+    return guid_text(G(G(gm, "<FirstSeekerProof>k__BackingField"), "_RowID"))
   end
 
   function R.checked_nodes()

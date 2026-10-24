@@ -3963,5 +3963,115 @@ do
   end
 end
 
+-- 33. the First Seeker's Token (SPEC 28.9.1-2)
+do
+  local UID = "72821825-5dd3-41a6-86b4-3e75e3b50e0a"
+  local function token_world(seeker, rows)
+    local f = fixture({ files = { [K.PLACES] = places(rows or {
+      { k = "token", uid = UID, id = K.TOKEN_ID, x = -413.1, y = 100.3, z = -1961.7,
+        src = "normal" },
+      prow("token", "other", K.TOKEN_ID, 5, 5) }) } })
+    f.data.first_seeker = seeker
+    f.reads.first_seeker = function()
+      f.reads_n.first_seeker = (f.reads_n.first_seeker or 0) + 1
+      if f.fail.first_seeker then error("fake read failure: first_seeker") end
+      return f.data.first_seeker
+    end
+    return f, f.new()
+  end
+  local FT = { first_token = true }
+
+  local f, w = token_world(UID)
+  check("tok1 round runs on the toggle alone", w:refresh(0, true, FT) == true)
+  local ft = w:input().first_token
+  check("tok1 published", ft ~= nil and ft.uid == UID and ft.first_seeker == true)
+  check("tok1 name", ft and ft.name == "Finder's Token spot")
+  check("tok1 pos", ft and ft.pos.x == -413.1 and ft.pos.y == 100.3 and ft.pos.z == -1961.7)
+  check("tok1 state without records", ft and ft.state == "unknown")
+  check("tok1 read once", f.reads_n.first_seeker == 1)
+  check("tok1 step timed", type(w:stats().ms.step_first_token) == "number")
+  check("tok1 not in the token list", #w:input().tokens == 0)
+
+  -- with Tokens on and the save record collected
+  f, w = token_world(UID)
+  f.data.records = { { key = UID .. "_0", guid = UID, free_bit = 1 << K.TOKEN_BIT } }
+  w:refresh(0, true, { first_token = true, tokens = true })
+  check("tok1 state collected", w:input().first_token.state == "collected")
+  check("tok1 token list still holds it", find(w:input().tokens, UID) ~= nil)
+  f.data.records = { { key = UID .. "_0", guid = UID, free_bit = 0 } }
+  w:refresh(10, true, { first_token = true, tokens = true })
+  check("tok1 state not collected", w:input().first_token.state == "not")
+
+  -- an upper-case guid still matches
+  f, w = token_world(UID:upper())
+  w:refresh(0, true, FT)
+  check("tok1 upper-case read matches", w:input().first_token ~= nil
+    and w:input().first_token.uid == UID)
+
+  -- nil read, unknown guid, failing read
+  f, w = token_world(nil)
+  w:refresh(0, true, FT)
+  check("tok1 nil read gives none", w:input().first_token == nil)
+  f, w = token_world("00000000-0000-0000-0000-000000000000")
+  w:refresh(0, true, FT)
+  check("tok1 no row gives none", w:input().first_token == nil)
+  f, w = token_world(UID)
+  f.fail.first_seeker = true
+  check("tok1 failing read does not fail the round", w:refresh(0, true, FT) == true
+    and w:input().first_token == nil)
+  f, w = token_world(UID, { prow("chest", UID, 10, 1, 1) })
+  w:refresh(0, true, FT)
+  check("tok1 a row that is not a token gives none", w:input().first_token == nil)
+
+  -- toggle off: the read is not made
+  f, w = token_world(UID)
+  w:refresh(0, true, on("tokens", "chests"))
+  check("tok1 toggle off: no read", (f.reads_n.first_seeker or 0) == 0)
+  check("tok1 toggle off: none", w:input().first_token == nil)
+
+  -- the game read, against a fake object model
+  local function obj(fields, methods)
+    local o = {}
+    function o:get_field(n) return fields and fields[n] end
+    function o:call(n, ...)
+      local m = methods and methods[n]
+      if m then return m(...) end
+      return nil
+    end
+    return o
+  end
+  local function guid(text)
+    return obj(nil, { ["ToString()"] = function() return text end })
+  end
+  local singletons = {}
+  local saved_sdk = sdk
+  sdk = {
+    get_managed_singleton = function(n) return singletons[n] end,
+    find_type_definition = function() return nil end,
+  }
+  local R = world.game_reads()
+  local function manager(exists, proof)
+    singletons["app.GimmickManager"] = obj(
+      { ["<FirstSeekerProof>k__BackingField"] = proof },
+      { isExistFirstSeekerProof = function()
+        if exists == "raise" then error("boom") end
+        return exists
+      end })
+  end
+  manager(true, obj({ _RowID = guid("72821825-5DD3-41A6-86B4-3E75E3B50E0A") }))
+  check("first_seeker read: lower-case uid", R.first_seeker() == UID)
+  manager(false, obj({ _RowID = guid(UID) }))
+  check("first_seeker read: exist call false gives nil", R.first_seeker() == nil)
+  manager(true, nil)
+  check("first_seeker read: nil backing field gives nil", R.first_seeker() == nil)
+  manager(true, obj({}))
+  check("first_seeker read: no row id gives nil", R.first_seeker() == nil)
+  manager("raise", obj({ _RowID = guid(UID) }))
+  check("first_seeker read: a raise gives nil", R.first_seeker() == nil)
+  singletons["app.GimmickManager"] = nil
+  check("first_seeker read: no manager gives nil", R.first_seeker() == nil)
+  sdk = saved_sdk
+end
+
 if failures > 0 then os.exit(1) end
 print("world_test: all OK")
