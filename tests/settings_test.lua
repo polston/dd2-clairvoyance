@@ -771,20 +771,34 @@ do
   check("tree: families sort by name then fam",
     type(t7) == "table" and #t7 == 2 and t7[1].fam == "ch100" and t7[2].fam == "ch300")
 
+  local t8 = tree({ ch220 = { Goblin = true, Monster = true }, ["?"] = { Monster = true } },
+    { ch220 = "Goblin" }, {}, true)
+  check("tree: a ? kind also seen in a family stays in the plain entry",
+    type(t8) == "table" and #t8 == 2 and t8[2].plain == true and #t8[2].kinds == 1
+    and t8[2].kinds[1].kind == "Monster")
+  local t9 = tree({ ch255 = { Medusa = true } }, { ch255 = "Medusa" },
+    { ["fam:ch255"] = true, Medusa = true }, true)
+  check("tree: kind entry carries its own saved state under an off family",
+    type(t9) == "table" and t9[1].kinds[1].box == "disabled" and t9[1].kinds[1].off == true
+    and t3[1].kinds[1].off == false)
+  local t10 = tree({ ["?"] = { Odd = true } }, {}, { Cyclops = true }, true)
+  check("tree: plain kind entries carry off",
+    type(t10) == "table" and t10[1].kinds[1].kind == "Cyclops" and t10[1].kinds[1].off == true
+    and t10[1].kinds[2].off == false)
+
   -- not_searched (SPEC 30.6.8)
   local all_on = {}
   for _, k in ipairs(su.WORLD_BOOLS) do all_on[k] = true end
-  local ns1 = type(su.not_searched) == "function"
-    and su.not_searched({ world_chests = true, world_treasure = true, world_tokens = true,
-      world_first_token = true, world_beetles = true, world_monsters = true,
-      world_small_monsters = true, world_sellers = true, world_shops = true,
-      world_show_opened = true, world_undiscovered = true,
-      world_monster_off = { large = {}, small = { Goblin = true, ["fam:ch220"] = true } } })
+  local ns_in = {}
+  for k, v in pairs(all_on) do ns_in[k] = v end
+  ns_in.world_monster_off = { large = {}, small = { Goblin = true, ["fam:ch220"] = true } }
+  local ns1 = type(su.not_searched) == "function" and su.not_searched(ns_in)
   check("not_searched counts kinds and families", type(ns1) == "table" and #ns1 == 2
     and ns1[1] == "1 monster kinds" and ns1[2] == "1 monster families")
   local one_off = {}
   for k, v in pairs(all_on) do one_off[k] = v end
   one_off.world_chests = false
+  one_off.world_shops = false   -- in WORLD_NO_SEARCH: never listed
   one_off.world_monster_off = { large = {}, small = {} }
   local ns2 = type(su.not_searched) == "function" and su.not_searched(one_off)
   check("not_searched lists a searchable toggle off", type(ns2) == "table" and #ns2 == 1

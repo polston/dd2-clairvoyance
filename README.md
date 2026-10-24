@@ -90,10 +90,11 @@ and so on), so a whole family or a single kind can be switched off; a family
 with one kind is just that kind's checkbox. The World panel uses the same
 trees: the spot is listed first under Seeker's Tokens, and Monsters splits
 into a Large node and a Small node, each holding one node per family with
-several kinds, and that family's kinds inside. A chest's label ends with its kinds in brackets,
-for example "Chest - Wakestone [stays opened in NG+]", and the map search
-matches those words. Five checkboxes under Chests turn each kind on or off; a
-chest with several kinds is hidden when any one of them is off:
+several kinds (its kinds inside) and the kinds of one-kind families directly.
+A chest's label ends with its kinds in brackets, for example "Chest -
+Wakestone [stays opened in NG+]", and the map search matches those words.
+Five checkboxes under Chests turn each kind on or off; a chest with several kinds is hidden when any one of
+them is off:
 
 1. New shard each cycle: the Wakestone Shard chests that are full again in each
    New Game Plus cycle.

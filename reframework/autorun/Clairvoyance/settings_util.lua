@@ -498,7 +498,7 @@ function M.monster_tree(seen_class, fam_names_class, offs, class_on)
     local fam_off = offs[FAM_PREFIX .. fam] == true
     local kinds = {}
     for _, kind in ipairs(M.family_kind_list(seen_class[fam])) do
-      kinds[#kinds + 1] = { kind = kind,
+      kinds[#kinds + 1] = { kind = kind, off = offs[kind] == true,
         box = M.kind_box(kind, class_on, n_off, offs[kind] == true, fam_off) }
     end
     out[#out + 1] = { fam = fam, name = name_of(fam), node = #kinds >= 2 or fam_off,
@@ -512,8 +512,8 @@ function M.monster_tree(seen_class, fam_names_class, offs, class_on)
   end
   local plain = {}
   for _, kind in ipairs(M.monster_kind_list(seen_class["?"], offs)) do
-    if not in_fam[kind] then
-      plain[#plain + 1] = { kind = kind,
+    if (seen_class["?"] and seen_class["?"][kind]) or not in_fam[kind] then
+      plain[#plain + 1] = { kind = kind, off = offs[kind] == true,
         box = M.kind_box(kind, class_on, n_off, offs[kind] == true, false) }
     end
   end
