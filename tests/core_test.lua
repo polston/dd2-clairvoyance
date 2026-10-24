@@ -3905,6 +3905,20 @@ do
   check("fam panel: both paths agree", type(fam_paths_p[1].monster.families) == "table"
     and fam_ser(fam_paths_p[1]) == fam_ser(fam_paths_p[2])
     and kfam_ser(fam_paths_p[1]) == kfam_ser(fam_paths_p[2]))
+  for _, pa in ipairs(paths) do
+    for _, order in ipairs({ { "ch230", "ch220" }, { "ch220", "ch230" } }) do
+      local tw = { monsters = {
+        { uid = "a", cid = 1, name = "Monster", kind = "Monster", fam = order[1], pos = P(2), small = true },
+        { uid = "b", cid = 2, name = "Monster", kind = "Monster", fam = order[2], pos = P(3), small = true } } }
+      local _, pt = pa[2](tw, kshow(nil), O, {})
+      local ks = {}
+      for _, k in ipairs(pt.monster.kinds or {}) do ks[#ks + 1] = tostring(k.fam) end
+      check("fam panel: same name ordered by fam [" .. pa[1] .. "] " .. order[1],
+        type(pt.monster.families) == "table"
+        and fam_ser(pt) == "ch220:true:Monster:1:1:1,ch230:true:Monster:1:1:1"
+        and table.concat(ks, ",") == "ch220,ch230")
+    end
+  end
 
   -- per-kind counts (SPEC 29.5.3)
   local function kinds_ser(p)

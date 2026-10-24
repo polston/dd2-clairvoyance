@@ -630,7 +630,8 @@ local function kind_off(e, show)
   return cls[kind_of(e)] == true or cls["fam:" .. fam_of(e)] == true
 end
 
--- SPEC 29.5.3: count one known monster into kc = { large = {}, small = {} }.
+-- SPEC 29.5.3, 30.5.3: count one known monster into
+-- kc = { large = {}, small = {} } as kc[class][fam][kind].
 local function count_kind(kc, e)
   local cls = kc[class_of(e.small == true)]
   local f, k = fam_of(e), kind_of(e)
