@@ -89,6 +89,7 @@ for i = 1, N_BEETLE do
   add("beetle", string.format("beetle-%05d", i), K.BEETLE_ID, (i * 43) % 3000, (i * 83) % 3000)
 end
 
+add("chest", "live-00001", 10, 1234, 1234, { src = "subquest" })   -- listed, never in the atlas: live-only
 local f = fixture({ [K.PLACES] = { version = 1, pak = "1:1", rows = rows } })
 local d = f.data
 d.boss = { ch253 = true }
@@ -140,8 +141,15 @@ end
 for i = 1, 60 do d.nodes[i] = { name = "Node " .. i, pos = P((i * 61) % 3000, 0, (i * 13) % 3000) } end
 for i = 1, 200 do d.drops[10000 + i] = { 100 + (i % 40) } end
 
+-- the First Seeker's Token read, and one live-only row (a reserved chest the
+-- places file lists only as a subquest row), so both paths are in the table
+f.reads.first_seeker = function() return "token-00001" end
+d.reserved[#d.reserved + 1] = { uid = "live-00001", pos = P(1234, 0, 1234),
+  gimmick = 10, table_ix = 9 }
+
 local TG = { chests = true, treasure = true, tokens = true, beetles = true,
-  monsters = true, small_monsters = true, sellers = true, search = true, shops = true }
+  monsters = true, small_monsters = true, sellers = true, search = true, shops = true,
+  first_token = true }
 
 local w = world.new(f.adapter, f.reads, f.io)
 local t = 0
