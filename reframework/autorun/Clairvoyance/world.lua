@@ -1590,23 +1590,24 @@ function M.new(a, reads, io)
           end
         end
       end
-      -- clustering per family (SPEC 17.10.9)
-      local fams = {}
+      -- clustering per family and kind (SPEC 17.10.9, 29.4)
+      local groups = {}
       for uid, it in pairs(items) do
         local key = it.fam .. "\0" .. badge(it.cid)
-        local l = fams[key]
-        if l == nil then l = {}; fams[key] = l end
+        local l = groups[key]
+        if l == nil then l = {}; groups[key] = l end
         l[#l + 1] = uid
       end
       local ids = {}
-      for _, fam in ipairs(sorted_keys(fams)) do
-        table.sort(fams[fam])
-        for _, c in ipairs(M.cluster(items, fams[fam], M.K.CLUSTER)) do
+      for _, key in ipairs(sorted_keys(groups)) do
+        table.sort(groups[key])
+        for _, c in ipairs(M.cluster(items, groups[key], M.K.CLUSTER)) do
           local s = c.seed
-          local nm = badge(s.cid)
+          local kind = badge(s.cid)
+          local nm = kind
           if c.count > 1 then nm = nm .. " x" .. c.count end
           out.monsters[#out.monsters + 1] = { uid = s.uid, cid = s.cid, name = nm,
-            kind = badge(s.cid),
+            kind = kind,
             pos = pcopy(s.pos), respawning = c.respawning == true,
             small = s.small == true, count = c.count, cids = c.cids }
           ids[s.cid] = true
