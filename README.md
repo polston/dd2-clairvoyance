@@ -28,6 +28,15 @@ map and in your view.
    draws as before, with the game's icon glyphs.
 10. Optional numbered icons (Hex 1 to 5) mark in-progress quests by their
     current journal step.
+11. Every picture and text the mod draws can have an outline, one global
+    setting with an optional override per marker category. The route line
+    and the route stop pictures have their own color and size settings.
+12. A searched NPC's daily route can follow the game's own walking paths
+    instead of straight lines, on the full map and, optionally, in the world.
+13. Chests say what kind they are in their label ("stays opened in NG+",
+    "quest-gated", "trap", and so on), the map search finds them by kind, and
+    each kind has its own toggle.
+14. Map coordinates show beside the full map's cursor and under the minimap.
 
 ## Requirements
 
@@ -49,12 +58,65 @@ The release zip includes the generated places file the world tracker reads
 
 ## Settings
 
-Open the REFramework menu and expand Clairvoyance. Icon
-types, colors, the quest tree, the world tracker categories and the map search
-box are all there. Settings are saved to `reframework/data/Clairvoyance.json`.
-"Reset icons and colors to defaults" puts every category icon and color back to
-its default. The first start after the matching-icons update replaces any icon
-or color you never changed with the new default; a value you changed is kept.
+Open the REFramework menu and expand Clairvoyance. Settings are saved to
+`reframework/data/Clairvoyance.json`. The panel, top to bottom: Enabled, the
+search box with its results and NPC list, then these sections: Quests, World
+markers, NPCs, Items, Map and minimap, Appearance, Quest tree, World, and
+Status and debug.
+
+### World markers
+
+One checkbox per category (chests, treasure, tokens, beetles, monsters, small
+monsters, sellers, shops, show opened and collected, undiscovered areas) and a
+cap on the number of markers. A chest's label ends with its kinds in brackets,
+for example "Chest - Wakestone [stays opened in NG+]", and the map search
+matches those words. Five checkboxes under Chests turn each kind on or off; a
+chest with several kinds is hidden when any one of them is off:
+
+1. New shard each cycle: the Wakestone Shard chests that are full again in each
+   New Game Plus cycle.
+2. Stays opened in NG+: the Wakestone, Wakestone Shard and Portcrystal chests
+   that stay opened after a New Game Plus.
+3. Quest-gated: chests that open only after a quest, or only until one ends.
+   The label names the quest only if you have seen it or turned on "Reveal
+   gating quest names"; otherwise it says "another quest". A chest whose quest
+   is known to be over fades.
+4. Trap: opening the chest spawns enemies.
+5. Pawns can't open: your pawns will not open the chest.
+
+### NPCs
+
+"Route path" draws a searched NPC's route as straight lines or along the
+game's walking paths ("Walking path", the default). "Show route path in the
+world" draws the walking path in the world too. The path search needs a copy of
+the game's walking graph, which the mod makes over a second or two in small
+slices the first time a walking-path route is shown.
+
+### Map and minimap
+
+Minimap indicators, Matching icons (D2DX), and two coordinates toggles:
+"Coordinates beside the map cursor" shows the cursor's map position as
+"X 123  Z -456" on the full map, and "Coordinates under the minimap" shows your
+position as "X 123  Z -456  H 78" (H is height) and fades with the minimap. The
+numbers are in the same space as the search results and markers.
+
+### Appearance
+
+1. Outlines: on or off, color and width (1 to 4 pixels at 1080 lines; wider on
+   larger displays). Outlines are drawn on pictures the mod draws through the
+   D2DX plugin and on its text, not on the game's own icon glyphs.
+2. Route: line color and width, stop picture size, and the stop number's color
+   and size.
+3. Names color.
+4. Overrides: for each marker category, the route line, the names and the item
+   menu, an Override checkbox with its own outline on or off, color and width.
+5. Icons and colors: the icon and color of each category.
+
+"Reset appearance to defaults" puts every category icon and color and every
+appearance setting back to its default; it leaves the two NPCs route path
+settings alone. The first start after the matching-icons update replaces any
+icon or color you never changed with the new default; a value you changed is
+kept.
 
 ## Development
 
