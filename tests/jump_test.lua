@@ -1,12 +1,13 @@
 -- tests/jump_test.lua - map-jump state machine with a fake frame clock
 -- (SPEC 16.3g, 16.6a).
-package.path = package.path .. ";./reframework/autorun/?.lua"
+package.path = "./reframework/autorun/?.lua;" .. package.path
 local J = require("Clairvoyance.jump")
 
 local failures = 0
 local function check(name, cond)
   if not cond then failures = failures + 1; print("FAIL: " .. name) end
 end
+check("path: real modules first", package.path:sub(1, 28) == "./reframework/autorun/?.lua;")
 
 -- Fake world: w.ui is the captured map UI, w.ctor the .ctor counter,
 -- w.dead[ui] marks a freed object, w.rb the readback apply returns.

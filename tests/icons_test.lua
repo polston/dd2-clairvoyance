@@ -1,11 +1,12 @@
 -- tests/icons_test.lua: drives Clairvoyance/icons.lua with a fake D2DX and a
 -- fake clock (SPEC 21.11.1). Pure Lua; no sdk.
-package.path = package.path .. ";./reframework/autorun/?.lua"
+package.path = "./reframework/autorun/?.lua;" .. package.path
 local icons = require("Clairvoyance.icons")
 local failures = 0
 local function check(name, cond)
   if not cond then failures = failures + 1; print("FAIL: " .. name) end
 end
+check("path: real modules first", package.path:sub(1, 28) == "./reframework/autorun/?.lua;")
 
 local now = 0
 local function clock() return now end

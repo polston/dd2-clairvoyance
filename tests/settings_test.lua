@@ -1,10 +1,11 @@
 -- tests/settings_test.lua
-package.path = package.path .. ";./reframework/autorun/?.lua"
+package.path = "./reframework/autorun/?.lua;" .. package.path
 local su = require("Clairvoyance.settings_util")
 local failures = 0
 local function check(name, cond)
   if not cond then failures = failures + 1; print("FAIL: " .. name) end
 end
+check("path: real modules first", package.path:sub(1, 28) == "./reframework/autorun/?.lua;")
 local D = su.defaults()
 check("defaults sane", D.enabled == true and type(D.icon_startable) == "number")
 

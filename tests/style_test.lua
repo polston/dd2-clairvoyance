@@ -1,11 +1,12 @@
 -- tests/style_test.lua - outline and thick-line helpers (SPEC 23.4.2, 23.5).
-package.path = package.path .. ";./reframework/autorun/?.lua"
+package.path = "./reframework/autorun/?.lua;" .. package.path
 local S = require("Clairvoyance.style")
 
 local failures = 0
 local function check(name, cond)
   if not cond then failures = failures + 1; print("FAIL: " .. name) end
 end
+check("path: real modules first", package.path:sub(1, 28) == "./reframework/autorun/?.lua;")
 local function near(a, b, e) return math.abs(a - b) <= e end
 
 local function rec()

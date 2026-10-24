@@ -1,11 +1,12 @@
 -- tests/itemmenu_test.lua: drives Clairvoyance/itemmenu.lua with a fake sdk,
 -- fake hooks and fake GUI objects (SPEC 22.10.2-22.10.6; Rulings 6-8).
-package.path = package.path .. ";./reframework/autorun/?.lua"
+package.path = "./reframework/autorun/?.lua;" .. package.path
 local itemmenu = require("Clairvoyance.itemmenu")
 local failures = 0
 local function check(name, cond)
   if not cond then failures = failures + 1; print("FAIL: " .. name) end
 end
+check("path: real modules first", package.path:sub(1, 28) == "./reframework/autorun/?.lua;")
 
 -- A fake managed object: fields by name, methods by name; a function value
 -- is called (and may raise).

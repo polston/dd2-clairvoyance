@@ -1,12 +1,13 @@
 -- tests/npcs_test.lua - NPC routes, affinity tiers, quest items, hints
 -- (SPEC 22.5, 22.8, 22.9.4, 22.10.1, 22.11).
-package.path = package.path .. ";./reframework/autorun/?.lua"
+package.path = "./reframework/autorun/?.lua;" .. package.path
 local N = require("Clairvoyance.npcs")
 
 local failures = 0
 local function check(name, cond)
   if not cond then failures = failures + 1; print("FAIL: " .. name) end
 end
+check("path: real modules first", package.path:sub(1, 28) == "./reframework/autorun/?.lua;")
 
 -- today
 do

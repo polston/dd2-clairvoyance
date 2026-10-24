@@ -1,5 +1,5 @@
 -- tests/core_test.lua
-package.path = package.path .. ";./reframework/autorun/?.lua"
+package.path = "./reframework/autorun/?.lua;" .. package.path
 local core = require("Clairvoyance.core")
 local SHOW_ALL = { startable=true, in_progress=true, completed=true, unavailable=true, locked=true }
 
@@ -89,6 +89,7 @@ local failures = 0
 local function check(name, cond)
   if not cond then failures = failures + 1; print("FAIL: " .. name) end
 end
+check("path: real modules first", package.path:sub(1, 28) == "./reframework/autorun/?.lua;")
 
 -- 1. unavailable game state
 check("nil acceptable -> nil result",

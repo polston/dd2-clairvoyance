@@ -1,13 +1,14 @@
 -- tests/world_test.lua - drives Clairvoyance/world.lua with a fake
 -- reads table, a fake adapter and a fake io, all counting every call
 -- (SPEC 17.3, 17.10). Pure Lua; no sdk.
-package.path = package.path .. ";./reframework/autorun/?.lua"
+package.path = "./reframework/autorun/?.lua;" .. package.path
 local world = require("Clairvoyance.world")
 
 local failures = 0
 local function check(name, cond)
   if not cond then failures = failures + 1; print("FAIL: " .. name) end
 end
+check("path: real modules first", package.path:sub(1, 28) == "./reframework/autorun/?.lua;")
 
 local K = world.K
 local NAN = 0 / 0
