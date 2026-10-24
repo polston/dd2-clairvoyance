@@ -961,6 +961,7 @@ do
   check("families: two kinds of one family", #m == 2)
   check("families: first kind carries fam", m[1] ~= nil and m[1].fam == "ch220")
   check("families: second kind carries fam", m[2] ~= nil and m[2].fam == "ch220")
+  check("families: the two are different kinds", m[1] ~= nil and m[2] ~= nil and m[1].kind == "Goblin" and m[2].kind == "Hobgoblin")
 
   local fr = fixture()
   fr.data.respawn = { { key = "zz_0", cid = 1002, cid_name = "ch220002_00", pos = P(300, 0, 300) } }
