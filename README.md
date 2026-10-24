@@ -77,9 +77,15 @@ Status and debug.
 
 ### World markers
 
-One checkbox per category (chests, treasure, tokens, beetles, monsters, small
-monsters, sellers, shops, show opened and collected, undiscovered areas) and a
-cap on the number of markers. A chest's label ends with its kinds in brackets,
+One checkbox per category (chests, treasure, beetles, sellers, shops, show
+opened and collected, undiscovered areas) and a cap on the number of markers.
+Two categories are trees with two checkboxes each. Seeker's Tokens holds "All
+Seeker's Tokens" and "Finder's Token spot (first token found)": the spot where
+you picked up your first Seeker's Token this playthrough, which a Sphinx riddle
+asks for. It shows even when the other tokens are off. Monsters holds "Large
+monsters" and "Small monsters", and each one works on its own. The World panel
+uses the same trees: the spot is listed first under Seeker's Tokens, and
+Monsters splits into a Large node and a Small node. A chest's label ends with its kinds in brackets,
 for example "Chest - Wakestone [stays opened in NG+]", and the map search
 matches those words. Five checkboxes under Chests turn each kind on or off; a
 chest with several kinds is hidden when any one of them is off:
