@@ -2922,6 +2922,10 @@ do
   ai.set_item_quests({ [311] = { 20090 } })
   assert(ai.item_related()[311] ~= nil and #ai.item_related()[300] == 2,
     "RS3 set_item_quests clears the cache")
+  ai.set_item_quests({ [312] = { 20090, 20077 } })
+  local two = ai.item_related()[312]
+  assert(#two == 1 and two[1] == "another quest",
+    "RS5 two unmet quests on one item: one 'another quest', not repeated")
   ai.set_item_quests(nil)
   assert(ai.item_related()[311] == nil, "RS4 nil clears the static map")
 

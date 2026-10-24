@@ -3503,15 +3503,17 @@ function A.make()
       for id in pairs(ids) do
         local titles, seen = {}, {}
         -- the live lists name quests with an in-progress need; the static
-        -- hints-file lists follow the gate-name rule (SPEC 13.3d)
+        -- hints-file lists follow the gate-name rule (SPEC 13.3d); a title
+        -- shows once, so two unmet quests read "another quest" once
         for si, src in ipairs({ items.related or {}, items.static_related or {} }) do
           for _, q in ipairs(src[id] or {}) do
             if not seen[q] then
               seen[q] = true
-              if si == 1 then
-                titles[#titles + 1] = a.quest_name(q) or ("Quest " .. tostring(q))
-              else
-                titles[#titles + 1] = qnml_core.gate_name(q, a, reveal == true)
+              local t = si == 1 and (a.quest_name(q) or ("Quest " .. tostring(q)))
+                or qnml_core.gate_name(q, a, reveal == true)
+              if not seen[t] then
+                seen[t] = true
+                titles[#titles + 1] = t
               end
             end
           end
