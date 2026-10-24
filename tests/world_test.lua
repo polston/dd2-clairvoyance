@@ -3595,7 +3595,7 @@ do
   d2.shops = { [41] = { { item = 378, release_qid = 0 } },
     [42] = { { item = 379, release_qid = 0 } } }
   d2.alive = false
-  d2.needs = { { quest = 1, item = 378, n = 1 } }
+  d2.needs = { [100] = { { id = 378, num = 1 } } }
   local inner = f2.reads.schedule_pos
   f2.reads.schedule_pos = function(cid)
     f2.clock_t = f2.clock_t + 0.001
@@ -3611,6 +3611,134 @@ do
   local calls2 = f2.reads_n.schedule_pos - calls
   check("schedule_pos cleared per round",
     math.abs(w2:stats().ms.schedule_pos - calls2 * 1.0) < 1e-6)
+end
+
+-- 30. round caches (SPEC 28.5.3)
+do
+  local function cache_world()
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "f1", 10, 1, 1),
+      prow("chest", "f2", 10, 2, 2, { src = "subquest" }),
+      prow("chara", "m1", 1, 100, 0, { name = "ch253000_00" }) }) } })
+    f.data.boss = { ch253 = true }
+    f.data.catalog = { 1 }
+    f.data.cast = { [1] = { 2058 } }
+    return f, f.new()
+  end
+
+  -- effective(): merged once per change
+  do
+    local f, w = cache_world()
+    w:refresh(0, true, ALL)
+    local b0 = w:stats().eff_builds
+    check("eff counter wired", b0 == 1)
+    w:refresh(10, true, ALL)
+    check("eff cached", w:stats().eff_builds - b0 == 0)
+    f.data.reserved = { chest_row("n1", 50, 50) }
+    w:refresh(20, true, ALL)
+    check("eff learn rebuilds", w:stats().eff_builds - b0 == 1)
+    check("eff learn shows the new chest", find(w:input().chests, "n1") ~= nil)
+    w:refresh(30, true, ALL)
+    check("eff cached after learn", w:stats().eff_builds - b0 == 1)
+
+    -- a live-only row changing does not rebuild, and shows the change
+    f.data.reserved = { chest_row("f2", 5, 5) }
+    w:refresh(40, true, ALL)
+    local b1 = w:stats().eff_builds
+    local c1 = find(w:input().chests, "f2")
+    check("eff live row shown", c1 ~= nil and c1.pos.x == 5)
+    f.data.reserved = { chest_row("f2", 9, 9) }
+    w:refresh(50, true, ALL)
+    local c2 = find(w:input().chests, "f2")
+    check("eff live row change shown", c2 ~= nil and c2.pos.x == 9)
+    check("eff live row change does not rebuild", w:stats().eff_builds - b1 == 0)
+    f.data.reserved = {}
+    w:refresh(60, true, ALL)
+    check("eff live row gone", find(w:input().chests, "f2") == nil)
+    check("eff live row gone does not rebuild", w:stats().eff_builds - b1 == 0)
+  end
+
+  -- reset invalidates the merge: no file monsters while the cast is unavailable
+  do
+    local f, w = cache_world()
+    w:refresh(0, true, ALL)
+    check("eff reset: file monster before", #w:input().monsters == 1)
+    local b0 = w:stats().eff_builds
+    w:reset()
+    f.afail.catalog_ids = true
+    w:refresh(10, true, ALL)
+    check("eff reset: rebuilt", w:stats().eff_builds - b0 == 1)
+    check("eff reset: no file monsters", #w:input().monsters == 0)
+  end
+
+  -- first_seller_cid is read once per round for shops and sellers together
+  do
+    local function sched_calls(tg)
+      local f = fixture()
+      local d = f.data
+      d.needs = { [100] = { { id = 378, num = 1 } } }
+      d.iname = { [378] = "Grimoire" }
+      d.sched_ids = { 2058, 2059 }
+      d.shop = { [2058] = 41, [2059] = 42 }
+      d.npcname = { [2058] = "Dudley", [2059] = "Ana" }
+      d.sched = { [2058] = P(100, 0, 100), [2059] = P(200, 0, 100) }
+      d.alive = false
+      d.shops = { [41] = { { item = 378, release_qid = 0 } },
+        [42] = { { item = 379, release_qid = 0 } } }
+      local w = f.new()
+      w:refresh(0, true, tg)
+      return f.reads_n.schedule_pos or 0, w
+    end
+    local both, wb = sched_calls({ shops = true, sellers = true })
+    local alone = sched_calls({ shops = true })
+    check("fsc: sellers appeared", #wb:input().sellers == 1)
+    check("fsc: shops with sellers reads as shops alone", both == alone and alone > 0)
+  end
+
+  -- item lists: kept per key, rebuilt on a changed id list or a fallback name
+  do
+    local nm = { [5] = "Potion", [6] = "Tonic" }
+    local cache = {}
+    local function name_of(id) return nm[id] or ("Item " .. id) end
+    local l1, b1 = world.item_list(cache, "k", { { id = 5, n = 1 } }, name_of)
+    check("item_list: first build", b1 == true and l1[1].name == "Potion")
+    local l2, b2 = world.item_list(cache, "k", { { id = 5, n = 1 } }, name_of)
+    check("item_list: kept", b2 == false and l2 == l1)
+    local l3, b3 = world.item_list(cache, "k", { { id = 5, n = 1 }, { id = 6, n = 1 } }, name_of)
+    check("item_list: ids {5} then {5,6} rebuilds", b3 == true and #l3 == 2)
+    local _, b4 = world.item_list(cache, "k", { { id = 5, n = 1 }, { id = 7, n = 1 } }, name_of)
+    check("item_list: a changed id rebuilds", b4 == true)
+    local _, b5 = world.item_list(cache, "k", { { id = 5, n = 1 }, { id = 7, n = 1 } }, name_of)
+    check("item_list: fallback name retries", b5 == true)
+    nm[7] = "Elixir"
+    local l6, b6 = world.item_list(cache, "k", { { id = 5, n = 1 }, { id = 7, n = 1 } }, name_of)
+    check("item_list: retry takes the real name", b6 == true and l6[2].name == "Elixir")
+    local _, b7 = world.item_list(cache, "k", { { id = 5, n = 1 }, { id = 7, n = 1 } }, name_of)
+    check("item_list: kept after the real name", b7 == false)
+  end
+
+  -- chests and treasure through the round: a fallback name, then the real one
+  do
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "f1", 10, 1, 1, { items = { { id = 5, n = 1 } } }) }) } })
+    f.data.iname = { [5] = "Item 5" }
+    f.data.nodes = { { name = "Node A", pos = P(1, 0, 1) } }
+    local w = f.new()
+    local tg = on("chests", "treasure")
+    w:refresh(0, true, tg)
+    local b0 = w:stats().item_list_builds
+    check("item lists counter wired", b0 == 2)
+    check("item retry: fallback shown first", find(w:input().chests, "f1").items[1].name == "Item 5")
+    f.data.iname[5] = "Potion"
+    w:refresh(10, true, tg)
+    local b1 = w:stats().item_list_builds
+    check("item retry", find(w:input().chests, "f1").items[1].name == "Potion")
+    check("item retry: treasure", w:input().treasure[1].items[1].name == "Potion")
+    check("item retry rebuilt once each", b1 - b0 == 2)
+    w:refresh(20, true, tg)
+    check("item list kept", w:stats().item_list_builds - b1 == 0)
+    check("item list kept: still named", find(w:input().chests, "f1").items[1].name == "Potion")
+  end
 end
 
 if failures > 0 then os.exit(1) end

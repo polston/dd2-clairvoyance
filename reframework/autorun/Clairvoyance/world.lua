@@ -114,6 +114,31 @@ function M.kind_of_gimmick(id)
   return nil
 end
 
+-- An item list kept per key in `cache` (SPEC 28.5.3.3): { { name, n }, ... }
+-- for `items` ({ { id, n }, ... }) with names from name_of(id). Returns the
+-- list and whether it was built this call. It is rebuilt when the id list
+-- differs (length, any id or count) or when a name last time was the
+-- "Item <id>" fallback, so a name the adapter could not read yet is retried.
+function M.item_list(cache, key, items, name_of)
+  local c = cache[key]
+  if c ~= nil and not c.retry and #c.ids == #items then
+    local same = true
+    for i, it in ipairs(items) do
+      if c.ids[i] ~= it.id or c.ns[i] ~= it.n then same = false; break end
+    end
+    if same then return c.list, false end
+  end
+  local ids, ns, list, retry = {}, {}, {}, false
+  for i, it in ipairs(items) do
+    local nm = name_of(it.id)
+    ids[i], ns[i] = it.id, it.n
+    list[i] = { name = nm, n = it.n }
+    if nm == nil or nm == "Item " .. tostring(it.id) then retry = true end
+  end
+  cache[key] = { ids = ids, ns = ns, list = list, retry = retry }
+  return list, true
+end
+
 -- Greedy clustering of one family (SPEC 17.10.9): each item, in uid order,
 -- joins the earliest-created cluster whose seed lies within `radius`, else
 -- seeds a new one. Seeds sit in a radius-sized grid, so only the 27 cells
@@ -195,7 +220,8 @@ function M.new(a, reads, io)
   local input_tbl = nil
   local unlisted = 0
   local stats = { ms = {}, known = {}, monster_ids = {}, rounds = 0, saves = 0,
-    save_ms = 0, last_save_reason = nil, hits = 0, misses = 0 }
+    save_ms = 0, last_save_reason = nil, hits = 0, misses = 0,
+    eff_builds = 0, item_list_builds = 0 }
   local S
 
   local function new_session()
@@ -204,6 +230,8 @@ function M.new(a, reads, io)
       settle = nil, msgs = {}, disc_set = nil, disc_count = nil,
       disc_cache = {}, need_sort = true, file_monsters = {}, held = {}, live = {},
       drop_ids = nil,
+      -- SPEC 28.5.3.3: item lists kept per chest uid / treasure name
+      chest_lists = {}, treasure_lists = {},
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
       route_cid = nil, route_name = nil, route_cache = nil,
@@ -420,12 +448,12 @@ function M.new(a, reads, io)
     return ok, v
   end
 
-  -- Times fn under stats.ms["step_" .. name] (SPEC 28.5.2); one result.
+  -- Times fn under stats.ms["step_" .. name] (SPEC 28.5.2); up to two results.
   local function step(name, fn, ...)
     local t0 = clock()
-    local r = fn(...)
+    local r1, r2 = fn(...)
     stats.ms["step_" .. name] = (clock() - t0) * 1000
-    return r
+    return r1, r2
   end
 
   local function table_read(name, ...)
@@ -700,12 +728,20 @@ function M.new(a, reads, io)
     return p
   end
 
-  -- the first of a shop's sellers with a usable position: cid, pos (or nil)
+  -- the first of a shop's sellers with a usable position: cid, pos (or nil);
+  -- computed once per round and shared by shops and sellers (SPEC 28.5.3.2)
+  local fsc_memo = {}
   local function first_seller_cid(sid)
-    for _, cid in ipairs(ensure_shop_cids()[sid] or {}) do
-      local p = seller_pos(cid)
-      if p ~= nil then return cid, p end
+    local m = fsc_memo[sid]
+    if m == nil then
+      m = false
+      for _, cid in ipairs(ensure_shop_cids()[sid] or {}) do
+        local p = seller_pos(cid)
+        if p ~= nil then m = { cid, p }; break end
+      end
+      fsc_memo[sid] = m
     end
+    if m then return m[1], m[2] end
     return nil
   end
 
@@ -931,21 +967,43 @@ function M.new(a, reads, io)
   end
 
   -- ----- effective atlas -----
+  -- The static + file monsters + learned merge and its sorted keys are kept
+  -- until the learned set (rev) or the file monsters table changes (SPEC
+  -- 28.5.3.1: sort_places and w:reset() each replace S.file_monsters). The
+  -- live rows are laid over a copy each round. Returns eff, sorted keys.
+  local eff_cache = nil
   local function effective()
-    local eff = {}
-    for uid, e in pairs(static) do eff[uid] = e end
-    for uid, e in pairs(S.file_monsters) do eff[uid] = e end
-    for uid, e in pairs(learned) do
-      if e.k == "chest" and eff[uid] ~= nil then
-        if e.items == nil then e.items = eff[uid].items end
-        if e.quest == nil then e.quest = eff[uid].quest end
-        if e.trap == nil then e.trap = eff[uid].trap end
-        if e.pawn == nil then e.pawn = eff[uid].pawn end
+    local c = eff_cache
+    if c == nil or c.rev ~= rev or c.fm ~= S.file_monsters then
+      stats.eff_builds = stats.eff_builds + 1
+      local eff = {}
+      for uid, e in pairs(static) do eff[uid] = e end
+      for uid, e in pairs(S.file_monsters) do eff[uid] = e end
+      for uid, e in pairs(learned) do
+        if e.k == "chest" and eff[uid] ~= nil then
+          if e.items == nil then e.items = eff[uid].items end
+          if e.quest == nil then e.quest = eff[uid].quest end
+          if e.trap == nil then e.trap = eff[uid].trap end
+          if e.pawn == nil then e.pawn = eff[uid].pawn end
+        end
+        eff[uid] = e
       end
+      c = { rev = rev, fm = S.file_monsters, map = eff, keys = sorted_keys(eff) }
+      eff_cache = c
+    end
+    if next(S.live) == nil then return c.map, c.keys end
+    local eff, keys, extra = {}, c.keys, nil
+    for uid, e in pairs(c.map) do eff[uid] = e end
+    for uid, e in pairs(S.live) do
+      if c.map[uid] == nil then extra = extra or {}; extra[#extra + 1] = uid end
       eff[uid] = e
     end
-    for uid, e in pairs(S.live) do eff[uid] = e end
-    return eff
+    if extra ~= nil then
+      keys = table.move(c.keys, 1, #c.keys, 1, {})
+      table.move(extra, 1, #extra, #keys + 1, keys)
+      table.sort(keys)
+    end
+    return eff, keys
   end
 
   local KEPT_ITEMS = { [77] = true, [78] = true, [81] = true }
@@ -1207,6 +1265,7 @@ function M.new(a, reads, io)
   local function round(now, tg)
     stats.hits, stats.misses = 0, 0
     S.live = {}
+    fsc_memo = {}
     -- the per-round timings start empty (one-shot read timings stay)
     for k in pairs(stats.ms) do
       if k == "schedule_pos" or k:sub(1, 5) == "step_" then stats.ms[k] = nil end
@@ -1263,7 +1322,7 @@ function M.new(a, reads, io)
       end
     end)
 
-    local eff = step("effective", effective)
+    local eff, uids = step("effective", effective)
     local out = { chests = {}, treasure = {}, tokens = {}, beetles = {},
       monsters = {}, sellers = {}, schedule = schedule, settlements = {} }
 
@@ -1275,7 +1334,6 @@ function M.new(a, reads, io)
 
     -- chests, tokens, beetles
     local collect_t0 = clock()
-    local uids = sorted_keys(eff)
     local chest_qs = nil
     for _, uid in ipairs(uids) do
       local e = eff[uid]
@@ -1306,10 +1364,9 @@ function M.new(a, reads, io)
           end)
         end
         if e.items ~= nil then
-          c.items = {}
-          for _, it in ipairs(e.items) do
-            c.items[#c.items + 1] = { name = item_name(it.id), n = it.n }
-          end
+          local built
+          c.items, built = M.item_list(S.chest_lists, uid, e.items, item_name)
+          if built then stats.item_list_builds = stats.item_list_builds + 1 end
         end
         out.chests[#out.chests + 1] = c
       elseif COLLECT[e.k] and tg[COLLECT[e.k].list] then
@@ -1369,10 +1426,9 @@ function M.new(a, reads, io)
           local ce = S.node_chest ~= nil and S.node_chest[n.name] or nil
           if ce ~= nil and ce.items ~= nil then
             local t = out.treasure[#out.treasure]
-            t.items = {}
-            for _, it in ipairs(ce.items) do
-              t.items[#t.items + 1] = { name = item_name(it.id), n = it.n }
-            end
+            local built
+            t.items, built = M.item_list(S.treasure_lists, n.name, ce.items, item_name)
+            if built then stats.item_list_builds = stats.item_list_builds + 1 end
           end
         end
       end
@@ -1678,6 +1734,7 @@ function M.new(a, reads, io)
       round_ms = stats.round_ms,
       drops_first_ms = stats.drops_first_ms, drops = drops,
       rounds = stats.rounds, saves = stats.saves, save_ms = stats.save_ms,
+      eff_builds = stats.eff_builds, item_list_builds = stats.item_list_builds,
       last_save_reason = stats.last_save_reason,
     }
   end
