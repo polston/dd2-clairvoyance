@@ -77,6 +77,17 @@ local COLLECT = {
     done = function(r) return to_int(r.gather_num) == 0 end },
 }
 
+-- What the save records say about one collectable: "unknown" without a
+-- records index, else "collected" if any record of the uid is done, else "not".
+local function collect_state(def, rec_idx, uid)
+  if rec_idx == nil then return "unknown" end
+  local state = "not"
+  for _, r in ipairs(rec_idx[uid] or {}) do
+    if def.done(r) then state = "collected" end
+  end
+  return state
+end
+
 local function guid_of(key)
   if type(key) ~= "string" then return nil end
   return (key:match("^(.*)_[^_]*$") or key):lower()
@@ -442,6 +453,23 @@ function M.new(a, reads, io)
   end
 
   -- ----- guarded sources -----
+  -- Per-round timings, one mechanism (SPEC 28.5.2): lap(name, t0) stores a
+  -- section's time under stats.ms["step_" .. name] and notes the key so the
+  -- next round clears it; call() adds up the ACCUM names over the round
+  -- instead of keeping the last call's time.
+  local ACCUM = { schedule_pos = true }
+  local STEP_KEY = setmetatable({}, { __index = function(t, n)
+    local k = "step_" .. n
+    t[n] = k
+    return k
+  end })
+  local lapped = {}
+  local function lap(name, t0)
+    local k = STEP_KEY[name]
+    stats.ms[k] = (clock() - t0) * 1000
+    lapped[#lapped + 1] = k
+  end
+
   -- Calls reads[name]; returns ok, value. Times the call.
   local function call(name, ...)
     local f = reads[name]
@@ -449,18 +477,9 @@ function M.new(a, reads, io)
     local t0 = clock()
     local ok, v = pcall(f, ...)
     local dt = (clock() - t0) * 1000
-    -- schedule_pos is a per-round total, not the last call's time (SPEC 28.5.2)
-    if name == "schedule_pos" then dt = (stats.ms[name] or 0) + dt end
+    if ACCUM[name] then dt = (stats.ms[name] or 0) + dt end
     stats.ms[name] = dt
     return ok, v
-  end
-
-  -- Times fn under stats.ms["step_" .. name] (SPEC 28.5.2); up to two results.
-  local function step(name, fn, ...)
-    local t0 = clock()
-    local r1, r2 = fn(...)
-    stats.ms["step_" .. name] = (clock() - t0) * 1000
-    return r1, r2
   end
 
   local function table_read(name, ...)
@@ -1286,84 +1305,97 @@ function M.new(a, reads, io)
     S.live = {}
     fsc_memo = {}
     -- the per-round timings start empty (one-shot read timings stay)
-    for k in pairs(stats.ms) do
-      if k == "schedule_pos" or k:sub(1, 5) == "step_" then stats.ms[k] = nil end
+    for i = #lapped, 1, -1 do
+      stats.ms[lapped[i]] = nil
+      lapped[i] = nil
     end
+    for k in pairs(ACCUM) do stats.ms[k] = nil end
     local any_rec = tg.chests or tg.tokens or tg.beetles
     local need_shops = tg.search or tg.shops
-    local cast_ok = step("cast", ensure_cast)
-    step("boss", ensure_boss)
+    local t = clock()
+    local cast_ok = ensure_cast()
+    lap("cast", t)
+    t = clock()
+    ensure_boss()
+    lap("boss", t)
     local boss_ok = S.boss ~= nil
     local any_monsters = tg.monsters or tg.small_monsters
-    if any_monsters then step("loaded_boss", read_loaded_boss) end
+    if any_monsters then
+      t = clock()
+      read_loaded_boss()
+      lap("loaded_boss", t)
+    end
 
-    local rows = step("reserved", table_read, "reserved_rows")
-    step("sort", function()
-      if cast_ok and boss_ok and S.need_sort then sort_places() end
-    end)
+    t = clock()
+    local rows = table_read("reserved_rows")
+    lap("reserved", t)
+    t = clock()
+    if cast_ok and boss_ok and S.need_sort then sort_places() end
+    lap("sort", t)
     local reserved_uids = nil
-    step("learn", function()
-      if rows ~= nil then reserved_uids = learn_reserved(rows, cast_ok and boss_ok) end
-    end)
-    local loaded_seen = step("loaded", read_loaded, reserved_uids)
-    step("patched", function()
-      if rows ~= nil then remove_patched(rows, reserved_uids) end
-    end)
+    t = clock()
+    if rows ~= nil then reserved_uids = learn_reserved(rows, cast_ok and boss_ok) end
+    lap("learn", t)
+    t = clock()
+    local loaded_seen = read_loaded(reserved_uids)
+    lap("loaded", t)
+    t = clock()
+    if rows ~= nil then remove_patched(rows, reserved_uids) end
+    lap("patched", t)
 
-    step("settlements", ensure_settlements)
+    t = clock()
+    ensure_settlements()
+    lap("settlements", t)
 
     -- schedule positions of cast NPCs (SPEC 17.3b.1.2)
     local schedule = {}
-    step("schedule", function()
-      if S.cast ~= nil and type(reads.schedule_pos) == "function" then
-        local t0 = clock()
-        for _, cid in ipairs(S.cast_list) do
-          local ok, p = call("schedule_pos", cid)
-          if ok and valid_pos(p) and not near_zero(p) then
-            schedule[cid] = { x = p.x, y = p.y, z = p.z }
-          end
+    t = clock()
+    if S.cast ~= nil and type(reads.schedule_pos) == "function" then
+      for _, cid in ipairs(S.cast_list) do
+        local ok, p = call("schedule_pos", cid)
+        if ok and valid_pos(p) and not near_zero(p) then
+          schedule[cid] = { x = p.x, y = p.y, z = p.z }
         end
-        stats.ms.schedule_loop = (clock() - t0) * 1000
       end
-    end)
+    end
+    lap("schedule", t)
 
     local rec_idx = nil
     if any_rec then
-      rec_idx = step("records", guarded, "records", function()
+      t = clock()
+      rec_idx = guarded("records", function()
         return build_records(need_table("save_records"))
       end)
+      lap("records", t)
     end
     -- the First Seeker's Token spot (SPEC 28.9.2): straight from the places
     -- row, so it exists with the Tokens toggle off
     local first_token = nil
     if tg.first_token then
-      first_token = step("first_token", function()
-        local ok, v = call("first_seeker")
-        if not ok or type(v) ~= "string" then return nil end
+      t = clock()
+      local ok, v = call("first_seeker")
+      if ok and type(v) == "string" then
         local uid = v:lower()
         local row = static[uid]
-        if row == nil or row.k ~= "token" then return nil end
-        local state = "unknown"
-        if rec_idx ~= nil then
-          state = "not"
-          for _, r in ipairs(rec_idx[uid] or {}) do
-            if COLLECT.token.done(r) then state = "collected" end
-          end
-        end
-        return { uid = uid, pos = pcopy(row), name = "Finder's Token spot",
-          state = state, first_seeker = true }
-      end)
-    end
-    step("seen", function()
-      if loaded_seen ~= nil and rec_idx ~= nil then
-        for uid in pairs(loaded_seen) do
-          if rec_idx[uid] ~= nil then stats.hits = stats.hits + 1
-          else stats.misses = stats.misses + 1 end
+        if row ~= nil and row.k == "token" then
+          first_token = { uid = uid, pos = pcopy(row), name = "Finder's Token spot",
+            state = collect_state(COLLECT.token, rec_idx, uid), first_seeker = true }
         end
       end
-    end)
+      lap("first_token", t)
+    end
+    t = clock()
+    if loaded_seen ~= nil and rec_idx ~= nil then
+      for uid in pairs(loaded_seen) do
+        if rec_idx[uid] ~= nil then stats.hits = stats.hits + 1
+        else stats.misses = stats.misses + 1 end
+      end
+    end
+    lap("seen", t)
 
-    local eff, uids = step("effective", effective)
+    t = clock()
+    local eff, uids = effective()
+    lap("effective", t)
     local out = { chests = {}, treasure = {}, tokens = {}, beetles = {},
       monsters = {}, sellers = {}, schedule = schedule, settlements = {},
       first_token = first_token }
@@ -1413,23 +1445,27 @@ function M.new(a, reads, io)
         out.chests[#out.chests + 1] = c
       elseif COLLECT[e.k] and tg[COLLECT[e.k].list] then
         local def = COLLECT[e.k]
-        local state = "unknown"
-        if rec_idx ~= nil then
-          state = "not"
-          for _, r in ipairs(rec_idx[uid] or {}) do
-            if def.done(r) then state = "collected" end
-          end
-        end
         local list = out[def.list]
-        list[#list + 1] = { uid = uid, pos = pcopy(e),
-          name = item_name(M.K[def.item]), state = state }
+        local entry = { uid = uid, pos = pcopy(e),
+          name = item_name(M.K[def.item]),
+          state = collect_state(def, rec_idx, uid) }
+        -- the ordinary entry for the Finder's Token spot is marked, so
+        -- consumers can leave it out of results (it still counts as known)
+        if e.k == "token" and first_token ~= nil and uid == first_token.uid then
+          entry.first_seeker = true
+        end
+        list[#list + 1] = entry
       end
     end
 
-    stats.ms.step_collect = (clock() - collect_t0) * 1000
+    lap("collect", collect_t0)
 
     -- treasure
-    if tg.treasure or tg.sellers or need_shops then step("discovery", refresh_discovery) end
+    if tg.treasure or tg.sellers or need_shops then
+      t = clock()
+      refresh_discovery()
+      lap("discovery", t)
+    end
     local treasure_t0 = clock()
     if tg.treasure then
       if S.nodes == nil then
@@ -1475,7 +1511,7 @@ function M.new(a, reads, io)
         end
       end
       table.sort(out.treasure, function(p, q) return p.name < q.name end)
-      stats.ms.step_treasure = (clock() - treasure_t0) * 1000
+      lap("treasure", treasure_t0)
     end
 
     -- shop stock index for map search or the Shops toggle (SPEC 19.7.1, 20.2);
@@ -1484,7 +1520,8 @@ function M.new(a, reads, io)
     local first_shops = stats.search_first_ms == nil
     if need_shops then
       local t0 = clock()
-      local list = step("shop_index", guarded, "shop_index", compute_shops)
+      local list = guarded("shop_index", compute_shops)
+      lap("shop_index", t0)
       out.shops = list or {}
       if stats.search_first_ms == nil and list ~= nil then
         stats.search_first_ms = (clock() - t0) * 1000
@@ -1493,7 +1530,9 @@ function M.new(a, reads, io)
 
     -- sellers
     if tg.sellers then
-      local list = step("sellers", guarded, "sellers", compute_sellers)
+      t = clock()
+      local list = guarded("sellers", compute_sellers)
+      lap("sellers", t)
       for _, s in ipairs(list or {}) do
         local c = {}
         for k, v in pairs(s) do c[k] = v end
@@ -1565,7 +1604,7 @@ function M.new(a, reads, io)
       end
       table.sort(out.monsters, function(p, q) return p.uid < q.uid end)
       stats.monster_ids = sorted_keys(ids)
-      stats.ms.step_monsters = (clock() - monsters_t0) * 1000
+      lap("monsters", monsters_t0)
     end
 
     -- drops: deferred past the round whose shop index first succeeds (19.12.3.3)
@@ -1583,7 +1622,7 @@ function M.new(a, reads, io)
           stats.ms.drop_names = (clock() - t0) * 1000
         end
       end
-      stats.ms.step_drops = (clock() - drops_t0) * 1000
+      lap("drops", drops_t0)
     end
 
     for _, cat in ipairs({ "chests", "treasure", "tokens", "beetles", "monsters", "sellers" }) do
@@ -1591,10 +1630,14 @@ function M.new(a, reads, io)
     end
     if tg.search then
       local more
-      out.npcs, more = step("npcs", npc_round, tg)
+      t = clock()
+      out.npcs, more = npc_round(tg)
+      lap("npcs", t)
       again = again or more == true
     end
-    out.route = step("route", route_round)
+    t = clock()
+    out.route = route_round()
+    lap("route", t)
     return out, again
   end
 
