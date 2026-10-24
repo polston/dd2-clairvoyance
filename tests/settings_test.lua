@@ -568,6 +568,28 @@ do
     su.world_toggled(p2, { world_chests = true, world_first_token = true }) == true)
   check("toggled: no settings false", su.world_toggled({}, {}) == false)
 end
+-- world tables shared by the search line and the settings UI
+do
+  local inb = {}
+  for _, k in ipairs(su.WORLD_BOOLS) do inb[k] = true end
+  local n = 0
+  for k in pairs(su.WORLD_NO_SEARCH) do
+    n = n + 1
+    check("WORLD_NO_SEARCH key " .. k .. " is a world toggle", inb[k] == true)
+  end
+  check("WORLD_NO_SEARCH has the four unsearched toggles", n == 4
+    and su.WORLD_NO_SEARCH.world_show_opened and su.WORLD_NO_SEARCH.world_undiscovered
+    and su.WORLD_NO_SEARCH.world_shops and su.WORLD_NO_SEARCH.world_first_token)
+  check("WORLD_TREES tokens pair", su.WORLD_TREES.world_tokens[2] == "world_first_token")
+  check("WORLD_TREES monsters pair", su.WORLD_TREES.world_monsters[2] == "world_small_monsters")
+  for first, tr in pairs(su.WORLD_TREES) do
+    check("WORLD_TREES " .. first .. " keys are toggles with labels",
+      inb[first] and inb[tr[2]] and su.WORLD_BOOL_LABEL[first] ~= nil
+      and su.WORLD_BOOL_LABEL[tr[2]] ~= nil and type(tr[1]) == "string")
+    check("WORLD_TREE_SECOND holds " .. tr[2], su.WORLD_TREE_SECOND[tr[2]] == true)
+    check("WORLD_TREE_SECOND omits first " .. first, su.WORLD_TREE_SECOND[first] == nil)
+  end
+end
 -- median (SPEC 28.11.2)
 do
   check("median empty", su.median({}) == nil)

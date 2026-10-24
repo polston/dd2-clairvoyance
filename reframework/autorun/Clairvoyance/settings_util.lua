@@ -178,6 +178,18 @@ M.WORLD_BOOLS = { "world_chests", "world_treasure", "world_tokens",
   "world_first_token", "world_beetles", "world_monsters", "world_small_monsters",
   "world_sellers", "world_shops", "world_show_opened", "world_undiscovered" }
 
+-- Toggles the "Not searched (off)" line never lists.
+M.WORLD_NO_SEARCH = { world_show_opened = true, world_undiscovered = true,
+  world_shops = true, world_first_token = true }
+
+-- Tokens and Monsters each hold two checkboxes in one tree node (SPEC 28.9.4,
+-- 28.12.1): first box key -> { tree id, second box key }. WORLD_TREE_SECOND
+-- is the set of second-box keys (drawn with their first, not on their own).
+M.WORLD_TREES = { world_tokens = { "Seeker's Tokens##wtok", "world_first_token" },
+  world_monsters = { "Monsters##wmon", "world_small_monsters" } }
+M.WORLD_TREE_SECOND = {}
+for _, tr in pairs(M.WORLD_TREES) do M.WORLD_TREE_SECOND[tr[2]] = true end
+
 -- Median of a list of numbers (SPEC 28.11.2): the lower middle element for
 -- an even count, nil for an empty list. Sorts a copy.
 function M.median(list)

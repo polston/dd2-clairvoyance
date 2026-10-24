@@ -117,32 +117,40 @@ re.on_config_save(function() pcall(wt.save, wt, "config") end)
 
 -- Snapshot: only re.on_frame writes it; map hooks only read it.
 local snapshot = nil      -- { markers, unresolved, unnamed, counts, resolved_count, sig }
+-- Last frame's world toggles (su.world_toggled) and the debug tick ring.
+wt.prev_tg, wt.tick_ring = {}, {}
 -- The World panel rows of one category, cached on the snapshot (the debug
 -- dump reads the same rows). Each row carries its "Show on map" button id.
 wt.rows = function(cat)
   -- SPEC 28.12.1: "monster_large" / "monster_small" are the Monsters node's
   -- two children, each its own nearest list over the matching entries
-  local size = cat == "monster_large" and 0 or cat == "monster_small" and 1 or nil
+  local small   -- true: Small child, false: Large child, nil: not a size list
+  if cat == "monster_small" then small = true elseif cat == "monster_large" then small = false end
   local p = snapshot ~= nil and snapshot.world ~= nil
-    and snapshot.world[size ~= nil and "monster" or cat] or nil
+    and snapshot.world[small ~= nil and "monster" or cat] or nil
   if p == nil then return {} end
   local cache = snapshot.world_rows
   if cache == nil then cache = {}; snapshot.world_rows = cache end
   local rows = cache[cat]
   if rows == nil then
     local ents = p.entries
-    if size ~= nil then
+    if small ~= nil then
       ents = {}
       for _, e in ipairs(p.entries or {}) do
-        if (e.small == true) == (size == 1) then ents[#ents + 1] = e end
+        if (e.small == true) == small then ents[#ents + 1] = e end
       end
     end
     rows = core.world_rows(ents, (wt.q("input", nil) or {}).settlements,
       wt.world_origin, cat == "shop" and math.huge or nil)
     for _, r in ipairs(rows) do
-      if size ~= nil then r.small = size == 1 end
+      if small ~= nil then r.small = small end
       r.jump_id = "Show on map##wj_" .. cat .. "_" .. tostring(r.key)
       r.tree_id = r.text .. "###ws_" .. tostring(r.key)
+    end
+    -- SPEC 28.9.4: the Finder's Token spot is listed first
+    if cat == "token" and p.first ~= nil then
+      table.insert(rows, 1, { text = "Finder's Token spot", pos = p.first.pos,
+        key = p.first.key, first = true, jump_id = "Show on map##wj_token_first" })
     end
     cache[cat] = rows
   end
@@ -880,7 +888,6 @@ re.on_frame(function()
     if show.search ~= nil and not wt.search_on then wt.q("poke", nil) end
     wt.search_on = show.search ~= nil
     -- SPEC 20.1.4, 28.7.3: any world toggle turning on pokes the round the same way
-    wt.prev_tg = wt.prev_tg or {}
     if su.world_toggled(wt.prev_tg, settings) then wt.q("poke", nil) end
     local t0 = os.clock()
     -- v10 (SPEC 17.3a): world round, own pcall so a raise never skips compute;
@@ -978,7 +985,6 @@ re.on_frame(function()
     end
     last_tick_ms = (os.clock() - t0) * 1000.0
     if settings.debug then   -- SPEC 28.11.2: the last 20 ticks, for the median
-      wt.tick_ring = wt.tick_ring or {}
       wt.tick_n = ((wt.tick_n or 0) % 20) + 1
       wt.tick_ring[wt.tick_n] = last_tick_ms
     end
@@ -1715,9 +1721,11 @@ local function install_debug()
               and (cat ~= "shop" or wt.search_on or settings.world_shops) then
               for _, r in ipairs(wt.rows(cat)) do
                 if #rows >= max_rows then break end
-                rows[#rows + 1] = { cat = cat, text = r.text }
-                logmsg(string.format("World row: %s %s at %.1f, %.1f, %.1f",
-                  cat, r.text, r.pos.x, r.pos.y, r.pos.z))
+                if not r.first then
+                  rows[#rows + 1] = { cat = cat, text = r.text }
+                  logmsg(string.format("World row: %s %s at %.1f, %.1f, %.1f",
+                    cat, r.text, r.pos.x, r.pos.y, r.pos.z))
+                end
               end
             end
           end
@@ -1906,8 +1914,7 @@ do
     if wt.search_on then
       local off = {}
       for _, k in ipairs(su.WORLD_BOOLS) do
-        if k ~= "world_show_opened" and k ~= "world_undiscovered"
-          and k ~= "world_shops" and k ~= "world_first_token" and not settings[k] then
+        if not su.WORLD_NO_SEARCH[k] and not settings[k] then
           off[#off + 1] = string.lower(su.WORLD_BOOL_LABEL[k])
         end
       end
@@ -1926,7 +1933,11 @@ do
           snapshot.search_rows = srows
           local nres = 0
           for _, m in ipairs(snapshot.markers) do
-            if m.cat ~= "route_stop" and m.cat ~= "hint_pin" and not m.first_seeker then nres = nres + 1 end
+            if core.is_result ~= nil then
+              if core.is_result(m) then nres = nres + 1 end
+            elseif m.cat ~= "route_stop" and m.cat ~= "hint_pin" and not m.first_seeker then
+              nres = nres + 1
+            end
           end
           snapshot.search_n = nres
         end
@@ -2035,37 +2046,31 @@ do
     imgui.tree_pop()
   end
 
-  sec.world_markers = function()
+  -- A world checkbox: toggling it refreshes the markers and saves.
+  wt.wbox = function(key)
     local changed
+    changed, settings[key] = imgui.checkbox(su.WORLD_BOOL_LABEL[key], settings[key])
+    if changed then want_update = true; last_tick = 0.0; save_settings() end
+  end
+
+  sec.world_markers = function()
     if imgui.tree_node("World markers##wcfg") then
       -- SPEC 28.9.4, 28.12.1: Tokens and Monsters each hold two checkboxes
       -- in one tree node, drawn where the first of the pair sits
-      wt.trees = wt.trees or { world_tokens = { "Seeker's Tokens##wtok", "world_first_token" },
-        world_monsters = { "Monsters##wmon", "world_small_monsters" } }
-      local TREES = wt.trees
       for _, k in ipairs(su.WORLD_BOOLS) do
-        local tr = TREES[k]
-        local open = true
-        if k == "world_first_token" or k == "world_small_monsters" then
-          open = false   -- the second box of a tree, drawn with its first
-        elseif tr ~= nil then
-          open = imgui.tree_node(tr[1])
-        end
+        local tr = su.WORLD_TREES[k]
+        -- the second box of a tree is drawn with its first
+        local open = not su.WORLD_TREE_SECOND[k] and (tr == nil or imgui.tree_node(tr[1]))
         if open then
-          changed, settings[k] = imgui.checkbox(su.WORLD_BOOL_LABEL[k], settings[k])
-          if changed then want_update = true; last_tick = 0.0; save_settings() end
+          wt.wbox(k)
           if tr ~= nil then
-            changed, settings[tr[2]] = imgui.checkbox(su.WORLD_BOOL_LABEL[tr[2]], settings[tr[2]])
-            if changed then want_update = true; last_tick = 0.0; save_settings() end
+            wt.wbox(tr[2])
             imgui.tree_pop()
           end
         end
         if open and k == "world_chests" then   -- the kind filters sit indented under Chests
           imgui.indent(20)
-          for _, kk in ipairs(su.WORLD_KIND_BOOLS) do
-            changed, settings[kk] = imgui.checkbox(su.WORLD_BOOL_LABEL[kk], settings[kk])
-            if changed then want_update = true; last_tick = 0.0; save_settings() end
-          end
+          for _, kk in ipairs(su.WORLD_KIND_BOOLS) do wt.wbox(kk) end
           imgui.unindent(20)
         end
       end
@@ -2290,6 +2295,34 @@ do
             imgui.text("No world data yet")
             return
           end
+          -- one category's row list: text (or a shop's stock node) and its jump button
+          local function draw_rows(cat, rows)
+            for _, r in ipairs(rows) do
+              local open = true
+              if cat == "shop" then
+                open = imgui.tree_node(r.tree_id)
+                if open then
+                  for _, l in ipairs(r.sells_for or {}) do imgui.text(l) end
+                  if r.stock == nil or #r.stock == 0 then
+                    imgui.text("No stock listed")
+                  else
+                    for _, it in ipairs(r.stock) do
+                      imgui.text(tostring(it.name) .. (it.locked and " (may be locked)" or ""))
+                    end
+                  end
+                end
+              else
+                imgui.text(r.text)
+              end
+              if open then
+                if imgui.button(r.jump_id) then
+                  jump_pending = r.pos
+                end
+                if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+                if cat == "shop" then imgui.tree_pop() end
+              end
+            end
+          end
           for _, cat in ipairs(core.WORLD_CATS) do
             local p = cat ~= "npc_search" and sw[cat] or nil   -- NPCs live in the search panel
             local title = su.WORLD_LABEL[cat] or cat
@@ -2297,56 +2330,25 @@ do
             if p ~= nil and (cat ~= "shop" or wt.search_on or settings.world_shops)
               and imgui.tree_node(string.format("%s (%d/%d)###wcat_%s",
                 title, p.shown, p.known, cat)) then
-              local rows = wt.rows(cat)
-              -- SPEC 28.9.4: the Finder's Token spot is listed first
-              local fst = cat == "token" and p.first or nil
-              if #rows == 0 and fst == nil then imgui.text("Nothing shown") end
-              if fst ~= nil then
-                imgui.text("Finder's Token spot")
-                if imgui.button("Show on map##wj_token_first") then jump_pending = fst.pos end
-                if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
-              end
-              -- SPEC 28.12.1: Monsters holds a Large and a Small child node
-              local groups = { { rows = rows } }
-              if cat == "monster" then
+              if cat ~= "monster" then
+                local rows = wt.rows(cat)
+                if #rows == 0 then imgui.text("Nothing shown") end
+                draw_rows(cat, rows)
+              else
+                -- SPEC 28.12.1: Monsters holds a Large and a Small child node
+                if p.shown == 0 then imgui.text("Nothing shown") end
                 local ss, sk = p.small_shown or 0, p.small_known or 0
-                groups = {
-                  { rows = wt.rows("monster_large"), title = string.format("Large monsters (%d/%d)###wmonl",
-                      p.shown - ss, p.known - sk) },
-                  { rows = wt.rows("monster_small"), title = string.format("Small monsters (%d/%d)###wmons", ss, sk) },
-                }
-              end
-              for _, g in ipairs(groups) do
-              local gopen = g.title == nil or imgui.tree_node(g.title)
-              if gopen then
-              if g.title ~= nil and #g.rows == 0 then imgui.text("Nothing shown") end
-              for _, r in ipairs(g.rows) do
-                local open = true
-                if cat == "shop" then
-                  open = imgui.tree_node(r.tree_id)
-                  if open then
-                    for _, l in ipairs(r.sells_for or {}) do imgui.text(l) end
-                    if r.stock == nil or #r.stock == 0 then
-                      imgui.text("No stock listed")
-                    else
-                      for _, it in ipairs(r.stock) do
-                        imgui.text(tostring(it.name) .. (it.locked and " (may be locked)" or ""))
-                      end
-                    end
+                local sub = { { "monster_large", string.format("Large monsters (%d/%d)###wmonl",
+                    p.shown - ss, p.known - sk) },
+                  { "monster_small", string.format("Small monsters (%d/%d)###wmons", ss, sk) } }
+                for _, g in ipairs(sub) do
+                  if imgui.tree_node(g[2]) then
+                    local rows = wt.rows(g[1])
+                    if #rows == 0 then imgui.text("Nothing shown") end
+                    draw_rows(cat, rows)
+                    imgui.tree_pop()
                   end
-                else
-                  imgui.text(r.text)
                 end
-                if open then
-                  if imgui.button(r.jump_id) then
-                    jump_pending = r.pos
-                  end
-                  if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
-                  if cat == "shop" then imgui.tree_pop() end
-                end
-              end
-              if g.title ~= nil then imgui.tree_pop() end
-              end
               end
               imgui.tree_pop()
             end
