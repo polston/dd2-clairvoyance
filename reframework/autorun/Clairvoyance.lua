@@ -120,12 +120,12 @@ local snapshot = nil      -- { markers, unresolved, unnamed, counts, resolved_co
 -- Last frame's world toggles (su.world_toggled) and the debug tick ring.
 wt.prev_tg, wt.tick_ring = {}, {}
 -- Monster kinds seen this save, per class, for the World markers tree
--- (SPEC 29.6.2); filled once per tick from the published kind counts.
+-- (SPEC 29.6.3); filled once per tick from the published kind counts.
 wt.kinds_seen = { large = {}, small = {} }
 -- The World panel rows of one category, cached on the snapshot (the debug
 -- dump reads the same rows). Each row carries its "Show on map" button id.
 wt.rows = function(cat, class, kind)
-  -- SPEC 29.6.3: with class ("large" or "small") and kind, the nearest rows
+  -- SPEC 29.6.6: with class ("large" or "small") and kind, the nearest rows
   -- of that one monster kind, filtered before the row limit; with one
   -- argument "monster" is still every monster row (the debug dump)
   local small   -- true: Small class, false: Large class, nil: not a kind list
@@ -1731,7 +1731,7 @@ local function install_debug()
           tostring(qid), tostring(idx), tostring(label), #list))
         return #list
       end,
-      -- same effect as ticking one kind checkbox (SPEC 29.6.7); false and no
+      -- same effect as ticking one kind checkbox (SPEC 29.6.4); false and no
       -- change for a bad class, a bad kind, or a class already at the cap
       monster_kind = function(kind, class, off)
         if class ~= "large" and class ~= "small" then return false end
@@ -1740,8 +1740,7 @@ local function install_debug()
         if type(o) ~= "table" then o = { large = {}, small = {} }; settings.world_monster_off = o end
         if type(o[class]) ~= "table" then o[class] = {} end
         if off == true then
-          local n = 0
-          for _, v in pairs(o[class]) do if v == true then n = n + 1 end end
+          local n = su.monster_class_off_count(o[class])
           if o[class][kind] ~= true and n >= su.MONSTER_OFF_MAX then return false end
           o[class][kind] = true
         else
@@ -2105,11 +2104,8 @@ do
     wt.wbox(key)
     local class_on = settings[key] == true
     local off = settings.world_monster_off
-    if type(off) ~= "table" then off = { large = {}, small = {} }; settings.world_monster_off = off end
-    if type(off[class]) ~= "table" then off[class] = {} end
-    local offs = off[class]
-    local n_off = 0
-    for _, v in pairs(offs) do if v == true then n_off = n_off + 1 end end
+    local offs = type(off) == "table" and type(off[class]) == "table" and off[class] or {}
+    local n_off = su.monster_class_off_count(offs)
     local list = su.monster_kind_list((wt.kinds_seen or {})[class], offs)
     if #list == 0 then imgui.text(su.kind_empty_text(class_on)) end
     for i, kind in ipairs(list) do
@@ -2413,7 +2409,7 @@ do
                 if #rows == 0 then imgui.text("Nothing shown") end
                 draw_rows(cat, rows)
               else
-                -- SPEC 29.6.3: Monsters holds a Large and a Small node, each
+                -- SPEC 29.6.6: Monsters holds a Large and a Small node, each
                 -- holding one node per kind
                 if p.shown == 0 then imgui.text("Nothing shown") end
                 local ss, sk = p.small_shown or 0, p.small_known or 0

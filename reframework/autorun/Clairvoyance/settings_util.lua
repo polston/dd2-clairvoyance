@@ -386,7 +386,7 @@ local function off_class(t)
   for i = 1, math.min(#keys, M.MONSTER_OFF_MAX) do out[keys[i]] = true end
   return out
 end
-function M.monster_off_field(v)
+local function monster_off_field(v)
   local t = type(v) == "table" and v or {}
   return { large = off_class(t.large), small = off_class(t.small) }
 end
@@ -404,16 +404,18 @@ function M.monster_kind_list(seen, off)
   return list
 end
 
+-- Number of true entries in one class's off set (0 for a non-table).
+function M.monster_class_off_count(t)
+  if type(t) ~= "table" then return 0 end
+  local n = 0
+  for _, v in pairs(t) do if v == true then n = n + 1 end end
+  return n
+end
+
 -- Number of off kinds over both classes (0 for anything but a table).
 function M.monster_off_count(off)
   if type(off) ~= "table" then return 0 end
-  local n = 0
-  for _, c in ipairs({ "large", "small" }) do
-    if type(off[c]) == "table" then
-      for _, v in pairs(off[c]) do if v == true then n = n + 1 end end
-    end
-  end
-  return n
+  return M.monster_class_off_count(off.large) + M.monster_class_off_count(off.small)
 end
 
 -- State of one kind checkbox: "disabled" when its class is off, the name
@@ -451,7 +453,7 @@ function M.validate(raw)
     out[k] = field(raw, k, d)
   end
   for k in pairs(STYLE_INT_RANGE) do out[k] = field(raw, k, d) end
-  out.world_monster_off = M.monster_off_field(raw.world_monster_off)
+  out.world_monster_off = monster_off_field(raw.world_monster_off)
   return out
 end
 

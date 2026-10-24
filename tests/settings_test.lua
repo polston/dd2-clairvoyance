@@ -623,7 +623,8 @@ do
   local junk0 = wmo({ world_monster_off = { large = { [1] = true, A = false, B = "yes", C = 1,
     [""] = true, [string.rep("k", 65)] = true, [string.rep("k", 64)] = true, K = true, ["z"] = true } } })
   local junk = junk0.large or {}
-  check("monster_off drops bad keys and values", junk[1] == nil and junk.A == nil and junk.B == nil
+  check("monster_off drops bad keys and values", type(junk0.large) == "table"
+    and next(junk0.large) ~= nil and junk[1] == nil and junk.A == nil and junk.B == nil
     and junk.C == nil and junk[""] == nil and junk[string.rep("k", 65)] == nil)
   check("monster_off keeps 1 and 64 byte keys", junk.K == true and junk[string.rep("k", 64)] == true
     and junk.z == true)
@@ -648,6 +649,10 @@ do
     and su.monster_off_count({ large = { A = true, B = true }, small = { A = true } }) == 3)
   check("monster_off_count nil and string", oc and su.monster_off_count(nil) == 0
     and su.monster_off_count("x") == 0)
+
+  check("monster_class_off_count", type(su.monster_class_off_count) == "function"
+    and su.monster_class_off_count({ A = true, B = false, C = true }) == 2
+    and su.monster_class_off_count("x") == 0)
 
   local kb = type(su.kind_box) == "function"
   check("kind_box class off -> disabled", kb and su.kind_box("A", false, 0, false) == "disabled")
