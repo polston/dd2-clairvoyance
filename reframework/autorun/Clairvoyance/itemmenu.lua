@@ -30,8 +30,13 @@ end
 -- so the caller's pcall counts it (SPEC 22.10.6).
 -- get_size/get_element are wrapper methods on a managed array (o:get_size()),
 -- not methods reached through call(); a List answers get_Count/get_Item.
+-- Shared empty title list for a quest-flagged row with no names (read only).
+local NO_TITLES = {}
+
+local function index(o, name) return o[name] end
+
 local function direct(o, name, ...)
-  local ok, f = pcall(function() return o[name] end)
+  local ok, f = pcall(index, o, name)
   if not ok or type(f) ~= "function" then return nil end
   local ok2, v = pcall(f, o, ...)
   if ok2 then return v end
@@ -101,7 +106,7 @@ function M.create(opt)
     local id = storage:get_field("_ItemId")
     local titles = related[id]
     if titles ~= nil and #titles > 0 then return titles end
-    if opt.quest_flag(storage:get_field("_ItemData")) then return {} end
+    if opt.quest_flag(storage:get_field("_ItemData")) then return NO_TITLES end
     return nil
   end
 

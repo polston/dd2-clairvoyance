@@ -583,9 +583,12 @@ function M.route_polyline(pairs_, ends, fit, mode, out)
       out[n + 1] = x1; out[n + 2] = y1; n = n + 2
       local pts = p.pts
       if mode == 1 and pts and fit then
+        local fa, fb, fc, fd, fox, foy = fit.a, fit.b, fit.c, fit.d, fit.ox, fit.oy
         for q = 1, #pts - 2, 3 do
-          local lx, ly = M.fit_apply(fit, pts[q], pts[q + 2])
-          out[n + 1] = lx; out[n + 2] = ly; n = n + 2
+          local mx, mz = pts[q], pts[q + 2]
+          out[n + 1] = fa * mx + fb * mz + fox
+          out[n + 2] = fc * mx + fd * mz + foy
+          n = n + 2
         end
       end
       out[n + 1] = x2; out[n + 2] = y2; n = n + 2
