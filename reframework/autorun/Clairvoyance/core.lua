@@ -695,7 +695,7 @@ end
 local HAY_MAX = 20000
 local hay_ids, hay_n = {}, 0
 local scratch, scratch_n = {}, 0
-local mon_lists = {}   -- the drop lists collect read for the monster, by cid index
+local mon_lists, mon_n = {}, 0   -- the drop lists collect read for the monster, by cid index
 
 local function put(v)
   scratch_n = scratch_n + 1
@@ -703,15 +703,26 @@ local function put(v)
   scratch[scratch_n] = v
 end
 
+-- A count, then each string / each item's name: the mirror of same_strs and
+-- same_names below.
+local function put_strs(list)
+  local n = type(list) == "table" and #list or 0
+  put(n)
+  for i = 1, n do put(list[i]) end
+end
+
+local function put_names(items)
+  local n = type(items) == "table" and #items or 0
+  put(n)
+  for i = 1, n do put(items[i].name) end
+end
+
+-- One cid's drop list, kept in mon_lists for the rebuild that follows.
 local function put_list(drops, i, c)
   local list = drops[c]
   mon_lists[i] = list
-  if type(list) == "table" then
-    put(#list)
-    for _, n in ipairs(list) do put(n) end
-  else
-    put(-1)
-  end
+  mon_n = i
+  put_strs(list)
 end
 
 -- The source fields of an entry, in a fixed order, into `scratch`.
@@ -719,35 +730,25 @@ local function collect(cat, e, drops)
   scratch_n = 0
   if cat == "chest" then
     put(e.item_name); put(e.quest_text)
-    local kinds = type(e.kinds) == "table" and e.kinds or nil
-    put(kinds and #kinds or 0)
-    if kinds then for _, k in ipairs(kinds) do put(k) end end
-    local items = type(e.items) == "table" and e.items or nil
-    put(items and #items or 0)
-    if items then for _, it in ipairs(items) do put(it.name) end end
+    put_strs(e.kinds)
+    put_names(e.items)
   elseif cat == "treasure" then
-    local items = type(e.items) == "table" and e.items or nil
-    put(items and #items or 0)
-    if items then for _, it in ipairs(items) do put(it.name) end end
+    put_names(e.items)
   elseif cat == "monster" then
     put(e.name)
     if drops == nil then
       put(-2)
-    else
+    elseif e.cids then
       -- each cid's drop list is read once; a rebuild reuses the lists read here
-      if e.cids then
-        for i, c in ipairs(e.cids) do put_list(drops, i, c) end
-      else
-        put_list(drops, 1, e.cid)
-      end
+      for i, c in ipairs(e.cids) do put_list(drops, i, c) end
+    else
+      put_list(drops, 1, e.cid)
     end
   elseif cat == "seller" then
     put(e.item_name); put(e.npc); put(e.quest)
   elseif cat == "shop" then
     put(e.npc)
-    local items = e.items
-    put(#items)
-    for _, it in ipairs(items) do put(it.name) end
+    put_names(e.items)
   else
     put(e.name)
   end
@@ -781,20 +782,10 @@ local function same_src(cat, rec, e, drops)
   local k
   if cat == "chest" then
     if s[1] ~= (e.item_name or false) or s[2] ~= (e.quest_text or false) then return false end
-    local kinds, items = e.kinds, e.items
-    if kinds == nil then   -- the common case, no call
-      if s[3] ~= 0 then return false end
-      k = 4
-    else
-      k = same_strs(s, 3, kinds)
-      if not k then return false end
-    end
-    local n = type(items) == "table" and #items or 0
-    if s[k] ~= n then return false end
-    for i = 1, n do
-      if s[k + i] ~= (items[i].name or false) then return false end
-    end
-    k = k + n + 1
+    k = same_strs(s, 3, e.kinds)
+    if not k then return false end
+    k = same_names(s, k, e.items)
+    if not k then return false end
   elseif cat == "treasure" then
     k = same_names(s, 1, e.items)
   elseif cat == "monster" then
@@ -863,6 +854,8 @@ local function hay_rec(cat, e, drops)
     local md = false   -- false: looked up, none
     if cat == "monster" and drops ~= nil then
       md = monster_drops_of(e, drops, mon_lists) or false
+      for i = 1, mon_n do mon_lists[i] = nil end   -- do not keep the lists alive
+      mon_n = 0
     end
     fresh.hay = entry_hay(cat, e, drops, md)
     if md then fresh.names, fresh.shown = md.names, md.shown end
