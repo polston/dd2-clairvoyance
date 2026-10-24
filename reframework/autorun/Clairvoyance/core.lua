@@ -605,6 +605,20 @@ local function kind_off(e, show)
   return cls[kind_of(e)] == true
 end
 
+-- SPEC 29.5.3: known monsters per class and kind, by `included`'s rule.
+-- Returns { large = { [kind] = n }, small = { [kind] = n } }.
+local function kind_counts(world, small_ok, dups)
+  local out = { large = {}, small = {} }
+  for _, e in ipairs(world.monsters or {}) do
+    if included("monster", e, small_ok, dups) then
+      local cls = out[e.small == true and "small" or "large"]
+      local k = kind_of(e)
+      cls[k] = (cls[k] or 0) + 1
+    end
+  end
+  return out
+end
+
 local function monster_label(e)
   local label = tostring(e.name)
   if e.respawning then label = label .. " (respawning)" end
@@ -1315,7 +1329,7 @@ end
 -- the cap left out an `offmap` entry (SPEC 20.5.5, 20.5.7); neither is a
 -- marker or counted in `shown`.
 local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-                            quest_cids, ft)
+                            quest_cids, ft, kcounts)
   -- Nearest win the cap (ties by key); no origin: (category, key) order.
   local function by_pick(x, y)
     if has_origin then
@@ -1415,6 +1429,25 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
   for _, mg in ipairs(merged) do
     mg.line = with_sells(mg.cand)
   end
+  -- SPEC 29.5.3: per-kind counts, large first then by kind
+  local shown = { large = {}, small = {} }
+  for _, c in ipairs(kept) do
+    if c.cat == "monster" then
+      local cls = shown[c.small and "small" or "large"]
+      cls[c.kind] = (cls[c.kind] or 0) + 1
+    end
+  end
+  local kinds = {}
+  for _, class in ipairs({ "large", "small" }) do
+    local names = {}
+    for k in pairs((kcounts or {})[class] or {}) do names[#names + 1] = k end
+    table.sort(names)
+    for _, k in ipairs(names) do
+      kinds[#kinds + 1] = { kind = k, small = class == "small",
+        shown = shown[class][k] or 0, known = kcounts[class][k] }
+    end
+  end
+  panel.monster.kinds = kinds
   if shop_all and #shop_all > 0 then
     local entries = panel.shop.entries
     for _, c in ipairs(shop_all) do
@@ -1470,7 +1503,7 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids, ft)
+    quest_cids, ft, kind_counts(world, monster_shown(true, show), treasure_dups(world)))
 end
 
 -- Cached entry point (SPEC 17.10.10). A 256-unit grid of the world's
@@ -1538,6 +1571,7 @@ local function build_grid(world, show)
   local g = { cells = {}, flat = {}, known = {}, filled = {}, known_small = 0,
     small_ok = monster_shown(true, show),
     dups = treasure_dups(world) }
+  g.kinds = kind_counts(world, g.small_ok, g.dups)
   for _, cat in ipairs(M.WORLD_CATS) do
     g.known[cat] = 0
     g.flat[cat] = {}
@@ -1705,7 +1739,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids, ft)
+    quest_cids, ft, g.kinds)
 end
 
 -- The settlement nearest to pos by 3D distance (first wins a tie), or nil.
