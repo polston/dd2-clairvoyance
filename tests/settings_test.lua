@@ -637,34 +637,42 @@ do
   check("monster_off caps at 200 by byte order", cnt == 200 and first200 and kept.k201 == nil)
   check("monster_off has no RULE", su.set_key({}, "world_monster_off", {}) == false)
 
-  local ok = type(su.monster_kind_list) == "function"
-  local l = ok and su.monster_kind_list({ B = true, A = true }, { C = true, A = true })
-  check("monster_kind_list merges sorted", ok and type(l) == "table" and #l == 3
+  local l = su.monster_kind_list({ B = true, A = true }, { C = true, A = true })
+  check("monster_kind_list merges sorted", type(l) == "table" and #l == 3
     and l[1] == "A" and l[2] == "B" and l[3] == "C")
-  local l0 = ok and su.monster_kind_list(nil, nil)
-  check("monster_kind_list nil -> empty", ok and type(l0) == "table" and #l0 == 0)
+  local l0 = su.monster_kind_list(nil, nil)
+  check("monster_kind_list nil -> empty", type(l0) == "table" and #l0 == 0)
 
-  local oc = type(su.monster_off_count) == "function"
-  check("monster_off_count counts both classes", oc
-    and su.monster_off_count({ large = { A = true, B = true }, small = { A = true } }) == 3)
-  check("monster_off_count nil and string", oc and su.monster_off_count(nil) == 0
+  check("monster_off_count counts both classes",
+    su.monster_off_count({ large = { A = true, B = true }, small = { A = true } }) == 3)
+  check("monster_off_count nil and string", su.monster_off_count(nil) == 0
     and su.monster_off_count("x") == 0)
 
-  check("monster_class_off_count", type(su.monster_class_off_count) == "function"
-    and su.monster_class_off_count({ A = true, B = false, C = true }) == 2
+  check("monster_class_off_count",
+    su.monster_class_off_count({ A = true, B = false, C = true }) == 2
     and su.monster_class_off_count("x") == 0)
 
-  local kb = type(su.kind_box) == "function"
-  check("kind_box class off -> disabled", kb and su.kind_box("A", false, 0, false) == "disabled")
-  check("kind_box long name -> disabled", kb and su.kind_box(string.rep("k", 65), true, 0, false) == "disabled")
-  check("kind_box 199 off, on -> on", kb and su.kind_box("A", true, 199, false) == "on")
-  check("kind_box 200 off, on -> disabled", kb and su.kind_box("A", true, 200, false) == "disabled")
-  check("kind_box 200 off, off kind -> off", kb and su.kind_box("A", true, 200, true) == "off")
-  check("kind_box plain on", kb and su.kind_box("A", true, 0, false) == "on")
+  check("kind_box class off -> disabled", su.kind_box("A", false, 0, false) == "disabled")
+  check("kind_box long name -> disabled", su.kind_box(string.rep("k", 65), true, 0, false) == "disabled")
+  check("kind_box 199 off, on -> on", su.kind_box("A", true, 199, false) == "on")
+  check("kind_box 200 off, on -> disabled", su.kind_box("A", true, 200, false) == "disabled")
+  check("kind_box 200 off, off kind -> off", su.kind_box("A", true, 200, true) == "off")
+  check("kind_box plain on", su.kind_box("A", true, 0, false) == "on")
 
-  local ke = type(su.kind_empty_text) == "function"
-  check("kind_empty_text", ke and su.kind_empty_text(false) == "Turn on to list kinds"
+  check("kind_empty_text", su.kind_empty_text(false) == "Turn on to list kinds"
     and su.kind_empty_text(true) == "No kinds seen yet")
+
+  local st = {}
+  check("set_kind_off creates tables and sets", su.set_kind_off(st, "large", "A", true)
+    and st.world_monster_off.large.A == true)
+  check("set_kind_off clears", su.set_kind_off(st, "large", "A", false)
+    and st.world_monster_off.large.A == nil)
+  check("set_kind_off bad class and kind", not su.set_kind_off(st, "x", "A", true)
+    and not su.set_kind_off(st, "large", "", true)
+    and not su.set_kind_off(st, "large", string.rep("k", 65), true))
+  for i = 1, 200 do su.set_kind_off(st, "small", string.format("k%03d", i), true) end
+  check("set_kind_off refuses past the cap", not su.set_kind_off(st, "small", "extra", true)
+    and su.set_kind_off(st, "small", "k001", true))
 
   local prev = {}
   su.world_toggled(prev, { world_chests = true })

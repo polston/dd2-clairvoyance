@@ -595,28 +595,27 @@ end
 local function kind_of(e)
   return type(e.kind) == "string" and e.kind or "Monster"
 end
+M.kind_of = kind_of
+
+-- The monster class a small flag names.
+local function class_of(small)
+  return small and "small" or "large"
+end
 
 -- SPEC 29.5.2: is this monster's kind switched off in its class?
 local function kind_off(e, show)
   local off = show.world_monster_off
   if type(off) ~= "table" then return false end
-  local cls = off[e.small == true and "small" or "large"]
+  local cls = off[class_of(e.small == true)]
   if type(cls) ~= "table" then return false end
   return cls[kind_of(e)] == true
 end
 
--- SPEC 29.5.3: known monsters per class and kind, by `included`'s rule.
--- Returns { large = { [kind] = n }, small = { [kind] = n } }.
-local function kind_counts(world, small_ok)
-  local out = { large = {}, small = {} }
-  for _, e in ipairs(world.monsters or {}) do
-    if included("monster", e, small_ok, nil) then
-      local cls = out[e.small == true and "small" or "large"]
-      local k = kind_of(e)
-      cls[k] = (cls[k] or 0) + 1
-    end
-  end
-  return out
+-- SPEC 29.5.3: count one known monster into kc = { large = {}, small = {} }.
+local function count_kind(kc, e)
+  local cls = kc[class_of(e.small == true)]
+  local k = kind_of(e)
+  cls[k] = (cls[k] or 0) + 1
 end
 
 local function monster_label(e)
@@ -1195,6 +1194,7 @@ local function world_candidates(world, show, boxes, q, spot)
   local drops = q ~= nil and world.drops or nil
   local gc = { hay = {}, match = {} }
   known.monster_small = 0
+  known.kinds = { large = {}, small = {} }
   for _, cat in ipairs(M.WORLD_CATS) do
     known[cat] = 0
     if not special_cat(cat) then
@@ -1204,6 +1204,7 @@ local function world_candidates(world, show, boxes, q, spot)
           if cat == "monster" and e.small == true then
             known.monster_small = known.monster_small + 1
           end
+          if cat == "monster" then count_kind(known.kinds, e) end
           if not (cat == "monster" and kind_off(e, show))
             and entry_search(cat, e, drops, gc, q, ctx) then
             cands[#cands + 1] = make_cand(cat, e, ctx)
@@ -1417,7 +1418,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       m.small = c.small
       m.kind = c.kind
       if c.small then panel.monster.small_shown = panel.monster.small_shown + 1 end
-      local cls = shown[c.small and "small" or "large"]
+      local cls = shown[class_of(c.small)]
       cls[c.kind] = (cls[c.kind] or 0) + 1
     end
     if c.cat == "shop" then
@@ -1436,7 +1437,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
   local kinds = {}
   for _, class in ipairs({ "large", "small" }) do
     local names = {}
-    for k in pairs((kcounts or {})[class] or {}) do names[#names + 1] = k end
+    for k in pairs(kcounts[class]) do names[#names + 1] = k end
     table.sort(names)
     for _, k in ipairs(names) do
       kinds[#kinds + 1] = { kind = k, small = class == "small",
@@ -1490,6 +1491,7 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   local cands, known, shop_of = world_candidates(world, show, boxes, show.search, ft ~= nil)
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = known[cat] end
   panel.monster.small_known = known.monster_small
+  local kcounts = known.kinds
   for _, c in ipairs(cands) do
     if (special_cat(c.cat) or (cat_on(c.cat, show)
       and (c.cat ~= "monster" or monster_shown(c.small, show)))) and not c.hidden then
@@ -1499,7 +1501,7 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids, ft, kind_counts(world, monster_shown(true, show)))
+    quest_cids, ft, kcounts)
 end
 
 -- Cached entry point (SPEC 17.10.10). A 256-unit grid of the world's
@@ -1521,13 +1523,14 @@ end
 -- flat list only when `fill` (the category is on), widening the bounds.
 -- Sellers are never in cells (the merge needs the whole list). Returns
 -- known, small known, entries put in cells.
-local function walk_cat(g, world, cat, fill, show)
+local function walk_cat(g, world, cat, fill, show, kc)
   local known, small_known, put_n = 0, 0, 0
   fill = fill and cat ~= "seller"
   for _, e in ipairs(world[WORLD_DEF[cat].src] or {}) do
     if included(cat, e, g.small_ok, g.dups) then
       known = known + 1
       if cat == "monster" and e.small == true then small_known = small_known + 1 end
+      if cat == "monster" and kc ~= nil then count_kind(kc, e) end
       if fill and (cat ~= "monster" or monster_shown(e.small == true, show)) then
         local ci, cj = cell_of(e.pos.x), cell_of(e.pos.z)
         local key = cell_key(ci, cj)
@@ -1567,14 +1570,14 @@ local function build_grid(world, show)
   local g = { cells = {}, flat = {}, known = {}, filled = {}, known_small = 0,
     small_ok = monster_shown(true, show),
     dups = treasure_dups(world) }
-  g.kinds = kind_counts(world, g.small_ok)
+  g.kinds = { large = {}, small = {} }
   for _, cat in ipairs(M.WORLD_CATS) do
     g.known[cat] = 0
     g.flat[cat] = {}
     M.world_stats.cell_entries[cat] = 0
     if not special_cat(cat) then
       local key = fill_key(cat, show)
-      local known, small_known, put_n = walk_cat(g, world, cat, key, show)
+      local known, small_known, put_n = walk_cat(g, world, cat, key, show, g.kinds)
       g.known[cat] = known
       if cat == "monster" then g.known_small = small_known end
       g.filled[cat] = key

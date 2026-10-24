@@ -386,10 +386,6 @@ local function off_class(t)
   for i = 1, math.min(#keys, M.MONSTER_OFF_MAX) do out[keys[i]] = true end
   return out
 end
-local function monster_off_field(v)
-  local t = type(v) == "table" and v or {}
-  return { large = off_class(t.large), small = off_class(t.small) }
-end
 
 -- Sorted union of the kinds seen and the kinds switched off in one class
 -- (nil inputs read as empty).
@@ -427,6 +423,26 @@ function M.kind_box(name, class_on, off_count, is_off)
   return is_off and "off" or "on"
 end
 
+-- Switch one kind off (off == true) or on in settings.world_monster_off
+-- (SPEC 29.6.4). False and no change for a bad class, a bad kind, or a
+-- class already at the cap; the tables are created when missing.
+function M.set_kind_off(settings, class, kind, off)
+  if class ~= "large" and class ~= "small" then return false end
+  if type(kind) ~= "string" or #kind < 1 or #kind > M.MONSTER_KIND_MAX then return false end
+  local o = settings.world_monster_off
+  if type(o) ~= "table" then o = { large = {}, small = {} }; settings.world_monster_off = o end
+  if type(o[class]) ~= "table" then o[class] = {} end
+  if off == true then
+    if o[class][kind] ~= true and M.monster_class_off_count(o[class]) >= M.MONSTER_OFF_MAX then
+      return false
+    end
+    o[class][kind] = true
+  else
+    o[class][kind] = nil
+  end
+  return true
+end
+
 function M.kind_empty_text(class_on)
   return class_on and "No kinds seen yet" or "Turn on to list kinds"
 end
@@ -453,7 +469,8 @@ function M.validate(raw)
     out[k] = field(raw, k, d)
   end
   for k in pairs(STYLE_INT_RANGE) do out[k] = field(raw, k, d) end
-  out.world_monster_off = monster_off_field(raw.world_monster_off)
+  local mo = type(raw.world_monster_off) == "table" and raw.world_monster_off or {}
+  out.world_monster_off = { large = off_class(mo.large), small = off_class(mo.small) }
   return out
 end
 
