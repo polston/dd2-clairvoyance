@@ -12,6 +12,7 @@ M.K = {
   NPC_NAME_SLICE = 200,
   SENTIMENT_EVERY = 1.0,
   SAVE_EVERY = 60,
+  RESERVED_MAX_AGE = 60.0,
   REMOVE_RADIUS = 50,
   REMOVE_NEIGHBOURS = 3,
   ROUND_TO = 0.1,
@@ -239,7 +240,9 @@ function M.new(a, reads, io)
   local stats = { ms = {}, known = {}, monster_ids = {}, rounds = 0, saves = 0,
     save_ms = 0, last_save_reason = nil, hits = 0, misses = 0,
     eff_builds = 0, item_list_builds = 0, held_rounds = 0,
-    shop_index_runs = 0, chest_kinds_calls = 0 }
+    shop_index_runs = 0, chest_kinds_calls = 0,
+    reserved_reused = 0, reserved_reads = 0 }
+  local res_path = nil
   local S
 
   local function new_session()
@@ -253,7 +256,9 @@ function M.new(a, reads, io)
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
       route_cid = nil, route_name = nil, route_cache = nil,
-      sent = {}, walk_i = 0, walk_n = 0, walk_acc = {} }
+      sent = {}, walk_i = 0, walk_n = 0, walk_acc = {},
+      -- SPEC 31: the reserved rows kept while the selector signature holds
+      res_rows = nil, res_sig = nil, res_at = nil }
   end
   S = new_session()
   w.spawned = {}
@@ -1321,6 +1326,7 @@ function M.new(a, reads, io)
       lapped[i] = nil
     end
     for k in pairs(ACCUM) do stats.ms[k] = nil end
+    stats.ms.reserved_rows, stats.ms.reserved_sig = nil, nil
     local any_rec = tg.chests or tg.tokens or tg.beetles
     local need_shops = tg.search or tg.shops
     local t = clock()
@@ -1338,7 +1344,21 @@ function M.new(a, reads, io)
     end
 
     t = clock()
-    local rows = table_read("reserved_rows")
+    local rows
+    local sig_ok, sig = call("reserved_sig")
+    if sig_ok and type(sig) == "string" and sig == S.res_sig and S.res_rows ~= nil
+      and now - S.res_at < M.K.RESERVED_MAX_AGE then
+      rows = S.res_rows
+      res_path = "reused"
+    else
+      rows = table_read("reserved_rows")
+      res_path = "read"
+      if rows ~= nil and sig_ok and type(sig) == "string" then
+        S.res_rows, S.res_sig, S.res_at = rows, sig, now
+      else
+        S.res_rows, S.res_sig, S.res_at = nil, nil, nil
+      end
+    end
     lap("reserved", t)
     t = clock()
     if cast_ok and boss_ok and S.need_sort then sort_places() end
@@ -1718,6 +1738,8 @@ function M.new(a, reads, io)
     committed = true
     if again then last_round = nil end
     stats.rounds = stats.rounds + 1
+    if res_path == "reused" then stats.reserved_reused = stats.reserved_reused + 1
+    else stats.reserved_reads = stats.reserved_reads + 1 end
     if dirty and (last_save == nil or now - last_save >= M.K.SAVE_EVERY) then
       do_save("round", now)
     end
@@ -1843,6 +1865,7 @@ function M.new(a, reads, io)
       npcs_max_slice_ms = stats.npcs_max_slice_ms,
       round_ms = stats.round_ms,
       drops_first_ms = stats.drops_first_ms, drops = drops,
+      reserved_reused = stats.reserved_reused, reserved_reads = stats.reserved_reads,
       rounds = stats.rounds, saves = stats.saves, save_ms = stats.save_ms,
       eff_builds = stats.eff_builds, item_list_builds = stats.item_list_builds,
       held_rounds = stats.held_rounds,

@@ -54,6 +54,7 @@ local function fixture(o)
     end
   end
   def("reserved_rows", function() return d.reserved end)
+  def("reserved_sig", function() return d.sig end)
   def("loaded_gimmicks", function() return d.loaded end)
   def("schedule_pos", function(cid) return d.sched[cid] end)
   def("map_icons", function() return d.icons end)
@@ -4268,6 +4269,106 @@ do
   singletons["app.GimmickManager"] = nil
   check("first_seeker read: no manager gives nil", R.first_seeker() == nil)
   sdk = saved_sdk
+end
+
+-- 32. reserved rows reused while the selector signature holds (SPEC 31)
+do
+  local function rfix(sig)
+    local f = fixture()
+    f.data.reserved = { chest_row("c1", 10, 10) }
+    f.data.sig = sig
+    return f, f.new()
+  end
+  local C = on("chests")
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C); w:refresh(10, true, C)
+    check("reserved: equal signatures read once", f.reads_n.reserved_rows == 1)
+    local st = w:stats()
+    check("reserved: reuse round shows no read time",
+      st.ms.reserved_rows == nil and st.ms.reserved_sig ~= nil
+      and st.reserved_reused == 1 and st.reserved_reads == 1)
+  end
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C); f.data.sig = "b"; w:refresh(10, true, C)
+    check("reserved: changed signature reads again", f.reads_n.reserved_rows == 2)
+  end
+  do
+    local f, w = rfix("a")
+    f.reads.reserved_sig = nil
+    w:refresh(0, true, C); w:refresh(10, true, C)
+    check("reserved: no signature read reads every round", f.reads_n.reserved_rows == 2)
+    local f2, w2 = rfix(5)
+    w2:refresh(0, true, C); w2:refresh(10, true, C)
+    check("reserved: a number signature reads every round", f2.reads_n.reserved_rows == 2)
+  end
+  do
+    local f, w = rfix("a")
+    f.fail.reserved_sig = true
+    w:refresh(0, true, C); w:refresh(10, true, C)
+    check("reserved: failing signature read reads", f.reads_n.reserved_rows == 2)
+  end
+  do
+    local f, w = rfix("a")
+    local n = {}
+    w:refresh(0, true, C); n[1] = f.reads_n.reserved_rows
+    w:refresh(50, true, C); n[2] = f.reads_n.reserved_rows
+    w:refresh(60, true, C); n[3] = f.reads_n.reserved_rows
+    check("reserved: age cap", n[1] == 1 and n[2] == 1 and n[3] == 2)
+  end
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C)
+    f.data.sig = "b"; f.fail.reserved_rows = true
+    w:refresh(10, true, C)
+    f.fail.reserved_rows = nil; f.data.sig = "a"
+    w:refresh(20, true, C)
+    check("reserved: failed read clears the cache",
+      f.reads_n.reserved_rows == 3 and w:stats().reserved_reads == 3)
+  end
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C); w:reset(); w:refresh(10, true, C)
+    check("reserved: reset drops the cache", f.reads_n.reserved_rows == 2)
+  end
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C)
+    w:refresh(30, true, C, true)
+    w:refresh(40, true, C)
+    check("reserved: held refresh keeps the cache",
+      f.reads_n.reserved_rows == 1 and f.reads_n.reserved_sig == 2)
+  end
+  do
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "lv1", 10, 30, 30, { src = "subquest" }) }) } })
+    f.data.reserved = { chest_row("lv1", 30, 30) }
+    f.data.sig = "a"
+    local w = f.new()
+    w:refresh(0, true, C); w:refresh(10, true, C)
+    check("reserved: reuse round still draws a live-only chest",
+      f.reads_n.reserved_rows == 1 and find(w:input().chests, "lv1") ~= nil)
+    local f2 = fixture({ files = { [K.PLACES] = places({
+      prow("chara", "sq1", 5, 500, 0, { name = "ch253000_00", src = "subquest" }),
+      prow("chest", "other", 10, 9, 9) }) } })
+    f2.data.boss = { ch253 = true }
+    f2.data.reserved = { mrow("sq1", 5, "ch253000_00", 500, 0), chest_row("keep1", 1, 1) }
+    f2.data.sig = "a"
+    local w2 = f2.new()
+    w2:refresh(0, true, ALL); w2:refresh(10, true, ALL)
+    local m = w2:input().monsters
+    check("reserved: reuse round still draws a live-only monster",
+      f2.reads_n.reserved_rows == 1 and #m == 1 and m[1].pos.x == 500)
+  end
+  do
+    local f, w = rfix("a")
+    w:refresh(0, true, C)
+    f.reads.reserved_sig = nil
+    w:refresh(10, true, C)
+    check("reserved: a round without a signature read clears its time",
+      w:stats().ms.reserved_sig == nil)
+  end
 end
 
 if failures > 0 then os.exit(1) end
