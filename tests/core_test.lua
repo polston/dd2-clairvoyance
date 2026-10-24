@@ -1823,6 +1823,9 @@ do
     for _, cat in ipairs(core.WORLD_CATS) do
       t[#t + 1] = cat .. ":" .. p[cat].shown .. "/" .. p[cat].known .. ":" .. ser(p[cat].entries)
     end
+    for _, k in ipairs(p.monster.kinds or {}) do
+      t[#t + 1] = tostring(k.kind) .. ":" .. tostring(k.small) .. ":" .. tostring(k.shown) .. ":" .. tostring(k.known)
+    end
     return table.concat(t, "#")
   end
   local shops_exercised = { merged = false, offmap = false, sells = false, stock = false }
@@ -1842,7 +1845,7 @@ do
       elseif r == 4 then rw.beetles[#rw.beetles + 1] = { uid = "b" .. i, pos = rp(), name = "B" .. i,
         state = "not" }
       elseif r == 5 then rw.monsters[#rw.monsters + 1] = { uid = "m" .. i, cid = i, name = "M" .. i,
-        pos = rp(), small = math.random() < 0.3 }
+        kind = "K" .. (i % 7), pos = rp(), small = math.random() < 0.3 }
       else rw.sellers[#rw.sellers + 1] = { shop = i, item = i, item_name = "I" .. i, cid = i,
         npc = "N", qids = {}, quest = "", pos = rp(), maybe_locked = false, discovered = true } end
     end
@@ -1888,6 +1891,14 @@ do
     if keys(m1) ~= keys(m2) or panel_sig(p1) ~= panel_sig(p2)
       or merged_sig(g1) ~= merged_sig(g2) then
       all_same = false
+    end
+    do   -- both paths agree under a kind off set
+      local so = {}
+      for k, v in pairs(s) do so[k] = v end
+      so.world_monster_off = { large = { K3 = true }, small = { K5 = true } }
+      local o1, q1 = core.world_markers(rw, so, origin, boxes, qc)
+      local o2, q2 = core.world_markers_cached(rw, so, origin, boxes, qc)
+      if ser(o1) ~= ser(o2) or panel_ser(q1) ~= panel_ser(q2) then all_same = false end
     end
     if #m1 ~= 300 or not merged_sig(g2):find("99999", 1, true) then all_same = false end
     -- warm call: the ring cull must stop early, well short of a full scan
@@ -3691,6 +3702,130 @@ do
   local both2 = core.world_markers_cached(mw3, sh({ world_monsters = true, world_small_monsters = true }), O, {})
   check("mtree: Large back on re-fills", keys(both2) == "w:mon:ml,w:mon:ms"
     and stats.grid_builds == gb2 and stats.cell_entries.monster == 2)
+
+  -- monster kinds (SPEC 29.5)
+  local function kmw()
+    return { monsters = {
+      { uid = "g", cid = 1, name = "Goblin", kind = "Goblin", pos = P(2), small = true },
+      { uid = "h", cid = 2, name = "Hobgoblin", kind = "Hobgoblin", pos = P(3), small = true },
+      { uid = "c", cid = 3, name = "Cyclops", kind = "Cyclops", pos = P(4), small = false },
+      { uid = "ml", cid = 4, name = "Monster", kind = "Monster", pos = P(5), small = false },
+      { uid = "ms", cid = 5, name = "Monster", kind = "Monster", pos = P(6), small = true } },
+      drops = { [1] = { "Goblin Ear" }, [3] = { "Cyclops Eye" } } }
+  end
+  local function kshow(off, over)
+    local o = { world_small_monsters = true, world_monster_off = off }
+    for k, v in pairs(over or {}) do o[k] = v end
+    return sh(o)
+  end
+  for _, pa in ipairs(paths) do
+    local tag = " [" .. pa[1] .. "]"
+    local kw = kmw()
+    local m0, p0 = pa[2](kw, kshow(nil), O, {})
+    local m, p = pa[2](kw, kshow({ small = { Goblin = true } }), O, {})
+    check("kinds: Goblin off hides Goblin" .. tag, keys(m):find("w:mon:g", 1, true) == nil)
+    check("kinds: Goblin off keeps Hobgoblin" .. tag, keys(m):find("w:mon:h", 1, true) ~= nil)
+    check("kinds: Goblin off known unchanged" .. tag, p.monster.known == p0.monster.known
+      and p.monster.known == 5)
+    m = pa[2](kw, kshow({ small = { Goblin = true } }, { search = Q("goblin") }), O, {})
+    check("kinds: query goblin finds only Hobgoblin" .. tag, keys(m) == "w:mon:h")
+    m = pa[2](kw, kshow({ small = { Goblin = true } }, { search = Q("ear") }), O, {})
+    check("kinds: drop search skips the off kind" .. tag, #m == 0)
+    m = pa[2](kw, kshow(nil, { search = Q("ear") }), O, {})
+    check("kinds: drop search finds it when on" .. tag, keys(m) == "w:mon:g")
+    -- the class decides which kind is off
+    m = pa[2](kw, kshow({ large = { Monster = true } }), O, {})
+    local ks = keys(m)
+    check("kinds: large Monster off hides only the large one" .. tag,
+      ks:find("w:mon:ml", 1, true) == nil and ks:find("w:mon:ms", 1, true) ~= nil
+      and ks:find("w:mon:c", 1, true) ~= nil)
+    -- entries carry kind
+    local all_kind = #p0.monster.entries == 5
+    for _, e in ipairs(p0.monster.entries) do
+      if type(e.kind) ~= "string" then all_kind = false end
+    end
+    check("kinds: every entry carries kind" .. tag, all_kind)
+    -- a missing or non-string kind counts as Monster
+    local nk = { monsters = {
+      { uid = "n1", cid = 1, name = "A", pos = P(2), small = false },
+      { uid = "n2", cid = 2, name = "B", kind = 5, pos = P(3), small = false },
+      { uid = "n3", cid = 3, name = "C", kind = "Cyclops", pos = P(4), small = false } } }
+    m = pa[2](nk, kshow({ large = { Monster = true } }), O, {})
+    check("kinds: missing or non-string kind is Monster" .. tag, keys(m) == "w:mon:n3")
+    local m_all = pa[2](nk, kshow(nil), O, {})
+    local mk = {}
+    for _, x in ipairs(m_all) do mk[x.key] = x.kind end
+    check("kinds: marker kind falls back to Monster" .. tag, mk["w:mon:n1"] == "Monster"
+      and mk["w:mon:n2"] == "Monster" and mk["w:mon:n3"] == "Cyclops")
+    -- bad off sets show every kind
+    for i, bad in ipairs({ {}, "x", { large = "x" }, { small = 7 } }) do
+      m = pa[2](kw, kshow(bad), O, {})
+      check("kinds: bad off set " .. i .. " shows all" .. tag, #m == 5)
+    end
+    m = pa[2](kw, kshow(nil), O, {})
+    check("kinds: nil off set shows all" .. tag, #m == 5)
+  end
+  do
+    local kw = kmw()
+    core.world_markers_cached(kw, kshow(nil), O, {})
+    local gb0 = stats.grid_builds
+    local mo = core.world_markers_cached(kw, kshow({ small = { Goblin = true } }), O, {})
+    local mi = core.world_markers_cached(kw, kshow({ small = {} }), O, {})
+    check("kinds: untick hides on the cached path", keys(mo):find("w:mon:g", 1, true) == nil)
+    check("kinds: re-tick brings it back", keys(mi):find("w:mon:g", 1, true) ~= nil)
+    check("kinds: untick and re-tick run no grid rebuild", stats.grid_builds == gb0)
+  end
+
+  -- per-kind counts (SPEC 29.5.3)
+  local function kinds_ser(p)
+    local t = {}
+    if type(p.monster.kinds) ~= "table" then return "none" end
+    for i, k in ipairs(p.monster.kinds) do
+      t[i] = tostring(k.kind) .. ":" .. tostring(k.small) .. ":" .. tostring(k.shown)
+        .. ":" .. tostring(k.known)
+    end
+    return table.concat(t, ",")
+  end
+  local want_kinds = "Cyclops:false:1:1,Monster:false:1:1,Goblin:true:0:1,Hobgoblin:true:1:1,Monster:true:1:1"
+  for _, pa in ipairs(paths) do
+    local tag = " [" .. pa[1] .. "]"
+    local kw = kmw()
+    local _, p = pa[2](kw, kshow({ small = { Goblin = true } }), O, {})
+    check("kinds panel: order and numbers" .. tag,
+      type(p.monster.kinds) == "table" and kinds_ser(p) == want_kinds)
+    local gw = { monsters = {
+      { uid = "a", cid = 1, name = "Goblin", kind = "Goblin", pos = P(2), small = true },
+      { uid = "b", cid = 1, name = "Goblin", kind = "Goblin", pos = P(3), small = true },
+      { uid = "c", cid = 1, name = "Goblin", kind = "Goblin", pos = P(4), small = true } } }
+    _, p = pa[2](gw, kshow(nil, { world_max_markers = 1 }), O, {})
+    check("kinds panel: cap leaves shown below known" .. tag,
+      type(p.monster.kinds) == "table" and kinds_ser(p) == "Goblin:true:1:3")
+    local hw = { monsters = {
+      { uid = "z", cid = 9, name = "Goblin", kind = "Goblin", pos = P(300), small = true } } }
+    for i = 1, 11 do
+      hw.monsters[#hw.monsters + 1] = { uid = "h" .. i, cid = 2, name = "Hobgoblin",
+        kind = "Hobgoblin", pos = P(i), small = true }
+    end
+    local _, hp = pa[2](hw, kshow(nil), O, {})
+    local gob_row = false
+    for _, e in ipairs(hp.monster.entries) do
+      if e.kind == "Goblin" then gob_row = true end
+    end
+    check("kinds panel: a far kind still has its entry" .. tag, gob_row)
+    _, p = pa[2](kw, kshow(nil, { world_small_monsters = false }), O, {})
+    local no_small = type(p.monster.kinds) == "table" and #p.monster.kinds == 2
+    if no_small then
+      for _, k in ipairs(p.monster.kinds) do if k.small then no_small = false end end
+    end
+    check("kinds panel: Small off lists only large kinds" .. tag, no_small)
+  end
+  do
+    local kw = kmw()
+    local _, pu = core.world_markers(kw, kshow({ small = { Goblin = true } }), O, {})
+    local _, pc = core.world_markers_cached(kw, kshow({ small = { Goblin = true } }), O, {})
+    check("kinds panel: both paths give the same array", type(pu.monster.kinds) == "table"
+      and kinds_ser(pu) == kinds_ser(pc))
+  end
 end
 
 -- first token (SPEC 28.9.3)
