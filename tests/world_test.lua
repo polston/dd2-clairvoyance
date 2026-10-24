@@ -3663,10 +3663,14 @@ do
   do
     local function chest_uids(live)
       local rows = { prow("chest", "a1", 10, 1, 1), prow("chest", "c1", 10, 9, 9) }
-      if not live then rows[#rows + 1] = prow("chest", "b1", 10, 5, 5) end
+      if not live then
+        rows[#rows + 1] = prow("chest", "b1", 10, 5, 5)
+        rows[#rows + 1] = prow("chest", "z1", 10, 20, 20)
+      end
       local f = fixture({ files = { [K.PLACES] = places(rows) } })
       if live then
-        f.data.reserved = { chest_row("b1", 5, 5) }
+        rows[#rows + 1] = prow("chest", "z1", 10, 0, 0, { src = "subquest" })
+        f.data.reserved = { chest_row("b1", 5, 5), chest_row("z1", 20, 20) }
         -- a listed-but-not-file row (subquest) is the live-only case
         rows[#rows + 1] = prow("chest", "b1", 10, 0, 0, { src = "subquest" })
       end
@@ -3680,10 +3684,26 @@ do
     local want = chest_uids(false)
     local got, w = chest_uids(true)
     check("live one row: same output as a file row", got == want)
-    check("live one row: sorted between the cached uids", got == "a1@1.0,b1@5.0,c1@9.0")
+    check("live one row: sorted between the cached uids", got == "a1@1.0,b1@5.0,c1@9.0,z1@20.0")
     local b0 = w:stats().eff_builds
     w:refresh(20, true, ALL)
     check("live one row: cache hit kept", w:stats().eff_builds == b0)
+  end
+
+  -- a live monster row over a uid the merge already holds: the live row wins
+  do
+    local f = fixture({ files = {
+      [K.PLACES] = places({ prow("chara", "ov1", 5, 1, 1, { name = "ch299000_00" }),
+        prow("chest", "c1", 10, 9, 9) }),
+      [K.ATLAS] = { version = K.FILE_VERSION, pak = "1:1", entries = {
+        ov1 = { k = "monster", id = 5, x = 1, y = 0, z = 1, name = "ch299000_00", table_ix = 1 } } } } })
+    f.data.boss = { ch253 = true }
+    f.data.reserved = { mrow("ov1", 5, "ch220000_00", 500, 500) }
+    local w = f.new()
+    w:refresh(0, true, ALL)
+    w:refresh(10, true, ALL)
+    local m = w:input().monsters
+    check("live row over a learned uid: live row wins", #m == 1 and m[1].pos.x == 500)
   end
 
   -- reset invalidates the merge: no file monsters while the cast is unavailable
