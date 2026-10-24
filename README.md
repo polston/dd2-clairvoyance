@@ -93,8 +93,8 @@ into a Large node and a Small node, each holding one node per family with
 several kinds (its kinds inside) and the kinds of one-kind families directly.
 A chest's label ends with its kinds in brackets, for example "Chest -
 Wakestone [stays opened in NG+]", and the map search matches those words.
-Five checkboxes under Chests turn each kind on or off; a chest with several kinds is hidden when any one of
-them is off:
+Five checkboxes under Chests turn each kind on or off; a chest with several
+kinds is hidden when any one of them is off:
 
 1. New shard each cycle: the Wakestone Shard chests that are full again in each
    New Game Plus cycle.
