@@ -558,6 +558,31 @@ do
   check("has_text nil", N.has_text(nil) == false)
 end
 
+do
+  local q, info = N.parse_quests({ version = 1, pak = "p7", quests = {
+    ["10010"] = { cast = { 5, 6.0, -1, 2.5, "7" }, npcs = { 8 }, items = { 300 },
+      dest = { { cid = 9 }, { key = 44 }, { cid = 0, key = 0 }, "x", { cid = 10, key = 45 } },
+      decoded = true },
+    ["1.5"] = { cast = { 1 } }, ["-3"] = {}, abc = {}, ["10020"] = "x",
+    ["10030"] = { cast = 5, npcs = { a = 1 }, decoded = false } } })
+  local a = q[10010]
+  check("quests: lists keep positive whole numbers", a and table.concat(a.cast, ",") == "5,6"
+    and math.type(a.cast[2]) == "integer" and a.npcs[1] == 8 and a.items[1] == 300 and a.decoded == true)
+  check("quests: dest keeps entries with a positive cid or key", a and #a.dest == 3
+    and a.dest[1].cid == 9 and a.dest[1].key == nil and a.dest[2].key == 44
+    and a.dest[3].cid == 10 and a.dest[3].key == 45)
+  local b = q[10030]
+  check("quests: bad fields become empty lists", b and #b.cast == 0 and #b.npcs == 0
+    and #b.items == 0 and #b.dest == 0 and b.decoded == false)
+  check("quests: bad keys and non-table entries dropped", q[10020] == nil
+    and info.kept == 2 and info.dropped == 4 and info.pak == "p7" and info.version == 1
+    and info.first == "-3")
+  q, info = N.parse_quests(nil)
+  check("quests: nil input", next(q) == nil and info.kept == 0 and info.pak == nil and info.first == nil)
+  q, info = N.parse_quests({ pak = 5 })
+  check("quests: no quests table, non-string pak", next(q) == nil and info.pak == nil)
+end
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)
