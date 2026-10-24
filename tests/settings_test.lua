@@ -670,6 +670,10 @@ do
   check("set_kind_off bad class and kind", not su.set_kind_off(st, "x", "A", true)
     and not su.set_kind_off(st, "large", "", true)
     and not su.set_kind_off(st, "large", string.rep("k", 65), true))
+  check("set_kind_off refuses a family entry of the wrong length",
+    not su.set_kind_off(st, "small", "fam:ab", true)
+    and su.set_kind_off(st, "small", "fam:ch220", true)
+    and su.set_kind_off(st, "small", "fam:ch220", false))
   for i = 1, 200 do su.set_kind_off(st, "small", string.format("k%03d", i), true) end
   check("set_kind_off refuses past the cap", not su.set_kind_off(st, "small", "extra", true)
     and su.set_kind_off(st, "small", "k001", true))
@@ -678,6 +682,135 @@ do
   su.world_toggled(prev, { world_chests = true })
   check("world_toggled ignores world_monster_off",
     su.world_toggled(prev, { world_chests = true, world_monster_off = { large = { A = true }, small = {} } }) == false)
+
+  -- family entries (SPEC 30.6)
+  local fo = wmo({ world_monster_off = { small = { ["fam:ch220"] = true, ["fam:"] = true,
+    ["fam:?"] = true, ["fam:not-a-family-id"] = true } } }).small or {}
+  check("validate keeps fam:ch220", fo["fam:ch220"] == true)
+  check("validate drops bad fam keys", fo["fam:"] == nil and fo["fam:?"] == nil
+    and fo["fam:not-a-family-id"] == nil)
+  local kk = { ["fam:ch220"] = true }
+  for i = 1, 200 do kk[string.format("K%03d", i)] = true end
+  local kc = wmo({ world_monster_off = { large = kk } }).large or {}
+  local kcnt, kok = 0, true
+  for _ in pairs(kc) do kcnt = kcnt + 1 end
+  for i = 1, 199 do if not kc[string.format("K%03d", i)] then kok = false end end
+  check("cap keeps fam:ch220 and K001..K199, drops K200",
+    kcnt == 200 and kok and kc["fam:ch220"] == true and kc.K200 == nil)
+  local ff = { Goblin = true }
+  for i = 1, 201 do ff[string.format("fam:c%04d", i)] = true end
+  local fc = wmo({ world_monster_off = { small = ff } }).small or {}
+  local fcnt, fok = 0, true
+  for _ in pairs(fc) do fcnt = fcnt + 1 end
+  for i = 1, 200 do if not fc[string.format("fam:c%04d", i)] then fok = false end end
+  check("cap keeps 200 family keys before kinds", fcnt == 200 and fok
+    and fc["fam:c0201"] == nil and fc.Goblin == nil)
+
+  local mk = su.monster_kind_list(nil, { Cyclops = true, ["fam:ch220"] = true })
+  check("monster_kind_list skips fam keys", type(mk) == "table" and #mk == 1 and mk[1] == "Cyclops")
+
+  local kn, fn = su.monster_off_count({ large = { A = true, ["fam:ch250"] = true },
+    small = { ["fam:ch220"] = true } })
+  check("monster_off_count kinds then families", kn == 1 and fn == 2)
+  local kn0, fn0 = su.monster_off_count(nil)
+  check("monster_off_count nil -> 0, 0", kn0 == 0 and fn0 == 0)
+
+  local fl = type(su.monster_kind_list) == "function" and su.monster_kind_list({ Hobgoblin = true, Goblin = true })
+  check("monster_kind_list (family seen set) sorted", type(fl) == "table" and #fl == 2 and fl[1] == "Goblin" and fl[2] == "Hobgoblin")
+  local fl0 = type(su.monster_kind_list) == "function" and su.monster_kind_list(nil)
+  check("monster_kind_list (family seen set) nil -> empty", type(fl0) == "table" and #fl0 == 0)
+
+  check("kind_box family off -> disabled", su.kind_box("Goblin", true, 0, false, true) == "disabled")
+  check("kind_box fam_off false/nil as before", su.kind_box("A", true, 0, false, false) == "on"
+    and su.kind_box("A", true, 0, true, nil) == "off")
+
+  check("family_box class off -> disabled",
+    type(su.family_box) == "function" and su.family_box(false, 0, false) == "disabled")
+  check("family_box on at cap -> disabled",
+    type(su.family_box) == "function" and su.family_box(true, 200, false) == "disabled")
+  check("family_box off at cap -> off",
+    type(su.family_box) == "function" and su.family_box(true, 200, true) == "off")
+  check("family_box plain on",
+    type(su.family_box) == "function" and su.family_box(true, 0, false) == "on")
+
+  -- monster_tree (SPEC 30.3.1, 30.6.2)
+  local function tree(seen, names, offs, class_on)
+    if type(su.monster_tree) ~= "function" then return nil end
+    return su.monster_tree(seen, names, offs, class_on)
+  end
+  local t1 = tree({ ch220 = { Goblin = true, Hobgoblin = true } }, { ch220 = "Goblin" }, {}, true)
+  check("tree: two-kind family is a node with kinds in name order",
+    type(t1) == "table" and #t1 == 1 and t1[1].fam == "ch220" and t1[1].name == "Goblin"
+    and t1[1].node == true and t1[1].family_box == "on" and #t1[1].kinds == 2
+    and t1[1].kinds[1].kind == "Goblin" and t1[1].kinds[1].box == "on"
+    and t1[1].kinds[2].kind == "Hobgoblin")
+  local t2 = tree({ ch255 = { Medusa = true } }, { ch255 = "Medusa" }, {}, true)
+  check("tree: one-kind family is not a node",
+    type(t2) == "table" and #t2 == 1 and t2[1].node == false and #t2[1].kinds == 1
+    and t2[1].kinds[1].box == "on")
+  local t3 = tree({ ch255 = { Medusa = true } }, { ch255 = "Medusa" }, { ["fam:ch255"] = true }, true)
+  check("tree: one-kind family with its entry off is a node, kind disabled",
+    type(t3) == "table" and #t3 == 1 and t3[1].node == true and t3[1].family_box == "off"
+    and t3[1].kinds[1].box == "disabled")
+  local t4 = tree({ ["?"] = { Monster = true } }, {}, { Cyclops = true }, true)
+  check("tree: ? kinds and off-unseen kinds are one plain entry",
+    type(t4) == "table" and #t4 == 1 and t4[1].plain == true and #t4[1].kinds == 2
+    and t4[1].kinds[1].kind == "Cyclops" and t4[1].kinds[1].box == "off"
+    and t4[1].kinds[2].kind == "Monster" and t4[1].kinds[2].box == "on")
+  local t4b = tree({ ch220 = { Goblin = true, ["fam:abcde"] = true } }, { ch220 = "Goblin" }, {}, true)
+  check("tree: a seen kind named like a family entry is left out of its family",
+    type(t4b) == "table" and #t4b == 1 and #t4b[1].kinds == 1
+    and t4b[1].kinds[1].kind == "Goblin" and t4b[1].node == false)
+  local t5 = tree({}, {}, { ["fam:ch299"] = true }, true)
+  check("tree: off family not seen gives an unseen entry",
+    type(t5) == "table" and #t5 == 1 and t5[1].fam == "ch299" and t5[1].unseen == true
+    and t5[1].family_box == "off")
+  local t6 = tree({ ch220 = { Goblin = true, Hobgoblin = true } }, { ch220 = "Goblin" },
+    { Cyclops = true, ["fam:ch299"] = true }, false)
+  local ok6 = type(t6) == "table" and #t6 == 3 and t6[1].family_box == "disabled"
+  if ok6 then
+    for _, k in ipairs(t6[1].kinds) do if k.box ~= "disabled" then ok6 = false end end
+    ok6 = ok6 and t6[2].plain == true and t6[2].kinds[1].box == "disabled"
+      and t6[3].unseen == true and t6[3].family_box == "disabled"
+  end
+  check("tree: class off disables every box", ok6)
+  local t7 = tree({ ch300 = { Zed = true }, ch100 = { Zed2 = true, Zed3 = true } },
+    { ch300 = "Alpha", ch100 = "Alpha" }, {}, true)
+  check("tree: families sort by name then fam",
+    type(t7) == "table" and #t7 == 2 and t7[1].fam == "ch100" and t7[2].fam == "ch300")
+
+  local t8 = tree({ ch220 = { Goblin = true, Monster = true }, ["?"] = { Monster = true } },
+    { ch220 = "Goblin" }, {}, true)
+  check("tree: a ? kind also seen in a family stays in the plain entry",
+    type(t8) == "table" and #t8 == 2 and t8[2].plain == true and #t8[2].kinds == 1
+    and t8[2].kinds[1].kind == "Monster")
+  local t9 = tree({ ch255 = { Medusa = true } }, { ch255 = "Medusa" },
+    { ["fam:ch255"] = true, Medusa = true }, true)
+  check("tree: kind entry carries its own saved state under an off family",
+    type(t9) == "table" and t9[1].kinds[1].box == "disabled" and t9[1].kinds[1].off == true
+    and t3[1].kinds[1].off == false)
+  local t10 = tree({ ["?"] = { Odd = true } }, {}, { Cyclops = true }, true)
+  check("tree: plain kind entries carry off",
+    type(t10) == "table" and t10[1].kinds[1].kind == "Cyclops" and t10[1].kinds[1].off == true
+    and t10[1].kinds[2].off == false)
+
+  -- not_searched (SPEC 30.6.8)
+  local all_on = {}
+  for _, k in ipairs(su.WORLD_BOOLS) do all_on[k] = true end
+  local ns_in = {}
+  for k, v in pairs(all_on) do ns_in[k] = v end
+  ns_in.world_monster_off = { large = {}, small = { Goblin = true, ["fam:ch220"] = true } }
+  local ns1 = type(su.not_searched) == "function" and su.not_searched(ns_in)
+  check("not_searched counts kinds and families", type(ns1) == "table" and #ns1 == 2
+    and ns1[1] == "1 monster kinds" and ns1[2] == "1 monster families")
+  local one_off = {}
+  for k, v in pairs(all_on) do one_off[k] = v end
+  one_off.world_chests = false
+  one_off.world_shops = false   -- in WORLD_NO_SEARCH: never listed
+  one_off.world_monster_off = { large = {}, small = {} }
+  local ns2 = type(su.not_searched) == "function" and su.not_searched(one_off)
+  check("not_searched lists a searchable toggle off", type(ns2) == "table" and #ns2 == 1
+    and ns2[1] == string.lower(su.WORLD_BOOL_LABEL.world_chests))
 end
 if failures > 0 then os.exit(1) end
 print("settings_test: all OK")

@@ -597,6 +597,31 @@ local function kind_of(e)
 end
 M.kind_of = kind_of
 
+-- SPEC 30.5.1: a monster's family; a missing or non-string one counts as "?".
+local function fam_of(e)
+  return type(e.fam) == "string" and e.fam or "?"
+end
+M.fam_of = fam_of
+
+-- "fam:" .. fam, built once per family rather than per monster per tick.
+local FAM_KEY = setmetatable({}, { __index = function(t, f)
+  local k = "fam:" .. f; t[f] = k; return k
+end })
+
+-- SPEC 30.2.1: a family's display name: its shortest kind name, ties by byte
+-- order, "Monster" left out unless it is the only one, "Other" for no kinds.
+function M.family_name(names)
+  local best
+  for _, n in ipairs(names or {}) do
+    if n ~= "Monster" and (best == nil or #n < #best or (#n == #best and n < best)) then
+      best = n
+    end
+  end
+  if best ~= nil then return best end
+  if names ~= nil and names[1] ~= nil then return names[1] end
+  return "Other"
+end
+
 -- The monster class a small flag names.
 local function class_of(small)
   return small and "small" or "large"
@@ -608,14 +633,17 @@ local function kind_off(e, show)
   if type(off) ~= "table" then return false end
   local cls = off[class_of(e.small == true)]
   if type(cls) ~= "table" then return false end
-  return cls[kind_of(e)] == true
+  return cls[kind_of(e)] == true or cls[FAM_KEY[fam_of(e)]] == true
 end
 
--- SPEC 29.5.3: count one known monster into kc = { large = {}, small = {} }.
+-- SPEC 29.5.3, 30.5.3: count one known monster into
+-- kc = { large = {}, small = {} } as kc[class][fam][kind].
 local function count_kind(kc, e)
   local cls = kc[class_of(e.small == true)]
-  local k = kind_of(e)
-  cls[k] = (cls[k] or 0) + 1
+  local f, k = fam_of(e), kind_of(e)
+  local fc = cls[f]
+  if not fc then fc = {}; cls[f] = fc end
+  fc[k] = (fc[k] or 0) + 1
 end
 
 local function monster_label(e)
@@ -1014,6 +1042,7 @@ local function make_cand(cat, e, ctx)
     c.key = "w:mon:" .. tostring(e.uid)
     c.small = e.small == true
     c.kind = kind_of(e)
+    c.fam = fam_of(e)
     c.label = monster_label(e)
     local md = ctx.mdrop and ctx.mdrop[e]
     if md then c.hover, c.why = md.hover, md.why end
@@ -1417,9 +1446,12 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
     if c.cat == "monster" then
       m.small = c.small
       m.kind = c.kind
+      m.fam = c.fam
       if c.small then panel.monster.small_shown = panel.monster.small_shown + 1 end
       local cls = shown[class_of(c.small)]
-      cls[c.kind] = (cls[c.kind] or 0) + 1
+      local fc = cls[c.fam]
+      if not fc then fc = {}; cls[c.fam] = fc end
+      fc[c.kind] = (fc[c.kind] or 0) + 1
     end
     if c.cat == "shop" then
       if #c.sells_for > 0 then m.hover = with_sells(c) end
@@ -1433,18 +1465,39 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
   for _, mg in ipairs(merged) do
     mg.line = with_sells(mg.cand)
   end
-  -- SPEC 29.5.3: per-kind counts, large first then by kind
-  local kinds = {}
+  -- SPEC 29.5.3, 30.5.3, 30.5.4: per-(class, fam, kind) rows and per-family
+  -- rows, large first, then family name, then fam, then kind.
+  local kinds, families = {}, {}
   for _, class in ipairs({ "large", "small" }) do
-    local names = {}
-    for k in pairs(kcounts[class]) do names[#names + 1] = k end
-    table.sort(names)
-    for _, k in ipairs(names) do
-      kinds[#kinds + 1] = { kind = k, small = class == "small",
-        shown = shown[class][k] or 0, known = kcounts[class][k] }
+    local rows = {}
+    for f, fc in pairs(kcounts[class]) do
+      local names = {}
+      for k in pairs(fc) do names[#names + 1] = k end
+      table.sort(names)
+      local sf = shown[class][f] or {}
+      local row = { fam = f, small = class == "small", shown = 0, known = 0,
+        n_kinds = #names, kinds = {} }
+      row.name = (f == "?") and "Other" or M.family_name(names)
+      for _, k in ipairs(names) do
+        local kr = { kind = k, fam = f, small = row.small, shown = sf[k] or 0, known = fc[k] }
+        row.kinds[#row.kinds + 1] = kr
+        row.shown = row.shown + kr.shown
+        row.known = row.known + kr.known
+      end
+      rows[#rows + 1] = row
+    end
+    table.sort(rows, function(a, b)
+      if a.name ~= b.name then return a.name < b.name end
+      return a.fam < b.fam
+    end)
+    for _, row in ipairs(rows) do
+      for _, kr in ipairs(row.kinds) do kinds[#kinds + 1] = kr end
+      families[#families + 1] = { fam = row.fam, small = row.small, name = row.name,
+        shown = row.shown, known = row.known, n_kinds = row.n_kinds }
     end
   end
   panel.monster.kinds = kinds
+  panel.monster.families = families
   if shop_all and #shop_all > 0 then
     local entries = panel.shop.entries
     for _, c in ipairs(shop_all) do
