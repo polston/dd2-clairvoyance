@@ -2755,8 +2755,8 @@ wt.coords_frame = function()
   elseif settings.coords_minimap and settings.show_minimap and ui_map == nil
       and wt.mini_vis and wt.mini_t ~= nil and now - wt.mini_t < 0.5
       and player_origin ~= nil then
-    -- below and to the left of the minimap's lower-left edge
-    wt.coord_text(string.format("X %.0f  Z %.0f  height %.0f",
+    -- below and to the left of the minimap circle, clear of its rim
+    wt.coord_text(string.format("X %.0f  Z %.0f  H %.0f",
       player_origin.x, player_origin.z, player_origin.y),
       wt.mini_x + wt.MINI_DX, wt.mini_y + wt.MINI_DY)
   end
@@ -2766,7 +2766,7 @@ wt.coord_text = function(s, x, y)
   wt.style.text(draw, s, x, y, 0xFFE8E0D0, true, 0xFF000000, 1)
 end
 wt.CURSOR_DX, wt.CURSOR_DY = 18, -34
-wt.MINI_DX, wt.MINI_DY = -120, 95
+wt.MINI_DX, wt.MINI_DY = -245, 118
 re.on_frame(function() wt.layer_run(wt.coords_layer, "coordinates", wt.coords_frame) end)
 
 -- v14 (SPEC 22.10): item-menu quest dots, its own failure counters inside.
