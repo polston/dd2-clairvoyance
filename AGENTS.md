@@ -12,7 +12,7 @@
    The icon folder `reframework/images/Clairvoyance/icons/` is generated from
    game files with `tools/extract_icons.py` and the user's own key (never
    printed or committed); the release zip carries the folder, never `tools/`.
-   v13 matching icons need the D2DX plugin (Dragon's Dogma 2 mod 1261) and
+   v13 matching icons need the D2DX plugin and
    fall back to the game glyphs without it.
 5. CI (`.github/workflows/ci.yml`) runs `check.ps1 -SkipProvenance` and builds the zip
    from the committed `data/Clairvoyance_places.json`; releases are automatic from

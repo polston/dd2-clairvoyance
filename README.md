@@ -42,7 +42,7 @@ map and in your view.
 
 1. Dragon's Dogma 2 (Steam).
 2. REFramework.
-3. For matching icons: the D2DX plugin (Dragon's Dogma 2 mod 1261). Without it,
+3. For matching icons: the D2DX plugin. Without it,
    or with "Matching icons (D2DX)" turned off, every surface keeps the game's
    own icon glyphs and the rest of the mod works the same.
 
