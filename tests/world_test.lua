@@ -130,6 +130,14 @@ local function chest_row(uid, x, z, ix, gimmick)
   return { uid = uid, pos = P(x, 0, z), gimmick = gimmick or 10, table_ix = ix or 1 }
 end
 
+local function route_in(w, cid)
+  local l = w:input() and w:input().routes
+  if type(l) ~= "table" then return nil end
+  if cid == nil then return l[1] end
+  for _, e in ipairs(l) do if e.cid == cid then return e end end
+  return nil
+end
+
 local function find(list, uid)
   for _, e in ipairs(list or {}) do if e.uid == uid then return e end end
   return nil
@@ -2288,6 +2296,8 @@ do
     d.npcname[2001] = "Aa"
     d.rows[2001] = rows_of({ 6, 18, 49 }, { 18, 6, 46 }, { 0, 1, 99 })
     d.cur[2001] = { area = 49, location = 0, pos = P(5, 5, 5) }
+    d.rows[2002] = rows_of({ 6, 18, 49 })
+    d.cur[2002] = { area = 49, location = 0 }
     d.area_nodes[49] = { P(1, 0, 1), P(2, 0, 2) }
     d.area_nodes[46] = { P(990, 0, 990) }
     d.icons = {
@@ -2299,12 +2309,16 @@ do
     local w = f.new()
     local tg = on("search")
     w:refresh(0, true, tg)
-    check("route: none until set", w:input().route == nil)
+    check("route: none until set", route_in(w) == nil)
     w:set_route(2001, "Aa")
     check("route: set_route then refresh builds on that call",
       w:refresh(1, true, tg) == true)
-    local r = w:input().route
+    local r = route_in(w)
     check("route: cid and name", r ~= nil and r.cid == 2001 and r.name == "Aa")
+    check("routes: a list with one member", type(w:input().routes) == "table"
+      and #w:input().routes == 1 and w:input().routes[1].cid == 2001
+      and w:input().routes[1].name == "Aa")
+    check("routes: no input.route", w:input().route == nil)
     check("route: stops from route_stops", r and #r.stops == 2 and r.stops[1].area == 49
       and r.stops[1].pos.x == 1 and r.stops[2].area == 46)
     check("route: unplaced carried", r and r.unplaced == 1)
@@ -2322,7 +2336,7 @@ do
     w:poke()
     w:refresh(2, true, tg)
     check("route: unchanged hour reuses the cache", stub.calls.route_stops == 1
-      and w:input().route and #w:input().route.stops == 2)
+      and route_in(w) and #route_in(w).stops == 2)
     check("route: cache reads rows once", (f.reads_n.schedule_rows or 0) == 1)
     -- a new day at the same hour rebuilds
     d.day = 34
@@ -2343,17 +2357,23 @@ do
     check("route: next round at the same hour reuses", stub.calls.route_stops == 2)
     -- clear
     w:clear_route()
-    check("route: clear_route drops the published route", w:input().route == nil)
+    check("route: clear_route drops the published route", route_in(w) == nil)
+    check("routes: cleared list is nil", w:input().routes == nil)
     w:poke()
     w:refresh(5, true, tg)
-    check("route: stays cleared", w:input().route == nil)
+    check("route: stays cleared", route_in(w) == nil)
     -- set again, then reset clears it
     w:set_route(2001, "Aa")
     w:refresh(6, true, tg)
-    check("route: set again builds", w:input().route ~= nil)
+    check("route: set again builds", route_in(w) ~= nil)
+    w:set_route(2002, "Bb")
+    w:refresh(6.5, true, tg)
+    check("routes: set_route to another cid replaces the target",
+      type(w:input().routes) == "table" and #w:input().routes == 1
+      and w:input().routes[1].cid == 2002)
     w:reset()
     w:refresh(7, true, tg)
-    check("route: reset clears the route", w:input().route == nil)
+    check("route: reset clears the route", route_in(w) == nil)
   end
 
   -- route errors
@@ -2369,19 +2389,19 @@ do
     f.fail.schedule_rows = true
     w:set_route(2001, "Aa")
     w:refresh(0, true, tg)
-    local r = w:input().route
+    local r = route_in(w)
     check("route err: raising schedule_rows", r ~= nil and r.err == "route unavailable"
       and r.cid == 2001 and r.name == "Aa" and r.stops == nil)
     f.fail.schedule_rows = nil
     w:poke()
     w:refresh(0.5, true, tg)
     check("route err: a failed build is retried the next round, same hour",
-      w:input().route.err == nil and #w:input().route.stops == 1)
+      route_in(w).err == nil and #route_in(w).stops == 1)
     d.hour = 9
     w:set_route(2001, "Aa")
     w:refresh(1, true, tg)
-    check("route err: recovers when the read works", w:input().route.err == nil
-      and #w:input().route.stops == 1)
+    check("route err: recovers when the read works", route_in(w).err == nil
+      and #route_in(w).stops == 1)
     -- -1/-1 current row
     local calls = stub.calls.route_stops
     d.cur[2001] = { area = -1, location = -1, key = 2309, pos = P(1, 1, 1) }
@@ -2389,7 +2409,7 @@ do
     d.hour = 10
     w:set_route(2001, "Aa")
     w:refresh(2, true, tg)
-    r = w:input().route
+    r = route_in(w)
     check("route off: unmatched key publishes stops + off_schedule",
       r.err == nil and #r.stops == 1 and r.off_schedule == true)
     check("route off: route_stops called with the current row",
@@ -2400,22 +2420,22 @@ do
     w:poke()
     w:refresh(2.4, true, tg)
     check("route off: off_schedule clears on an hour-change rebuild alone",
-      w:input().route.err == nil and w:input().route.off_schedule == nil)
+      route_in(w).err == nil and route_in(w).off_schedule == nil)
     w:set_route(2001, "Aa")
     w:refresh(2.5, true, tg)
     check("route off: a matched current row has no off_schedule",
-      w:input().route.err == nil and w:input().route.off_schedule == nil)
+      route_in(w).err == nil and route_in(w).off_schedule == nil)
     d.area_nodes[49] = nil
     d.hour = 14
     w:set_route(2001, "Aa")
     w:refresh(2.55, true, tg)
     check("route off: a matched route with zero placed stops is route unavailable",
-      w:input().route.err == "route unavailable" and w:input().route.stops == nil)
+      route_in(w).err == "route unavailable" and route_in(w).stops == nil)
     d.cur[2001] = { area = -1, location = -1, pos = P(1, 1, 1) }
     d.hour = 13
     w:set_route(2001, "Aa")
     w:refresh(2.6, true, tg)
-    r = w:input().route
+    r = route_in(w)
     check("route off: -1/-1 with nothing placeable is route unavailable",
       r.err == "route unavailable" and r.stops == nil)
     d.area_nodes[49] = { P(1, 0, 1) }
@@ -2426,8 +2446,8 @@ do
     w:set_route(2001, "Aa")
     w:refresh(2.62, true, tg)
     check("route off: nil entry passes nil and has no off_schedule",
-      stub.last_cur == nil and w:input().route.err == nil
-      and w:input().route.off_schedule == nil)
+      stub.last_cur == nil and route_in(w).err == nil
+      and route_in(w).off_schedule == nil)
     -- an overwrite change inside the same hour rebuilds; a failed sig errs
     d.cur[2001] = { area = 49, location = 0 }
     d.sig = "a"
@@ -2441,17 +2461,17 @@ do
     w:poke()
     w:refresh(2.66, true, tg)
     check("route sig: a changed signature in the same hour rebuilds",
-      stub.calls.route_stops == before + 1 and w:input().route.err == nil)
+      stub.calls.route_stops == before + 1 and route_in(w).err == nil)
     f.fail.current_sig = true
     w:poke()
     w:refresh(2.67, true, tg)
     check("route sig: a failed signature read shows route unavailable",
-      w:input().route.err == "route unavailable")
+      route_in(w).err == "route unavailable")
     f.fail.current_sig = nil
     d.sig = nil
     w:poke()
     w:refresh(2.68, true, tg)
-    check("route sig: recovers when the read works", w:input().route.err == nil)
+    check("route sig: recovers when the read works", route_in(w).err == nil)
     -- raising route_stops leaves no partial stops
     d.cur[2001] = { area = 49, location = 0 }
     local orig = stub.route_stops
@@ -2460,14 +2480,14 @@ do
     w:set_route(2001, "Aa")
     w:refresh(3, true, tg)
     stub.route_stops = orig
-    r = w:input().route
+    r = route_in(w)
     check("route err: raising route_stops gives err, no stops",
       r.err == "route unavailable" and r.stops == nil and r.unplaced == nil)
     -- schedule_now failure
     f.fail.schedule_now = true
     w:set_route(2001, "Aa")
     w:refresh(4, true, tg)
-    check("route err: schedule_now failure", w:input().route.err == "route unavailable")
+    check("route err: schedule_now failure", route_in(w).err == "route unavailable")
   end
 
   -- area_nodes through anchor_node; missing nodes leave a stop unplaced
@@ -2482,7 +2502,7 @@ do
     local w = f.new()
     w:set_route(2001, "Aa")
     w:refresh(0, true, on("search"))
-    local r = w:input().route
+    local r = route_in(w)
     check("route: anchor_node picks the stop position", #r.stops == 1
       and r.stops[1].pos.x == 9)
     check("route: empty node list stays unplaced", r.unplaced == 1)
@@ -2506,7 +2526,7 @@ do
     local w = f.new()
     w:set_route(2001, "Aa")
     w:refresh(0, true, on("search"))
-    local r = w:input().route
+    local r = route_in(w)
     check("route key: area -1 with different locations asked separately",
       r and #r.stops == 2 and r.stops[1].discovered == false
       and r.stops[2].discovered == true)
@@ -2678,11 +2698,11 @@ do
     w:set_route(2001, "Aa")
     w:refresh(0, true, on("search"))
     w:spawned_step(200)
-    check("reset all: precondition", #w:input().npcs == 1 and w:input().route ~= nil
+    check("reset all: precondition", #w:input().npcs == 1 and route_in(w) ~= nil
       and #w.spawned == 1)
     w:reset()
     w:refresh(1, true, on("search"))
-    check("reset all: route gone", w:input().route == nil)
+    check("reset all: route gone", route_in(w) == nil)
     check("reset all: spawned gone", #w.spawned == 0)
   end
 
@@ -3364,7 +3384,7 @@ do
     w:refresh(0, true, tg)
     w:set_route(2696, "Albert")
     w:refresh(1, true, tg)
-    local r = w:input().route
+    local r = route_in(w)
     check("real route: albert publishes 4 stops", r ~= nil and r.err == nil and #r.stops == 4
       and r.stops[1].from == 6 and r.stops[2].from == 18 and r.stops[3].from == 20
       and r.stops[4].from == 22 and r.stops[4].to == 6)
@@ -3386,7 +3406,7 @@ do
     w:refresh(0, true, tg)
     w:set_route(2697, "Bb")
     w:refresh(1, true, tg)
-    local r = w:input().route
+    local r = route_in(w)
     local bad = 0
     for _, c in ipairs(d.area_calls) do
       if c.area == -1 and c.location == -1 then bad = bad + 1 end
@@ -3417,7 +3437,7 @@ do
     w:refresh(0, true, tg)
     w:set_route(2698, "Cc")
     w:refresh(1, true, tg)
-    local r = w:input().route
+    local r = route_in(w)
     check("real route: key stops get their own discovery answers",
       r ~= nil and r.err == nil and r.stops ~= nil and #r.stops == 2 and r.stops[1].discovered == false
       and r.stops[2].discovered == true)
@@ -3444,7 +3464,7 @@ do
       w:refresh(0, true, tg)
       w:set_route(2696, "Albert")
       w:refresh(1, true, tg)
-      return w:input().route
+      return route_in(w)
     end
 
     do

@@ -255,7 +255,7 @@ function M.new(a, reads, io)
       chest_lists = {}, treasure_lists = {},
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
-      route_cid = nil, route_name = nil, route_cache = nil,
+      target_member = nil, members = {}, member_of = {}, route_cache = {},
       sent = {}, walk_i = 0, walk_n = 0, walk_acc = {},
       -- SPEC 31: the reserved rows kept while the selector signature holds
       res = nil }
@@ -1268,9 +1268,38 @@ function M.new(a, reads, io)
     return { stops = stops, unplaced = unplaced or 0, off_schedule = (matched == false) or nil }
   end
 
-  local function route_round()
-    local cid, name = S.route_cid, S.route_name
-    if cid == nil then return nil end
+  -- the published route entries: the search target, then the members in
+  -- order, a cid listed once
+  local function published()
+    local list, seen = {}, {}
+    local t = S.target_member
+    if t ~= nil then list[1] = t; seen[t.cid] = true end
+    for _, m in ipairs(S.members) do
+      if not seen[m.cid] then list[#list + 1] = m; seen[m.cid] = true end
+    end
+    return list
+  end
+
+  -- the cid is the target's or a member's
+  local function live(cid)
+    local t = S.target_member
+    return (t ~= nil and t.cid == cid) or S.member_of[cid] ~= nil
+  end
+
+  -- a cid that left the route set drops its per-cid state
+  local function leave(cid)
+    if cid == nil or live(cid) then return end
+    S.route_cache[cid] = nil
+    local l = input_tbl and input_tbl.routes
+    if type(l) ~= "table" then return end
+    for i = #l, 1, -1 do
+      if l[i].cid == cid then table.remove(l, i) end
+    end
+    if #l == 0 then input_tbl.routes = nil end
+  end
+
+  local function one_route(member)
+    local cid, name = member.cid, member.name
     local errt = { cid = cid, name = name, err = ROUTE_ERR }
     if type(reads.schedule_now) ~= "function" then return errt end
     local okn, day, hour = pcall(reads.schedule_now)
@@ -1285,7 +1314,7 @@ function M.new(a, reads, io)
       if not oks then return errt end
       sig = tostring(a) .. "|" .. tostring(l) .. "|" .. tostring(k) .. "|" .. tostring(o)
     end
-    local c = S.route_cache
+    local c = S.route_cache[cid]
     if c == nil or c.cid ~= cid or c.hour ~= hour or c.day ~= day or c.sig ~= sig then
       local t0 = clock()
       local ok, built = pcall(function()
@@ -1295,7 +1324,7 @@ function M.new(a, reads, io)
       -- a failed build is not kept: the next round retries it
       if not ok then return errt end
       c = { cid = cid, hour = hour, day = day, sig = sig, value = built }
-      S.route_cache = c
+      S.route_cache[cid] = c
     end
     if c.value == nil then return errt end
     refresh_discovery()
@@ -1312,6 +1341,14 @@ function M.new(a, reads, io)
     end
     return { cid = cid, name = name, stops = stops, unplaced = c.value.unplaced,
              off_schedule = c.value.off_schedule }
+  end
+
+  local function routes_round()
+    local list = published()
+    if #list == 0 then return nil, false end
+    local out = {}
+    for i, member in ipairs(list) do out[i] = one_route(member) end
+    return out, false
   end
 
   -- ----- the round -----
@@ -1667,9 +1704,10 @@ function M.new(a, reads, io)
       again = again or more == true
     end
     t = clock()
-    out.route = route_round()
+    local more_routes
+    out.routes, more_routes = routes_round()
     lap("route", t)
-    return out, again
+    return out, again or more_routes
   end
 
   -- ----- save -----
@@ -1697,11 +1735,14 @@ function M.new(a, reads, io)
     return false
   end
 
-  -- a round result whose route is on: no error, the current cid, a stop
-  local function published_on(res)
-    local r = res and res.route
-    return type(r) == "table" and r.err == nil and r.cid == S.route_cid
-      and type(r.stops) == "table" and #r.stops > 0
+  -- a round result with a route on: some entry has no error and a stop
+  local function routes_on(res)
+    local l = res and res.routes
+    if type(l) ~= "table" then return false end
+    for _, r in ipairs(l) do
+      if r.err == nil and type(r.stops) == "table" and #r.stops > 0 then return true end
+    end
+    return false
   end
 
   -- ----- public -----
@@ -1733,7 +1774,7 @@ function M.new(a, reads, io)
       end
     end
     if not ok or type(res) ~= "table" then return false end
-    if published_on(res) and not published_on(input_tbl) then w.route_gen = w.route_gen + 1 end
+    if routes_on(res) and not routes_on(input_tbl) then w.route_gen = w.route_gen + 1 end
     input_tbl = res
     committed = true
     if again then last_round = nil end
@@ -1753,16 +1794,23 @@ function M.new(a, reads, io)
 
   -- SPEC 22.8: the route NPC; the next refresh builds it
   function w:set_route(cid, name)
-    if cid ~= S.route_cid then w.path_job = nil; w.route_gen = w.route_gen + 1 end
-    S.route_cid, S.route_name, S.route_cache = cid, name, nil
+    local old = S.target_member and S.target_member.cid
+    S.target_member = { cid = cid, name = name }
+    if cid ~= old then
+      w.path_job = nil
+      w.route_gen = w.route_gen + 1
+      leave(old)
+    end
+    S.route_cache[cid] = nil
     last_round = nil
   end
 
   function w:clear_route()
+    local old = S.target_member and S.target_member.cid
+    S.target_member = nil
     w.path_job = nil
     w.route_gen = w.route_gen + 1
-    S.route_cid, S.route_name, S.route_cache = nil, nil, nil
-    if input_tbl ~= nil then input_tbl.route = nil end
+    leave(old)
   end
 
   -- SPEC 22.9.3: walk n holder slots per call; a finished pass replaces
@@ -1889,8 +1937,16 @@ function M.new(a, reads, io)
 
   -- the published route stops, or nil when no route is on
   local function route_stops()
-    if not published_on(input_tbl) then return nil end
-    return input_tbl.route.stops
+    local t = S.target_member
+    local l = input_tbl and input_tbl.routes
+    if t == nil or type(l) ~= "table" then return nil end
+    for _, r in ipairs(l) do
+      if r.cid == t.cid then
+        if r.err == nil and type(r.stops) == "table" and #r.stops > 0 then return r.stops end
+        return nil
+      end
+    end
+    return nil
   end
 
   local function copy_fail(err)
@@ -2002,7 +2058,8 @@ function M.new(a, reads, io)
   end
 
   local function same_route(c, stops, undisc)
-    if c.undisc ~= undisc or c.cid ~= S.route_cid or c.n ~= #stops then return false end
+    local t = S.target_member
+    if c.undisc ~= undisc or t == nil or c.cid ~= t.cid or c.n ~= #stops then return false end
     for i = 1, c.n do
       local s = stops[i]
       local p = s.pos
@@ -2016,7 +2073,7 @@ function M.new(a, reads, io)
 
   local function build_rp(stops, undisc)
     local npcs = require("Clairvoyance.npcs")
-    local c = { cid = S.route_cid, undisc = undisc, n = #stops,
+    local c = { cid = S.target_member and S.target_member.cid, undisc = undisc, n = #stops,
       kx = {}, ky = {}, kz = {}, kd = {}, keys = {}, list_ver = -1 }
     for i = 1, c.n do
       local s = stops[i]
