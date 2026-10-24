@@ -3659,6 +3659,33 @@ do
     check("eff live row gone does not rebuild", w:stats().eff_builds - b1 == 0)
   end
 
+  -- one live row: same output as the same row in the places file
+  do
+    local function chest_uids(live)
+      local rows = { prow("chest", "a1", 10, 1, 1), prow("chest", "c1", 10, 9, 9) }
+      if not live then rows[#rows + 1] = prow("chest", "b1", 10, 5, 5) end
+      local f = fixture({ files = { [K.PLACES] = places(rows) } })
+      if live then
+        f.data.reserved = { chest_row("b1", 5, 5) }
+        -- a listed-but-not-file row (subquest) is the live-only case
+        rows[#rows + 1] = prow("chest", "b1", 10, 0, 0, { src = "subquest" })
+      end
+      local w = f.new()
+      w:refresh(0, true, ALL)
+      w:refresh(10, true, ALL)
+      local t = {}
+      for _, c in ipairs(w:input().chests) do t[#t + 1] = c.uid .. "@" .. c.pos.x end
+      return table.concat(t, ","), w
+    end
+    local want = chest_uids(false)
+    local got, w = chest_uids(true)
+    check("live one row: same output as a file row", got == want)
+    check("live one row: sorted between the cached uids", got == "a1@1.0,b1@5.0,c1@9.0")
+    local b0 = w:stats().eff_builds
+    w:refresh(20, true, ALL)
+    check("live one row: cache hit kept", w:stats().eff_builds == b0)
+  end
+
   -- reset invalidates the merge: no file monsters while the cast is unavailable
   do
     local f, w = cache_world()
@@ -3694,6 +3721,28 @@ do
     local alone = sched_calls({ shops = true })
     check("fsc: sellers appeared", #wb:input().sellers == 1)
     check("fsc: shops with sellers reads as shops alone", both == alone and alone > 0)
+
+    -- the memo is per round: a seller that moves moves its markers
+    local f = fixture()
+    local d = f.data
+    d.needs = { [100] = { { id = 378, num = 1 } } }
+    d.iname = { [378] = "Grimoire" }
+    d.sched_ids = { 2058 }
+    d.shop = { [2058] = 41 }
+    d.npcname = { [2058] = "Dudley" }
+    d.sched = { [2058] = P(100, 0, 100) }
+    d.alive = false
+    d.shops = { [41] = { { item = 378, release_qid = 0 } } }
+    local w = f.new()
+    local tg = { shops = true, sellers = true }
+    w:refresh(0, true, tg)
+    check("fsc: first position", w:input().shops[1].pos.x == 100
+      and w:input().sellers[1].pos.x == 100)
+    d.sched[2058] = P(200, 0, 200)
+    w:poke()
+    w:refresh(1, true, tg)
+    check("fsc: memo is per round, shop", w:input().shops[1].pos.x == 200)
+    check("fsc: memo is per round, seller", w:input().sellers[1].pos.x == 200)
   end
 
   -- item lists: kept per key, rebuilt on a changed id list or a fallback name
@@ -3843,7 +3892,8 @@ do
     d.nodes = { { name = "Node A", pos = P(1, 0, 1) } }
     d.records = { { key = "f1", guid = "f1", picked = false } }
     d.loaded_boss = {}
-    d.respawn = { { key = "r1_0", cid = 1001, cid_name = "ch253000_00", pos = P(10, 0, 10) } }
+    d.respawn = { { key = "r1_0", cid = 1001, cid_name = "ch253000_00", pos = P(10, 0, 10) },
+      { key = "r2_0", cid = 1002, cid_name = "ch220000_00", pos = P(700, 0, 700) } }
     return f, f.new()
   end
   local BASE = { chests = true, treasure = true, tokens = true, beetles = true,
