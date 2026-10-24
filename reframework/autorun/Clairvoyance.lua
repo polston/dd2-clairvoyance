@@ -2410,11 +2410,16 @@ do
                     for _, k in ipairs(p.kinds or {}) do
                       if (k.small == true) == (g[1] == "small") then
                         -- the label is built once per snapshot, not per frame
-                        if k.lbl == nil then
-                          k.lbl = string.format("%s (%d/%d)###wkp_%s_%s",
+                        -- (kept on the snapshot, never written into the published kinds)
+                        local lbls = snapshot.world_kind_lbls
+                        if lbls == nil then lbls = {}; snapshot.world_kind_lbls = lbls end
+                        local lbl = lbls[k]
+                        if lbl == nil then
+                          lbl = string.format("%s (%d/%d)###wkp_%s_%s",
                             k.kind, k.shown or 0, k.known or 0, g[1], k.kind)
+                          lbls[k] = lbl
                         end
-                        if imgui.tree_node(k.lbl) then
+                        if imgui.tree_node(lbl) then
                           local rows = wt.rows("monster", g[1], k.kind)
                           if #rows == 0 then imgui.text("Nothing shown") end
                           draw_rows(cat, rows)
