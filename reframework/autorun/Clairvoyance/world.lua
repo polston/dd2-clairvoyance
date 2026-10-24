@@ -2359,6 +2359,37 @@ function M.game_reads()
     return out
   end
 
+  -- A row array's get_Count; -1 for a missing array or unreadable count.
+  local function sig_count(info)
+    local n = C(G(info, "_BasicRowDatas"), "get_Count")
+    if type(n) == "number" then return n end
+    return -1
+  end
+
+  local function sig_selector(sel, _, acc)
+    acc.n = acc.n + 1
+    local tbl = G(sel, "<Table>k__BackingField")
+    if tbl == nil then
+      acc.parts[#acc.parts + 1] = "0"
+      return
+    end
+    local addr = math.tointeger(C(tbl, "get_address"))
+    if addr == nil then error("table address unreadable") end
+    acc.parts[#acc.parts + 1] = string.format("%x:%d:%d", addr,
+      sig_count(G(tbl, "_GimmickSetInfo")), sig_count(G(tbl, "_EnemySetInfo")))
+  end
+
+  -- Cheap change signal for the reserved selector list (SPEC 31.3.1): the
+  -- selector count, then per selector 0 or address:gimmick count:enemy count.
+  function R.reserved_sig()
+    local acc = { n = 0, parts = {} }
+    local gm = single("app.GenerateManager")
+    local ok = each(G(G(gm, "_ReserveManager"), "_ReservedGenerateSelector"),
+      sig_selector, acc)
+    if not ok then error("reserved selectors unreadable") end
+    return acc.n .. (#acc.parts > 0 and "," or "") .. table.concat(acc.parts, ",")
+  end
+
   function R.loaded_gimmicks()
     local out = {}
     local gm = single("app.GimmickManager")

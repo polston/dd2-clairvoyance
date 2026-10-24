@@ -1052,10 +1052,15 @@ end
 
 -- ===== game_reads against a fake object model =====
 do
+  local addr_seq = 0
   local function obj(fields, methods, tname)
     local o = {}
+    addr_seq = addr_seq + 1
+    local my_addr = 0x1000 + addr_seq * 16
+    function o:get_address() return my_addr end
     function o:get_field(n) return fields and fields[n] end
     function o:call(n, ...)
+      if n == "get_address" then return my_addr end
       local m = methods and methods[n]
       if m then return m(...) end
       return nil
@@ -1074,7 +1079,7 @@ do
       get_Item = function(i) return items[i + 1] end })
   end
   local function array(items)
-    local o = obj()
+    local o = obj(nil, { get_Count = function() return #items end })
     function o:get_elements() return items end
     return o
   end
@@ -1128,6 +1133,35 @@ do
   singletons["app.GenerateManager"] = obj({ _ReserveManager =
     obj({ _ReservedGenerateSelector = list({}) }) })
   check("reads: no reserved rows is a failed read", not pcall(R.reserved_rows))
+
+  -- reserved signature: count, then per selector 0 or addr:gimmicks:enemies
+  local tblA = obj({
+    _GimmickSetInfo = obj({ _BasicRowDatas = array({ row_obj({}) }) }),
+    _EnemySetInfo = obj({ _BasicRowDatas = array({ row_obj({}) }) }) })
+  local tblB = obj({
+    _GimmickSetInfo = obj({ _BasicRowDatas = array({ row_obj({}), row_obj({}) }) }) })
+  local selA = obj({ ["<Table>k__BackingField"] = tblA })
+  local selB = obj({ ["<Table>k__BackingField"] = tblB })
+  local selN = obj({})
+  local addrA, addrB = tblA:get_address(), tblB:get_address()
+  local function set_sels(items)
+    singletons["app.GenerateManager"] = obj({ _ReserveManager =
+      obj({ _ReservedGenerateSelector = list(items) }) })
+  end
+  set_sels({ selA, selB })
+  local ok1, s1 = pcall(R.reserved_sig)
+  check("reads: reserved sig lists count then each table",
+    ok1 and s1 == string.format("2,%x:1:1,%x:2:-1", addrA, addrB))
+  set_sels({ selB, selA })
+  local ok2, s2 = pcall(R.reserved_sig)
+  check("reads: reserved sig follows list order", ok2 and s2 ~= s1)
+  set_sels({ selA, selN })
+  local ok3, s3 = pcall(R.reserved_sig)
+  check("reads: a selector with no table is 0 in its slot",
+    ok3 and s3 == string.format("2,%x:1:1,0", addrA))
+  singletons["app.GenerateManager"] = obj({ _ReserveManager = obj({}) })
+  check("reads: unreadable selector list errors",
+    type(R.reserved_sig) == "function" and not pcall(R.reserved_sig))
 
   -- save records: contexts one hop down, in Record or SaveData
   local function rec(ctxs, via)
