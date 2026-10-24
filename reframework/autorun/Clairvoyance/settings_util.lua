@@ -184,8 +184,8 @@ M.WORLD_BOOLS = { "world_chests", "world_treasure", "world_tokens",
 M.WORLD_NO_SEARCH = { world_show_opened = true, world_undiscovered = true,
   world_shops = true, world_first_token = true }
 
--- Tokens and Monsters each hold two checkboxes in one tree node (SPEC 28.9.4,
--- 28.12.1): first box key -> { tree id, second box key }. WORLD_TREE_SECOND
+-- Tokens and Monsters each pair two keys in one tree node (SPEC 28.9.4,
+-- 28.12.1; Monsters draws them as class nodes with kinds, 29.2): first box key -> { tree id, second box key }. WORLD_TREE_SECOND
 -- is the set of second-box keys (drawn with their first, not on their own).
 M.WORLD_TREES = { world_tokens = { "Seeker's Tokens##wtok", "world_first_token" },
   world_monsters = { "Monsters##wmon", "world_small_monsters" } }

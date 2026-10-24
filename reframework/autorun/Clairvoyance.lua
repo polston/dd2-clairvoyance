@@ -2112,8 +2112,9 @@ do
 
   sec.world_markers = function()
     if imgui.tree_node("World markers##wcfg") then
-      -- SPEC 28.9.4, 28.12.1: Tokens and Monsters each hold two checkboxes
-      -- in one tree node, drawn where the first of the pair sits
+      -- SPEC 28.9.4, 28.12.1: Tokens and Monsters each pair two keys in one
+      -- tree node, drawn where the first of the pair sits (Monsters as class
+      -- nodes with kind checkboxes, 29.2)
       for _, k in ipairs(su.WORLD_BOOLS) do
         local tr = su.WORLD_TREES[k]
         -- the second box of a tree is drawn with its first
