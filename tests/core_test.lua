@@ -3158,19 +3158,19 @@ do
     { from = 6, to = 9, pos = P(5), discovered = true },
     { from = 9, to = 12, pos = P(6), discovered = false },
     { from = 12, to = 18, pos = P(7), discovered = true } } }
-  r = run({}, nil, { route = route, world_max_markers = 0 })
+  r = run({}, nil, { routes = { route }, world_max_markers = 0 })
   local rs = {}
   for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then rs[#rs + 1] = mm end end
   check("npc 12: undiscovered stop skipped, others outside the cap", #rs == 2
     and rs[1].key == "r:12:1" and rs[1].cid == 12 and rs[1].stop == 1
     and rs[1].label == "Mara 06-09" and rs[2].stop == 3 and rs[2].label == "Mara 12-18"
     and #rs[1].qids == 0)
-  r = run({}, nil, { route = route, world_undiscovered = true })
+  r = run({}, nil, { routes = { route }, world_undiscovered = true })
   local n3 = 0
   for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then n3 = n3 + 1 end end
   check("npc 12b: world_undiscovered keeps all three", n3 == 3)
   route.stops[2].discovered = true
-  r = run({}, nil, { route = route })
+  r = run({}, nil, { routes = { route } })
   n3 = 0
   for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then n3 = n3 + 1 end end
   check("npc 12c: three stops give three markers", n3 == 3)
@@ -4069,6 +4069,74 @@ do
   check("is_result: route stop", core.is_result({ cat = "route_stop" }) == false)
   check("is_result: hint pin", core.is_result({ cat = "hint_pin" }) == false)
   check("is_result: first seeker", core.is_result({ cat = "token", first_seeker = true }) == false)
+end
+
+-- v19 (SPEC 32): quest focus
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local function Q(t) return core.parse_query(t) end
+  local SH = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_max_markers = 300, world_origin = P(0, 0, 0), map_origin = P(0, 0, 0),
+    world_show_opened = false, world_undiscovered = false }
+  local function run(world, search, over, ex)
+    local o = { acceptable = {}, names = {} }
+    for k, v in pairs(ex or {}) do o[k] = v end
+    local a = fake_adapter(o)
+    if o.generic then a.is_generic = function(c) return o.generic[c] == true end end
+    if o.main then a.is_side = function(q) return not o.main[q] end end
+    if o.quest_step then a.quest_step = o.quest_step end
+    local show = { startable = true, in_progress = true, quest_items = true,
+      world = world, search = search }
+    for k, v in pairs(SH) do show[k] = v end
+    for k, v in pairs(over or {}) do show[k] = v end
+    return core.compute(a, show)
+  end
+  local function has(list, key)
+    for _, m in ipairs(list or {}) do if m.key == key then return m end end
+    return nil
+  end
+  local function keys(list, prefix)
+    local out = {}
+    for _, m in ipairs(list or {}) do
+      if m.key:sub(1, #prefix) == prefix then out[#out + 1] = m.key end
+    end
+    table.sort(out)
+    return table.concat(out, ",")
+  end
+
+  check("fo 1: marker_cid focus_npc", core.marker_cid({ key = "n:12", cat = "focus_npc", cid = 12 }) == 12
+    and core.marker_cid({ key = "f:4", cat = "focus_place", place = 4 }) == nil
+    and core.marker_cid({ key = "w:npc:9", cat = "npc_search", cid = 9 }) == nil)
+  check("fo 2: focus markers are not results", core.is_result({ cat = "focus_npc" }) == false
+    and core.is_result({ cat = "focus_place" }) == false)
+  check("fo 3: row label [F]", core.row_label({ qid = 3, name = "A", state = "locked" }, nil, true)
+    == "[F] A - locked###qd_3"
+    and core.row_label({ qid = 3, name = "A", state = "locked" }, nil, false) == "A - locked###qd_3")
+  local function sg(dim) return (core.signature({ { key = "k", pos = P(1), qids = {}, label = "L",
+    cat = "chest", dim = dim } }, {})) end
+  check("fo 4: signature hashes dim", sg(true) ~= sg(nil) and sg(false) == sg(nil))
+  local sel = core.minimap_markers({ { key = "f:1", cat = "focus_place", pos = P(3) },
+    { key = "c:5", cat = "startable", pos = P(50) }, { key = "w:chest:a", cat = "chest", pos = P(1) },
+    { key = "n:7", cat = "focus_npc", pos = P(60) } }, P(0), 100, 10)
+  local sk = {}
+  for _, m in ipairs(sel) do sk[#sk + 1] = m.key end
+  check("fo 5: minimap tiers", table.concat(sk, ",") == "c:5,n:7,f:1,w:chest:a")
+  check("fo 6: item walk with focus", core.item_walk_wanted({ focus_on = true }) == true
+    and core.item_walk_mode({ focus_on = true }) == "full"
+    and core.item_walk_wanted({ focus_on = false }) == false)
+  local fa = fake_adapter({ states = { [12] = "completed", [13] = "failed", [14] = "canceled" } })
+  check("fo 7: active set", table.concat(core.focus_active({ 11, 12, 13, 14, 15, 11 }, 15, fa), ",") == "15,11"
+    and #core.focus_active({}, nil, fa) == 0
+    and table.concat(core.focus_active(nil, 11, fa), ",") == "11"
+    and #core.focus_active({ 0, -2 }, 12, fa) == 0)
+  local r1 = { cid = 12, name = "Mara", stops = { { from = 6, to = 9, pos = P(5), discovered = true } } }
+  local r2 = { cid = 13, name = "Bo", stops = { { from = 1, to = 2, pos = P(8), discovered = true } } }
+  local r = run({}, nil, { routes = { r1, r2, { cid = 14, name = "X", err = "no schedule" } } })
+  check("fo 8: every route's stops", keys(r.markers, "r:") == "r:12:1,r:13:1"
+    and has(r.markers, "r:13:1").label == "Bo 01-02")
+  r = run({}, nil, { route = r2 })
+  check("fo 8b: the single route field is not read", has(r.markers, "r:13:1") == nil)
 end
 
 if failures > 0 then os.exit(1) end

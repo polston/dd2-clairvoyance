@@ -1811,6 +1811,24 @@ end
 -- Seeker's Token spot is kept as a marker but listed nowhere (SPEC 28.9.3).
 function M.is_result(m)
   return m.cat ~= "route_stop" and m.cat ~= "hint_pin" and not m.first_seeker
+    and m.cat ~= "focus_npc" and m.cat ~= "focus_place"
+end
+
+-- v19 (SPEC 32): the focused quests that are still live, tracked first, then
+-- focus_qids in order; numbers above 0 only, no repeats, minus quests whose
+-- state is completed, failed or canceled.
+function M.focus_active(focus_qids, tracked_qid, adapter)
+  local out, seen = {}, {}
+  local function add(q)
+    if type(q) ~= "number" or q <= 0 or seen[q] then return end
+    seen[q] = true
+    local st = adapter.quest_state(q)
+    if st == "completed" or st == "failed" or st == "canceled" then return end
+    out[#out + 1] = q
+  end
+  add(tracked_qid)
+  for _, q in ipairs(type(focus_qids) == "table" and focus_qids or {}) do add(q) end
+  return out
 end
 
 -- The `limit` (default WORLD_ROWS, ten) nearest entries to origin as panel
@@ -1970,11 +1988,11 @@ local function usable(e) return type(e) == "table" and not e.missing end
 local function nonempty(s) return type(s) == "string" and s ~= "" end
 
 -- Row label: the visible text, tags, then a stable ImGui id after ###.
-function M.row_label(rec, nearest_qid)
+function M.row_label(rec, nearest_qid, focused)
   local tags = ""
   if rec.tracked then tags = tags .. " [tracked]" end
   if rec.qid == nearest_qid then tags = tags .. " [nearest]" end
-  return rec.name .. " - " .. rec.state .. (rec.waiting or "") .. tags
+  return (focused and "[F] " or "") .. rec.name .. " - " .. rec.state .. (rec.waiting or "") .. tags
     .. "###qd_" .. rec.qid
 end
 
@@ -2523,18 +2541,19 @@ function M.compute(adapter, show)
   -- v14 (SPEC 22.8.4, 22.11.3): the route stops and hint pins, outside the
   -- cap and the search filter. cid / stop and qid / i identify the icon.
   local undisc = show.world_undiscovered == true
-  local route = show.route
-  if type(route) == "table" and type(route.stops) == "table"
-    and type(route.cid) == "number" then
-    for n, s in ipairs(route.stops) do
-      if type(s) == "table" and valid_pos(s.pos)
-        and (s.discovered ~= false or undisc) then
-        markers[#markers + 1] = {
-          key = string.format("r:%d:%d", math.floor(route.cid), n),
-          cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
-          label = string.format("%s %02d-%02d", tostring(route.name),
-            math.floor(tonumber(s.from) or 0), math.floor(tonumber(s.to) or 0)),
-          cid = route.cid, stop = n }
+  for _, route in ipairs(type(show.routes) == "table" and show.routes or {}) do
+    if type(route) == "table" and type(route.stops) == "table"
+      and type(route.cid) == "number" then
+      for n, s in ipairs(route.stops) do
+        if type(s) == "table" and valid_pos(s.pos)
+          and (s.discovered ~= false or undisc) then
+          markers[#markers + 1] = {
+            key = string.format("r:%d:%d", math.floor(route.cid), n),
+            cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
+            label = string.format("%s %02d-%02d", tostring(route.name),
+              math.floor(tonumber(s.from) or 0), math.floor(tonumber(s.to) or 0)),
+            cid = route.cid, stop = n }
+        end
       end
     end
   end
@@ -2593,7 +2612,7 @@ function M.signature(markers, committed)
     parts[#parts + 1] = string.format("%s=%d:%d:%d[%s]{%s}{%s}<%s>",
       m.key, math.floor(c.x), math.floor(c.y), math.floor(c.z),
       table.concat(m.qids, ","), m.label or "", m.hover or "",
-      (m.cat or "") .. (m.done and "|d" or "") .. (m.faded and "|f" or "") .. (m.step and ("|s" .. m.step) or ""))
+      (m.cat or "") .. (m.done and "|d" or "") .. (m.faded and "|f" or "") .. (m.dim and "|m" or "") .. (m.step and ("|s" .. m.step) or ""))
   end
   table.sort(parts)
   return table.concat(parts, "|"), new_committed
@@ -2602,6 +2621,7 @@ end
 -- v3 overhead layer (SPEC §10.2c): pure helpers, no sdk.
 function M.marker_cid(m)
   if type(m) ~= "table" or type(m.key) ~= "string" then return nil end
+  if m.cat == "focus_npc" then return m.cid end
   return tonumber(m.key:match("^c:(%d+)$"))
 end
 
@@ -2651,14 +2671,15 @@ end
 function M.item_walk_wanted(show)
   return show ~= nil and ((show.in_progress == true and show.quest_items == true)
     or show.world_sellers == true
-    or (show.inventory_quest_marks == true and show.item_menu_open == true))
+    or (show.inventory_quest_marks == true and show.item_menu_open == true)
+    or show.focus_on == true)
 end
 
 -- v14 (SPEC 22.10.1): "full" when the round also feeds the quest-item and
 -- seller markers, "needs" when only the item menu marks want it.
 function M.item_walk_mode(show)
   if show ~= nil and ((show.in_progress == true and show.quest_items == true)
-    or show.world_sellers == true) then
+    or show.world_sellers == true or show.focus_on == true) then
     return "full"
   end
   return "needs"
@@ -2692,7 +2713,8 @@ function M.minimap_markers(markers, origin, radius, cap)
       -- quest and item markers 0, route stops and hint pins 1, world 2
       local w = 0
       if WORLD_DEF[m.cat] ~= nil then w = 2
-      elseif m.cat == "route_stop" or m.cat == "hint_pin" then w = 1 end
+      elseif m.cat == "route_stop" or m.cat == "hint_pin"
+        or m.cat == "focus_place" then w = 1 end
       if lim >= 1 and (n < lim or before(w, d2, m.key, sel[n])) then
         local i = n < lim and n + 1 or n
         if n < lim then n = n + 1 end
