@@ -670,6 +670,10 @@ do
   check("set_kind_off bad class and kind", not su.set_kind_off(st, "x", "A", true)
     and not su.set_kind_off(st, "large", "", true)
     and not su.set_kind_off(st, "large", string.rep("k", 65), true))
+  check("set_kind_off refuses a family entry of the wrong length",
+    not su.set_kind_off(st, "small", "fam:ab", true)
+    and su.set_kind_off(st, "small", "fam:ch220", true)
+    and su.set_kind_off(st, "small", "fam:ch220", false))
   for i = 1, 200 do su.set_kind_off(st, "small", string.format("k%03d", i), true) end
   check("set_kind_off refuses past the cap", not su.set_kind_off(st, "small", "extra", true)
     and su.set_kind_off(st, "small", "k001", true))

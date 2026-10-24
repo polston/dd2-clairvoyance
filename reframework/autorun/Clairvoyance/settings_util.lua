@@ -553,6 +553,7 @@ end
 function M.set_kind_off(settings, class, kind, off)
   if class ~= "large" and class ~= "small" then return false end
   if type(kind) ~= "string" or #kind < 1 or #kind > M.MONSTER_KIND_MAX then return false end
+  if is_fam_key(kind) and #kind ~= #FAM_PREFIX + 5 then return false end
   local o = settings.world_monster_off
   if type(o) ~= "table" then o = { large = {}, small = {} }; settings.world_monster_off = o end
   if type(o[class]) ~= "table" then o[class] = {} end
