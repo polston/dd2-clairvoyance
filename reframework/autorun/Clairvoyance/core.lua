@@ -636,12 +636,17 @@ local function entry_hay(cat, e, drops, md)
     end
     return hay_join(parts)
   elseif cat == "monster" then
-    local parts = { monster_label(e) }
+    local parts = { e.name }   -- the name, never the "(respawning)" label
     if md == nil then md = monster_drops_of(e, drops) end   -- false: none
     for _, n in ipairs(md and md.names or {}) do parts[#parts + 1] = n end
     return hay_join(parts)
   elseif cat == "seller" then
-    return hay_join({ seller_label(e) })
+    -- item, NPC and quest fields, never the "sold by / for / may be locked" words
+    local parts = {}
+    if e.item_name ~= nil then parts[#parts + 1] = e.item_name end
+    if e.npc ~= nil then parts[#parts + 1] = e.npc end
+    if type(e.quest) == "string" and e.quest ~= "" then parts[#parts + 1] = e.quest end
+    return hay_join(parts)
   end
   return hay_join({ e.name })
 end

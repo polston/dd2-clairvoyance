@@ -3352,5 +3352,39 @@ do
   end
 end
 
+-- haystacks from fields (SPEC 28.4.1)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(q)
+    local s = {}
+    for k, v in pairs(SHB) do s[k] = v end
+    s.search = core.parse_query(q)
+    return s
+  end
+  local w = {
+    monsters = { { uid = "m1", cid = 101, cids = { 101 }, name = "Goblin",
+      respawning = true, pos = P(0, 0, 0) } },
+    drops = { [101] = { "Rotten Meat" } },
+    sellers = { { shop = 7, item = 5, item_name = "Potion", npc = "Ana", quest = "Sky",
+      maybe_locked = true, pos = P(1, 0, 0), qids = {} } },
+    chests = { { uid = "c1", pos = P(2, 0, 0), state = "unopened", item_name = "Ferrystone" } },
+  }
+  local paths = { { "uncached", core.world_markers }, { "cached", core.world_markers_cached } }
+  for _, pa in ipairs(paths) do
+    local function n(q) return #pa[2](w, sh(q), O, {}) end
+    for _, q in ipairs({ "respawning", "for", "sold", "by", "may", "locked" }) do
+      check("hay45 " .. q .. " [" .. pa[1] .. "]", n(q) == 0)
+    end
+    check("hay45 monster name [" .. pa[1] .. "]", n("goblin") == 1)
+    check("hay45 drop [" .. pa[1] .. "]", n("rotten") == 1)
+    check("hay45 seller npc [" .. pa[1] .. "]", n("ana") == 1)
+    check("hay45 chest word [" .. pa[1] .. "]", n("chest") >= 1)
+  end
+end
+
 if failures > 0 then os.exit(1) end
 print("core_test: all OK")
