@@ -182,8 +182,8 @@ def quest_of(insts, cont):
             continue
         if el.type == QUEST_FLAG:
             q.append([el.fields["_QuestID"], bool(el.fields["_IsFinishCheck"])])
-        elif el.type == QUEST_VAR:
-            var = True
+        else:
+            var = True  # QuestVariableInfo or an unknown type: gated, no quest named
     if not q and not var:
         return None
     out = {"any": qi.fields.get("_CheckType") == 1, "q": q}

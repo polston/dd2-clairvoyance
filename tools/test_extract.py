@@ -260,6 +260,39 @@ class RowTests(unittest.TestCase):
             ew.collect_rows({"t.user": full, "l.user": lst}, params, {2}, {})
         ew.collect_rows({"t.user": full, "l.user": lst}, params, {99}, {})
 
+    def test_key_locations_and_unknown_element(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        table = [inst(1, "app.GenerateTable", _GimmickSetInfo=R(2)),
+                 inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3), R(4), R(5)]),
+                 inst(3, "app.GenerateRowData", _GimmickID=10, _ManualSetGuid="k5",
+                      _ManualPos=(1.0, 2.0, 3.0), _Container=R(6)),
+                 inst(4, "app.GenerateRowData", _GimmickID=10, _ManualSetGuid="k0",
+                      _ManualPos=(1.0, 2.0, 3.0), _Container=R(7)),
+                 inst(5, "app.GenerateRowData", _GimmickID=10, _ManualSetGuid="unk",
+                      _ManualPos=(1.0, 2.0, 3.0), _Container=R(8)),
+                 inst(6, "app.Container", _GimmickSetting=R(9)),
+                 inst(7, "app.Container", _GimmickSetting=R(10)),
+                 inst(8, "app.Container", _GimmickSetting=R(10), _SetFlagSetting=R(11)),
+                 inst(9, "app.GimmickSetting", _ParamId=1, _KeyLocationId=5),
+                 inst(10, "app.GimmickSetting", _ParamId=1, _KeyLocationId=0),
+                 inst(11, "app.SetFlagSetting", _QuestFlagInfos=R(12)),
+                 inst(12, "app.QuestFlagInfos", _CheckType=0, _Infos=[R(13)]),
+                 inst(13, "app.GenerateManager.QuestFlagInfos.SomethingNew")]
+        lst = [inst(1, "app.GenerateTableData", path="t.user"),
+               inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)], _SubQuestTableList=[],
+                    _MainQuestTableList=[], _RandomNormalTableList=[])]
+        params = {1: {"items": [], "trap": False, "pawn": False}}
+        rows, _unj, _ids, kinds = ew.collect_rows({"t.user": table, "l.user": lst}, params, set(), {})
+        r = {x["uid"]: x for x in rows}
+        self.assertEqual(kinds["key locations"], 1)
+        self.assertNotIn("key locations", r["k5"])
+        self.assertEqual(r["unk"]["quest"], {"any": False, "q": [], "var": True})
+        self.assertEqual(kinds["quest"], 1)
+
     def test_missing_key_fails(self):
         with tempfile.TemporaryDirectory() as d:
             out = os.path.join(d, "out.json")
