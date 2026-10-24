@@ -4323,6 +4323,10 @@ do
     w:refresh(50, true, C); n[2] = f.reads_n.reserved_rows
     w:refresh(60, true, C); n[3] = f.reads_n.reserved_rows
     check("reserved: age cap", n[1] == 1 and n[2] == 1 and n[3] == 2)
+    w:refresh(70, true, C); n[4] = f.reads_n.reserved_rows
+    local st = w:stats()
+    check("reserved: a read restarts the age",
+      n[4] == 2 and st.reserved_reads == 2 and st.reserved_reused == 2)
   end
   do
     local f, w = rfix("a")
