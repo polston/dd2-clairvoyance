@@ -84,13 +84,17 @@ Seeker's Tokens" and "Finder's Token spot (first token found)": the spot where
 you picked up your first Seeker's Token this playthrough, which a Sphinx riddle
 asks for. It shows even when the other tokens are off. Monsters is a tree of
 "Large monsters" and "Small monsters", each with its own checkbox and one
-checkbox per kind seen (Cyclops, Goblin and so on), so a single kind can be
-switched off. The World panel uses the same trees: the spot is listed first
-under Seeker's Tokens, and Monsters splits into a Large node and a Small node,
-each holding one node per kind. A chest's label ends with its kinds in brackets,
-for example "Chest - Wakestone [stays opened in NG+]", and the map search
-matches those words. Five checkboxes under Chests turn each kind on or off; a
-chest with several kinds is hidden when any one of them is off:
+entry per family (Goblin, Minotaur and so on). A family with several kinds is
+a node holding an "All" checkbox and one checkbox per kind (Goblin, Hobgoblin
+and so on), so a whole family or a single kind can be switched off; a family
+with one kind is just that kind's checkbox. The World panel uses the same
+trees: the spot is listed first under Seeker's Tokens, and Monsters splits
+into a Large node and a Small node, each holding one node per family with
+several kinds (its kinds inside) and the kinds of one-kind families directly.
+A chest's label ends with its kinds in brackets, for example "Chest -
+Wakestone [stays opened in NG+]", and the map search matches those words.
+Five checkboxes under Chests turn each kind on or off; a chest with several
+kinds is hidden when any one of them is off:
 
 1. New shard each cycle: the Wakestone Shard chests that are full again in each
    New Game Plus cycle.
