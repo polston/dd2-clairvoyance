@@ -119,25 +119,32 @@ re.on_config_save(function() pcall(wt.save, wt, "config") end)
 local snapshot = nil      -- { markers, unresolved, unnamed, counts, resolved_count, sig }
 -- Last frame's world toggles (su.world_toggled) and the debug tick ring.
 wt.prev_tg, wt.tick_ring = {}, {}
+-- Monster kinds seen this save, per class, for the World markers tree
+-- (SPEC 29.6.2); filled once per tick from the published kind counts.
+wt.kinds_seen = { large = {}, small = {} }
 -- The World panel rows of one category, cached on the snapshot (the debug
 -- dump reads the same rows). Each row carries its "Show on map" button id.
-wt.rows = function(cat)
-  -- SPEC 28.12.1: "monster_large" / "monster_small" are the Monsters node's
-  -- two children, each its own nearest list over the matching entries
-  local small   -- true: Small child, false: Large child, nil: not a size list
-  if cat == "monster_small" then small = true elseif cat == "monster_large" then small = false end
-  local p = snapshot ~= nil and snapshot.world ~= nil
-    and snapshot.world[small ~= nil and "monster" or cat] or nil
+wt.rows = function(cat, class, kind)
+  -- SPEC 29.6.3: with class ("large" or "small") and kind, the nearest rows
+  -- of that one monster kind, filtered before the row limit; with one
+  -- argument "monster" is still every monster row (the debug dump)
+  local small   -- true: Small class, false: Large class, nil: not a kind list
+  if cat == "monster" and kind ~= nil then small = (class == "small") end
+  local key = cat
+  if small ~= nil then key = class .. "\0" .. kind end
+  local p = snapshot ~= nil and snapshot.world ~= nil and snapshot.world[cat] or nil
   if p == nil then return {} end
   local cache = snapshot.world_rows
   if cache == nil then cache = {}; snapshot.world_rows = cache end
-  local rows = cache[cat]
+  local rows = cache[key]
   if rows == nil then
     local ents = p.entries
     if small ~= nil then
       ents = {}
       for _, e in ipairs(p.entries or {}) do
-        if (e.small == true) == small then ents[#ents + 1] = e end
+        if (e.small == true) == small and (e.kind or "Monster") == kind then
+          ents[#ents + 1] = e
+        end
       end
     end
     rows = core.world_rows(ents, (wt.q("input", nil) or {}).settlements,
@@ -152,7 +159,7 @@ wt.rows = function(cat)
       table.insert(rows, 1, { text = "Finder's Token spot", pos = p.first.pos,
         key = p.first.key, first = true, jump_id = "Show on map##wj_token_first" })
     end
-    cache[cat] = rows
+    cache[key] = rows
   end
   return rows
 end
@@ -830,6 +837,7 @@ re.on_frame(function()
       want_update = true
       pcall(wt.reset, wt)
       wt.world_origin = nil
+      wt.kinds_seen = { large = {}, small = {} }
       wt.map_origin, wt.map_origin_at = nil, nil
       if wt.route_cid ~= nil then logmsg("route cleared: save or session changed") end
       wt.hints_open, wt.route_cid = {}, nil   -- SPEC 22.6.6
@@ -926,6 +934,7 @@ re.on_frame(function()
     for _, k in ipairs(su.WORLD_BOOLS) do show[k] = settings[k] end
     for _, k in ipairs(su.WORLD_KIND_BOOLS) do show[k] = settings[k] end
     show.world_max_markers = settings.world_max_markers
+    show.world_monster_off = settings.world_monster_off
     show.world_origin = wt.world_origin
     show.map_origin = wt.map_origin
     show.world_givers = wt.q("givers", {})
@@ -1003,6 +1012,19 @@ re.on_frame(function()
     local changed = snapshot == nil or sig ~= snapshot.sig
     result.sig = sig
     snapshot = result   -- always replace: counts/unresolved stay fresh
+    do
+      local ks = type(result.world) == "table" and type(result.world.monster) == "table"
+        and result.world.monster.kinds or nil
+      if type(ks) == "table" then
+        wt.kinds_seen = wt.kinds_seen or { large = {}, small = {} }
+        for _, k in ipairs(ks) do
+          if type(k) == "table" and type(k.kind) == "string" then
+            local c = wt.kinds_seen[k.small == true and "small" or "large"]
+            if c ~= nil then c[k.kind] = true end
+          end
+        end
+      end
+    end
     if changed and ui_map ~= nil then want_update = true end
   end)
   if not ok then logerr("tick error: " .. tostring(err)) end
@@ -1709,6 +1731,25 @@ local function install_debug()
           tostring(qid), tostring(idx), tostring(label), #list))
         return #list
       end,
+      -- same effect as ticking one kind checkbox (SPEC 29.6.7); false and no
+      -- change for a bad class, a bad kind, or a class already at the cap
+      monster_kind = function(kind, class, off)
+        if class ~= "large" and class ~= "small" then return false end
+        if type(kind) ~= "string" or #kind < 1 or #kind > su.MONSTER_KIND_MAX then return false end
+        local o = settings.world_monster_off
+        if type(o) ~= "table" then o = { large = {}, small = {} }; settings.world_monster_off = o end
+        if type(o[class]) ~= "table" then o[class] = {} end
+        if off == true then
+          local n = 0
+          for _, v in pairs(o[class]) do if v == true then n = n + 1 end end
+          if o[class][kind] ~= true and n >= su.MONSTER_OFF_MAX then return false end
+          o[class][kind] = true
+        else
+          o[class][kind] = nil
+        end
+        save_settings(); want_update = true; last_tick = 0.0
+        return true
+      end,
       -- stats plus at most 20 rows (counts and labels); positions go to the log only
       world = function()
         local st = wt.q("stats", {})
@@ -1731,6 +1772,8 @@ local function install_debug()
           end
         end
         st.rows = rows
+        st.monster_kinds = sn ~= nil and type(sn.monster) == "table" and sn.monster.kinds or nil
+        st.kinds_seen = wt.kinds_seen
         st.first_token = sn ~= nil and sn.token ~= nil and sn.token.first or nil
         st.cursor = ui_map ~= nil and adapter.map_cursor ~= nil
           and adapter.map_cursor(ui_map) or nil
@@ -1918,6 +1961,8 @@ do
           off[#off + 1] = string.lower(su.WORLD_BOOL_LABEL[k])
         end
       end
+      local kn = su.monster_off_count(settings.world_monster_off)
+      if kn > 0 then off[#off + 1] = kn .. " monster kinds" end
       if #off > 0 then imgui.text("Not searched (off): " .. table.concat(off, ", ")) end
       if snapshot == nil then
         imgui.text("No results yet")
@@ -2053,6 +2098,34 @@ do
     if changed then want_update = true; last_tick = 0.0; save_settings() end
   end
 
+  -- SPEC 29.2: one monster class node: its class checkbox, then one
+  -- checkbox per kind seen or switched off.
+  wt.kind_tree = function(title, class, key)
+    if not imgui.tree_node(title) then return end
+    wt.wbox(key)
+    local class_on = settings[key] == true
+    local off = settings.world_monster_off
+    if type(off) ~= "table" then off = { large = {}, small = {} }; settings.world_monster_off = off end
+    if type(off[class]) ~= "table" then off[class] = {} end
+    local offs = off[class]
+    local n_off = 0
+    for _, v in pairs(offs) do if v == true then n_off = n_off + 1 end end
+    local list = su.monster_kind_list((wt.kinds_seen or {})[class], offs)
+    if #list == 0 then imgui.text(su.kind_empty_text(class_on)) end
+    for i, kind in ipairs(list) do
+      local is_off = offs[kind] == true
+      local st = su.kind_box(kind, class_on, n_off, is_off)
+      imgui.begin_disabled(st == "disabled")
+      local changed, v = imgui.checkbox(kind .. "##wk_" .. class .. "_" .. i, not is_off)
+      imgui.end_disabled()
+      if changed and st ~= "disabled" then
+        if v then offs[kind] = nil else offs[kind] = true end
+        save_settings(); want_update = true; last_tick = 0.0
+      end
+    end
+    imgui.tree_pop()
+  end
+
   sec.world_markers = function()
     if imgui.tree_node("World markers##wcfg") then
       -- SPEC 28.9.4, 28.12.1: Tokens and Monsters each hold two checkboxes
@@ -2061,7 +2134,12 @@ do
         local tr = su.WORLD_TREES[k]
         -- the second box of a tree is drawn with its first
         local open = not su.WORLD_TREE_SECOND[k] and (tr == nil or imgui.tree_node(tr[1]))
-        if open then
+        if open and k == "world_monsters" then
+          -- SPEC 29.2: Monsters is a tree of Large and Small, each down to its kinds
+          wt.kind_tree("Large monsters##wmonL", "large", "world_monsters")
+          wt.kind_tree("Small monsters##wmonS", "small", "world_small_monsters")
+          imgui.tree_pop()
+        elseif open then
           wt.wbox(k)
           if tr ~= nil then
             wt.wbox(tr[2])
@@ -2335,17 +2413,30 @@ do
                 if #rows == 0 then imgui.text("Nothing shown") end
                 draw_rows(cat, rows)
               else
-                -- SPEC 28.12.1: Monsters holds a Large and a Small child node
+                -- SPEC 29.6.3: Monsters holds a Large and a Small node, each
+                -- holding one node per kind
                 if p.shown == 0 then imgui.text("Nothing shown") end
                 local ss, sk = p.small_shown or 0, p.small_known or 0
-                local sub = { { "monster_large", string.format("Large monsters (%d/%d)###wmonl",
-                    p.shown - ss, p.known - sk) },
-                  { "monster_small", string.format("Small monsters (%d/%d)###wmons", ss, sk) } }
+                local sub = { { "large", string.format("Large monsters (%d/%d)###wmonl",
+                    p.shown - ss, p.known - sk), p.shown - ss },
+                  { "small", string.format("Small monsters (%d/%d)###wmons", ss, sk), ss } }
                 for _, g in ipairs(sub) do
                   if imgui.tree_node(g[2]) then
-                    local rows = wt.rows(g[1])
-                    if #rows == 0 then imgui.text("Nothing shown") end
-                    draw_rows(cat, rows)
+                    local any = false
+                    for _, k in ipairs(type(p.kinds) == "table" and p.kinds or {}) do
+                      if type(k) == "table" and type(k.kind) == "string"
+                        and (k.small == true) == (g[1] == "small") then
+                        any = true
+                        if imgui.tree_node(string.format("%s (%d/%d)###wkp_%s_%s",
+                          k.kind, k.shown or 0, k.known or 0, g[1], k.kind)) then
+                          local rows = wt.rows("monster", g[1], k.kind)
+                          if #rows == 0 then imgui.text("Nothing shown") end
+                          draw_rows(cat, rows)
+                          imgui.tree_pop()
+                        end
+                      end
+                    end
+                    if not any or g[3] <= 0 then imgui.text("Nothing shown") end
                     imgui.tree_pop()
                   end
                 end

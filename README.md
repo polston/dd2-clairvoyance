@@ -82,10 +82,12 @@ opened and collected, undiscovered areas) and a cap on the number of markers.
 Two categories are trees with two checkboxes each. Seeker's Tokens holds "All
 Seeker's Tokens" and "Finder's Token spot (first token found)": the spot where
 you picked up your first Seeker's Token this playthrough, which a Sphinx riddle
-asks for. It shows even when the other tokens are off. Monsters holds "Large
-monsters" and "Small monsters", and each one works on its own. The World panel
-uses the same trees: the spot is listed first under Seeker's Tokens, and
-Monsters splits into a Large node and a Small node. A chest's label ends with its kinds in brackets,
+asks for. It shows even when the other tokens are off. Monsters is a tree of
+"Large monsters" and "Small monsters", each with its own checkbox and one
+checkbox per kind seen (Cyclops, Goblin and so on), so a single kind can be
+switched off. The World panel uses the same trees: the spot is listed first
+under Seeker's Tokens, and Monsters splits into a Large node and a Small node,
+each holding one node per kind. A chest's label ends with its kinds in brackets,
 for example "Chest - Wakestone [stays opened in NG+]", and the map search
 matches those words. Five checkboxes under Chests turn each kind on or off; a
 chest with several kinds is hidden when any one of them is off:
