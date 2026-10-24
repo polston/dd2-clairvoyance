@@ -47,3 +47,4 @@ here and never pushed; roadmap and spec edits are committed there, not in this r
    from the committed `data/Clairvoyance_places.json`; releases are automatic from
    Conventional Commit types on push to master (`scripts/next_version.py`), never hand-tagged.
 7. Commit titles must follow Conventional Commits: `type(scope)?!?: description` with type feat, fix, perf, refactor, docs, test, build, ci, chore, style or revert.
+8. README install and requirements steps may name the release page, a mod manager and the required plugins (operator ruling 2026-10-24); the no-naming rule covers code provenance, other mods' authors and hint sources, not install instructions.
