@@ -3340,7 +3340,8 @@ end
 -- item marker shares a UniqId with a quest marker or another item marker
 -- in one snapshot. A.map_marker_guid is the ONE place that picks the
 -- prefix per marker; add_markers passes every marker through it.
--- Prefixes: quest ...-4000-, item ...-4001-, world ...-4002-.
+-- Prefixes: quest ...-4000-, item ...-4001-, world ...-4002-, route ...-4003-,
+-- pin ...-4004-, focus npc ...-4005-, focus place ...-4006-.
 do
   local ITEM_GUID_PREFIX = "51a1c0de-0000-4001-8000-"
   function A.item_marker_guid(id, ord)
@@ -3358,8 +3359,18 @@ do
   -- v14 (SPEC 22.6.6): route stops and hint pins; 32 slots per owner
   local ROUTE_GUID_PREFIX = "51a1c0de-0000-4003-8000-"
   local PIN_GUID_PREFIX = "51a1c0de-0000-4004-8000-"
+  local FOCUS_NPC_GUID_PREFIX = "51a1c0de-0000-4005-8000-"
+  local FOCUS_PLACE_GUID_PREFIX = "51a1c0de-0000-4006-8000-"
   function A.map_marker_guid(m)
     local c = m.cat
+    if c == "focus_npc" then
+      return A.guid_parse(FOCUS_NPC_GUID_PREFIX .. string.format("%012x",
+        m.cid % 0x1000000000000))
+    end
+    if c == "focus_place" then
+      return A.guid_parse(FOCUS_PLACE_GUID_PREFIX .. string.format("%012x",
+        m.place % 0x1000000000000))
+    end
     if c == "route_stop" then
       return A.guid_parse(ROUTE_GUID_PREFIX .. string.format("%012x",
         (m.cid * 32 + m.stop) % 0x1000000000000))
