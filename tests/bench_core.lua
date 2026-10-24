@@ -81,7 +81,6 @@ local function measure(text)
   local total = (os.clock() - total0) * 1000 / RUNS
   collectgarbage("restart")
   return median(ms), core.world_stats.hay_builds - hb0, total,
-    (core.world_stats.cand_builds - cb0) / RUNS,
     (core.world_stats.cand_builds - cb0) / RUNS
 end
 
