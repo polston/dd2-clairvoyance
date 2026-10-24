@@ -141,7 +141,7 @@ check("journal_spoilers stored false kept",
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 151", n == 151)
+  check("defaults key count is 152", n == 152)
   check("first token default on", D.world_first_token == true)
 end
 
@@ -447,7 +447,12 @@ do
     and o.show_completed == true and o.overhead_names == 2)
   local allnew = true
   for k, w in pairs(d) do
-    if old[k] == nil and o[k] ~= w then allnew = false; print("missing default " .. k) end
+    if old[k] == nil then
+      if k == "world_monster_off" then
+        if type(o[k]) ~= "table" or next(o[k].large or { 1 }) ~= nil
+          or next(o[k].small or { 1 }) ~= nil then allnew = false; print("missing default " .. k) end
+      elseif o[k] ~= w then allnew = false; print("missing default " .. k) end
+    end
   end
   check("v13 table gets every new default", allnew)
   check("COLOR_KEYS still 15", #su.COLOR_KEYS == 15)
@@ -600,6 +605,71 @@ do
   check("median even is the lower middle", su.median(l4) == 2)
   check("median even input unchanged", l4[1] == 4 and l4[4] == 2)
   check("median one", su.median({ 7 }) == 7)
+end
+-- world_monster_off and the kind helpers (SPEC 29.2.1, 29.6)
+do
+  local function empty(t) return type(t) == "table" and next(t) == nil end
+  local function wmo(raw) return su.validate(raw).world_monster_off or {} end
+  local d0 = su.defaults().world_monster_off
+  check("monster_off default shape", type(d0) == "table" and empty(d0.large) and empty(d0.small))
+  for _, v in ipairs({ "x", 5 }) do
+    local o = wmo({ world_monster_off = v })
+    check("monster_off " .. tostring(v) .. " -> default", type(o) == "table" and empty(o.large) and empty(o.small))
+  end
+  check("monster_off nil -> default",
+    empty(wmo({}).large) and empty(wmo({}).small))
+  local p = wmo({ world_monster_off = { large = "x", small = { Goblin = true } } })
+  check("monster_off partial keeps good class", empty(p.large) and (p.small or {}).Goblin == true)
+  local junk0 = wmo({ world_monster_off = { large = { [1] = true, A = false, B = "yes", C = 1,
+    [""] = true, [string.rep("k", 65)] = true, [string.rep("k", 64)] = true, K = true, ["z"] = true } } })
+  local junk = junk0.large or {}
+  check("monster_off drops bad keys and values", type(junk0.large) == "table"
+    and next(junk0.large) ~= nil and junk[1] == nil and junk.A == nil and junk.B == nil
+    and junk.C == nil and junk[""] == nil and junk[string.rep("k", 65)] == nil)
+  check("monster_off keeps 1 and 64 byte keys", junk.K == true and junk[string.rep("k", 64)] == true
+    and junk.z == true)
+  local big = {}
+  for i = 1, 250 do big[string.format("k%03d", i)] = true end
+  local kept = wmo({ world_monster_off = { large = big } }).large or {}
+  local cnt, first200 = 0, true
+  for k in pairs(kept) do cnt = cnt + 1 end
+  for i = 1, 200 do if not kept[string.format("k%03d", i)] then first200 = false end end
+  check("monster_off caps at 200 by byte order", cnt == 200 and first200 and kept.k201 == nil)
+  check("monster_off has no RULE", su.set_key({}, "world_monster_off", {}) == false)
+
+  local ok = type(su.monster_kind_list) == "function"
+  local l = ok and su.monster_kind_list({ B = true, A = true }, { C = true, A = true })
+  check("monster_kind_list merges sorted", ok and type(l) == "table" and #l == 3
+    and l[1] == "A" and l[2] == "B" and l[3] == "C")
+  local l0 = ok and su.monster_kind_list(nil, nil)
+  check("monster_kind_list nil -> empty", ok and type(l0) == "table" and #l0 == 0)
+
+  local oc = type(su.monster_off_count) == "function"
+  check("monster_off_count counts both classes", oc
+    and su.monster_off_count({ large = { A = true, B = true }, small = { A = true } }) == 3)
+  check("monster_off_count nil and string", oc and su.monster_off_count(nil) == 0
+    and su.monster_off_count("x") == 0)
+
+  check("monster_class_off_count", type(su.monster_class_off_count) == "function"
+    and su.monster_class_off_count({ A = true, B = false, C = true }) == 2
+    and su.monster_class_off_count("x") == 0)
+
+  local kb = type(su.kind_box) == "function"
+  check("kind_box class off -> disabled", kb and su.kind_box("A", false, 0, false) == "disabled")
+  check("kind_box long name -> disabled", kb and su.kind_box(string.rep("k", 65), true, 0, false) == "disabled")
+  check("kind_box 199 off, on -> on", kb and su.kind_box("A", true, 199, false) == "on")
+  check("kind_box 200 off, on -> disabled", kb and su.kind_box("A", true, 200, false) == "disabled")
+  check("kind_box 200 off, off kind -> off", kb and su.kind_box("A", true, 200, true) == "off")
+  check("kind_box plain on", kb and su.kind_box("A", true, 0, false) == "on")
+
+  local ke = type(su.kind_empty_text) == "function"
+  check("kind_empty_text", ke and su.kind_empty_text(false) == "Turn on to list kinds"
+    and su.kind_empty_text(true) == "No kinds seen yet")
+
+  local prev = {}
+  su.world_toggled(prev, { world_chests = true })
+  check("world_toggled ignores world_monster_off",
+    su.world_toggled(prev, { world_chests = true, world_monster_off = { large = { A = true }, small = {} } }) == false)
 end
 if failures > 0 then os.exit(1) end
 print("settings_test: all OK")
