@@ -783,10 +783,19 @@ local function same_src(cat, rec, e, drops)
     if s[1] ~= (e.item_name or false) or s[2] ~= (e.quest_text or false) then return false end
     k = same_strs(s, 3, e.kinds)
     if not k then return false end
-    k = same_names(s, k, e.items)
-    if not k then return false end
+    -- the items are last in the array; the same list table is the same names
+    if rec.items_ref ~= nil and rec.items_ref == e.items then
+      k = rec.sn + 1
+    else
+      k = same_names(s, k, e.items)
+      if not k then return false end
+    end
   elseif cat == "treasure" then
-    k = same_names(s, 1, e.items)
+    if rec.items_ref ~= nil and rec.items_ref == e.items then
+      k = rec.sn + 1
+    else
+      k = same_names(s, 1, e.items)
+    end
   elseif cat == "monster" then
     if s[1] ~= (e.name or false) then return false end
     if drops == nil then
@@ -845,6 +854,11 @@ local function hay_rec(cat, e, drops)
   collect(cat, e, drops)
   M.world_stats.hay_builds = M.world_stats.hay_builds + 1
   local fresh = { sn = scratch_n, src = table.move(scratch, 1, scratch_n, 1, {}) }
+  if cat == "chest" or cat == "treasure" then
+    -- item lists are never changed after they are built (M.item_list returns
+    -- the same table while ids and counts stay equal), so identity is equality
+    fresh.items_ref = type(e.items) == "table" and e.items or nil
+  end
   if cat == "shop" then
     fresh.npc = tostring(e.npc):lower()
     fresh.names = {}
@@ -1596,7 +1610,15 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
     end
   end
   local drops = q ~= nil and world.drops or nil
-  local ft = first_token_cand(world, show)
+  -- the spot's candidate is built once per world table (the grid is rebuilt
+  -- for a new one); the toggle is read every tick
+  local ft
+  if show.world_first_token ~= false then
+    if g.ft_src ~= world.first_token then
+      g.ft_src, g.ft = world.first_token, first_token_cand(world, show)
+    end
+    ft = g.ft
+  end
   local function take(cat, e)
     if not entry_search(cat, e, drops, g, q, ctx) then return end
     stats.cand_builds = stats.cand_builds + 1
