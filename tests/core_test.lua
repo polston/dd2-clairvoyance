@@ -3386,5 +3386,107 @@ do
   end
 end
 
+-- haystack carry (SPEC 28.4.3)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local SHB = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(q)
+    local s = {}
+    for k, v in pairs(SHB) do s[k] = v end
+    s.search = core.parse_query(q or "pot")
+    return s
+  end
+  local stats = core.world_stats
+  local function run(w, q) return core.world_markers_cached(w, sh(q), O, {}) end
+  local function by_key(ms)
+    local t = {}
+    for _, m in ipairs(ms) do t[m.key] = m end
+    return t
+  end
+
+  -- equal entries in fresh tables: each haystack is built once
+  local function mk_equal()
+    return {
+      chests = { { uid = "h1", pos = P(1), state = "unopened", item_name = "Potion",
+        items = { { name = "Potion", n = 1 } }, kinds = { "trap" } } },
+      treasure = { { name = "HTre", pos = P(20), items = { { name = "Elixir" } } } },
+      tokens = { { uid = "ht", pos = P(3), name = "Token A", state = "not" } },
+      monsters = { { uid = "hm", cid = 401, cids = { 401 }, name = "Mino", pos = P(4) } },
+      drops = { [401] = { "Mino Horn" } },
+      sellers = { { shop = 70, item = 5, item_name = "Potion", npc = "Ana", quest = "Q",
+        qids = {}, pos = P(5) } },
+      shops = { { shop = 71, cid = 9171, npc = "Gil", pos = P(6), discovered = true,
+        items = { { name = "Potion" }, { name = "Rope" } } } },
+    }
+  end
+  local b0 = stats.hay_builds
+  run(mk_equal())
+  local first = stats.hay_builds - b0
+  check("hay40 counter moves on first build", first >= 6)
+  b0 = stats.hay_builds
+  run(mk_equal())
+  check("hay40 built once", stats.hay_builds - b0 == 0)
+
+  -- chest item name read falls back, then succeeds
+  local function mk_chest(name)
+    return { chests = { { uid = "hc", pos = P(1), state = "unopened", item_name = name } } }
+  end
+  local ms = run(mk_chest("Item 5"))
+  check("hay40 chest fallback not matched", #ms == 0)
+  b0 = stats.hay_builds
+  ms = run(mk_chest("Potion"))
+  check("hay40 chest rebuilt", stats.hay_builds - b0 == 1)
+  check("hay40 chest matches after", #ms == 1 and ms[1].key == "w:chest:hc")
+  b0 = stats.hay_builds
+  run(mk_chest("Potion"))
+  check("hay40 chest then carried", stats.hay_builds - b0 == 0)
+
+  -- monster drop names change
+  local function mk_mon(list)
+    return { monsters = { { uid = "hd", cid = 402, cids = { 402 }, name = "Troll", pos = P(1) } },
+      drops = { [402] = list } }
+  end
+  ms = run(mk_mon({ "Rotten Meat" }), "rotten")
+  check("hay40 drop matched", #ms == 1)
+  b0 = stats.hay_builds
+  ms = run(mk_mon({ "Bone" }), "rotten")
+  check("hay40 drops rebuilt", stats.hay_builds - b0 == 1 and #ms == 0)
+  b0 = stats.hay_builds
+  ms = run(mk_mon({ "Bone" }), "bone")
+  check("hay40 drops carried", stats.hay_builds - b0 == 0 and #ms == 1)
+
+  -- a shop whose item unlocks between rounds: the label is fresh
+  local function mk_shop(locked)
+    return { shops = { { shop = 72, cid = 9172, npc = "Gil", pos = P(1), discovered = true,
+      items = { { name = "Potion", locked = locked } } } } }
+  end
+  local k1 = by_key(run(mk_shop(true)))["w:shop:72"]
+  local k2 = by_key(run(mk_shop(false)))["w:shop:72"]
+  check("hay40 shop locked r1", k1 ~= nil and k1.label:find("(may be locked)", 1, true) ~= nil)
+  check("hay40 shop label fresh", k2 ~= nil and k2.label:find("(may be locked)", 1, true) == nil)
+
+  -- sellers at one shop keep their own haystacks
+  local sw = { sellers = {
+    { shop = 77, item = 5, item_name = "Potion", npc = "N", qids = {}, quest = "", pos = P(1) },
+    { shop = 77, item = 6, item_name = "Elixir", npc = "N", qids = {}, quest = "", pos = P(2) } } }
+  local pk = by_key(run(sw, "potion"))
+  local ek = by_key(run(sw, "elixir"))
+  check("hay40 seller keys distinct", pk["w:sell:77:5"] ~= nil and pk["w:sell:77:6"] == nil
+    and ek["w:sell:77:6"] ~= nil and ek["w:sell:77:5"] == nil)
+
+  -- the drop hover follows the new entry's label
+  local function mk_resp(r)
+    return { monsters = { { uid = "hg", cid = 403, cids = { 403 }, name = "Gob",
+      respawning = r, pos = P(1) } }, drops = { [403] = { "Rotten Meat" } } }
+  end
+  run(mk_resp(false), "rotten")
+  ms = run(mk_resp(true), "rotten")
+  check("hay40 hover fresh", #ms == 1 and ms[1].hover ~= nil
+    and ms[1].hover:sub(1, 20) == "Gob (respawning)\nDro")
+end
+
 if failures > 0 then os.exit(1) end
 print("core_test: all OK")

@@ -580,11 +580,12 @@ end
 -- SPEC 19.12.4: the drop names of a monster entry over its cluster's cids,
 -- one lower-cased name kept once; nil when there are none. names are the
 -- lower-cased names, shown the display names, in list order.
-local function monster_drops_of(e, drops)
+local function monster_drops_of(e, drops, pre)
   if type(drops) ~= "table" then return nil end
   local names, shown, seen = {}, {}, {}
-  for _, c in ipairs(e.cids or { e.cid }) do
-    local list = drops[c]
+  for i, c in ipairs(e.cids or { e.cid }) do
+    local list
+    if pre then list = pre[i] else list = drops[c] end   -- pre: lists already read
     if type(list) == "table" then
       for _, n in ipairs(list) do
         local low = tostring(n):lower()
@@ -651,22 +652,201 @@ local function entry_hay(cat, e, drops, md)
   return hay_join({ e.name })
 end
 
--- Cached haystack of an entry; `cache` may be nil (uncached path). A
--- monster with drops caches a table (SPEC 19.12.4.3); the haystack is
--- returned first, that table (or nil) second.
-local function hay_of(cache, cat, e, drops)
-  local h = cache and cache[e]
-  if h == nil then
+-- SPEC 28.4.3: haystacks carry across grid rebuilds. The identity cache is
+-- keyed by category and entry identity (seller shop:item, shop id, treasure
+-- name, every other category uid) and stores only the lower-cased strings and
+-- drop-name lists, with the source fields they were built from (a flat
+-- array). A lookup collects the entry's current source fields into `scratch`
+-- and reuses the record only when every field compares equal (strings by
+-- value, a list by length and each name), else rebuilds it. Per-query memos
+-- stay keyed by entry table in the per-grid record, never here. Emptied once
+-- it passes HAY_MAX records (a bound, not a tuning knob).
+local HAY_MAX = 20000
+local hay_ids, hay_n = {}, 0
+local scratch, scratch_n = {}, 0
+local mon_lists = {}   -- the drop lists collect read for the monster, by cid index
+
+local function put(v)
+  scratch_n = scratch_n + 1
+  if v == nil then v = false end
+  scratch[scratch_n] = v
+end
+
+local function put_list(drops, i, c)
+  local list = drops[c]
+  mon_lists[i] = list
+  if type(list) == "table" then
+    put(#list)
+    for _, n in ipairs(list) do put(n) end
+  else
+    put(-1)
+  end
+end
+
+-- The source fields of an entry, in a fixed order, into `scratch`.
+local function collect(cat, e, drops)
+  scratch_n = 0
+  if cat == "chest" then
+    put(e.item_name); put(e.quest_text)
+    local kinds = type(e.kinds) == "table" and e.kinds or nil
+    put(kinds and #kinds or 0)
+    if kinds then for _, k in ipairs(kinds) do put(k) end end
+    local items = type(e.items) == "table" and e.items or nil
+    put(items and #items or 0)
+    if items then for _, it in ipairs(items) do put(it.name) end end
+  elseif cat == "treasure" then
+    local items = type(e.items) == "table" and e.items or nil
+    put(items and #items or 0)
+    if items then for _, it in ipairs(items) do put(it.name) end end
+  elseif cat == "monster" then
+    put(e.name)
+    if drops == nil then
+      put(-2)
+    else
+      -- each cid's drop list is read once; a rebuild reuses the lists read here
+      if e.cids then
+        for i, c in ipairs(e.cids) do put_list(drops, i, c) end
+      else
+        put_list(drops, 1, e.cid)
+      end
+    end
+  elseif cat == "seller" then
+    put(e.item_name); put(e.npc); put(e.quest)
+  elseif cat == "shop" then
+    put(e.npc)
+    local items = e.items
+    put(#items)
+    for _, it in ipairs(items) do put(it.name) end
+  else
+    put(e.name)
+  end
+end
+
+-- Comparisons against the stored source array `s`, from index k: each returns
+-- the next index, or false on a difference. They allocate nothing (the carry
+-- path runs once per entry per grid).
+local function same_names(s, k, items)   -- a count, then each item's name
+  local n = type(items) == "table" and #items or 0
+  if s[k] ~= n then return false end
+  for i = 1, n do
+    if s[k + i] ~= (items[i].name or false) then return false end
+  end
+  return k + n + 1
+end
+
+local function same_strs(s, k, list)   -- a count, then each string
+  local n = type(list) == "table" and #list or 0
+  if s[k] ~= n then return false end
+  for i = 1, n do
+    if s[k + i] ~= list[i] then return false end
+  end
+  return k + n + 1
+end
+
+-- Does the stored record match the entry's current source fields? Mirrors
+-- collect, field for field.
+local function same_src(cat, rec, e, drops)
+  local s = rec.src
+  local k
+  if cat == "chest" then
+    if s[1] ~= (e.item_name or false) or s[2] ~= (e.quest_text or false) then return false end
+    local kinds, items = e.kinds, e.items
+    if kinds == nil then   -- the common case, no call
+      if s[3] ~= 0 then return false end
+      k = 4
+    else
+      k = same_strs(s, 3, kinds)
+      if not k then return false end
+    end
+    local n = type(items) == "table" and #items or 0
+    if s[k] ~= n then return false end
+    for i = 1, n do
+      if s[k + i] ~= (items[i].name or false) then return false end
+    end
+    k = k + n + 1
+  elseif cat == "treasure" then
+    k = same_names(s, 1, e.items)
+  elseif cat == "monster" then
+    if s[1] ~= (e.name or false) then return false end
+    if drops == nil then
+      if s[2] ~= -2 then return false end
+      k = 3
+    else
+      k = 2
+      if e.cids then
+        for _, c in ipairs(e.cids) do
+          k = same_strs(s, k, drops[c])
+          if not k then return false end
+        end
+      else
+        k = same_strs(s, k, drops[e.cid])
+      end
+    end
+  elseif cat == "seller" then
+    if s[1] ~= (e.item_name or false) or s[2] ~= (e.npc or false)
+      or s[3] ~= (e.quest or false) then return false end
+    k = 4
+  elseif cat == "shop" then
+    if s[1] ~= (e.npc or false) then return false end
+    k = same_names(s, 2, e.items)
+  else
+    if s[1] ~= (e.name or false) then return false end
+    k = 2
+  end
+  return k == rec.sn + 1
+end
+
+-- The cached record of an entry: { hay, names, shown } for a search entry
+-- (names and shown only for a monster with drops, SPEC 19.12.4.3), or
+-- { npc, names } for a shop (SPEC 19.7). A seller is keyed shop, then item.
+local function hay_rec(cat, e, drops)
+  local bycat = hay_ids[cat]
+  if bycat == nil then bycat = {}; hay_ids[cat] = bycat end
+  local id, sub
+  if cat == "seller" then
+    id, sub = e.shop, e.item
+  elseif cat == "shop" then
+    id = e.shop
+  elseif cat == "treasure" then
+    id = e.name
+  else
+    id = e.uid
+  end
+  local keyed = id ~= nil and id == id and (cat ~= "seller" or (sub ~= nil and sub == sub))
+  local slot = bycat
+  if keyed and cat == "seller" then
+    slot = bycat[id]
+    if slot == nil then slot = {}; bycat[id] = slot end
+    id = sub
+  end
+  local rec = keyed and slot[id] or nil
+  if rec and same_src(cat, rec, e, drops) then return rec end
+  collect(cat, e, drops)
+  M.world_stats.hay_builds = M.world_stats.hay_builds + 1
+  local fresh = { sn = scratch_n, src = table.move(scratch, 1, scratch_n, 1, {}) }
+  if cat == "shop" then
+    fresh.npc = tostring(e.npc):lower()
+    fresh.names = {}
+    for i, it in ipairs(e.items) do fresh.names[i] = tostring(it.name):lower() end
+  else
     local md = false   -- false: looked up, none
     if cat == "monster" and drops ~= nil then
-      md = monster_drops_of(e, drops) or false
+      md = monster_drops_of(e, drops, mon_lists) or false
     end
-    h = entry_hay(cat, e, drops, md)
-    if md then h = { hay = h, names = md.names, shown = md.shown } end
-    if cache then cache[e] = h end
+    fresh.hay = entry_hay(cat, e, drops, md)
+    if md then fresh.names, fresh.shown = md.names, md.shown end
   end
-  if type(h) == "table" then return h.hay, h end
-  return h
+  if keyed then
+    if rec ~= nil then
+      slot[id] = fresh
+    elseif hay_n >= HAY_MAX then
+      hay_ids, hay_n = {}, 0   -- over the bound: start empty, this one is rebuilt next time
+    else
+      hay_n = hay_n + 1
+      slot[id] = fresh
+    end
+  end
+  return fresh
 end
 
 -- SPEC 28.4.2: does the entry match the query? One path for the cached and the
@@ -679,13 +859,18 @@ local function entry_search(cat, e, drops, gc, q, ctx)
   if gc.mkey ~= q.key or gc.match == nil then
     gc.mkey, gc.match, gc.dhov = q.key, {}, {}
   end
-  local hay, dh = hay_of(gc.hay, cat, e, drops)
+  local rec = gc.hay[e]   -- per-grid memo by entry table over the identity cache
+  if rec == nil then
+    rec = hay_rec(cat, e, drops)
+    gc.hay[e] = rec
+  end
   local m = gc.match[e]
   if m == nil then
-    m = query_match(q, hay)
+    m = query_match(q, rec.hay)
     gc.match[e] = m
   end
   if not m then return false end
+  local dh = rec.names and rec or nil   -- a monster with drops
   if dh then
     local hv = gc.dhov[e]
     if hv == nil then
@@ -699,15 +884,10 @@ local function entry_search(cat, e, drops, gc, q, ctx)
 end
 
 -- SPEC 19.7: the counting items a query selects from a shop entry, or nil.
--- hay = { npc = <lower>, names = { <lower>, ... } } (cached per entry).
-local function shop_hay(cache, e)
-  local h = cache and cache[e]
-  if h == nil then
-    h = { npc = tostring(e.npc):lower(), names = {} }
-    for i, it in ipairs(e.items) do h.names[i] = tostring(it.name):lower() end
-    if cache then cache[e] = h end
-  end
-  return h
+-- hay = { npc = <lower>, names = { <lower>, ... } } (the identity cache,
+-- SPEC 28.4.3; only a search reads it).
+local function shop_hay(e)
+  return hay_rec("shop", e)
 end
 
 local function shop_listing(e, q, h)
@@ -902,20 +1082,28 @@ end
 -- entries) or show.world_shops is on (every entry with stock). With neither
 -- the shop list is not read at all. Returns the list, the entry count and
 -- the shop-id -> visible-candidate set.
-local function shop_cands(world, q, ctx, cache, shops_on)
+local function shop_cands(world, q, ctx, gc, shops_on)
   local out, shop_of = {}, {}
   local list = (q ~= nil or shops_on) and type(world.shops) == "table"
     and world.shops or {}
   ctx.slabel = {}
+  -- the listing and label memo: one record per entry table in the per-grid
+  -- record (no lower-cased names in it; the uncached path passes none)
+  local memo = gc and gc.shop
+  if memo == nil then
+    memo = {}
+    if gc then gc.shop = memo end
+  end
   -- no-search key "" is distinct from every query key (a query has a term)
   local qkey = q ~= nil and q.key or ""
   for _, e in ipairs(list) do
     if valid_pos(e.pos) and type(e.items) == "table" then
-      local h = shop_hay(cache, e)
+      local h = memo[e]
+      if h == nil then h = {}; memo[e] = h end
       if h.qkey ~= qkey then   -- listing and label change only with the query
         h.qkey = qkey
         if q ~= nil then
-          h.list = shop_listing(e, q, h) or false
+          h.list = shop_listing(e, q, shop_hay(e)) or false
           h.label = h.list and shop_label(e, h.list) or nil
         else
           h.list = (#e.items > 0) and e.items or false
@@ -1194,7 +1382,7 @@ end
 -- entries (x, z cells) is built once per world table and small-monster
 -- setting; sellers stay a plain list. The counters are for tests.
 local CELL = 256
-M.world_stats = { grid_builds = 0, cand_builds = 0 }
+M.world_stats = { grid_builds = 0, cand_builds = 0, hay_builds = 0 }
 local grid_cache = { world = nil, small = nil, grid = nil }
 
 local function cell_of(v) return math.floor(v / CELL) end
@@ -1267,7 +1455,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   local shops_on = show.world_shops == true
   if q ~= nil or shops_on then
     local sc, n
-    sc, n, shop_of = shop_cands(world, q, ctx, g.hay, shops_on)
+    sc, n, shop_of = shop_cands(world, q, ctx, g, shops_on)
     panel.shop.known = n
     for _, c in ipairs(sc) do
       stats.cand_builds = stats.cand_builds + 1
