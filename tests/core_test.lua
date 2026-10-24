@@ -3775,12 +3775,16 @@ do
     check("tok1 kept under a query that matches nothing" .. tag, keyset(ms)["w:tok1:t1"] ~= nil)
     check("tok1 is not a search result row" .. tag, #core.world_rows(ms, {}, O) == 0)
     -- a first_seeker entry never becomes a marker, with or without a query
-    local hw = { tokens = { { uid = "h1", pos = P(7), name = "Hidden", state = "not",
+    local hw = { first_token = { uid = "h1", pos = P(7), name = "Spot", state = "not" },
+      tokens = { { uid = "h1", pos = P(7), name = "Hidden", state = "not",
       first_seeker = true }, { uid = "h2", pos = P(8), name = "Shown", state = "not" } } }
     ms = pa[2](hw, sh({ world_tokens = true }), O, {})
-    check("first_seeker entry hidden" .. tag, keys(ms) == "w:tok:h2")
+    check("first_seeker entry hidden" .. tag, keys(ms) == "w:tok1:h1,w:tok:h2")
+    ms = pa[2](hw, sh({ world_tokens = true, world_first_token = false }), O, {})
+    check("first_seeker entry shown when the spot is off" .. tag,
+      keys(ms) == "w:tok:h1,w:tok:h2")
     ms = pa[2](hw, sh({ world_tokens = true, search = Q("hidden") }), O, {})
-    check("first_seeker entry hidden under a query" .. tag, keys(ms) == "")
+    check("first_seeker entry hidden under a query" .. tag, keys(ms) == "w:tok1:h1")
   end
   check("is_result: ordinary marker", core.is_result({ cat = "chest" }) == true)
   check("is_result: route stop", core.is_result({ cat = "route_stop" }) == false)

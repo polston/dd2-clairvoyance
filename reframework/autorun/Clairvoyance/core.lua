@@ -1011,8 +1011,8 @@ local function make_cand(cat, e, ctx)
     c.hidden = (e.discovered == false) and not ctx.undisc
   end
   -- the ordinary token at the First Seeker's Token spot draws as the spot
-  -- (SPEC 28.9.3); it stays in `known`, never becomes a marker
-  if e.first_seeker then c.hidden = true end
+  -- (SPEC 28.9.3) while the spot itself is built; it stays in `known`
+  if e.first_seeker and ctx.spot then c.hidden = true end
   return c
 end
 
@@ -1157,9 +1157,10 @@ end
 
 -- Uncached candidates: every included entry counts in `known`; with a
 -- query only the matching ones become candidates (before make_cand).
-local function world_candidates(world, show, boxes, q)
+local function world_candidates(world, show, boxes, q, spot)
   local cands, known = {}, {}
   local ctx = world_ctx(show, boxes)
+  ctx.spot = spot
   local small_ok = monster_shown(true, show)
   local dups = treasure_dups(world)
   local drops = q ~= nil and world.drops or nil
@@ -1440,7 +1441,7 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   local kept, merged, shops, shop_all, hits = {}, {}, {}, {}, {}
   local shops_on = show.world_shops == true
   local ft = first_token_cand(world, show)
-  local cands, known, shop_of = world_candidates(world, show, boxes, show.search)
+  local cands, known, shop_of = world_candidates(world, show, boxes, show.search, ft ~= nil)
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = known[cat] end
   panel.monster.small_known = known.monster_small
   for _, c in ipairs(cands) do
@@ -1619,6 +1620,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
     end
     ft = g.ft
   end
+  ctx.spot = ft ~= nil
   local function take(cat, e)
     if not entry_search(cat, e, drops, g, q, ctx) then return end
     stats.cand_builds = stats.cand_builds + 1
