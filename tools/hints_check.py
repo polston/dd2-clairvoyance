@@ -1,7 +1,8 @@
 """Compares hint text against fetched reference pages (the .txt files only).
 
 Exits 1 when any hint shares a run of 8 consecutive words with a reference
-text, printing the qid and the shared run. Exits 0 when --ref is absent.
+text, printing the qid and the shared run. Exits 1 when hint text exists and
+--ref is absent; exits 0 with no reference pages only for a file with no text.
 """
 import argparse
 import json
@@ -74,11 +75,14 @@ def main(argv=None):
     ap.add_argument("--hints", default="data/Clairvoyance_hints.json")
     ap.add_argument("--ref", default="reference/hints")
     args = ap.parse_args(argv)
-    if not os.path.isdir(args.ref):
-        print("hints_check: skipped: no reference pages")
-        return 0
     with open(args.hints, encoding="utf-8") as f:
         hints = json.load(f)
+    if not os.path.isdir(args.ref):
+        if any(hint_texts(e) for e in hints.values()):
+            print("hints_check: FAILED: hint text exists but there are no reference pages")
+            return 1
+        print("hints_check: skipped: no hint text")
+        return 0
     found = check(hints, args.ref)
     for qid, run in found:
         print("hints_check: qid %s shares %d words: %s" % (qid, RUN, run))

@@ -79,10 +79,15 @@ class Check(unittest.TestCase):
         code, _ = self.run_main({"5": {"steps": {"0": {"text": words(8)}}}})
         self.assertEqual(code, 0)
 
-    def test_no_reference_folder_exits_zero(self):
+    def test_no_reference_folder_with_text_fails(self):
         code, out = self.run_main({"5": {"quest": words(9)}}, ref=os.path.join(self.d.name, "none"))
+        self.assertEqual(code, 1)
+        self.assertIn("no reference pages", out)
+
+    def test_no_reference_folder_without_text_skips(self):
+        code, out = self.run_main({"5": {"items": [300]}}, ref=os.path.join(self.d.name, "none"))
         self.assertEqual(code, 0)
-        self.assertIn("skipped: no reference pages", out)
+        self.assertIn("skipped: no hint text", out)
 
 
 class MergePins(unittest.TestCase):
