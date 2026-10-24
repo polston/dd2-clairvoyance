@@ -188,13 +188,14 @@ function M.median(list)
   return s[(n + 1) // 2]
 end
 
--- True when any world toggle is on in `settings` and was not on in `prev`
--- (SPEC 28.7.3); then records every toggle's current value into `prev`.
-function M.world_turned_on(prev, settings)
+-- True when any world toggle changed either way (off-to-on or on-to-off)
+-- between `prev` and `settings`; then records every toggle's current value
+-- into `prev`.
+function M.world_toggled(prev, settings)
   local turned = false
   for _, k in ipairs(M.WORLD_BOOLS) do
     local on = settings[k] == true
-    if on and prev[k] ~= true then turned = true end
+    if on ~= (prev[k] == true) then turned = true end
     prev[k] = on
   end
   return turned

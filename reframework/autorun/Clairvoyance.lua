@@ -881,7 +881,7 @@ re.on_frame(function()
     wt.search_on = show.search ~= nil
     -- SPEC 20.1.4, 28.7.3: any world toggle turning on pokes the round the same way
     wt.prev_tg = wt.prev_tg or {}
-    if su.world_turned_on(wt.prev_tg, settings) then wt.q("poke", nil) end
+    if su.world_toggled(wt.prev_tg, settings) then wt.q("poke", nil) end
     local t0 = os.clock()
     -- v10 (SPEC 17.3a): world round, own pcall so a raise never skips compute;
     -- inside the timed window. The gate (evaluated here) is: a snapshot from
