@@ -135,11 +135,11 @@ check("journal_spoilers stored false kept",
 -- exact defaults key count (24 after the per-category icon keys, plus
 -- journal_spoilers, plus 23 world-tracker keys (SPEC 17.5, 17.10.13),
 -- plus 8 v14 keys (SPEC 22.6), plus 83 style and route keys (SPEC 23.4),
--- plus 2 coordinate readout keys)
+-- plus 2 coordinate readout keys, plus 5 chest kind keys)
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 145", n == 145)
+  check("defaults key count is 150", n == 150)
 end
 
 -- world tracker settings
@@ -519,5 +519,33 @@ do
   check("NO_CONTROL_KEYS", #su.NO_CONTROL_KEYS == 1 and su.NO_CONTROL_KEYS[1] == "palette")
 end
 
+-- v14 chest kind filters (SPEC 27.6)
+do
+  local KINDS = { "world_kind_ng_shard", "world_kind_kept", "world_kind_quest",
+    "world_kind_trap", "world_kind_pawn" }
+  check("WORLD_KIND_BOOLS has five keys", #su.WORLD_KIND_BOOLS == 5)
+  local inbool = {}
+  local old = su.validate({})
+  for i, k in ipairs(KINDS) do
+    check("WORLD_KIND_BOOLS[" .. i .. "] is " .. k, su.WORLD_KIND_BOOLS[i] == k)
+    check(k .. " default true", D[k] == true)
+    check(k .. " absent loads true", old[k] == true)
+    check(k .. " stored false kept", su.validate({ [k] = false })[k] == false)
+    check(k .. " string replaced by true", su.validate({ [k] = "no" })[k] == true)
+    check(k .. " has a label", type(su.WORLD_BOOL_LABEL[k]) == "string")
+  end
+  check("kind labels", su.WORLD_BOOL_LABEL.world_kind_ng_shard == "New shard each cycle"
+    and su.WORLD_BOOL_LABEL.world_kind_kept == "Stays opened in NG+"
+    and su.WORLD_BOOL_LABEL.world_kind_quest == "Quest-gated"
+    and su.WORLD_BOOL_LABEL.world_kind_trap == "Trap"
+    and su.WORLD_BOOL_LABEL.world_kind_pawn == "Pawns can't open")
+  check("WORLD_BOOLS still ten", #su.WORLD_BOOLS == 10)
+  local c0 = su.color_of(D, "chest")
+  local half = (((c0 >> 24) & 0xFF) // 2 << 24) | (c0 & 0x00FFFFFF)
+  local faded = su.marker_color(D, { cat = "chest", faded = true })
+  check("marker_color faded halves alpha", faded == half)
+  check("marker_color faded and done halves once",
+    su.marker_color(D, { cat = "chest", faded = true, done = true }) == half)
+end
 if failures > 0 then os.exit(1) end
 print("settings_test: all OK")

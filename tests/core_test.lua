@@ -3214,5 +3214,142 @@ do
     and core.item_walk_mode({ world_sellers = true }) == "full")
 end
 
+-- v14 chest kinds (SPEC 27.4.2, 27.5, 27.6)
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local O = P(0, 0, 0)
+  local SHK = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_show_opened = false, world_undiscovered = false, world_max_markers = 300 }
+  local function sh(over)
+    local s = {}
+    for k, v in pairs(SHK) do s[k] = v end
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  local function chest(uid, x, kinds, extra)
+    local c = { uid = uid, pos = P(x), state = "unopened", kinds = kinds,
+      items = { { name = "Gold", n = 1 } } }
+    for k, v in pairs(extra or {}) do c[k] = v end
+    return c
+  end
+  local function lbl(c) return core.chest_label(c) end
+  check("kinds: kept label", lbl({ items = { { name = "Wakestone", n = 1 } },
+    kinds = { "kept" } }) == "Chest - Wakestone [stays opened in NG+]")
+  check("kinds: ng_shard label", lbl({ kinds = { "ng_shard" } })
+    == "Chest [new shard each cycle]")
+  check("kinds: quest and trap, quest_text", lbl({ items = { { name = "Gold", n = 1 } },
+    kinds = { "quest", "trap" }, quest_text = "after another quest" })
+    == "Chest - Gold [after another quest, trap]")
+  check("kinds: quest without text", lbl({ kinds = { "quest" } }) == "Chest [quest-gated]")
+  check("kinds: pawn phrase", lbl({ kinds = { "pawn" } }) == "Chest [pawns can't open]")
+  check("kinds: three kinds -> two then +1", lbl({ items = { { name = "Gold", n = 1 } },
+    kinds = { "kept", "trap", "pawn" } }) == "Chest - Gold [stays opened in NG+, trap +1]")
+  check("kinds: empty list no bracket", lbl({ kinds = {} }) == "Chest")
+  check("kinds: nil list as before", lbl({ items = { { name = "A", n = 1 } } }) == "Chest - A")
+
+  -- gate_name
+  local ad = { quest_name = function(q) return q == 7 and "Full Seven" or nil end,
+    seen_quest_name = function(q) return q == 8 and "Seen Eight" or nil end }
+  check("gate_name: reveal gives full name", core.gate_name(7, ad, true) == "Full Seven")
+  check("gate_name: no reveal, unseen -> another quest",
+    core.gate_name(7, ad, false) == "another quest")
+  check("gate_name: seen name", core.gate_name(8, ad, false) == "Seen Eight")
+  check("gate_name: reveal falls back to seen", core.gate_name(8, ad, true) == "Seen Eight")
+  check("gate_name: nothing -> another quest, never an id",
+    core.gate_name(9, ad, true) == "another quest")
+  check("gate_name: empty name", core.gate_name(7,
+    { quest_name = function() return "" end }, true) == "another quest")
+
+  -- search
+  local function found(q, w)
+    return #core.world_markers(w, sh({ search = core.parse_query(q) }), O, {})
+  end
+  local w = { chests = {
+    chest("a", 1, { "ng_shard" }), chest("b", 2, { "kept" }),
+    chest("c", 3, { "quest" }, { quest_text = "after Foo" }),
+    chest("d", 4, { "trap" }), chest("e", 5, { "pawn" }), chest("f", 6, nil) } }
+  check("kinds search: new shard", found("new shard each cycle", w) == 1)
+  check("kinds search: NG+", found("stays opened in NG+", w) == 1)
+  check("kinds search: quest-gated", found("quest-gated", w) == 1)
+  check("kinds search: quest_text", found("after foo", w) == 1)
+  check("kinds search: trap", found("trap", w) == 1)
+  check("kinds search: pawns", found("pawns can't open", w) == 1)
+
+  -- filters, uncached and cached
+  local KEYS = { "ng_shard", "kept", "quest", "trap", "pawn" }
+  local function shown(f, over)
+    local ms = f(w, sh(over), O, {})
+    local t = {}
+    for _, m in ipairs(ms) do t[m.key] = true end
+    return t
+  end
+  for _, f in ipairs({ core.world_markers, core.world_markers_cached }) do
+    local all = shown(f)
+    check("kinds filter: all on shows six", (function()
+      local n = 0; for _ in pairs(all) do n = n + 1 end; return n == 6 end)())
+    for i, k in ipairs(KEYS) do
+      local t = shown(f, { ["world_kind_" .. k] = false })
+      local hid = {}
+      for key in pairs(all) do if not t[key] then hid[#hid + 1] = key end end
+      check("kinds filter: " .. k .. " hides only its chest",
+        #hid == 1 and hid[1] == "w:chest:" .. string.char(96 + i))
+    end
+  end
+  do
+    local w2 = { chests = { chest("x", 1, { "kept", "trap" }) } }
+    local c = 0
+    for _, off in ipairs({ "world_kind_kept", "world_kind_trap" }) do
+      if #core.world_markers(w2, sh({ [off] = false }), O, {}) == 0 then c = c + 1 end
+    end
+    check("kinds filter: two kinds hide when either off", c == 2)
+    local none = { chests = { chest("y", 1, nil) } }
+    local s5 = {}
+    for _, k in ipairs(KEYS) do s5["world_kind_" .. k] = false end
+    check("kinds filter: no kinds ignores all five",
+      #core.world_markers(none, sh(s5), O, {}) == 1)
+    check("kinds filter: show without the keys hides nothing",
+      #core.world_markers(w, sh(), O, {}) == 6)
+    local dd = { chests = { chest("z", 1, { "trap" }) },
+      treasure = { { name = "T1", pos = P(1.5), checked = false, discovered = true } } }
+    local ms, pn = core.world_markers(dd, sh({ world_kind_trap = false }), O, {})
+    check("kinds filter: hidden chest still dedupes its treasure", #ms == 0
+      and pn.treasure.known == 0 and pn.chest.known == 1 and pn.chest.shown == 0)
+  end
+
+  -- a name seen later relabels (new world table, same uid)
+  do
+    local function lab(text)
+      local ms = core.world_markers_cached({ chests = { chest("r", 1, { "quest" },
+        { quest_text = text }) } }, sh(), O, {})
+      return ms[1].label
+    end
+    local l1 = lab("after another quest")
+    local l2 = lab("after Foo")
+    check("kinds: quest_text change relabels", l1:find("after another quest", 1, true)
+      and l2:find("after Foo", 1, true) and not l2:find("another", 1, true))
+  end
+
+  -- faded
+  do
+    local fw = { chests = { chest("m", 1, { "quest" }, { quest_met = false }),
+      chest("n", 2, { "quest" }, { quest_met = true }),
+      chest("o", 3, { "quest" }) } }
+    for _, f in ipairs({ core.world_markers, core.world_markers_cached }) do
+      local ms = f(fw, sh(), O, {})
+      local by = {}
+      for _, m in ipairs(ms) do by[m.key] = m end
+      check("faded: quest_met false -> faded", by["w:chest:m"].faded == true)
+      check("faded: met true -> not faded", not by["w:chest:n"].faded)
+      check("faded: nil -> not faded", not by["w:chest:o"].faded)
+    end
+    local sig = function(faded)
+      return (core.signature({ { key = "k", pos = P(1), qids = {}, label = "L",
+        cat = "chest", faded = faded } }, {}))
+    end
+    check("faded: signature differs", sig(true) ~= sig(false) and sig(nil) == sig(false))
+  end
+end
+
 if failures > 0 then os.exit(1) end
 print("core_test: all OK")

@@ -892,12 +892,14 @@ re.on_frame(function()
       -- the round's toggle names are the setting names without "world_"
       local tg = {}
       for _, k in ipairs(su.WORLD_BOOLS) do tg[k:sub(7)] = settings[k] end
+      tg.reveal_gate_names = settings.reveal_gate_names   -- chest quest names (SPEC 27.4.2)
       tg.search = show.search ~= nil
       tg.npc_cids = snapshot ~= nil and snapshot.npc_match_cids or nil   -- Ruling 10
       if wt:refresh(now, gate, tg) then wt.line_txt = nil end
     end)
     if not ok_w then logerr("world round: " .. tostring(err_w)) end
     for _, k in ipairs(su.WORLD_BOOLS) do show[k] = settings[k] end
+    for _, k in ipairs(su.WORLD_KIND_BOOLS) do show[k] = settings[k] end
     show.world_max_markers = settings.world_max_markers
     show.world_origin = wt.world_origin
     show.map_origin = wt.map_origin
@@ -1632,6 +1634,16 @@ local function install_debug()
               break
             end
           end
+          if not hit then
+            for _, k in ipairs(su.WORLD_KIND_BOOLS) do
+              if key == k then
+                settings[k] = v == true
+                want_update = true; last_tick = 0.0; save_settings()
+                hit = true
+                break
+              end
+            end
+          end
           -- v14 (SPEC 23.4.8): every style and route key, validated
           if not hit and (key:find("^style_") or key:find("^outline_")
             or key:find("^route_") or key == "names_color")
@@ -2002,6 +2014,14 @@ do
       for _, k in ipairs(su.WORLD_BOOLS) do
         changed, settings[k] = imgui.checkbox(su.WORLD_BOOL_LABEL[k], settings[k])
         if changed then want_update = true; last_tick = 0.0; save_settings() end
+        if k == "world_chests" then   -- the kind filters sit indented under Chests
+          imgui.indent(20)
+          for _, kk in ipairs(su.WORLD_KIND_BOOLS) do
+            changed, settings[kk] = imgui.checkbox(su.WORLD_BOOL_LABEL[kk], settings[kk])
+            if changed then want_update = true; last_tick = 0.0; save_settings() end
+          end
+          imgui.unindent(20)
+        end
       end
       local wc, wv = imgui.slider_int("Max world markers",
         settings.world_max_markers, 0, su.WORLD_MAX_MARKERS)

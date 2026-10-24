@@ -105,15 +105,22 @@ function M.item_need_table(records, held)
   return out, ignored
 end
 
+-- SPEC 13.3d, 27.4.2: the name a gate shows for one quest: the full name only
+-- with `reveal`, else the seen name, else "another quest"; never an id.
+function M.gate_name(qid, adapter, reveal)
+  local nm
+  if reveal then nm = adapter.quest_name(qid) end
+  if (nm == nil or nm == "") and adapter.seen_quest_name then
+    nm = adapter.seen_quest_name(qid)
+  end
+  if nm == nil or nm == "" then nm = "another quest" end
+  return nm
+end
+
 local function gate_suffix(refs, adapter, show)
   local names, seen = {}, {}
   for _, ref in ipairs(refs) do
-    local nm
-    if show and show.reveal_gate_names then nm = adapter.quest_name(ref) end
-    if (nm == nil or nm == "") and adapter.seen_quest_name then
-      nm = adapter.seen_quest_name(ref)
-    end
-    if nm == nil or nm == "" then nm = "another quest" end
+    local nm = M.gate_name(ref, adapter, show and show.reveal_gate_names)
     if not seen[nm] then
       seen[nm] = true
       names[#names + 1] = nm
@@ -464,16 +471,49 @@ local function items_text(items, skip_nil)
   return top3(names, total)
 end
 
+-- SPEC 27.2, 27.6: the chest kinds, in order, with the phrase labels and
+-- search use and the settings key that turns each off.
+local KIND_PHRASE = { ng_shard = "new shard each cycle",
+  kept = "stays opened in NG+", quest = "quest-gated", trap = "trap",
+  pawn = "pawns can't open" }
+local KIND_KEY = { ng_shard = "world_kind_ng_shard", kept = "world_kind_kept",
+  quest = "world_kind_quest", trap = "world_kind_trap",
+  pawn = "world_kind_pawn" }
+
+-- The label's kind phrases: quest shown as its quest_text (SPEC 27.5).
+local function kind_phrase(e, k)
+  if k == "quest" and type(e.quest_text) == "string" and e.quest_text ~= "" then
+    return e.quest_text
+  end
+  return KIND_PHRASE[k]
+end
+
 -- Chest label (SPEC 17.10.11): item_name wins; else up to three item names,
 -- "<name> x<n>" for n > 1, then " (+N)" for the rest; no items: "Chest".
+-- Kinds (SPEC 27.5) add a bracket: at most two phrases, then " +N".
 function M.chest_label(chest)
   local e = chest or {}
+  local text
   if type(e.item_name) == "string" and e.item_name ~= "" then
-    return "Chest - " .. e.item_name
+    text = e.item_name
+  else
+    text = items_text(e.items, false)
   end
-  local text = items_text(e.items, false)
-  if text == nil then return "Chest" end
-  return "Chest - " .. text
+  local out = text and ("Chest - " .. text) or "Chest"
+  if type(e.kinds) == "table" and #e.kinds > 0 then
+    local ph = {}
+    for _, k in ipairs(e.kinds) do
+      local p = kind_phrase(e, k)
+      if p then ph[#ph + 1] = p end
+    end
+    if #ph > 0 then
+      local shown = ph[1]
+      if #ph >= 2 then shown = shown .. ", " .. ph[2] end
+      if #ph > 2 then shown = shown .. " +" .. (#ph - 2) end
+      out = out .. " [" .. shown .. "]"
+    end
+  end
+  return out
 end
 
 -- Treasure nodes within 3 units of any chest are the chest's own marker
@@ -582,6 +622,12 @@ local function entry_hay(cat, e, drops, md)
     for _, it in ipairs(type(e.items) == "table" and e.items or {}) do
       parts[#parts + 1] = it.name
     end
+    for _, k in ipairs(type(e.kinds) == "table" and e.kinds or {}) do
+      if KIND_PHRASE[k] then parts[#parts + 1] = KIND_PHRASE[k] end
+    end
+    if type(e.quest_text) == "string" and e.quest_text ~= "" then
+      parts[#parts + 1] = e.quest_text
+    end
     return hay_join(parts)
   elseif cat == "treasure" then
     local parts = { "Treasure" }
@@ -670,6 +716,15 @@ local function make_cand(cat, e, ctx)
       if valid_pos(b) and dist2(e.pos, b) <= 1 then near_box = true; break end
     end
     c.hidden = near_box or (c.done and not ctx.show_opened)
+    -- SPEC 27.6: a chest is hidden when any of its kinds is off
+    if not c.hidden and type(e.kinds) == "table" then
+      for _, k in ipairs(e.kinds) do
+        if KIND_KEY[k] and ctx.show_kind[KIND_KEY[k]] == false then
+          c.hidden = true; break
+        end
+      end
+    end
+    c.faded = e.quest_met == false
   elseif cat == "treasure" then
     c.key = "w:tre:" .. tostring(e.name)
     local text = items_text(e.items, true)
@@ -805,6 +860,7 @@ end
 local function world_ctx(show, boxes)
   return { show_opened = show.world_show_opened == true,
     undisc = show.world_undiscovered == true, boxes = boxes or {},
+    show_kind = show,
     mdrop = show.search ~= nil and {} or nil }
 end
 
@@ -1047,7 +1103,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
     local m = { key = c.key, cat = c.cat, qids = c.qids,
       pos = pos_copy(c.pos),
       label = c.label, done = c.done, world_ord = c.world_ord, hover = c.hover,
-      why = c.why }
+      why = c.why, faded = c.faded }
     if c.cat == "npc_search" then m.cid = c.cid end
     if c.cat == "shop" then
       if #c.sells_for > 0 then m.hover = with_sells(c) end
@@ -2089,7 +2145,7 @@ function M.signature(markers, committed)
     parts[#parts + 1] = string.format("%s=%d:%d:%d[%s]{%s}{%s}<%s>",
       m.key, math.floor(c.x), math.floor(c.y), math.floor(c.z),
       table.concat(m.qids, ","), m.label or "", m.hover or "",
-      (m.cat or "") .. (m.done and "|d" or "") .. (m.step and ("|s" .. m.step) or ""))
+      (m.cat or "") .. (m.done and "|d" or "") .. (m.faded and "|f" or "") .. (m.step and ("|s" .. m.step) or ""))
   end
   table.sort(parts)
   return table.concat(parts, "|"), new_committed

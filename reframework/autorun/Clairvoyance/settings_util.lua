@@ -27,6 +27,8 @@ function M.defaults()
     search_text = "",
     overhead_names = 0, inventory_quest_marks = true,
     coords_map_cursor = true, coords_minimap = true,
+    world_kind_ng_shard = true, world_kind_kept = true, world_kind_quest = true,
+    world_kind_trap = true, world_kind_pawn = true,
     color_npc_search = 0xFFF06292, color_route_stop = 0xFFF8BBD0,
     color_hint_pin = 0xFF00E676,
     icon_npc_search = 31, icon_route_stop = 25, icon_hint_pin = 58,
@@ -175,6 +177,10 @@ M.WORLD_BOOLS = { "world_chests", "world_treasure", "world_tokens",
   "world_beetles", "world_monsters", "world_small_monsters",
   "world_sellers", "world_shops", "world_show_opened", "world_undiscovered" }
 
+-- The five chest kind filters (SPEC 27.6), in the order of the kinds.
+M.WORLD_KIND_BOOLS = { "world_kind_ng_shard", "world_kind_kept",
+  "world_kind_quest", "world_kind_trap", "world_kind_pawn" }
+
 -- Display names: per world category (icon rows, World panel) and per toggle
 -- (World markers settings node).
 M.WORLD_LABEL = { chest = "Chests", treasure = "Treasure spots",
@@ -188,7 +194,10 @@ M.WORLD_BOOL_LABEL = { world_chests = M.WORLD_LABEL.chest,
   world_small_monsters = "Small monsters", world_sellers = M.WORLD_LABEL.seller,
   world_shops = M.WORLD_LABEL.shops,
   world_show_opened = "Show opened and collected",
-  world_undiscovered = "Show undiscovered areas" }
+  world_undiscovered = "Show undiscovered areas",
+  world_kind_ng_shard = "New shard each cycle",
+  world_kind_kept = "Stays opened in NG+", world_kind_quest = "Quest-gated",
+  world_kind_trap = "Trap", world_kind_pawn = "Pawns can't open" }
 
 local BOOL_KEYS = { "enabled", "debug", "show_startable", "show_in_progress",
   "show_completed", "show_unavailable", "show_locked", "show_overhead", "show_minimap",
@@ -196,6 +205,7 @@ local BOOL_KEYS = { "enabled", "debug", "show_startable", "show_in_progress",
   "matching_icons", "step_icons", "inventory_quest_marks", "route_world_path",
   "coords_map_cursor", "coords_minimap" }
 for _, k in ipairs(M.WORLD_BOOLS) do BOOL_KEYS[#BOOL_KEYS + 1] = k end
+for _, k in ipairs(M.WORLD_KIND_BOOLS) do BOOL_KEYS[#BOOL_KEYS + 1] = k end
 local COLOR_KEYS = { "icon_color", "color_in_progress", "color_completed",
   "color_unavailable", "color_locked", "color_quest_item",
   "color_chest", "color_treasure", "color_monster", "color_seller",
@@ -241,6 +251,7 @@ local panel_world
 do
   local w = {}
   for _, k in ipairs(M.WORLD_BOOLS) do w[#w + 1] = k end
+  for _, k in ipairs(M.WORLD_KIND_BOOLS) do w[#w + 1] = k end
   w[#w + 1] = "world_max_markers"
   panel_world = w
 end
@@ -429,10 +440,10 @@ function M.reset_appearance(settings)
 end
 
 -- Marker color: the category color, alpha byte halved when the marker
--- is done (opened / looted).
+-- is done (opened / looted) or faded (SPEC 27.6); once when both.
 function M.marker_color(settings, m)
   local c = M.color_of(settings, m.cat)
-  if not m.done then return c end
+  if not (m.done or m.faded) then return c end
   local a = (c >> 24) & 0xFF
   return ((a // 2) << 24) | (c & 0x00FFFFFF)
 end
