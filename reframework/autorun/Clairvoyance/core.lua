@@ -591,6 +591,20 @@ local function included(cat, e, small_ok, dups)
   return true
 end
 
+-- SPEC 29.3: a monster's kind; a missing or non-string one counts as "Monster".
+local function kind_of(e)
+  return type(e.kind) == "string" and e.kind or "Monster"
+end
+
+-- SPEC 29.5.2: is this monster's kind switched off in its class?
+local function kind_off(e, show)
+  local off = show.world_monster_off
+  if type(off) ~= "table" then return false end
+  local cls = off[e.small == true and "small" or "large"]
+  if type(cls) ~= "table" then return false end
+  return cls[kind_of(e)] == true
+end
+
 local function monster_label(e)
   local label = tostring(e.name)
   if e.respawning then label = label .. " (respawning)" end
@@ -986,6 +1000,7 @@ local function make_cand(cat, e, ctx)
   elseif cat == "monster" then
     c.key = "w:mon:" .. tostring(e.uid)
     c.small = e.small == true
+    c.kind = kind_of(e)
     c.label = monster_label(e)
     local md = ctx.mdrop and ctx.mdrop[e]
     if md then c.hover, c.why = md.hover, md.why end
@@ -1175,7 +1190,8 @@ local function world_candidates(world, show, boxes, q, spot)
           if cat == "monster" and e.small == true then
             known.monster_small = known.monster_small + 1
           end
-          if entry_search(cat, e, drops, gc, q, ctx) then
+          if not (cat == "monster" and kind_off(e, show))
+            and entry_search(cat, e, drops, gc, q, ctx) then
             cands[#cands + 1] = make_cand(cat, e, ctx)
           end
         end
@@ -1384,6 +1400,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
     if c.cat == "npc_search" then m.cid = c.cid end
     if c.cat == "monster" then
       m.small = c.small
+      m.kind = c.kind
       if c.small then panel.monster.small_shown = panel.monster.small_shown + 1 end
     end
     if c.cat == "shop" then
@@ -1622,6 +1639,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   end
   ctx.spot = ft ~= nil
   local function take(cat, e)
+    if cat == "monster" and kind_off(e, show) then return end
     if not entry_search(cat, e, drops, g, q, ctx) then return end
     stats.cand_builds = stats.cand_builds + 1
     local c = make_cand(cat, e, ctx)

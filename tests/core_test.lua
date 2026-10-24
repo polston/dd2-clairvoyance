@@ -3691,6 +3691,79 @@ do
   local both2 = core.world_markers_cached(mw3, sh({ world_monsters = true, world_small_monsters = true }), O, {})
   check("mtree: Large back on re-fills", keys(both2) == "w:mon:ml,w:mon:ms"
     and stats.grid_builds == gb2 and stats.cell_entries.monster == 2)
+
+  -- monster kinds (SPEC 29.5)
+  local function kmw()
+    return { monsters = {
+      { uid = "g", cid = 1, name = "Goblin", kind = "Goblin", pos = P(2), small = true },
+      { uid = "h", cid = 2, name = "Hobgoblin", kind = "Hobgoblin", pos = P(3), small = true },
+      { uid = "c", cid = 3, name = "Cyclops", kind = "Cyclops", pos = P(4), small = false },
+      { uid = "ml", cid = 4, name = "Monster", kind = "Monster", pos = P(5), small = false },
+      { uid = "ms", cid = 5, name = "Monster", kind = "Monster", pos = P(6), small = true } },
+      drops = { [1] = { "Goblin Ear" }, [3] = { "Cyclops Eye" } } }
+  end
+  local function kshow(off, over)
+    local o = { world_small_monsters = true, world_monster_off = off }
+    for k, v in pairs(over or {}) do o[k] = v end
+    return sh(o)
+  end
+  for _, pa in ipairs(paths) do
+    local tag = " [" .. pa[1] .. "]"
+    local kw = kmw()
+    local m0, p0 = pa[2](kw, kshow(nil), O, {})
+    local m, p = pa[2](kw, kshow({ small = { Goblin = true } }), O, {})
+    check("kinds: Goblin off hides Goblin" .. tag, keys(m):find("w:mon:g", 1, true) == nil)
+    check("kinds: Goblin off keeps Hobgoblin" .. tag, keys(m):find("w:mon:h", 1, true) ~= nil)
+    check("kinds: Goblin off known unchanged" .. tag, p.monster.known == p0.monster.known
+      and p.monster.known == 5)
+    m = pa[2](kw, kshow({ small = { Goblin = true } }, { search = Q("goblin") }), O, {})
+    check("kinds: query goblin finds only Hobgoblin" .. tag, keys(m) == "w:mon:h")
+    m = pa[2](kw, kshow({ small = { Goblin = true } }, { search = Q("ear") }), O, {})
+    check("kinds: drop search skips the off kind" .. tag, #m == 0)
+    m = pa[2](kw, kshow(nil, { search = Q("ear") }), O, {})
+    check("kinds: drop search finds it when on" .. tag, keys(m) == "w:mon:g")
+    -- the class decides which kind is off
+    m = pa[2](kw, kshow({ large = { Monster = true } }), O, {})
+    local ks = keys(m)
+    check("kinds: large Monster off hides only the large one" .. tag,
+      ks:find("w:mon:ml", 1, true) == nil and ks:find("w:mon:ms", 1, true) ~= nil
+      and ks:find("w:mon:c", 1, true) ~= nil)
+    -- entries carry kind
+    local all_kind = #p0.monster.entries == 5
+    for _, e in ipairs(p0.monster.entries) do
+      if type(e.kind) ~= "string" then all_kind = false end
+    end
+    check("kinds: every entry carries kind" .. tag, all_kind)
+    -- a missing or non-string kind counts as Monster
+    local nk = { monsters = {
+      { uid = "n1", cid = 1, name = "A", pos = P(2), small = false },
+      { uid = "n2", cid = 2, name = "B", kind = 5, pos = P(3), small = false },
+      { uid = "n3", cid = 3, name = "C", kind = "Cyclops", pos = P(4), small = false } } }
+    m = pa[2](nk, kshow({ large = { Monster = true } }), O, {})
+    check("kinds: missing or non-string kind is Monster" .. tag, keys(m) == "w:mon:n3")
+    local m_all = pa[2](nk, kshow(nil), O, {})
+    local mk = {}
+    for _, x in ipairs(m_all) do mk[x.key] = x.kind end
+    check("kinds: marker kind falls back to Monster" .. tag, mk["w:mon:n1"] == "Monster"
+      and mk["w:mon:n2"] == "Monster" and mk["w:mon:n3"] == "Cyclops")
+    -- bad off sets show every kind
+    for i, bad in ipairs({ {}, "x", { large = "x" }, { small = 7 } }) do
+      m = pa[2](kw, kshow(bad), O, {})
+      check("kinds: bad off set " .. i .. " shows all" .. tag, #m == 5)
+    end
+    m = pa[2](kw, kshow(nil), O, {})
+    check("kinds: nil off set shows all" .. tag, #m == 5)
+  end
+  do
+    local kw = kmw()
+    pcall(core.world_markers_cached, kw, kshow(nil), O, {})
+    local gb0 = stats.grid_builds
+    local mo = core.world_markers_cached(kw, kshow({ small = { Goblin = true } }), O, {})
+    local mi = core.world_markers_cached(kw, kshow({ small = {} }), O, {})
+    check("kinds: untick hides on the cached path", keys(mo):find("w:mon:g", 1, true) == nil)
+    check("kinds: re-tick brings it back", keys(mi):find("w:mon:g", 1, true) ~= nil)
+    check("kinds: untick and re-tick run no grid rebuild", stats.grid_builds == gb0)
+  end
 end
 
 -- first token (SPEC 28.9.3)
