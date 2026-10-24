@@ -32,8 +32,10 @@ local function make_world()
     elseif r == 5 then
       w.beetles[#w.beetles + 1] = { uid = "b" .. i, pos = rp(), name = "Beetle " .. i, state = "not" }
     elseif r <= 7 then
+      local mi = #w.monsters
       w.monsters[#w.monsters + 1] = { uid = "m" .. i, cid = 1000 + i, cids = { 1000 + i },
-        name = names[1 + i % #names], respawning = (i % 4 == 0), pos = rp(), small = (i % 6 == 0) }
+        name = names[1 + i % #names], respawning = (i % 4 == 0), pos = rp(), small = (i % 6 == 0),
+        kind = "K" .. (mi % 50), fam = "ch2" .. (20 + (mi % 50) % 20) }
       w.drops[1000 + i] = { "Horn " .. (i % 13), "Fang" }
     else
       w.sellers[#w.sellers + 1] = { shop = i, item = i, item_name = "Item " .. i, cid = 5000 + i,
