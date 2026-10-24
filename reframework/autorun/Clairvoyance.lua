@@ -1199,6 +1199,7 @@ minimap_renderer = require("Clairvoyance.minimap").create({
     local px, py, fade, vis = icons.frame_info(ui)
     -- kept for the coordinates readout under the minimap
     wt.mini_x, wt.mini_y, wt.mini_vis, wt.mini_t = px, py, vis, os.clock()
+    wt.mini_fade = fade
     return px, py, fade, vis
   end,
   push = icons.mini_push,
@@ -2753,17 +2754,21 @@ wt.coords_frame = function()
         gp.x + wt.CURSOR_DX, gp.y + wt.CURSOR_DY)
     end
   elseif settings.coords_minimap and settings.show_minimap and ui_map == nil
-      and wt.mini_vis and wt.mini_t ~= nil and now - wt.mini_t < 0.5
-      and player_origin ~= nil then
-    -- below and to the left of the minimap circle, clear of its rim
+      and wt.mini_vis and wt.mini_t ~= nil and now - wt.mini_t < 0.2
+      and (wt.mini_fade or 0) > 0.02 and player_origin ~= nil then
+    -- below and to the left of the minimap circle, clear of its rim;
+    -- fades out with the minimap
     wt.coord_text(string.format("X %.0f  Z %.0f  H %.0f",
       player_origin.x, player_origin.z, player_origin.y),
-      wt.mini_x + wt.MINI_DX, wt.mini_y + wt.MINI_DY)
+      wt.mini_x + wt.MINI_DX, wt.mini_y + wt.MINI_DY, wt.mini_fade)
   end
 end
--- Outlined text, its top-left corner at x, y.
-wt.coord_text = function(s, x, y)
-  wt.style.text(draw, s, x, y, 0xFFE8E0D0, true, 0xFF000000, 1)
+-- Outlined text, its top-left corner at x, y; a (0..1, default 1)
+-- scales its alpha.
+wt.coord_text = function(s, x, y, a)
+  a = math.min(1, math.max(0, a or 1))
+  local alpha = math.floor(0xFF * a + 0.5) << 24
+  wt.style.text(draw, s, x, y, alpha | 0x00E8E0D0, true, 0xFF000000, 1, a)
 end
 wt.CURSOR_DX, wt.CURSOR_DY = 18, -34
 wt.MINI_DX, wt.MINI_DY = -245, 118
