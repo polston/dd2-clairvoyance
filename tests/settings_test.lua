@@ -715,10 +715,10 @@ do
   local kn0, fn0 = su.monster_off_count(nil)
   check("monster_off_count nil -> 0, 0", kn0 == 0 and fn0 == 0)
 
-  local fl = type(su.family_kind_list) == "function" and su.family_kind_list({ Hobgoblin = true, Goblin = true })
-  check("family_kind_list sorted", type(fl) == "table" and #fl == 2 and fl[1] == "Goblin" and fl[2] == "Hobgoblin")
-  local fl0 = type(su.family_kind_list) == "function" and su.family_kind_list(nil)
-  check("family_kind_list nil -> empty", type(fl0) == "table" and #fl0 == 0)
+  local fl = type(su.monster_kind_list) == "function" and su.monster_kind_list({ Hobgoblin = true, Goblin = true })
+  check("monster_kind_list (family seen set) sorted", type(fl) == "table" and #fl == 2 and fl[1] == "Goblin" and fl[2] == "Hobgoblin")
+  local fl0 = type(su.monster_kind_list) == "function" and su.monster_kind_list(nil)
+  check("monster_kind_list (family seen set) nil -> empty", type(fl0) == "table" and #fl0 == 0)
 
   check("kind_box family off -> disabled", su.kind_box("Goblin", true, 0, false, true) == "disabled")
   check("kind_box fam_off false/nil as before", su.kind_box("A", true, 0, false, false) == "on"

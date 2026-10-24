@@ -376,32 +376,26 @@ end
 M.MONSTER_OFF_MAX = 200
 M.MONSTER_KIND_MAX = 64
 local FAM_PREFIX = "fam:"
+function M.fam_key(fam) return FAM_PREFIX .. fam end
 local function is_fam_key(k)
   return type(k) == "string" and k:sub(1, #FAM_PREFIX) == FAM_PREFIX
 end
 local function off_class(t)
   local out = {}
   if type(t) ~= "table" then return out end
-  local fams, kinds = {}, {}
+  local keys = {}
   for k, v in pairs(t) do
-    if type(k) == "string" and v == true and #k >= 1 and #k <= M.MONSTER_KIND_MAX then
-      if is_fam_key(k) then
-        if #k == #FAM_PREFIX + 5 then fams[#fams + 1] = k end
-      else
-        kinds[#kinds + 1] = k
-      end
+    if type(k) == "string" and v == true and #k >= 1 and #k <= M.MONSTER_KIND_MAX
+        and (not is_fam_key(k) or #k == #FAM_PREFIX + 5) then
+      keys[#keys + 1] = k
     end
   end
-  table.sort(fams)
-  table.sort(kinds)
-  local n = 0
-  for _, group in ipairs({ fams, kinds }) do
-    for _, k in ipairs(group) do
-      if n >= M.MONSTER_OFF_MAX then break end
-      out[k] = true
-      n = n + 1
-    end
-  end
+  table.sort(keys, function(a, b)
+    local fa, fb = is_fam_key(a), is_fam_key(b)
+    if fa ~= fb then return fa end
+    return a < b
+  end)
+  for i = 1, math.min(#keys, M.MONSTER_OFF_MAX) do out[keys[i]] = true end
   return out
 end
 
@@ -415,16 +409,6 @@ function M.monster_kind_list(seen, off)
         set[k] = true; list[#list + 1] = k
       end
     end
-  end
-  table.sort(list)
-  return list
-end
-
--- Sorted kind names of one family's seen set (nil reads as empty).
-function M.family_kind_list(seen_fam)
-  local list = {}
-  for k in pairs(seen_fam or {}) do
-    if type(k) == "string" then list[#list + 1] = k end
   end
   table.sort(list)
   return list
@@ -460,9 +444,8 @@ end
 -- is off, the name is too long to store, or the class is at the off cap and
 -- the kind is still on; else "off" or "on". off_count counts this class only.
 function M.kind_box(name, class_on, off_count, is_off, fam_off)
-  if not class_on or fam_off or #name > M.MONSTER_KIND_MAX then return "disabled" end
-  if not is_off and off_count >= M.MONSTER_OFF_MAX then return "disabled" end
-  return is_off and "off" or "on"
+  if fam_off or #name > M.MONSTER_KIND_MAX then return "disabled" end
+  return M.family_box(class_on, off_count, is_off)
 end
 
 -- State of one family checkbox: "disabled" when the class is off, or the
@@ -493,22 +476,17 @@ function M.monster_tree(seen_class, fam_names_class, offs, class_on)
     if na ~= nb then return na < nb end
     return a < b
   end)
-  local out = {}
+  local out, in_fam = {}, {}
   for _, fam in ipairs(fams) do
     local fam_off = offs[FAM_PREFIX .. fam] == true
     local kinds = {}
-    for _, kind in ipairs(M.family_kind_list(seen_class[fam])) do
+    for _, kind in ipairs(M.monster_kind_list(seen_class[fam])) do
+      in_fam[kind] = true
       kinds[#kinds + 1] = { kind = kind, off = offs[kind] == true,
         box = M.kind_box(kind, class_on, n_off, offs[kind] == true, fam_off) }
     end
     out[#out + 1] = { fam = fam, name = name_of(fam), node = #kinds >= 2 or fam_off,
       family_box = M.family_box(class_on, n_off, fam_off), kinds = kinds }
-  end
-  local in_fam = {}
-  for fam, set in pairs(seen_class) do
-    if fam ~= "?" then
-      for kind in pairs(set) do in_fam[kind] = true end
-    end
   end
   local plain = {}
   for _, kind in ipairs(M.monster_kind_list(seen_class["?"], offs)) do

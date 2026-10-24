@@ -601,6 +601,12 @@ M.kind_of = kind_of
 local function fam_of(e)
   return type(e.fam) == "string" and e.fam or "?"
 end
+M.fam_of = fam_of
+
+-- "fam:" .. fam, built once per family rather than per monster per tick.
+local FAM_KEY = setmetatable({}, { __index = function(t, f)
+  local k = "fam:" .. f; t[f] = k; return k
+end })
 
 -- SPEC 30.2.1: a family's display name: its shortest kind name, ties by byte
 -- order, "Monster" left out unless it is the only one, "Other" for no kinds.
@@ -627,7 +633,7 @@ local function kind_off(e, show)
   if type(off) ~= "table" then return false end
   local cls = off[class_of(e.small == true)]
   if type(cls) ~= "table" then return false end
-  return cls[kind_of(e)] == true or cls["fam:" .. fam_of(e)] == true
+  return cls[kind_of(e)] == true or cls[FAM_KEY[fam_of(e)]] == true
 end
 
 -- SPEC 29.5.3, 30.5.3: count one known monster into

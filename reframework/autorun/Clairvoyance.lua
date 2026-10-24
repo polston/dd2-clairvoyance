@@ -155,7 +155,7 @@ wt.rows = function(cat, class, kind, fam)
         by = { large = {}, small = {} }
         for _, e in ipairs(p.entries or {}) do
           local cls = by[e.small == true and "small" or "large"]
-          local f = type(e.fam) == "string" and e.fam or "?"
+          local f = core.fam_of(e)
           local fl = cls[f]
           if fl == nil then fl = {}; cls[f] = fl end
           local k = core.kind_of(e)
@@ -1035,7 +1035,7 @@ re.on_frame(function()
     local wm = result.world and result.world.monster or nil
     for _, k in ipairs((wm and wm.kinds) or {}) do
       local seen = wt.kinds_seen[k.small and "small" or "large"]
-      local fam = type(k.fam) == "string" and k.fam or "?"
+      local fam = core.fam_of(k)
       local set = seen[fam]
       if set == nil then set = {}; seen[fam] = set end
       set[k.kind] = true
@@ -1761,8 +1761,8 @@ local function install_debug()
       -- same effect as ticking one family checkbox (SPEC 30.6.7); false and no
       -- change unless class is "large" or "small" and fam is a 5-byte string
       monster_family = function(fam, class, off)
-        if type(fam) ~= "string" or #fam ~= 5 then return false end
-        if not su.set_kind_off(settings, class, "fam:" .. fam, off) then return false end
+        if type(fam) ~= "string" then return false end
+        if not su.set_kind_off(settings, class, su.fam_key(fam), off) then return false end
         save_settings(); want_update = true; last_tick = 0.0
         return true
       end,
@@ -2136,25 +2136,22 @@ do
       end
     end
     for _, e in ipairs(tree) do
-      if e.plain then
-        for _, k in ipairs(e.kinds) do
-          box(k.kind .. "##wku_" .. class .. "_" .. k.kind, k.box, k.kind)
-        end
-      elseif e.unseen then
+      if e.unseen then
         box("Family " .. e.fam .. " (none seen yet)##wfu_" .. class .. "_" .. e.fam,
-          e.family_box, "fam:" .. e.fam)
+          e.family_box, su.fam_key(e.fam))
       elseif e.node then
         if imgui.tree_node(e.name .. "###wf_" .. class .. "_" .. e.fam) then
           box("All " .. e.name .. "###wfa_" .. class .. "_" .. e.fam,
-            e.family_box, "fam:" .. e.fam)
+            e.family_box, su.fam_key(e.fam))
           for _, k in ipairs(e.kinds) do
             box(k.kind .. "##wk_" .. class .. "_" .. e.fam .. "_" .. k.kind, k.box, k.kind)
           end
           imgui.tree_pop()
         end
       else
+        local idp = e.plain and ("##wku_" .. class .. "_") or ("##wk_" .. class .. "_" .. e.fam .. "_")
         for _, k in ipairs(e.kinds) do
-          box(k.kind .. "##wk_" .. class .. "_" .. e.fam .. "_" .. k.kind, k.box, k.kind)
+          box(k.kind .. idp .. k.kind, k.box, k.kind)
         end
       end
     end
@@ -2463,7 +2460,7 @@ do
                 if flbls == nil then
                   flbls, fkinds = {}, { large = {}, small = {} }
                   for _, k in ipairs(p.kinds or {}) do
-                    local f = type(k.fam) == "string" and k.fam or "?"
+                    local f = core.fam_of(k)
                     local byfam = fkinds[k.small == true and "small" or "large"]
                     if byfam[f] == nil then byfam[f] = {} end
                     byfam[f][#byfam[f] + 1] = k
@@ -2497,7 +2494,7 @@ do
                   if imgui.tree_node(g[2]) then
                     for _, row in ipairs(p.families or {}) do
                       if (row.small == true) == (g[1] == "small") then
-                        local f = type(row.fam) == "string" and row.fam or "?"
+                        local f = core.fam_of(row)
                         local ks = fkinds[g[1]][f] or {}
                         if (row.n_kinds or #ks) >= 2 then
                           if imgui.tree_node(flbls[row]) then
