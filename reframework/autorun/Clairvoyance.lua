@@ -521,7 +521,8 @@ do
   icons.end_rows, icons.ends, icons.ends_n, icons.slot_of, icons.slot_cids = {}, {}, {}, {}, {}
   icons.route_pts, icons.scr, icons.fonts = {}, {}, {}
   icons.drew, icons.legend_rows = {}, {}   -- per route index: drew a leg or stop this frame; legend rows by slot
-  for k = 1, 8 do icons.drew[k] = false; icons.legend_rows[k] = { on = false, name = "", abgr = 0, a = 1 } end
+  for k = 1, 8 do icons.drew[k] = false; icons.legend_rows[k] = { on = false, name = "", label = "", abgr = 0, a = 1 } end
+  icons.legend_tally, icons.legend_seen = {}, {}
   wt.legend_n = 0
   icons.route_starts, icons.scr_starts, icons.leg_steps = {}, {}, {}
   -- Route numbers beside the stop records read this frame. Hoisted; the font
@@ -764,6 +765,27 @@ do
         row.on, row.name, row.abgr, row.a = true, r.name or "", A.argb_to_abgr(base), wt.a(base)
       end
     end
+    -- Rows sharing a name (several places of one quest) get " (1)", " (2)"
+    -- in slot order, so each row still names one line.
+    local tally = icons.legend_tally
+    for k in pairs(tally) do tally[k] = nil end
+    for k = 1, 8 do
+      local row = rows[k]
+      if row.on then tally[row.name] = (tally[row.name] or 0) + 1 end
+    end
+    local seen = icons.legend_seen
+    for k in pairs(seen) do seen[k] = nil end
+    for k = 1, 8 do
+      local row = rows[k]
+      if row.on then
+        local c = 0
+        if tally[row.name] > 1 then c = (seen[row.name] or 0) + 1; seen[row.name] = c end
+        if row.lname ~= row.name or row.lc ~= c then
+          row.lname, row.lc = row.name, c
+          row.label = c > 0 and (row.name .. " (" .. c .. ")") or row.name
+        end
+      end
+    end
     local st = wt.styles.route_stop
     local dk = wt.dk
     local o = wt.style.offset(st.width, dk)
@@ -772,7 +794,7 @@ do
       local row = rows[k]
       if row.on then
         draw.filled_rect(x, y + 3 * dk, 12 * dk, 12 * dk, row.abgr)
-        wt.style.text(draw, row.name, x + 18 * dk, y, row.abgr, st.on, st.color, o, row.a)
+        wt.style.text(draw, row.label, x + 18 * dk, y, row.abgr, st.on, st.color, o, row.a)
         y = y + 18 * dk
         n = n + 1
       end
