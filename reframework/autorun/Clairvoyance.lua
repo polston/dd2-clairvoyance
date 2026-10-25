@@ -64,7 +64,6 @@ do
   wt.outline_ms_shown = 0               -- last whole frame's total (icons + outside)
   wt.any_on = true                      -- some group has its outline on
   wt.path_draw_ms = 0
-  wt.path_scr = {}                      -- reused screen buffer for the in-world path
   wt.path_bufs, wt.path_starts = {}, {} -- per-route world buffers and each pair's first point index
   wt.leg_to = {}                        -- last point index of each leg, reused
   wt.leg_calls, wt.world_path_ms = 0, 0
@@ -80,7 +79,9 @@ do
       local s = starts[p]
       if s ~= 0 then to[p] = nxt - 2; nxt = s else to[p] = 0 end
     end
-    local amount = settings.route_gradient and settings.route_gradient_amount or 0
+    local grad = settings.route_gradient
+    local amount = settings.route_gradient_amount
+    local fills = 0
     local fin, aend = settings.route_gradient_end, settings.route_gradient_alpha
     if st.on then
       local t1 = os.clock()
@@ -88,7 +89,7 @@ do
       for p = 1, np do
         local s = starts[p]
         if s ~= 0 and to[p] >= s then
-          local argb, wf = sty.leg_color(base, fin, amount, aend, steps[p], nsteps)
+          local argb, wf = sty.leg_color(base, fin, amount, aend, grad and steps[p] or 0, nsteps)
           sty.outline_range(draw, buf, s, to[p], w * wf, true, st.color, o, wt.a(argb))
         end
       end
@@ -97,11 +98,12 @@ do
     for p = 1, np do
       local s = starts[p]
       if s ~= 0 and to[p] >= s then
-        local argb, wf = sty.leg_color(base, fin, amount, aend, steps[p], nsteps)
+        local argb, wf = sty.leg_color(base, fin, amount, aend, grad and steps[p] or 0, nsteps)
         sty.segments_range(draw, buf, s, to[p], w * wf, A.argb_to_abgr(argb))
-        wt.leg_calls = wt.leg_calls + 1
+        fills = fills + 1
       end
     end
+    return fills
   end
   wt.refresh_styles = function()
     local gs, styles = wt.style.GROUPS, wt.styles
@@ -692,7 +694,7 @@ do
         local base = member.slot ~= nil and settings.route_colors[member.slot] or nil
         if sn > 0 and base ~= nil then
           local nsteps = icons.npcs.leg_steps(pairs_, member.current, icons.leg_steps)
-          wt.draw_legs(icons.scr, sn // 2, icons.scr_starts, np, icons.leg_steps,
+          wt.leg_calls = wt.leg_calls + wt.draw_legs(icons.scr, sn // 2, icons.scr_starts, np, icons.leg_steps,
             nsteps, base, settings.route_line_width * icons:k(), icons:k(),
             wt.styles.route_line)
         end
