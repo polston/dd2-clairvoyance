@@ -4328,6 +4328,8 @@ do
   check("wants: unrelated toggle", world.wants_round({ reveal_gate_names = true }) == false)
   check("wants: members", world.wants_round({}, 1) == true)
   check("wants: zero members", world.wants_round({}, 0) == false)
+  check("wants: focus", world.wants_round({ focus = { active = { 1 }, quests = {} } }) == true)
+  check("wants: focus not a table", world.wants_round({ focus = true }) == false)
 
   local function held_world()
     local f = fixture()
@@ -4782,6 +4784,79 @@ do
     check("reserved: a failed round counts neither", ok2 == false and st.rounds == 2
       and st.reserved_reads + st.reserved_reused == 2)
   end
+end
+
+-- 34. quest focus collection (SPEC 32.6.1)
+do
+  local function FQ(active, items)
+    return { active = active, quests = { [active[1]] = { npcs = {}, step_npcs = {}, items = items or {}, places = {} } } }
+  end
+  local function cworld(tg, reserved)
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "g1", 10, 1, 1, { quest = { any = true, q = { { 11020, true }, { 11030, false } } } }),
+      prow("chest", "i1", 10, 2, 2, { items = { { id = 77, n = 1 }, { id = 78, n = 2 } } }),
+      prow("chest", "p0", 10, 3, 3, {}) }) } })
+    f.data.records = { { key = "g1_0", picked = true, item = 305 } }
+    f.data.reserved = reserved or {}
+    local w = f.new()
+    local ran = w:refresh(0, true, tg)
+    return w, f, ran
+  end
+  local function ids_are(t, a, b) return t ~= nil and #t == 2 and t[1] == a and t[2] == b end
+  local w = cworld(on("chests"))
+  local ch = w:input().chests
+  local g1, i1, p0 = find(ch, "g1"), find(ch, "i1"), find(ch, "p0")
+  check("chest ids: gate_qids", g1 ~= nil and ids_are(g1.gate_qids, 11020, 11030))
+  check("chest ids: item_ids", i1 ~= nil and ids_are(i1.item_ids, 77, 78))
+  check("chest ids: none on a plain chest", p0 ~= nil and p0.gate_qids == nil and p0.item_ids == nil)
+  w = cworld(on("chests"), { chest_row("i1", 5, 5) })
+  i1 = find(w:input().chests, "i1")
+  check("chest ids: a learned chest keeps its item_ids", i1 ~= nil and i1.pos.x == 5
+    and ids_are(i1.item_ids, 77, 78))
+  w = cworld({ treasure = true, focus = FQ({ 11020 }) })
+  ch = w:input().chests
+  g1 = find(ch, "g1")
+  check("focus: gate chest with Chests off", g1 ~= nil and find(ch, "i1") == nil and find(ch, "p0") == nil)
+  check("focus: its state is read", g1 ~= nil and g1.state == "opened" and g1.item == 305)
+  w = cworld({ treasure = true, focus = FQ({ 55 }, { 78 }) })
+  ch = w:input().chests
+  check("focus: item chest with Chests off", find(ch, "i1") ~= nil and find(ch, "g1") == nil)
+  w = cworld({ treasure = true, focus = FQ({ 55 }, { 305 }) })
+  ch = w:input().chests
+  check("focus: record item chest with Chests off", find(ch, "g1") ~= nil and find(ch, "i1") == nil)
+  w = cworld({ chests = true, focus = FQ({ 11020 }) })
+  ch = w:input().chests
+  check("focus: Chests on still lists every chest", find(ch, "g1") ~= nil and find(ch, "i1") ~= nil
+    and find(ch, "p0") ~= nil)
+  local f
+  w, f = cworld({ treasure = true })
+  check("focus off: no chest, no records", #w:input().chests == 0 and (f.reads_n.save_records or 0) == 0)
+  local okm = true
+  for _, fq in ipairs({ { active = "x" }, true }) do
+    local w2, _, ran = cworld({ treasure = true, focus = fq })
+    okm = okm and ran == true and #w2:input().chests == 0
+  end
+  check("focus: malformed collects nothing", okm)
+  local function sworld(tg)
+    local f2 = fixture()
+    local d = f2.data
+    d.needs = { [100] = { { id = 378, num = 1 } }, [90] = { { id = 378, num = 1 } } }
+    d.qname = { [90] = "Ninety", [100] = "Hundred" }
+    d.iname = { [378] = "Grimoire" }
+    d.sched_ids = { 2058 }
+    d.shop = { [2058] = 41 }
+    d.npcname = { [2058] = "Dudley" }
+    d.sched = { [2058] = P(100, 0, 100) }
+    d.shops = { [41] = { { item = 378, release_qid = 0, sentiment_bit = 0,
+      total_pay = 0, flag = 0, var_cond = 0 } } }
+    local w2 = f2.new()
+    w2:refresh(0, true, tg)
+    return w2:input().sellers or {}
+  end
+  local s = sworld({ treasure = true, focus = FQ({ 90 }) })
+  check("focus: related seller with Sellers off", #s == 1 and s[1].qids[1] == 90 and s[1].qids[2] == 100)
+  check("focus: unrelated seller dropped", #sworld({ treasure = true, focus = FQ({ 55 }) }) == 0)
+  check("focus: Sellers on lists all", #sworld({ sellers = true, focus = FQ({ 55 }) }) == 1)
 end
 
 if failures > 0 then os.exit(1) end

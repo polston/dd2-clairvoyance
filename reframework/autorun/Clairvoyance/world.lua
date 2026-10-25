@@ -130,7 +130,7 @@ end
 function M.wants_round(tg, members)
   return (tg.chests or tg.treasure or tg.tokens or tg.beetles or tg.monsters
     or tg.small_monsters or tg.sellers or tg.search or tg.shops
-    or tg.first_token or (members or 0) > 0) and true or false
+    or tg.first_token or type(tg.focus) == "table" or (members or 0) > 0) and true or false
 end
 
 -- An item list kept per key in `cache` (SPEC 28.5.3.3): { { name, n }, ... }
@@ -1405,11 +1405,32 @@ function M.new(a, reads, io)
     return out, again
   end
 
+  -- The quest focus (SPEC 32.6.1) as sets: the active quest ids (nil unless
+  -- the list holds a number) and the item ids the active quests need.
+  local function focus_sets(f)
+    local iset = {}
+    if type(f) ~= "table" or type(f.active) ~= "table" then return nil, iset end
+    local qset, any = {}, false
+    for _, q in ipairs(f.active) do
+      if type(q) == "number" then
+        qset[q] = true
+        any = true
+        local fq = type(f.quests) == "table" and f.quests[q] or nil
+        if type(fq) == "table" and type(fq.items) == "table" then
+          for _, id in ipairs(fq.items) do iset[id] = true end
+        end
+      end
+    end
+    if not any then return nil, iset end
+    return qset, iset
+  end
+
   -- ----- the round -----
   -- returns the round's output and whether it wants another round at once
   -- (an unfinished NPC name list, a deferred drop read; SPEC 28.6)
   local function round(now, tg)
     local again = false
+    local fq, fi = focus_sets(tg.focus)
     stats.hits, stats.misses = 0, 0
     S.live = {}
     fsc_memo = {}
@@ -1421,7 +1442,7 @@ function M.new(a, reads, io)
     for k in pairs(ACCUM) do stats.ms[k] = nil end
     for _, k in ipairs(CONDITIONAL_READS) do stats.ms[k] = nil end
     res_reused = false
-    local any_rec = tg.chests or tg.tokens or tg.beetles
+    local any_rec = tg.chests or tg.tokens or tg.beetles or fq
     local need_shops = tg.search or tg.shops
     local t = clock()
     local cast_ok = ensure_cast()
@@ -1533,7 +1554,27 @@ function M.new(a, reads, io)
     local chest_qs = nil
     for _, uid in ipairs(uids) do
       local e = eff[uid]
-      if e.k == "chest" and tg.chests then
+      if e.k == "chest" and (tg.chests or fq) then
+        local row = static[uid] or e
+        local gate_qids, item_ids = nil, nil
+        if type(row.quest) == "table" and type(row.quest.q) == "table" then
+          for _, qe in ipairs(row.quest.q) do
+            local qid = type(qe) == "table" and qe[1] or nil
+            if type(qid) == "number" then
+              gate_qids = gate_qids or {}
+              gate_qids[#gate_qids + 1] = qid
+            end
+          end
+        end
+        if type(row.items) == "table" then
+          for _, it in ipairs(row.items) do
+            local id = type(it) == "table" and to_int(it.id) or nil
+            if id ~= nil then
+              item_ids = item_ids or {}
+              item_ids[#item_ids + 1] = id
+            end
+          end
+        end
         local state, item = "unknown", nil
         local recs = rec_idx and rec_idx[uid] or nil
         if recs ~= nil then
@@ -1546,9 +1587,21 @@ function M.new(a, reads, io)
           end
           if has then state = picked and "opened" or "unopened" end
         end
+        local wanted = tg.chests and true or false
+        if not wanted and fq then
+          for _, q in ipairs(gate_qids or {}) do
+            if fq[q] then wanted = true; break end
+          end
+          for _, id in ipairs(item_ids or {}) do
+            if wanted then break end
+            if fi[id] then wanted = true end
+          end
+          if not wanted and item ~= nil and fi[item] then wanted = true end
+        end
+        if wanted then
         local c = { uid = uid, pos = pcopy(e), gimmick = e.id, state = state,
-          item = item, item_name = item ~= nil and item_name(item) or nil }
-        local row = static[uid] or e
+          item = item, item_name = item ~= nil and item_name(item) or nil,
+          gate_qids = gate_qids, item_ids = item_ids }
         c.kinds = chest_kinds(row, e, recs)
         if type(row.quest) == "table" then
           c.quest_text = quest_text_of(row.quest, tg.reveal_gate_names == true)
@@ -1565,6 +1618,7 @@ function M.new(a, reads, io)
           if built then stats.item_list_builds = stats.item_list_builds + 1 end
         end
         out.chests[#out.chests + 1] = c
+        end
       elseif COLLECT[e.k] and tg[COLLECT[e.k].list] then
         local def = COLLECT[e.k]
         local list = out[def.list]
@@ -1583,7 +1637,7 @@ function M.new(a, reads, io)
     lap("collect", collect_t0)
 
     -- treasure
-    if tg.treasure or tg.sellers or need_shops then
+    if tg.treasure or tg.sellers or need_shops or fq then
       t = clock()
       refresh_discovery()
       lap("discovery", t)
@@ -1651,15 +1705,23 @@ function M.new(a, reads, io)
     end
 
     -- sellers
-    if tg.sellers then
+    if tg.sellers or fq then
       t = clock()
       local list = guarded("sellers", compute_sellers)
       lap("sellers", t)
       for _, s in ipairs(list or {}) do
-        local c = {}
-        for k, v in pairs(s) do c[k] = v end
-        c.discovered = discovered("s:" .. tostring(s.shop), s.pos)
-        out.sellers[#out.sellers + 1] = c
+        local keep = tg.sellers and true or false
+        if not keep then
+          for _, q in ipairs(s.qids or {}) do
+            if fq[q] then keep = true; break end
+          end
+        end
+        if keep then
+          local c = {}
+          for k, v in pairs(s) do c[k] = v end
+          c.discovered = discovered("s:" .. tostring(s.shop), s.pos)
+          out.sellers[#out.sellers + 1] = c
+        end
       end
     end
 
