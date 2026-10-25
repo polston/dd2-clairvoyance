@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -59,8 +60,10 @@ class LayoutWalkTests(unittest.TestCase):
             ("app.QuestProcessor", dict(fields=[("Process", "Object", "t.Base", False)])),
             ("t.Base", dict(fields=u32)),
             ("t.Sub", dict(parent="t.Base", fields=[("_l", "Object", "t.Leaf[]", True)])),
-            ("t.Leaf", dict(fields=[("_g", "Object", "System.Collections.Generic.List`1<t.Arg>", True)])),
+            ("t.Leaf", dict(fields=[("_g", "Object", "System.Collections.Generic.List`1<t.Arg>", True),
+                                    ("_u", "UserData", "t.Ud", False)])),
             ("t.Arg", dict(fields=u32)),
+            ("t.Ud", dict(fields=u32)),
             ("t.Unrelated", dict(fields=u32)),
         ]
 
@@ -104,7 +107,7 @@ class LayoutWalkTests(unittest.TestCase):
     def test_walk_reaches_subclasses_and_arguments(self):
         dump = self.minimal(self.extras(self.walk_items()))
         q = bl.quest_types(dump)
-        for n in ("t.Base", "t.Sub", "t.Leaf", "t.Arg", "app.QuestProcessor"):
+        for n in ("t.Base", "t.Sub", "t.Leaf", "t.Arg", "t.Ud", "app.QuestProcessor"):
             self.assertIn(n, q)
         self.assertNotIn("t.Unrelated", q)
         self.assertNotIn("System.Collections.Generic.List`1<t.Arg>", q)
@@ -118,7 +121,11 @@ class LayoutWalkTests(unittest.TestCase):
                          [bl.BEHAVIOR_FLAG, ["_c", "U32", 4, 4, False]])
         self.assertNotIn(bl.BEHAVIOR_FLAG, sel[dump["t.Leaf"]["fqn"]]["fields"])
         loop = self.minimal(self.extras([("t.P", dict(parent="t.Q")), ("t.Q", dict(parent="t.P"))]))
-        self.assertFalse(bl.is_behavior(loop, "t.P"))
+        result = []
+        th = threading.Thread(target=lambda: result.append(bl.is_behavior(loop, "t.P")), daemon=True)
+        th.start()
+        th.join(5)
+        self.assertEqual(result, [False])
 
     def test_native_layouts(self):
         items = [("app.QuestProcessor", dict(fields=[("_n", "Object", "t.NoRsz", False)])),
@@ -140,6 +147,18 @@ class LayoutWalkTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             bl.select_types(dump)
         self.assertIn("app.QuestLogResource", str(cm.exception))
+
+    def test_missing_native_exits(self):
+        dump = self.minimal({}, drop=("via.Folder",))
+        with self.assertRaises(SystemExit) as cm:
+            bl.select_types(dump)
+        self.assertIn("via.Folder", str(cm.exception))
+
+    def test_wanted_without_fields_exits(self):
+        dump = self.minimal(self.extras([("app.GimmickData", dict())]))
+        with self.assertRaises(SystemExit) as cm:
+            bl.select_types(dump)
+        self.assertIn("app.GimmickData", str(cm.exception))
 
 
 if __name__ == "__main__":
