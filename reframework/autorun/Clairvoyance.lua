@@ -271,7 +271,7 @@ wt.focus_world = function(snap)
 end
 -- Route members (SPEC 32.7.1, Contract 4): the focus NPCs the world walks
 -- schedules for, capped so the search target and members total at most 8.
-wt.route_opt = { routes = 0, places = false }   -- reused, refreshed per call
+wt.route_opt = { routes = 0, places = false, player = nil, prev = {} }   -- reused, refreshed per call
 wt.route_in, wt.route_nmap, wt.route_snap = nil, nil, nil
 wt.route_name_of = function(cid, place)
   if place ~= nil then
@@ -307,6 +307,11 @@ wt.route_members = function(snap, input)
   wt.route_in, wt.route_nmap, wt.route_snap = input, nil, snap
   local opt = wt.route_opt
   opt.routes, opt.places = settings.focus_routes or 0, settings.focus_place_routes == true
+  opt.player = wt.world_origin
+  for k in pairs(opt.prev) do opt.prev[k] = nil end
+  for _, r in ipairs((input or {}).routes or {}) do
+    if r.place ~= nil then opt.prev[r.place] = true end
+  end
   local list, n, total = core.route_members(snap ~= nil and snap.focus or nil, wt.quest_rel,
     (input or {}).focus_places, wt.route_cid, opt, wt.route_name_of)
   wt.routes_n, wt.routes_total = n, total
@@ -544,10 +549,11 @@ do
     for i = 1, nrr do
       local rec = rr[i]
       local sx, sy = icons:to_screen(rec.lx, rec.ly)
-      local num = icons.nums[rec.marker.stop]
+      local nk = rec.marker.num or rec.marker.stop
+      local num = icons.nums[nk]
       if num == nil then
-        num = tostring(rec.marker.stop)
-        icons.nums[rec.marker.stop] = num
+        num = tostring(nk)
+        icons.nums[nk] = num
       end
       local off = rec.size * scale * k / 2 + 2
       wt.style.text(draw, num, sx + off, sy - dy, abgr, st.on, st.color, o, a)
@@ -2068,7 +2074,7 @@ local function install_debug()
           routes_total = wt.routes_total }
         for _, r in ipairs((wt.q("input", nil) or {}).routes or {}) do
           out.routes[#out.routes + 1] = { cid = r.cid, name = r.name, stops = #(r.stops or {}),
-            slot = r.slot, current = r.current, place = r.place }
+            slot = r.slot, current = r.current, place = r.place, lead = r.lead }
         end
         local nq = 0
         for _ in pairs(wt.quest_rel or {}) do nq = nq + 1 end

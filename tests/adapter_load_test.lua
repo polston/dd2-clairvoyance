@@ -2386,6 +2386,9 @@ do
   -- v14 marker ids (SPEC 22.6.6)
   do
     local rg = A.map_marker_guid({ cat = "route_stop", cid = 7, stop = 3 })
+    assert(A.map_marker_guid({ cat = "route_stop", cid = 7, stop = 2, num = 1 })
+        == "51a1c0de-0000-4003-8000-" .. string.format("%012x", 7 * 32 + 1),
+      "MG route_stop uses num when set")
     local hg = A.map_marker_guid({ cat = "hint_pin", qid = 20090, i = 1 })
     local qg = A.map_marker_guid({ cat = "in_progress", qids = { 20090 } })
     assert(rg == "51a1c0de-0000-4003-8000-" .. string.format("%012x", 7 * 32 + 3),
