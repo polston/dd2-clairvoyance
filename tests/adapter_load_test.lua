@@ -2388,6 +2388,16 @@ do
         (0x7fffffffffff * 32 + 9) % 0x1000000000000), "MG modulo 2^48")
     assert(A.map_marker_guid({ cat = "npc_search", world_ord = 4 })
       == "51a1c0de-0000-4002-8000-000000000004", "MG npc_search keeps the world guid")
+    local okn, ng = pcall(A.map_marker_guid, { cat = "focus_npc", cid = 1234, qids = {} })
+    local okp, pg = pcall(A.map_marker_guid, { cat = "focus_place", place = 77, qids = {} })
+    assert(okn and ng == "51a1c0de-0000-4005-8000-" .. string.format("%012x", 1234),
+      "MG focus_npc layout: " .. tostring(ng))
+    assert(okp and pg == "51a1c0de-0000-4006-8000-" .. string.format("%012x", 77),
+      "MG focus_place layout: " .. tostring(pg))
+    assert(ng ~= A.map_marker_guid({ cat = "focus_place", place = 1234, qids = {} }),
+      "MG focus_npc and focus_place differ for one number")
+    assert(A.map_marker_guid({ cat = "focus_npc", cid = 0x1000000000005, qids = {} })
+      == "51a1c0de-0000-4005-8000-000000000005", "MG focus_npc modulo 2^48")
   end
   A.guid_parse = real_gp
 

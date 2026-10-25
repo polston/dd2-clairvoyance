@@ -3158,19 +3158,19 @@ do
     { from = 6, to = 9, pos = P(5), discovered = true },
     { from = 9, to = 12, pos = P(6), discovered = false },
     { from = 12, to = 18, pos = P(7), discovered = true } } }
-  r = run({}, nil, { route = route, world_max_markers = 0 })
+  r = run({}, nil, { routes = { route }, world_max_markers = 0 })
   local rs = {}
   for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then rs[#rs + 1] = mm end end
   check("npc 12: undiscovered stop skipped, others outside the cap", #rs == 2
     and rs[1].key == "r:12:1" and rs[1].cid == 12 and rs[1].stop == 1
     and rs[1].label == "Mara 06-09" and rs[2].stop == 3 and rs[2].label == "Mara 12-18"
     and #rs[1].qids == 0)
-  r = run({}, nil, { route = route, world_undiscovered = true })
+  r = run({}, nil, { routes = { route }, world_undiscovered = true })
   local n3 = 0
   for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then n3 = n3 + 1 end end
   check("npc 12b: world_undiscovered keeps all three", n3 == 3)
   route.stops[2].discovered = true
-  r = run({}, nil, { route = route })
+  r = run({}, nil, { routes = { route } })
   n3 = 0
   for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then n3 = n3 + 1 end end
   check("npc 12c: three stops give three markers", n3 == 3)
@@ -4069,6 +4069,414 @@ do
   check("is_result: route stop", core.is_result({ cat = "route_stop" }) == false)
   check("is_result: hint pin", core.is_result({ cat = "hint_pin" }) == false)
   check("is_result: first seeker", core.is_result({ cat = "token", first_seeker = true }) == false)
+end
+
+-- v19 (SPEC 32): quest focus
+do
+  local function P(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local function Q(t) return core.parse_query(t) end
+  local SH = { world_chests = true, world_treasure = true, world_monsters = true,
+    world_sellers = true, world_tokens = true, world_beetles = true,
+    world_max_markers = 300, world_origin = P(0, 0, 0), map_origin = P(0, 0, 0),
+    world_show_opened = false, world_undiscovered = false }
+  local function run(world, search, over, ex)
+    local o = { acceptable = {}, names = {} }
+    for k, v in pairs(ex or {}) do o[k] = v end
+    local a = fake_adapter(o)
+    if o.generic then a.is_generic = function(c) return o.generic[c] == true end end
+    if o.main then a.is_side = function(q) return not o.main[q] end end
+    if o.quest_step then a.quest_step = o.quest_step end
+    local show = { startable = true, in_progress = true, quest_items = true,
+      world = world, search = search }
+    for k, v in pairs(SH) do show[k] = v end
+    for k, v in pairs(over or {}) do show[k] = v end
+    return core.compute(a, show)
+  end
+  local function has(list, key)
+    for _, m in ipairs(list or {}) do if m.key == key then return m end end
+    return nil
+  end
+  local function keys(list, prefix)
+    local out = {}
+    for _, m in ipairs(list or {}) do
+      if m.key:sub(1, #prefix) == prefix then out[#out + 1] = m.key end
+    end
+    table.sort(out)
+    return table.concat(out, ",")
+  end
+
+  check("fo 1: marker_cid focus_npc", core.marker_cid({ key = "n:12", cat = "focus_npc", cid = 12 }) == 12
+    and core.marker_cid({ key = "f:4", cat = "focus_place", place = 4 }) == nil
+    and core.marker_cid({ key = "w:npc:9", cat = "npc_search", cid = 9 }) == nil)
+  check("fo 2: focus markers are not results", core.is_result({ cat = "focus_npc" }) == false
+    and core.is_result({ cat = "focus_place" }) == false)
+  check("fo 3: row label [F]", core.row_label({ qid = 3, name = "A", state = "locked" }, nil, true)
+    == "[F] A - locked###qd_3"
+    and core.row_label({ qid = 3, name = "A", state = "locked" }, nil, false) == "A - locked###qd_3")
+  local function sg(dim) return (core.signature({ { key = "k", pos = P(1), qids = {}, label = "L",
+    cat = "chest", dim = dim } }, {})) end
+  check("fo 4: signature hashes dim", sg(true) ~= sg(nil) and sg(false) == sg(nil))
+  local sel = core.minimap_markers({ { key = "f:1", cat = "focus_place", pos = P(3) },
+    { key = "c:5", cat = "startable", pos = P(50) }, { key = "w:chest:a", cat = "chest", pos = P(1) },
+    { key = "n:7", cat = "focus_npc", pos = P(60) } }, P(0), 100, 10)
+  local sk = {}
+  for _, m in ipairs(sel) do sk[#sk + 1] = m.key end
+  check("fo 5: minimap tiers", table.concat(sk, ",") == "c:5,n:7,f:1,w:chest:a")
+  check("fo 6: item walk with focus", core.item_walk_wanted({ focus_on = true }) == true
+    and core.item_walk_mode({ focus_on = true }) == "full"
+    and core.item_walk_wanted({ focus_on = false }) == false)
+  local fa = fake_adapter({ states = { [12] = "completed", [13] = "failed", [14] = "canceled" } })
+  check("fo 7: active set", table.concat(core.focus_active({ 11, 12, 13, 14, 15, 11 }, 15, fa), ",") == "15,11"
+    and #core.focus_active({}, nil, fa) == 0
+    and table.concat(core.focus_active(nil, 11, fa), ",") == "11"
+    and #core.focus_active({ 0, -2 }, 12, fa) == 0)
+  local r1 = { cid = 12, name = "Mara", stops = { { from = 6, to = 9, pos = P(5), discovered = true } } }
+  local r2 = { cid = 13, name = "Bo", stops = { { from = 1, to = 2, pos = P(8), discovered = true } } }
+  local r = run({}, nil, { routes = { r1, r2, { cid = 14, name = "X", err = "no schedule" } } })
+  check("fo 8: every route's stops", keys(r.markers, "r:") == "r:12:1,r:13:1"
+    and has(r.markers, "r:13:1").label == "Bo 01-02")
+  r = run({}, nil, { route = r2 })
+  check("fo 8b: the single route field is not read", has(r.markers, "r:13:1") == nil)
+
+  local calls = 0
+  local ra = fake_adapter({ objectives = { [20] = { 7, 8, 0 } }, casts = { [20] = { 7, 9 }, [30] = { 4 } },
+    item_needs = { [20] = { { id = 300 }, { id = 301 } } } })
+  ra.is_generic = function(c) return c == 9 end
+  local base_cast = ra.cast_ids
+  ra.cast_ids = function(q) calls = calls + 1; return base_cast(q) end
+  local rel = { [20] = { cast = { 9, 11 }, npcs = { 12, 7 }, items = { 302, 300 },
+      dest = { { cid = 13 }, { key = 44 }, { key = 45 } } },
+    [30] = { cast = {}, npcs = { 15 }, items = {}, dest = { { key = 44 } } } }
+  local places = { [44] = P(1), [46] = P(2) }
+  local live = { givers = { [20] = 5, [30] = 6 }, prog = { [20] = true } }
+  local function j(t) return table.concat(t, ",") end
+  local rs = core.related_sets(ra, { 20, 30 }, rel, places, live)
+  check("rs 1: npcs order", j(rs[20].npcs) == "5,7,8,11,12,13")
+  check("rs 2: step npcs in progress = objectives", j(rs[20].step_npcs) == "7,8")
+  check("rs 3: items file then live", j(rs[20].items) == "302,300,301")
+  check("rs 4: places with a position", j(rs[20].places) == "44")
+  check("rs 5: not in progress: step npc is the giver", j(rs[30].npcs) == "6,4,15"
+    and j(rs[30].step_npcs) == "6" and #rs[30].items == 0 and j(rs[30].places) == "44")
+  local n0 = calls
+  check("rs 6: memo returns the same table", core.related_sets(ra, { 20, 30 }, rel, places, live) == rs
+    and calls == n0)
+  check("rs 7: new places recompute", core.related_sets(ra, { 20, 30 }, rel, { [44] = P(1) }, live) ~= rs)
+  check("rs 8: a new giver recomputes", core.related_sets(ra, { 20, 30 }, rel, places,
+    { givers = { [20] = 99, [30] = 6 }, prog = live.prog })[20].npcs[1] == 99)
+  local rn = core.related_sets(ra, { 20 }, nil, places, live)
+  check("rs 9: no file: live parts only", j(rn[20].npcs) == "5,7,8" and j(rn[20].items) == "300,301"
+    and #rn[20].places == 0)
+  local rm = core.related_sets(ra, { 40 }, rel, places, { givers = {}, prog = {} })
+  check("rs 10: quest with nothing", rm[40] ~= nil and #rm[40].npcs == 0 and #rm[40].step_npcs == 0)
+
+  -- each memo input alone forces a recompute, from a state that just hit the memo
+  local function base()
+    local b = core.related_sets(ra, { 20, 30 }, rel, places, live)
+    return b, core.related_sets(ra, { 20, 30 }, rel, places, live) == b
+  end
+  local b, hit = base()
+  check("rs 11: baseline hits the memo", hit)
+  local rp = core.related_sets(ra, { 20, 30 }, rel, places, { givers = live.givers, prog = {} })
+  check("rs 12: a changed in-progress flag recomputes", rp ~= b and j(rp[20].step_npcs) == "7,8,5")
+  b, hit = base()
+  local orig_oc = ra.objective_cids
+  local fresh_obj = { [20] = { 7, 8, 0 } }
+  ra.objective_cids = function(q) return fresh_obj[q] end
+  check("rs 13: a new objective array recomputes",
+    hit and core.related_sets(ra, { 20, 30 }, rel, places, live) ~= b)
+  ra.objective_cids = orig_oc
+  b, hit = base()
+  local orig_needs = ra.item_needs
+  ra.item_needs = function() return { [20] = { { id = 300 }, { id = 301 } } } end
+  check("rs 14: a new needs table recomputes",
+    hit and core.related_sets(ra, { 20, 30 }, rel, places, live) ~= b)
+  ra.item_needs = orig_needs
+  -- two quests alike in every other input, so only the order differs
+  local live2 = { givers = { [60] = 5, [61] = 5 }, prog = {} }
+  local b2 = core.related_sets(ra, { 60, 61 }, nil, places, live2)
+  check("rs 15: the same ids in another order recompute",
+    core.related_sets(ra, { 60, 61 }, nil, places, live2) == b2
+    and core.related_sets(ra, { 61, 60 }, nil, places, live2) ~= b2)
+  b, hit = base()
+  local rel2 = { [20] = rel[20], [30] = rel[30] }
+  check("rs 16: a new quest file recomputes",
+    hit and core.related_sets(ra, { 20, 30 }, rel2, places, live) ~= b)
+  local rsort = { [50] = { cast = {}, npcs = {}, items = {}, dest = { { key = 46 }, { key = 44 } } } }
+  local rso = core.related_sets(ra, { 50 }, rsort, places, { givers = {}, prog = {} })
+  check("rs 17: places come back ascending", j(rso[50].places) == "44,46")
+
+  -- Task 3.6: focus in the quest loop and the item markers
+  local qx = { acceptable = { 20, 21 }, hints = { [20] = 5, [21] = 6 },
+    npc_pos = { [5] = P(1), [6] = P(2) }, names = { [20] = "Twenty", [21] = "TwentyOne" } }
+  local r = run({}, nil, { startable = false }, qx)
+  check("fq 1a: hidden category, no focus: no marker", has(r.markers, "c:5") == nil and r.focus == nil)
+  r = run({}, nil, { startable = false, focus_qids = { 20 } }, qx)
+  check("fq 1: focused quest passes a hidden category", has(r.markers, "c:5") ~= nil
+    and has(r.markers, "c:6") == nil)
+  r = run({}, Q("zzz"), { focus_qids = { 20 } }, qx)
+  check("fq 2: focused quest marker skips the search", has(r.markers, "c:5") ~= nil)
+  r = run({}, nil, { focus_qids = { 21, 20 }, focus_tracked_qid = 20 }, qx)
+  check("fq 3: result.focus", r.focus ~= nil and table.concat(r.focus.active, ",") == "20,21"
+    and r.focus.quests[20].npcs[1] == 5 and table.concat(r.focus.quests[21].step_npcs, ",") == "6")
+  local qc = { acceptable = { 22 }, casts = { [22] = { 8, 7 } }, npc_pos = { [7] = P(3) },
+    names = { [22] = "TwentyTwo" } }
+  r = run({}, nil, { focus_qids = { 22 } }, qc)
+  check("fq 4: giver from the c: marker before the first candidate",
+    has(r.markers, "c:7") ~= nil and table.concat(r.focus.quests[22].step_npcs, ",") == "7")
+  qx.states = { [20] = "completed" }
+  r = run({}, nil, { completed = true, focus_qids = { 20 } }, qx)
+  check("fq 5: a completed quest is not active", r.focus == nil)
+  qx.states = nil
+  local qi = { progressing = { 30 }, hints = { [30] = 5 }, npc_pos = { [5] = P(1) },
+    names = { [30] = "Thirty" }, item_needs = { [30] = { { id = 300 } } },
+    item_locs = { { id = 300, pos = P(40), src = "placed" } }, item_names = { [300] = "Gem" } }
+  r = run({}, nil, { quest_items = false, focus_qids = { 30 } }, qi)
+  check("fq 6: focused needs with Quest items off", has(r.markers, "i:300:10:0") ~= nil)
+  r = run({}, nil, { in_progress = false, focus_qids = { 30 } }, qi)
+  check("fq 6b: and with In progress off", has(r.markers, "i:300:10:0") ~= nil and has(r.markers, "c:5") ~= nil)
+  r = run({}, nil, { quest_items = false }, qi)
+  check("fq 6c: no focus, Quest items off: none", has(r.markers, "i:300:10:0") == nil)
+  local many = { progressing = { 30, 31 }, hints = { [30] = 5, [31] = 6 },
+    npc_pos = { [5] = P(1), [6] = P(2) }, names = { [30] = "Thirty", [31] = "ThirtyOne" },
+    item_needs = { [30] = { { id = 300 } }, [31] = { { id = 301 } } }, item_locs = {} }
+  for i = 1, 40 do
+    many.item_locs[#many.item_locs + 1] = { id = 300, pos = P(i * 8), src = "placed" }
+    many.item_locs[#many.item_locs + 1] = { id = 301, pos = P(i * 8, 0, 400), src = "placed" }
+  end
+  local function count_id(rr, id)
+    local n = 0
+    for _, m in ipairs(rr.markers) do if m.item_id == id then n = n + 1 end end
+    return n
+  end
+  -- dim, so Task 3.8's hide pass keeps quest 31's items
+  r = run({}, nil, { focus_qids = { 30 }, focus_unrelated = 1 }, many)
+  check("fq 7: related needs take no cap slot", count_id(r, 300) == 40 and count_id(r, 301) == 32)
+  local ords, dup = {}, false
+  for _, m in ipairs(r.markers) do
+    if m.item_id then
+      local k = m.item_id .. ":" .. m.item_ord
+      if ords[k] then dup = true end
+      ords[k] = true
+    end
+  end
+  check("fq 7b: one item_ord sequence", not dup)
+  r = run({}, Q("zzz"), { focus_qids = { 30 } }, many)
+  check("fq 7c: related needs skip the search", count_id(r, 300) == 40 and count_id(r, 301) == 0)
+  local fk, n300 = true, 0
+  for _, m in ipairs(r.markers) do
+    if m.item_id == 300 then n300 = n300 + 1; if m.focus_kept ~= true then fk = false end end
+  end
+  check("fq 7d: item markers kept only by focus are flagged", n300 == 40 and fk)
+  r = run({}, Q("zzz"), { focus_qids = { 20 } }, qx)
+  local c5 = has(r.markers, "c:5") or {}
+  check("fq 2b: a quest marker kept only by focus is not a search result",
+    c5.focus_kept == true and core.is_result(c5) == false)
+  r = run({}, Q("twenty"), { focus_qids = { 20 } }, qx)
+  c5 = has(r.markers, "c:5")
+  check("fq 2c: a matching focused quest marker stays a result",
+    c5 ~= nil and c5.focus_kept == nil and core.is_result(c5) == true)
+  local qm = { progressing = { 50 }, main = { [50] = true }, item_needs = { [50] = { { id = 500 } } },
+    item_locs = { { id = 500, pos = P(40), src = "placed" } }, item_names = { [500] = "Seal" } }
+  r = run({}, nil, { focus_tracked_qid = 50 }, qm)
+  check("fq 8: a focused main quest's needs get item markers", has(r.markers, "i:500:10:0") ~= nil)
+  r = run({}, nil, {}, qm)
+  check("fq 8b: no focus: a main quest's needs get none", has(r.markers, "i:500:10:0") == nil)
+  r = run({}, nil, { focus_tracked_qid = 50,
+    quest_rel = { [50] = { cast = {}, npcs = { 12 }, items = {}, dest = {} } } }, {})
+  check("fq 9: a tracked quest outside every list gets the file's related set",
+    r.focus ~= nil and table.concat(r.focus.active, ",") == "50"
+    and table.concat(r.focus.quests[50].npcs, ",") == "12" and #r.focus.quests[50].step_npcs == 0)
+  local qo = { progressing = { 30 }, casts = { [30] = { 9 } }, objectives = { [30] = { 8 } },
+    npc_pos = { [8] = P(2), [9] = P(3) }, objective_pos = { [8] = P(2) }, names = { [30] = "Thirty" } }
+  r = run({}, nil, { focus_qids = { 30 } }, qo)
+  check("fq 10: in progress, the objective marker is not the giver", has(r.markers, "c:8") ~= nil
+    and table.concat(r.focus.quests[30].npcs, ",") == "9,8"
+    and table.concat(r.focus.quests[30].step_npcs, ",") == "8")
+  r = run({}, nil, { quest_items = false, focus_qids = { 30 } }, many)
+  check("fq 6d: unfocused needs stay off with Quest items off",
+    count_id(r, 300) == 40 and count_id(r, 301) == 0)
+  local qg = { acceptable = { 20 }, hints = { [20] = 9001 }, npc_pos = { [9001] = P(1) },
+    names = { [20] = "Twenty" } }
+  local sw = { sellers = { { shop = 5, item = 2, item_name = "Elixir", cid = 9001, npc = "N",
+    qids = {}, quest = "Q", pos = P(4), maybe_locked = false, discovered = true } } }
+  r = run(sw, Q("elixir"), { focus_qids = { 20 } }, qg)
+  local sell = has(r.markers, "w:sell:5:2")
+  check("fq 11: a focus-kept quest marker does not absorb a matching seller",
+    sell ~= nil and core.is_result(sell) == true)
+
+  -- Task 3.7: related world entries, held apart from the cap and the search
+  local function wset()
+    return { chests = {
+        { uid = "g1", pos = P(10), state = "unopened", gate_qids = { 20 }, kinds = { "quest" } },
+        { uid = "i1", pos = P(20), state = "unopened", item = 302 },
+        { uid = "i2", pos = P(30), state = "unopened", item_ids = { 7, 302 } },
+        { uid = "o1", pos = P(35), state = "opened", gate_qids = { 20 } },
+        { uid = "u1", pos = P(5), state = "unopened" } },
+      sellers = { { shop = 9, item = 400, item_name = "Herb", cid = 77, npc = "Vendor",
+        qids = { 20 }, quest = "Twenty", pos = P(15) },
+        { shop = 9, item = 401, item_name = "Salt", cid = 77, npc = "Vendor",
+        qids = { 99 }, quest = "Other", pos = P(16) } } }
+  end
+  local wq = { acceptable = { 20 }, hints = { [20] = 5 }, npc_pos = { [5] = P(1) }, names = { [20] = "Twenty" } }
+  local wrel = { [20] = { cast = {}, npcs = {}, items = { 302 }, dest = {} } }
+  local REL = "w:chest:g1,w:chest:i1,w:chest:i2,w:sell:9:400"
+  local function relkeys(list)
+    local t = {}
+    for _, m in ipairs(list or {}) do if m.related then t[#t + 1] = m.key end end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  r = run(wset(), nil, { world_chests = false, world_sellers = false, focus_qids = { 20 }, quest_rel = wrel }, wq)
+  check("fw 1: related entries of off categories", relkeys(r.markers) == REL
+    and has(r.markers, "w:chest:u1") == nil and has(r.markers, "w:chest:o1") == nil)
+  check("fw 1b: also in the full-map pass", relkeys(r.fullmap_world) == REL)
+  check("fw 1c: not counted in the panel", r.world.chest.shown == 0 and r.world.seller.shown == 0)
+  r = run(wset(), nil, { world_max_markers = 0, focus_qids = { 20 }, quest_rel = wrel }, wq)
+  check("fw 2: no cap slot", relkeys(r.markers) == REL and has(r.markers, "w:chest:u1") == nil)
+  r = run(wset(), Q("zzz"), { focus_qids = { 20 }, quest_rel = wrel }, wq)
+  check("fw 3: no search filter", relkeys(r.markers) == REL)
+  r = run(wset(), nil, { world_kind_quest = false, focus_qids = { 20 }, quest_rel = wrel }, wq)
+  check("fw 4: kind filters do not hide a related chest", has(r.markers, "w:chest:g1") ~= nil)
+  -- dim, so Task 3.8's hide pass keeps the unrelated u1 and seller 401 in these two checks
+  r = run(wset(), nil, { focus_qids = { 20 }, quest_rel = wrel, focus_unrelated = 1 }, wq)
+  local n_g1, ords, odup = 0, {}, false
+  for _, m in ipairs(r.markers) do
+    if m.key == "w:chest:g1" then n_g1 = n_g1 + 1 end
+    if m.world_ord then
+      if ords[m.world_ord] then odup = true end
+      ords[m.world_ord] = true
+    end
+  end
+  check("fw 5: drawn once, world_ord unique", n_g1 == 1 and not odup
+    and has(r.markers, "w:chest:u1") ~= nil and not has(r.markers, "w:chest:u1").related)
+  check("fw 6: seller markers carry cid", has(r.markers, "w:sell:9:401").cid == 77)
+  r = run(wset(), nil, { world_chests = false, world_sellers = false }, wq)
+  check("fw 7: no focus: off categories build nothing", relkeys(r.markers) == ""
+    and has(r.markers, "w:chest:g1") == nil)
+  local fx = { qids = { [20] = true }, items = { [302] = true }, key = "20|302" }
+  local um = core.world_markers(wset(), { world_chests = false, world_sellers = false }, P(0), {}, nil, fx)
+  check("fw 8: uncached path matches", relkeys(um) == REL)
+  local sw2 = { shops = { { shop = 3, pos = P(12), items = { { id = 1, name = "Rope" } }, npc = "Bo", cid = 55 } } }
+  r = run(sw2, nil, { world_shops = true })
+  check("fw 9: shop markers carry cid", has(r.markers, "w:shop:3") ~= nil and has(r.markers, "w:shop:3").cid == 55)
+  r = run(wset(), Q("herb"), { focus_qids = { 20 }, quest_rel = wrel }, wq)
+  local s400, g1 = has(r.markers, "w:sell:9:400"), has(r.markers, "w:chest:g1") or {}
+  check("fw 3b: under a search only the related entries that match are results",
+    s400 ~= nil and s400.focus_kept == nil and core.is_result(s400) == true
+    and g1.focus_kept == true and core.is_result(g1) == false)
+  -- fix round 1: cover, cache invalidation, uncached skip
+  local wn = wset()
+  wn.sellers[2] = nil   -- the unrelated seller of cid 77 would cover it too
+  wn.npcs = { { cid = 77, name = "Vendor", pos = P(15), alive = true, discovered = true } }
+  r = run(wn, Q("vendor"), { focus_qids = { 20 }, quest_rel = wrel }, wq)
+  check("fw 10: a related seller covers its NPC match", has(r.markers, "w:sell:9:400") ~= nil
+    and has(r.markers, "w:npc:77") == nil)
+  local cw = wset()
+  local cs = { world_chests = false, world_sellers = false }
+  local ca = core.world_markers_cached(cw, cs, P(0), {}, nil, nil,
+    { qids = { [20] = true }, items = {}, key = "20|" })
+  local cb = core.world_markers_cached(cw, cs, P(0), {}, nil, nil,
+    { qids = { [99] = true }, items = {}, key = "99|" })
+  check("fw 11: a new fx key rebuilds the cached related list",
+    relkeys(ca) == "w:chest:g1,w:sell:9:400" and relkeys(cb) == "w:sell:9:401")
+  local uo = core.world_markers(wset(), {}, P(0), {}, nil, fx)
+  local ng = 0
+  for _, m in ipairs(uo) do if m.key == "w:chest:g1" then ng = ng + 1 end end
+  check("fw 8b: uncached, categories on: a related chest is drawn once", ng == 1)
+
+  -- Task 3.8: focus NPC and destination markers, the hide/dim pass, counts
+  local function npc(cid, name, pos)
+    return { cid = cid, name = name, pos = pos, alive = true, discovered = true }
+  end
+  local fq = { acceptable = { 20, 21 }, hints = { [20] = 5, [21] = 6 },
+    npc_pos = { [5] = P(1), [6] = P(2), [12] = P(30), [13] = P(40), [17] = P(45) },
+    dead = { [14] = true }, names = { [20] = "Twenty", [21] = "TwentyOne" },
+    npc_names = { [13] = "Mara" } }
+  local frel = { [20] = { cast = {}, npcs = { 12, 13, 14, 16, 17 }, items = {},
+    dest = { { key = 44 }, { key = 45 } } }, [21] = { cast = {}, npcs = {}, items = {}, dest = { { key = 44 } } } }
+  local fw = { npcs = { { cid = 12, name = "Brant" } }, focus_places = { [44] = P(50) } }
+  local FO = { focus_qids = { 20 }, quest_rel = frel, reveal_gate_names = true }
+  r = run(fw, nil, FO, fq)
+  local n12, n13 = has(r.markers, "n:12"), has(r.markers, "n:13")
+  check("ff 1: focus NPC labels", n12 and n12.cat == "focus_npc" and n12.cid == 12 and n12.label == "Brant"
+    and n13 and n13.label == "Mara" and has(r.markers, "n:17").label == "NPC 17")
+  check("ff 2: dead, positionless and covered NPCs get none", has(r.markers, "n:14") == nil
+    and has(r.markers, "n:16") == nil and has(r.markers, "n:5") == nil
+    and table.concat(r.focus_counts.no_pos, ",") == "16")
+  local f44 = has(r.markers, "f:44")
+  check("ff 3: destination marker", f44 and f44.cat == "focus_place" and f44.place == 44
+    and f44.label == "Twenty" and f44.pos.x == 50 and has(r.markers, "f:45") == nil)
+  check("ff 4: hide drops unrelated", has(r.markers, "c:6") == nil and has(r.markers, "c:5") ~= nil)
+  check("ff 5: counts, hide", r.focus_counts.related == 5 and r.focus_counts.added == 4
+    and r.focus_counts.hidden == 1 and r.focus_counts.dimmed == 0)
+  r = run(fw, nil, { focus_qids = { 20, 21 }, quest_rel = frel, reveal_gate_names = true }, fq)
+  check("ff 6: one place marker for two quests", has(r.markers, "f:44").label == "Twenty / TwentyOne"
+    and keys(r.markers, "f:") == "f:44")
+  local FD = { focus_qids = { 20 }, quest_rel = frel, reveal_gate_names = true, focus_unrelated = 1 }
+  r = run(fw, nil, FD, fq)
+  check("ff 7: dim keeps and marks", has(r.markers, "c:6").dim == true and not has(r.markers, "c:5").dim
+    and r.focus_counts.dimmed == 1 and r.focus_counts.hidden == 0)
+  r = run(fw, Q("twentyone"), FO, fq)
+  check("ff 8: search results stay", has(r.markers, "c:6") ~= nil and not has(r.markers, "c:6").dim
+    and has(r.markers, "c:5") ~= nil)
+  r = run(fw, nil, { focus_qids = { 20 }, quest_rel = frel, hint_pins = {
+    { qid = 21, i = 1, pos = P(3), label = "x" }, { qid = 20, i = 1, pos = P(4), label = "y" } },
+    routes = { { cid = 99, name = "Z", stops = { { from = 1, to = 2, pos = P(9), discovered = true } } } } }, fq)
+  check("ff 9: pins of focused quests and every route stop", has(r.markers, "h:20:1") ~= nil
+    and has(r.markers, "h:21:1") == nil and has(r.markers, "r:99:1") ~= nil)
+  local frel6 = { [20] = { cast = {}, npcs = { 6 }, items = {}, dest = {} } }
+  r = run(fw, nil, { focus_qids = { 20 }, quest_rel = frel6 }, fq)
+  check("ff 10: a covering quest marker is related", has(r.markers, "c:6") ~= nil
+    and has(r.markers, "n:6") == nil)
+  local fws = { npcs = { npc(12, "Brant", P(30)) } }
+  r = run(fws, Q("bran"), FO, fq)
+  check("ff 11: an NPC search marker covers its cid", has(r.markers, "w:npc:12") ~= nil
+    and has(r.markers, "n:12") == nil)
+  local fwc = { focus_places = {}, chests = { { uid = "u1", pos = P(5), state = "unopened" } } }
+  r = run(fwc, nil, FO, fq)
+  check("ff 12: full-map pass hidden too", has(r.fullmap_world, "w:chest:u1") == nil)
+  r = run(fwc, nil, FD, fq)
+  check("ff 12b: and dimmed", has(r.fullmap_world, "w:chest:u1").dim == true)
+  r = run(fw, nil, { quest_rel = frel }, fq)
+  check("ff 13: no focus: nothing added or dimmed", keys(r.markers, "n:") == "" and keys(r.markers, "f:") == ""
+    and r.focus_counts == nil and not has(r.markers, "c:6").dim)
+  r = run({ sellers = { { shop = 9, item = 401, item_name = "Salt", cid = 77, npc = "Vendor", qids = { 99 },
+      quest = "Other", pos = P(16) } } }, nil,
+    { focus_qids = { 20 }, quest_rel = { [20] = { cast = {}, npcs = { 77 }, items = {}, dest = {} } } },
+    { acceptable = { 20 }, hints = { [20] = 5 }, npc_pos = { [5] = P(1), [77] = P(15) }, names = { [20] = "Twenty" } })
+  check("ff 14: a covering seller stays in both passes", has(r.markers, "w:sell:9:401") ~= nil
+    and has(r.fullmap_world, "w:sell:9:401") ~= nil and has(r.markers, "n:77") == nil
+    and not has(r.markers, "w:sell:9:401").related)
+
+  -- fix round 1 for Task 3.8
+  local rel77 = { [20] = { cast = {}, npcs = { 77 }, items = {}, dest = {} } }
+  local pos77 = { acceptable = { 20 }, hints = { [20] = 5 }, npc_pos = { [5] = P(1), [77] = P(15) },
+    names = { [20] = "Twenty" } }
+  local function seller(shop, item, cid, pos)
+    return { shop = shop, item = item, item_name = "Salt", cid = cid, npc = "V", qids = { 99 },
+      quest = "Other", pos = pos }
+  end
+  r = run({ sellers = { seller(9, 401, 77, P(16)), seller(10, 402, 78, P(1000)) } }, nil,
+    { focus_qids = { 20 }, quest_rel = rel77, world_max_markers = 1, map_origin = P(1000) }, pos77)
+  check("ff 15: a seller missing from the full map selection does not cover",
+    has(r.fullmap_world, "w:sell:9:401") == nil
+    and has(r.markers, "n:77") ~= nil)
+  local np = { acceptable = { 20 }, hints = { [20] = 5 }, npc_pos = { [5] = P(1) }, names = { [20] = "Twenty" } }
+  r = run({ sellers = { seller(9, 401, 77, P(16)) } }, nil, { focus_qids = { 20 }, quest_rel = rel77 }, np)
+  check("ff 16: no_pos counts a covered cid without a position",
+    has(r.markers, "w:sell:9:401") ~= nil and has(r.markers, "n:77") == nil
+    and table.concat(r.focus_counts.no_pos, ",") == "77")
+  r = run({ npcs = { { cid = 12, name = "Other" } }, focus_places = fw.focus_places }, nil, FO, fq)
+  check("ff 17: a new world.npcs table refreshes the names", has(r.markers, "n:12").label == "Other")
+  r = run({ sellers = { seller(9, 401, 77, P(16)) } }, nil,
+    { focus_qids = { 20 }, quest_rel = rel77, map_origin = false }, pos77)
+  check("ff 17b: with no full-map pass the seller covers", r.fullmap_world == nil
+    and has(r.markers, "w:sell:9:401") ~= nil and has(r.markers, "n:77") == nil)
+  local rel5 = { [20] = { cast = {}, npcs = { 5 }, items = {}, dest = {} } }
+  r = run({ sellers = { seller(9, 401, 5, P(16)) } }, Q("salt"), { focus_qids = { 20 }, quest_rel = rel5 }, fq)
+  check("ff 18: the first marker per cid covers", has(r.markers, "c:5").focus_kept == true
+    and has(r.markers, "w:sell:9:401") ~= nil and r.focus_counts.related == 1
+    and has(r.markers, "n:5") == nil)
 end
 
 if failures > 0 then os.exit(1) end

@@ -137,11 +137,12 @@ check("journal_spoilers stored false kept",
 -- journal_spoilers, plus 23 world-tracker keys (SPEC 17.5, 17.10.13),
 -- plus 8 v14 keys (SPEC 22.6), plus 83 style and route keys (SPEC 23.4),
 -- plus 2 coordinate readout keys, plus 5 chest kind keys, plus
--- world_first_token (SPEC 28.9.4))
+-- world_first_token (SPEC 28.9.4), plus 4 focus keys, 2 focus place appearance
+-- keys and 4 focus_place style keys (SPEC 32))
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 152", n == 152)
+  check("defaults key count is 162", n == 162)
   check("first token default on", D.world_first_token == true)
 end
 
@@ -274,8 +275,8 @@ do
   local ni, nc = 0, 0
   for _, k in ipairs(su.ICON_KEYS) do if su.V12_ICON[k] then ni = ni + 1 end end
   for _, k in ipairs(su.COLOR_KEYS) do if su.V12_COLOR[k] then nc = nc + 1 end end
-  check("V12_ICON keys are ICON_KEYS", ni == 15 and #su.ICON_KEYS == 15)
-  check("V12_COLOR keys are COLOR_KEYS", nc == 12 and #su.COLOR_KEYS == 15)
+  check("V12_ICON keys are ICON_KEYS", ni == 16 and #su.ICON_KEYS == 16)
+  check("V12_COLOR keys are COLOR_KEYS", nc == 12 and #su.COLOR_KEYS == 16)
 
   -- reset_appearance
   local S = {}
@@ -413,7 +414,7 @@ do
     route_number_color = 0xFFFFFFFF, route_number_size = 0, route_path = 1,
     route_world_path = false, names_color = 0xFFFFFFFF }
   for k, w in pairs(want) do check("default " .. k, d[k] == w) end
-  check("18 groups", #style.GROUPS == 18)
+  check("19 groups", #style.GROUPS == 19)
   for _, g in ipairs(style.GROUPS) do
     check("style_" .. g .. "_override", d["style_" .. g .. "_override"] == false)
     check("style_" .. g .. "_outline_on", d["style_" .. g .. "_outline_on"] == true)
@@ -448,14 +449,16 @@ do
   local allnew = true
   for k, w in pairs(d) do
     if old[k] == nil then
-      if k == "world_monster_off" then
+      if k == "focus_qids" then
+        if type(o[k]) ~= "table" or #o[k] ~= 0 then allnew = false; print("missing default " .. k) end
+      elseif k == "world_monster_off" then
         if type(o[k]) ~= "table" or next(o[k].large or { 1 }) ~= nil
           or next(o[k].small or { 1 }) ~= nil then allnew = false; print("missing default " .. k) end
       elseif o[k] ~= w then allnew = false; print("missing default " .. k) end
     end
   end
   check("v13 table gets every new default", allnew)
-  check("COLOR_KEYS still 15", #su.COLOR_KEYS == 15)
+  check("COLOR_KEYS now 16", #su.COLOR_KEYS == 16)
 
   -- set_key
   local S = su.defaults()
@@ -811,6 +814,43 @@ do
   local ns2 = type(su.not_searched) == "function" and su.not_searched(one_off)
   check("not_searched lists a searchable toggle off", type(ns2) == "table" and #ns2 == 1
     and ns2[1] == string.lower(su.WORLD_BOOL_LABEL.world_chests))
+end
+-- focus settings (SPEC 32.4)
+do
+  local V = su.validate
+  check("focus defaults", type(D.focus_qids) == "table" and #D.focus_qids == 0
+    and D.focus_tracked == false and D.focus_unrelated == 0 and D.focus_routes == 1)
+  local f = V({ focus_qids = { 3, 3.0, 2.5, -1, 0, "7", math.huge, 0/0, 20010 } }).focus_qids
+  check("qid_list keeps whole numbers above 0, once", #f == 2 and f[1] == 3 and f[2] == 20010
+    and math.type(f[1]) == "integer")
+  local long = { 5, 5 }
+  for i = 1, 20 do long[#long + 1] = i end
+  f = V({ focus_qids = long }).focus_qids
+  check("qid_list repeats dropped before the cap of 16", #f == 16 and f[1] == 5 and f[2] == 1
+    and f[5] == 4 and f[6] == 6 and f[16] == 16)
+  check("qid_list non-table -> empty", #V({ focus_qids = 5 }).focus_qids == 0)
+  local src = { 4 }
+  check("qid_list returns a copy", V({ focus_qids = src }).focus_qids ~= src)
+  check("focus_unrelated clamps", V({ focus_unrelated = 3 }).focus_unrelated == 1)
+  check("focus_routes clamps and floors", V({ focus_routes = -2 }).focus_routes == 0
+    and V({ focus_routes = 1.7 }).focus_routes == 1)
+  check("focus_qids fresh per defaults()", su.defaults().focus_qids ~= su.defaults().focus_qids)
+  check("focus_tracked kept", V({ focus_tracked = true }).focus_tracked == true)
+  local S = su.defaults()
+  check("set_key focus_qids", su.set_key(S, "focus_qids", { 4, 4, 9 }) == true
+    and #S.focus_qids == 2 and S.focus_qids[2] == 9)
+  check("set_key focus_qids wrong type", su.set_key(S, "focus_qids", 4) == false and #S.focus_qids == 2)
+  local qt
+  for _, p in ipairs(su.PANEL_ORDER) do if p.id == "quest_tree" then qt = p end end
+  check("quest_tree panel keys", table.concat(qt.keys, ",")
+    == "focus_qids,focus_tracked,focus_unrelated,focus_routes")
+  check("focus_npc colour and icon are npc_search's", su.color_of(D, "focus_npc") == 0xFFF06292
+    and su.icon_of(D, "focus_npc") == 31)
+  check("focus_place colour and icon", su.color_of(D, "focus_place") == 0xFFFFAB40
+    and su.icon_of(D, "focus_place") == 26)
+  check("marker_color dim halves", su.marker_color(D, { cat = "chest", dim = true }) == 0x7FC8A27A)
+  check("marker_color dim+done+faded halves once",
+    su.marker_color(D, { cat = "chest", dim = true, done = true, faded = true }) == 0x7FC8A27A)
 end
 if failures > 0 then os.exit(1) end
 print("settings_test: all OK")

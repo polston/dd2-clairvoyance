@@ -270,6 +270,57 @@ function M.parse_hints(t)
   return hints, errors
 end
 
+-- Quest relations file. A quest key is kept when it is a whole number above 0
+-- and its value is a table; list fields keep only positive whole numbers.
+-- Nothing raises.
+local function pos_int(v)
+  if type(v) ~= "number" then return nil end
+  local i = math.tointeger(v)
+  if i and i > 0 then return i end
+  return nil
+end
+
+local function int_list(t)
+  local out = {}
+  if type(t) ~= "table" or (#t == 0 and next(t) ~= nil) then return out end
+  for _, v in ipairs(t) do
+    local i = pos_int(v)
+    if i then out[#out + 1] = i end
+  end
+  return out
+end
+
+function M.parse_quests(t)
+  local quests = {}
+  local info = { pak = nil, version = nil, kept = 0, dropped = 0, first = nil }
+  if type(t) ~= "table" then return quests, info end
+  if type(t.version) == "number" then info.version = t.version end
+  if type(t.pak) == "string" then info.pak = t.pak end
+  if type(t.quests) ~= "table" then return quests, info end
+  for k, q in pairs(t.quests) do
+    local qid = pos_int(tonumber(k))
+    if qid and type(q) == "table" then
+      local dest = {}
+      if type(q.dest) == "table" and not (#q.dest == 0 and next(q.dest) ~= nil) then
+        for _, d in ipairs(q.dest) do
+          if type(d) == "table" then
+            local cid, key = pos_int(d.cid), pos_int(d.key)
+            if cid or key then dest[#dest + 1] = { cid = cid, key = key } end
+          end
+        end
+      end
+      quests[qid] = { cast = int_list(q.cast), npcs = int_list(q.npcs),
+        items = int_list(q.items), dest = dest, decoded = (q.decoded == true) }
+      info.kept = info.kept + 1
+    else
+      info.dropped = info.dropped + 1
+      local s = tostring(k)
+      if info.first == nil or s < info.first then info.first = s end
+    end
+  end
+  return quests, info
+end
+
 -- True when a parsed hints entry has any text to show (a quest hint or a step).
 function M.has_text(entry)
   return type(entry) == "table"
