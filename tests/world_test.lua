@@ -3417,6 +3417,18 @@ do
       check("place on NPC stop: exactly 150 m, no place entry", route_in(w15, -77) == nil
         and route_in(w15, 2001) ~= nil)
 
+      -- 1d: the distance counts z, and ignores y
+      local f16, d16, w16 = setup(P(1, 0, 150))
+      w16:set_routes(PL)
+      go(w16, ptg(PA, { 77 }))
+      check("place on NPC stop: 149 m along z, no place entry", route_in(w16, -77) == nil
+        and route_in(w16, 2001) ~= nil)
+      local f17, d17, w17 = setup(P(1, 500, 152))
+      w17:set_routes(PL)
+      go(w17, ptg(PA, { 77 }))
+      check("place on NPC stop: 151 m along z with a large y offset, the place publishes",
+        route_in(w17, -77) ~= nil)
+
       -- 9: all_err places
       local f12, d12, w12 = setup()
       w12:set_routes(PL)
