@@ -211,6 +211,63 @@ wt.hint_inputs = function()
   end
   return qids, pins
 end
+-- Quest focus to the world round (SPEC 32.7, Contract 3): the previous
+-- snapshot's focus table as is, and the sorted unique dest keys of the
+-- active quests.
+wt.focus_world = function(snap)
+  local f = snap ~= nil and snap.focus or nil
+  if f == nil or f.active == nil or #f.active == 0 then return nil, nil end
+  local keys, have = {}, {}
+  for _, qid in ipairs(f.active) do
+    local rel = wt.quest_rel ~= nil and wt.quest_rel[qid] or nil
+    for _, d in ipairs(rel ~= nil and rel.dest or {}) do
+      if type(d.key) == "number" and d.key > 0 and not have[d.key] then
+        have[d.key] = true; keys[#keys + 1] = d.key
+      end
+    end
+  end
+  table.sort(keys)
+  if #keys == 0 then keys = nil end
+  return f, keys
+end
+-- Route members (SPEC 32.7.1, Contract 4): the focus NPCs the world walks
+-- schedules for, capped so the search target and members total at most 8.
+wt.route_members = function(snap, input)
+  local list, seen, inlist = {}, {}, {}
+  local total = wt.route_cid ~= nil and 1 or 0
+  local f = snap ~= nil and snap.focus or nil
+  local opt = settings.focus_routes
+  if opt ~= nil and opt > 0 and f ~= nil and f.active ~= nil and #f.active > 0 then
+    local names
+    for _, qid in ipairs(f.active) do
+      local q = f.quests ~= nil and f.quests[qid] or nil
+      local src = q ~= nil and (opt == 1 and q.step_npcs or q.npcs) or nil
+      for _, cid in ipairs(src or {}) do
+        if not seen[cid] then
+          seen[cid] = true
+          if cid ~= wt.route_cid then total = total + 1 end
+          local extra = (wt.route_cid ~= nil and not inlist[wt.route_cid]) and 1 or 0
+          if cid == wt.route_cid or #list + extra < 8 then
+            if names == nil then
+              names = {}
+              for _, n in ipairs(input ~= nil and input.npcs or {}) do names[n.cid] = n.name end
+            end
+            local nm = names[cid]
+            if nm == nil then
+              local okn, v = pcall(adapter.npc_name, cid)
+              nm = okn and type(v) == "string" and v ~= "" and v or ("NPC " .. cid)
+            end
+            list[#list + 1] = { cid = cid, name = nm }
+            inlist[cid] = true
+          end
+        end
+      end
+    end
+  end
+  local extra = (wt.route_cid ~= nil and not inlist[wt.route_cid]) and 1 or 0
+  wt.routes_n, wt.routes_total = #list + extra, total
+  return list, total
+end
 -- v14 (SPEC 10.3b): one failure guard per new frame layer, state in a table
 -- of its own. Log each distinct message once (16 cap); 30 failing frames in
 -- a row suspend the layer for 5 s.
@@ -959,6 +1016,16 @@ re.on_frame(function()
       tg.reveal_gate_names = settings.reveal_gate_names   -- chest quest names (SPEC 27.4.2)
       tg.search = show.search ~= nil
       tg.npc_cids = snapshot ~= nil and snapshot.npc_match_cids or nil   -- Ruling 10
+      -- quest focus (SPEC 32.7): previous snapshot's focus, route members, poke on a set change
+      tg.focus, tg.focus_keys = wt.focus_world(snapshot)
+      wt.q("set_routes", nil, (wt.route_members(snapshot, wt.q("input", nil))))
+      local fa = snapshot ~= nil and snapshot.focus ~= nil and snapshot.focus.active or nil
+      local fs = table.concat(fa or {}, ",") .. "|" .. tostring(settings.focus_unrelated)
+      if fs ~= wt.focus_sig then
+        wt.focus_sig = fs
+        wt.focus_pokes = (wt.focus_pokes or 0) + 1
+        wt.q("poke", nil)
+      end
       -- SPEC 28.8.2: the full map's UI object or the game's paused-GUI read holds throttled rounds
       local hold = ui_map ~= nil or adapter.map_menu_open() == true
       if wt:refresh(now, gate, tg, hold) then wt.line_txt = nil end
@@ -1784,8 +1851,11 @@ local function install_debug()
       focus = function()
         local fs = snapshot ~= nil and snapshot.focus or nil
         local out = { active = {}, quests = {}, counts = snapshot ~= nil and snapshot.focus_counts or nil,
-          walks = wt.obj_walks or 0, focus_pokes = wt.focus_pokes, routes = wt.routes_n,
+          walks = wt.obj_walks or 0, focus_pokes = wt.focus_pokes or 0, routes = {},
           routes_total = wt.routes_total }
+        for _, r in ipairs((wt.q("input", nil) or {}).routes or {}) do
+          out.routes[#out.routes + 1] = { cid = r.cid, name = r.name, stops = #(r.stops or {}) }
+        end
         local nq = 0
         for _ in pairs(wt.quest_rel or {}) do nq = nq + 1 end
         out.file = { quests = nq, pak = wt.quest_pak }
