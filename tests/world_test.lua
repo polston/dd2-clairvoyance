@@ -3399,6 +3399,9 @@ do
     check("members: first member first", w:path_status(1, 2002) == "path: finding")
     w:path_step(0.5, 1, true)
     check("members: job serves the next member", w.path_job ~= nil and w.path_job.cid == 2002)
+    w:set_route(2003, "Cc")
+    check("members: set_route to another cid keeps another member's job",
+      w.path_job ~= nil and w.path_job.cid == 2002)
     w:clear_route()
     check("members: clear_route keeps another member's job", w.path_job ~= nil and w.path_job.cid == 2002)
     check("members: clear_route keeps a member with the target's cid",
@@ -3427,9 +3430,32 @@ do
       and #rp[2002] == 1 and rp[2002][1].pts ~= nil)
     check("members: route_paths cached", w:route_paths(true) == w:route_paths(true))
     w:set_routes({ { cid = 2001, name = "Aa" } })
+    check("members: a removed member's pair cache leaves at once", w.rps[2002] == nil)
     check("members: a removed member's paths leave at once",
       route_in(w, 2002) == nil and w:route_paths(true)[2002] == nil
       and w:route_paths(true)[2001] ~= nil)
+  end
+
+  -- two members with the same stops: a reused job reports the cid it serves
+  do
+    local f = gfix()
+    f.tick = 0.001
+    stops_by[2002] = R3
+    local w = with_route(f, R3)
+    w:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" } })
+    w:refresh(1, true, on("search"))
+    for _ = 1, 40 do
+      w:path_step(0.5, 1, true)
+      if w.graph ~= nil then break end
+    end
+    w:path_step(0.5, 1, true)
+    local before = w.path_job ~= nil and w.path_job.cid == 2001
+    w:set_route(2002, "Bb")
+    w:refresh(1, true, on("search"))
+    w:path_step(0.5, 1, true)
+    check("members: a job reused for a shared key serves the new cid",
+      before and w.path_job ~= nil and w.path_job.cid == 2002)
+    stops_by[2002] = nil
   end
 
   -- a target that is also a member keeps its job through clear_route

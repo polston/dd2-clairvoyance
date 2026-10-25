@@ -2262,6 +2262,7 @@ function M.new(a, reads, io)
     if kind == nil then w.path_job = nil; return end
     local t0 = clock()
     local j = w.path_job
+    if j ~= nil then j.cid = c.cid end  -- a reused job serves this cid now
     if kind == "near" then
       if j == nil or j.kind ~= "near" or j.key ~= k then
         local p = stops[a].pos
