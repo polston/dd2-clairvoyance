@@ -30,6 +30,7 @@ NPC_FIELDS = (
     ("app.quest.condition.CheckNPCArrivedLocationParam", "_CharaID"),
     ("app.quest.action.EnemyBattleSetting", "_NpcIDs"),
     ("app.quest.action.BattleSetting", "_HostileNPCIDs"),
+    ("app.quest.condition.CheckNPCHolderTypeParam", "_CharaID"),
 )
 ITEM_FIELDS = (
     ("app.quest.condition.CheckHasItemParam.ItemInfo", "_ID"),
@@ -38,6 +39,7 @@ ITEM_FIELDS = (
     ("app.quest.condition.CheckEquipItemParam", "_ItemID"),
     ("app.quest.condition.CheckPlayerActionParam", "_ItemID"),
     ("app.quest.action.UniqueAction046Param", "_ItemID"),
+    ("app.quest.condition.CheckJobMasterItemParam", "_ItemID"),
 )
 CONTEXT_TYPE = "app.QuestContextData.ContextData"
 DELIVER_TYPE = "app.QuestContextData.DeliverData"

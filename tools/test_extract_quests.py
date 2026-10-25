@@ -60,6 +60,12 @@ class RelationTests(unittest.TestCase):
         self.assertEqual(eq.scene_relations(insts, kept),
                          ({101, 102, 103, 104, 105, 106}, {201, 202, 203, 204, 205, 206}))
 
+    def test_scene_holder_and_job_master_fields(self):
+        kept = eq.kept_chara(CHARA)
+        insts = [inst(1, "app.quest.condition.CheckNPCHolderTypeParam", _CharaID=107),
+                 inst(2, "app.quest.condition.CheckJobMasterItemParam", _ItemID=207)]
+        self.assertEqual(eq.scene_relations(insts, kept), ({107}, {207}))
+
     def test_context_cast_and_deliveries(self):
         kept = eq.kept_chara(CHARA)
         insts = [
