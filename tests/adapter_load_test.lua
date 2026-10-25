@@ -724,6 +724,16 @@ do
   assert(aw.objective_cids(side_qid) == nil, "non-side progressing commits empty")
   assert(aw.objective_cids(3) == nil and aw.objective_stats().kept == 0,
     "non-side quest's processor is not kept")
+  -- (8b) a focused main quest reaches the objective walk, and clearing the
+  -- focus excludes it again
+  aw.set_focus_qids({ 3 })
+  procs = { p3, saved_procs[1] }   -- count change rebuilds the slot index
+  aw.refresh_objectives()
+  local h1 = aw.objective_cids(3)
+  assert(h1 ~= nil and h1[1] == npc_cid, "focused main quest reaches the walk")
+  aw.set_focus_qids(nil)
+  aw.refresh_objectives()
+  assert(aw.objective_cids(3) == nil, "unfocused main quest excluded again")
   procs = saved_procs
   prog_ids = { side_qid }
   -- (9) every unreadable-entry path is counted as skipped
@@ -2613,6 +2623,21 @@ do
     and IS.cls_reads == 0 and (IS.gets["app.ItemManager"] or 0) == 0
     and (IS.gets["app.GimmickManager"] or 0) == 0,
     "IW13 main quest excluded: empty table committed, no walk, held or scan")
+  -- IW13b a focused main quest reaches the item-needs walk, and clearing the
+  -- focus excludes it again
+  ifresh()
+  IS.prog = { 10100 }
+  IS.procs = { iproc(10100, { has_item({ { id = 376, num = 1, lv = 4 } }) }) }
+  ai.set_focus_qids({ 10100 })
+  ai.refresh_items()
+  local hn = (ai.item_needs() or {})[10100]
+  assert(hn ~= nil and hn[1].id == 376, "IW13b focused main quest reaches the item walk")
+  ai.set_focus_qids(nil)
+  ifresh()
+  IS.prog = { 10100 }
+  IS.procs = { iproc(10100, { has_item({ { id = 376, num = 1, lv = 4 } }) }) }
+  ai.refresh_items()
+  assert((ai.item_needs() or {})[10100] == nil, "IW13b unfocused excluded again")
   -- IW5 10 s throttle, attempt-start stamp, rounds per attempt
   ifresh()
   ai.refresh_items()

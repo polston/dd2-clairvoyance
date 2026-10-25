@@ -258,8 +258,12 @@ wt.route_members = function(snap, input)
               nm = wt.route_names[cid]
               if nm == nil then
                 local okn, v = pcall(adapter.npc_name, cid)
-                nm = okn and type(v) == "string" and v ~= "" and v or ("NPC " .. cid)
-                wt.route_names[cid] = nm
+                if okn and type(v) == "string" and v ~= "" then
+                  nm = v
+                  wt.route_names[cid] = nm
+                else
+                  nm = "NPC " .. cid
+                end
               end
             end
             list[#list + 1] = { cid = cid, name = nm }
