@@ -1992,7 +1992,9 @@ local function install_debug()
         st.npc_rows = nr
         st.npc_names = #((wt.q("input", nil) or {}).npcs or {})
         st.routes = (wt.q("input", nil) or {}).routes
-        st.end_slots = #icons.ends
+        local es = 0
+        for _ in pairs(icons.ends) do es = es + 1 end
+        st.end_slots = es
         return st
       end,
       state = function()
@@ -2997,30 +2999,30 @@ wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
   if pairs_ == nil or routes == nil then return end
   local buf, n = wt.path_scr, 0
   for ri = 1, #routes do
-   local pl = pairs_[routes[ri].cid]
-   for k = 1, pl ~= nil and #pl or 0 do
-    local pts = pl[k].pts
-    if pts ~= nil then
-      if n > 0 then buf[n + 1], buf[n + 2] = false, false; n = n + 2 end
-      for q = 1, #pts - 2, 3 do
-        local px, py, pz = pts[q] - ox, pts[q + 1] - oy + 0.3, pts[q + 2] - oz
-        local dx, dy, dz = px - cx, py - cy, pz - cz
-        local sx, sy = false, false
-        if dx * dx + dy * dy + dz * dz <= max_d2 then
-          local sp
-          if proj_vec_reuse then
-            proj_vec.x, proj_vec.y, proj_vec.z = px, py, pz
-            sp = draw.world_to_screen(proj_vec)
-          else
-            sp = draw.world_to_screen(Vector3f.new(px, py, pz))
+    local pl = pairs_[routes[ri].cid]
+    for k = 1, pl ~= nil and #pl or 0 do
+      local pts = pl[k].pts
+      if pts ~= nil then
+        if n > 0 then buf[n + 1], buf[n + 2] = false, false; n = n + 2 end
+        for q = 1, #pts - 2, 3 do
+          local px, py, pz = pts[q] - ox, pts[q + 1] - oy + 0.3, pts[q + 2] - oz
+          local dx, dy, dz = px - cx, py - cy, pz - cz
+          local sx, sy = false, false
+          if dx * dx + dy * dy + dz * dz <= max_d2 then
+            local sp
+            if proj_vec_reuse then
+              proj_vec.x, proj_vec.y, proj_vec.z = px, py, pz
+              sp = draw.world_to_screen(proj_vec)
+            else
+              sp = draw.world_to_screen(Vector3f.new(px, py, pz))
+            end
+            if sp ~= nil then sx, sy = sp.x, sp.y end
           end
-          if sp ~= nil then sx, sy = sp.x, sp.y end
+          buf[n + 1], buf[n + 2] = sx, sy
+          n = n + 2
         end
-        buf[n + 1], buf[n + 2] = sx, sy
-        n = n + 2
       end
     end
-   end
   end
   for j = #buf, n + 1, -1 do buf[j] = nil end
   if n == 0 then return end
