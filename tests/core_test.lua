@@ -3267,6 +3267,12 @@ do
     ml = core.route_members(fa, { [1] = { dest = { { key = 1 }, { key = 2 }, { key = 3 } } } },
       { [1] = pl(0, 0), [2] = pl(100, 0), [3] = pl(500, 0) }, nil, { routes = 0, places = true }, nmf)
     check("rcc no player", keys(ml) == "1,3")
+    ml = core.route_members(fa, relA, { [1] = pl(0, 0), [2] = pl(500, 0) }, nil,
+      { routes = 0, places = true, player = pl(500, 0) }, nmf)
+    check("rcc kept places publish in candidate order", keys(ml) == "1,2")
+    ml = core.route_members(fa, relA, { [1] = pl(0, 0), [2] = { x = 100, y = 400, z = 0 } }, nil,
+      { routes = 0, places = true }, nmf)
+    check("rcc merge ignores y", keys(ml) == "1")
 
     local function stops_of(r)
       local t = {}

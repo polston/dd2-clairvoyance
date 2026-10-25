@@ -2808,7 +2808,7 @@ function M.compute(adapter, show)
           and (s.discovered ~= false or undisc) then
           -- SPEC 32.14.11.4: num is the number shown; a lead entry's first
           -- stop is the player, so its stops count from 1 after it.
-          local num = s.idx or (route.lead == true and n - 1) or n
+          local num = tonumber(s.idx) or (route.lead == true and n - 1) or n
           markers[#markers + 1] = {
             key = string.format("r:%d:%d", math.floor(route.cid), math.floor(num)),
             cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
@@ -3009,7 +3009,7 @@ end
 -- Route members (SPEC 32.7.1, 32.14): the focus NPCs the world walks
 -- schedules for (unique cids in active-quest order, the target counted once),
 -- then the destination places present in `places`; at most 8 published
--- routes with the target, places last. Returns list, n (published), total (all candidates + target).
+-- routes with the target, places last. Returns list, n (published), total (kept candidates + target).
 function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
   local list, seen, inlist = {}, {}, {}
   local total = target_cid ~= nil and 1 or 0
