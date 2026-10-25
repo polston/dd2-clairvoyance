@@ -254,8 +254,13 @@ wt.route_members = function(snap, input)
             end
             local nm = names[cid]
             if nm == nil then
-              local okn, v = pcall(adapter.npc_name, cid)
-              nm = okn and type(v) == "string" and v ~= "" and v or ("NPC " .. cid)
+              wt.route_names = wt.route_names or {}
+              nm = wt.route_names[cid]
+              if nm == nil then
+                local okn, v = pcall(adapter.npc_name, cid)
+                nm = okn and type(v) == "string" and v ~= "" and v or ("NPC " .. cid)
+                wt.route_names[cid] = nm
+              end
             end
             list[#list + 1] = { cid = cid, name = nm }
             inlist[cid] = true
@@ -956,6 +961,7 @@ re.on_frame(function()
       wt.map_origin, wt.map_origin_at = nil, nil
       if wt.route_cid ~= nil then logmsg("route cleared: save or session changed") end
       wt.hints_open, wt.route_cid = {}, nil   -- SPEC 22.6.6
+      wt.route_names = nil
     end
     -- v9: a debug-expanded qid keeps the tree live (QNML_DEBUG, SPEC 16.10)
     local tree_live = core.tree_wanted(now, tree_open_at)
@@ -1089,6 +1095,9 @@ re.on_frame(function()
     -- v5 (SPEC 12.3a): own pcall so a raised walk never skips compute;
     -- inside the timed window so Tick ms includes it; skipped when the
     -- category is hidden (SPEC 9.9).
+    if adapter.set_focus_qids ~= nil then
+      pcall(adapter.set_focus_qids, snapshot and snapshot.focus and snapshot.focus.active or nil)
+    end
     if (show.in_progress or show.focus_on) and adapter.refresh_objectives ~= nil then
       wt.obj_walks = (wt.obj_walks or 0) + 1
       local tw = os.clock()
@@ -2026,8 +2035,11 @@ local JUMP_TIP = "Opens the map here"
 -- Quest focus (SPEC 32): whether a quest is focused (listed, or the tracked
 -- one while Focus tracked is on), and the list toggle behind the row box.
 wt.is_focused = function(qid)
-  for _, q in ipairs(settings.focus_qids) do
-    if q == qid then return true end
+  local act = snapshot ~= nil and snapshot.focus ~= nil and snapshot.focus.active
+  if act then
+    for _, q in ipairs(act) do
+      if q == qid then return true end
+    end
   end
   return settings.focus_tracked and qid == wt.focus_tracked_qid or false
 end
@@ -2066,6 +2078,7 @@ local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
     if focus_kind == "row" and rec ~= nil and rec.cat ~= "completed"
         and rec.cat ~= "failed" and rec.cat ~= "canceled" then
       d.focus_id = d.focus_id or ("Focus##qf_" .. qid)
+      if d.jump ~= nil then imgui.same_line() end
       local listed = false
       for _, q in ipairs(settings.focus_qids) do
         if q == qid then listed = true; break end
@@ -2076,6 +2089,7 @@ local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
         imgui.set_tooltip("At most 16 quests in focus")
       end
     elseif focus_kind == "tracked" then
+      if d.jump ~= nil then imgui.same_line() end
       local c, v = imgui.checkbox("Focus tracked##qf_tracked", settings.focus_tracked)
       if c then
         su.set_key(settings, "focus_tracked", v)

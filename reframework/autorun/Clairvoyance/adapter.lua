@@ -2410,7 +2410,7 @@ local function refresh_objectives_body()
     if prog == nil then objective_walk_failed() return end
     local progressing = {}
     for _, qid in ipairs(prog) do
-        if is_side_quest(qid) then progressing[qid] = true end
+        if is_side_quest(qid) or (items.focus_set ~= nil and items.focus_set[qid]) then progressing[qid] = true end
     end
     if next(progressing) == nil then
         -- No side quest in progress: skip the walk, but still commit so
@@ -3184,7 +3184,7 @@ local function item_round_needs(now)
     if prog == nil then item_round_failed() return end
     local wanted = {}
     for _, q in ipairs(prog) do
-        if not wanted[q] and is_side_quest(q) then wanted[q] = true end
+        if not wanted[q] and (is_side_quest(q) or (items.focus_set ~= nil and items.focus_set[q])) then wanted[q] = true end
     end
     if next(wanted) == nil then
         commit_item_needs({})
@@ -3536,6 +3536,18 @@ function A.make()
     items.static_related = type(map) == "table" and map or nil
     items.related_titles = nil
   end
+  -- SPEC 32.6.1.2: focused quests (main included) join the objective walk and
+  -- the item round; nil or an empty list clears the set
+  function a.set_focus_qids(list)
+    local set
+    if type(list) == "table" then
+      for _, q in ipairs(list) do
+        if type(q) == "number" then set = set or {}; set[q] = true end
+      end
+    end
+    items.focus_set = set
+  end
+  function a.focus_set() return items.focus_set end
   -- the next refresh_items round runs at once (Ruling 9)
   function a.reset_item_throttle() ITEM_LAST_AT = -math.huge end
   -- SPEC 22.11.4.1: every side quest's step text, keys the 0-based task index

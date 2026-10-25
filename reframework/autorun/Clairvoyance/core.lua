@@ -1308,17 +1308,19 @@ local function focus_entries(world, fx)
   if fx == nil then return list, set end
   for _, e in ipairs(world.chests or {}) do
     if valid_pos(e.pos) then
-      local hit = false
+      local hit, ids = false, {}
       for _, q in ipairs(type(e.gate_qids) == "table" and e.gate_qids or {}) do
         if fx.qids[q] then hit = true; break end
       end
-      if not hit and e.item ~= nil and fx.items[e.item] then hit = true end
-      if not hit then
-        for _, id in ipairs(type(e.item_ids) == "table" and e.item_ids or {}) do
-          if fx.items[id] then hit = true; break end
-        end
+      local gated = hit
+      if e.item ~= nil and fx.items[e.item] then hit = true; ids[e.item] = true end
+      for _, id in ipairs(type(e.item_ids) == "table" and e.item_ids or {}) do
+        if fx.items[id] then hit = true; ids[id] = true end
       end
-      if hit then list[#list + 1] = { cat = "chest", e = e }; set[e] = true end
+      if hit then
+        list[#list + 1] = { cat = "chest", e = e, gated = gated, ids = ids }
+        set[e] = true
+      end
     end
   end
   for _, e in ipairs(world.sellers or {}) do
@@ -1337,7 +1339,7 @@ end
 -- and kind filters, never hidden by the cap. A hidden one (opened, undiscovered,
 -- at a box) is dropped. Under a query, one that does not match is marked
 -- focus_kept (drawn, but not a result).
-local function related_cands(list, world, show, boxes, q, labels)
+local function related_cands(list, world, show, boxes, q, labels, origin)
   local rctx = world_ctx(show, boxes)
   rctx.show_kind = {}
   rctx.labels = labels
@@ -1349,8 +1351,42 @@ local function related_cands(list, world, show, boxes, q, labels)
     local c = make_cand(p.cat, p.e, rctx)
     if not c.hidden then
       if not ok then c.focus_kept = true end
+      c.rel_ids = p.cat == "chest" and not p.gated and p.ids or nil
       out[#out + 1] = c
     end
+  end
+  -- SPEC 32.6.1.3: a chest matched only through items is capped per item id,
+  -- nearest the origin first; a gate-matched chest is always kept
+  local has_o = valid_pos(origin)
+  local pend = {}
+  for _, c in ipairs(out) do
+    if c.rel_ids ~= nil then
+      c.rel_d = has_o and valid_pos(c.pos) and dist2(c.pos, origin) or 0
+      pend[#pend + 1] = c
+    end
+  end
+  if #pend > 0 then
+    table.sort(pend, function(x, y)
+      if x.rel_d ~= y.rel_d then return x.rel_d < y.rel_d end
+      return x.key < y.key
+    end)
+    local cnt, drop = {}, {}
+    for _, c in ipairs(pend) do
+      local keep = false
+      for id in pairs(c.rel_ids) do
+        if (cnt[id] or 0) < 3 then keep = true; break end
+      end
+      if keep then
+        for id in pairs(c.rel_ids) do cnt[id] = (cnt[id] or 0) + 1 end
+      else
+        drop[c] = true
+      end
+    end
+    local kept = {}
+    for _, c in ipairs(out) do
+      if not drop[c] then kept[#kept + 1] = c end
+    end
+    out = kept
   end
   table.sort(out, function(x, y) return x.key < y.key end)
   return out
@@ -1658,7 +1694,7 @@ function M.world_markers(world, show, origin, boxes, quest_cids, fx)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids, ft, kcounts, related_cands(flist, world, show, boxes, show.search))
+    quest_cids, ft, kcounts, related_cands(flist, world, show, boxes, show.search, nil, origin))
 end
 
 -- Cached entry point (SPEC 17.10.10). A 256-unit grid of the world's
@@ -1906,7 +1942,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats, f
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids, ft, g.kinds, related_cands(flist, world, show, boxes, q, g.labels))
+    quest_cids, ft, g.kinds, related_cands(flist, world, show, boxes, q, g.labels, origin))
 end
 
 -- The settlement nearest to pos by 3D distance (first wins a tie), or nil.
