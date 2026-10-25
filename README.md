@@ -132,8 +132,9 @@ places" also draws a route to each destination place of the focused quests,
 counted in the same eight, and "Routes: n of N" says how many of the
 candidate routes are shown. Close places of the focused quests share one
 route (the one nearest you), places on an NPC's stop are left to that NPC's
-route, and an NPC with a single stop gets a line from you. "Unrelated opacity (%)" sets how faint Dim
-markers are; Dim markers are drawn without an outline.
+route, and an NPC with a single stop gets a line from you. "Unrelated
+opacity (%)" sets how faint Dim markers are; Dim markers are drawn without
+an outline.
 
 ### Items
 
