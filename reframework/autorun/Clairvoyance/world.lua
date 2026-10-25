@@ -1377,6 +1377,20 @@ function M.new(a, reads, io)
     return string.format("%.1f,%.1f,%.1f", p.x, p.y, p.z)
   end
 
+  -- the player end of a route entry (place or lead): remember where the
+  -- route starts; when it moved, the old stop's walking-graph node is dropped
+  local function set_from(cid, pl)
+    local from = stop_key(pl)
+    local old = S.place_from[cid]
+    if old ~= nil and old ~= from then w.near[old] = nil end
+    S.place_from[cid] = from
+  end
+
+  -- a drawn stop (SPEC 32.14.11.2): positioned, and discovered or shown anyway
+  local function drawn_stop(st, tg)
+    return valid_pos(st.pos) and (st.discovered ~= false or tg.undiscovered == true)
+  end
+
   -- a place member's entry (SPEC 32.14.5.3): the player to the place, both
   -- discovered; nil (and no slot held) until both positions exist. When the
   -- player stop moved, the old stop's walking-graph node is dropped.
@@ -1387,10 +1401,7 @@ function M.new(a, reads, io)
       free_slot(m.cid)
       return nil
     end
-    local from = stop_key(pl)
-    local old = S.place_from[m.cid]
-    if old ~= nil and old ~= from then w.near[old] = nil end
-    S.place_from[m.cid] = from
+    set_from(m.cid, pl)
     return { cid = m.cid, place = m.place, name = m.name,
              stops = { { pos = pcopy(pl), discovered = true },
                        { pos = pcopy(kp), discovered = true } } }
@@ -1471,18 +1482,63 @@ function M.new(a, reads, io)
         pick.failed, pick.built = true, true
       end
     end
+    -- the NPC entries first (a place waits on them), then the final list in
+    -- member order
     local out, again = {}, false
-    for _, e in ipairs(info) do
+    local ents, npc_ready, block = {}, true, {}
+    local pl = valid_pos(tg.player) and tg.player or nil
+    for i, e in ipairs(info) do
+      local m = e.m
+      if not e.place then
+        if e.bad or e.failed then
+          ents[i] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
+        else
+          local c = S.route_cache[m.cid]
+          if e.stale then again = true end
+          if c ~= nil then
+            local r = render(m, c, hour)
+            ents[i] = r
+            local nd, di = 0, nil
+            for k, st in ipairs(r.stops or {}) do
+              if drawn_stop(st, tg) then
+                nd = nd + 1
+                di = di or k
+                block[#block + 1] = st.pos
+              end
+            end
+            -- exactly one drawn stop and a player: the route leads from them
+            if nd == 1 and pl ~= nil then
+              local st = r.stops[di]
+              st.idx = di
+              r.stops = { { pos = pcopy(pl), discovered = true, lead = true }, st }
+              r.lead = true
+              r.current = (r.current == di) and 2 or nil
+              set_from(m.cid, pl)
+            else
+              S.place_from[m.cid] = nil
+            end
+          else
+            npc_ready = false
+          end
+        end
+      end
+    end
+    for i, e in ipairs(info) do
       local m = e.m
       if e.place then
-        local pe = place_entry(m, tg)
+        local held = S.slot_of[m.cid] == nil and not npc_ready
+        local kp = S.key_pos[m.place]
+        if not held and kp ~= nil then
+          for _, p in ipairs(block) do
+            local dx, dz = kp.x - p.x, kp.z - p.z
+            if dx * dx + dz * dz <= 900 then held = true; break end
+          end
+        end
+        local pe = nil
+        if held then free_slot(m.cid) else pe = place_entry(m, tg) end
         if pe ~= nil then out[#out + 1] = pe end
-      elseif e.bad or e.failed then
-        out[#out + 1] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
-      else
-        local c = S.route_cache[m.cid]
-        if e.stale then again = true end
-        if c ~= nil then out[#out + 1] = render(m, c, hour) end
+      elseif ents[i] ~= nil then
+        out[#out + 1] = ents[i]
       end
     end
     if #out == 0 then return nil, again end

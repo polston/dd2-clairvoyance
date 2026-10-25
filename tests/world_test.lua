@@ -3083,7 +3083,7 @@ do
     -- 1: a place member
     f, d = sfix()
     w = f.new()
-    d.keypos[77] = P(10, 0, 10)
+    d.keypos[77] = P(100, 0, 100)
     if type(w.set_routes) == "function" then
       w:set_routes(PL)
       local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
@@ -3095,7 +3095,7 @@ do
         and pe.stops ~= nil and #pe.stops == 2)
       check("place member: stops are the player and the place, both discovered",
         pe ~= nil and pe.stops ~= nil and pe.stops[1].pos.x == 5 and pe.stops[1].pos.y == 1
-        and pe.stops[2].pos.x == 10 and pe.stops[2].pos.z == 10
+        and pe.stops[2].pos.x == 100 and pe.stops[2].pos.z == 100
         and pe.stops[1].discovered == true and pe.stops[2].discovered == true)
       check("place member: a slot and no current", pe ~= nil and pe.slot == 2
         and pe.current == nil and pe.err == nil)
@@ -3129,7 +3129,7 @@ do
       w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" } })
       local n = 0
       local t0 = ptg(nil, { 77 })
-      d.keypos[77] = P(10, 0, 10)
+      d.keypos[77] = P(100, 0, 100)
       repeat n = n + 1 until not w:refresh(0, true, t0) or n > 20
       check("place waits: no player, no place entry and the NPC takes slot 1",
         route_in(w, -77) == nil and slots(w) == "2001=1")
@@ -3141,7 +3141,7 @@ do
       repeat n = n + 1 until not w:refresh(1, true, t1) or n > 20
       check("place waits: no key position, no place entry",
         route_in(w, -77) == nil and slots(w) == "2001=1")
-      d.keypos[77] = P(10, 0, 10)
+      d.keypos[77] = P(100, 0, 100)
       w:poke()
       w:refresh(2, true, t1)
       check("place waits: both present, the entry appears with the next slot",
@@ -3181,19 +3181,219 @@ do
     -- 5: moving the player drops the old near key
     f, d = sfix()
     w = f.new()
-    d.keypos[77] = P(10, 0, 10)
+    d.keypos[77] = P(100, 0, 100)
     if type(w.set_routes) == "function" then
       w:set_routes({ { cid = -77, place = 77, name = "Q" } })
       w:refresh(0, true, ptg({ x = 5, y = 1, z = 5 }, { 77 }))
       w.near["5.0,1.0,5.0"] = 3
-      w.near["10.0,0.0,10.0"] = 4
+      w.near["100.0,0.0,100.0"] = 4
       w:poke()
       w:refresh(1, true, ptg({ x = 5, y = 1, z = 5 }, { 77 }))
       check("place re-path: an unmoved player keeps its near key", w.near["5.0,1.0,5.0"] == 3)
       w:poke()
       w:refresh(2, true, ptg({ x = 6, y = 1, z = 6 }, { 77 }))
       check("place re-path: a moved player drops the old near key only",
-        w.near["5.0,1.0,5.0"] == nil and w.near["10.0,0.0,10.0"] == 4)
+        w.near["5.0,1.0,5.0"] == nil and w.near["100.0,0.0,100.0"] == 4)
+    end
+
+    -- route clean-up (SPEC 32.14.11.2, 11.3): places held back, one-stop lead
+    do
+      local PA = { x = 5, y = 1, z = 5 }
+      local tick = 0
+      local function go(w, t)
+        local n = 0
+        tick = tick + 1
+        w:poke()
+        repeat n = n + 1 until not w:refresh(tick, true, t) or n > 20
+      end
+      local function one(w, t)
+        tick = tick + 1
+        w:poke()
+        w:refresh(tick, true, t)
+      end
+      local function undisc(dd)
+        dd.icons = {
+          { type = K.SETTLEMENT_TYPE, pos = P(0, 0, 0), disp_id = "a", icon_id = 1 },
+          { type = K.SETTLEMENT_TYPE, pos = P(1000, 0, 1000), disp_id = "b", icon_id = 2 } }
+        dd.msgs = { a = "Town A", b = "Town B" }
+        dd.icons_found = { [2] = true }
+        dd.disc_n = 1
+      end
+      local function setup(kp)
+        local ff, dd = sfix()
+        dd.keypos[77] = kp or P(100, 0, 100)
+        return ff, dd, ff.new()
+      end
+      local function bump(dd) dd.sig = (dd.sig or "") .. "x" end
+
+      -- 1: a place on an NPC stop is not published
+      local f1, d1, w1 = setup(P(30, 0, 1))
+      w1:set_routes(PL)
+      go(w1, ptg(PA, { 77 }))
+      check("place on NPC stop: 29 m, no place entry", route_in(w1, -77) == nil
+        and route_in(w1, 2001) ~= nil)
+      w1:set_routes({ { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" },
+        { cid = 2002, name = "B" } })
+      go(w1, ptg(PA, { 77 }))
+      check("place on NPC stop: a joining member takes the would-be slot",
+        slots(w1) == "2001=1,2002=2")
+      d1.keypos[77] = P(32, 0, 1)
+      w1:reset()
+      w1:set_routes(PL)
+      go(w1, ptg(PA, { 77 }))
+      check("place on NPC stop: 31 m, the place publishes", route_in(w1, -77) ~= nil)
+
+      -- 1b: a held place frees its slot
+      local f2, d2, w2 = setup()
+      w2:set_routes(PL)
+      go(w2, ptg(PA, { 77 }))
+      check("held place frees slot: precondition", slots(w2) == "2001=1,-77=2")
+      d2.area_nodes[50] = { P(100, 0, 90) }
+      d2.rows[2001] = rows_of({ 6, 18, 50 })
+      bump(d2)
+      go(w2, ptg(PA, { 77 }))
+      check("held place frees slot: no place entry", route_in(w2, -77) == nil)
+      w2:set_routes({ { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" },
+        { cid = 2002, name = "B" } })
+      go(w2, ptg(PA, { 77 }))
+      check("held place frees slot: a joining member takes it",
+        slots(w2) == "2001=1,2002=2")
+
+      -- 2: a place on an undiscovered stop
+      local f3, d3, w3 = setup(P(11, 0, 1))
+      undisc(d3)
+      w3:set_routes(PL)
+      go(w3, ptg(PA, { 77 }))
+      check("place on undiscovered stop: published", route_in(w3, -77) ~= nil)
+      local tu = ptg(PA, { 77 })
+      tu.undiscovered = true
+      go(w3, tu)
+      check("place on undiscovered stop: held with undiscovered shown",
+        route_in(w3, -77) == nil)
+
+      -- 3: places wait for NPC builds
+      local f4, d4, w4 = setup()
+      w4:set_routes({ { cid = 2001, name = "A" }, { cid = 2002, name = "B" },
+        { cid = -77, place = 77, name = "Q" } })
+      one(w4, ptg(PA, { 77 }))
+      check("places wait for NPC builds: round 1 has no place",
+        route_in(w4, -77) == nil and w4:stats().route_builds == 1)
+      one(w4, ptg(PA, { 77 }))
+      check("places wait for NPC builds: round 2 has it", route_in(w4, -77) ~= nil
+        and w4:stats().route_builds == 2)
+
+      -- 3b: a shown place keeps its slot
+      local f5, d5, w5 = setup()
+      w5:set_routes(PL)
+      go(w5, ptg(PA, { 77 }))
+      check("shown place keeps its slot: precondition", slots(w5) == "2001=1,-77=2")
+      w5:set_routes({ { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" },
+        { cid = 2003, name = "C" }, { cid = 2004, name = "D" } })
+      one(w5, ptg(PA, { 77 }))
+      local pe5 = route_in(w5, -77)
+      check("shown place keeps its slot: members joining", pe5 ~= nil and pe5.slot == 2
+        and route_in(w5, 2003) ~= nil and route_in(w5, 2004) == nil)
+      local f6, d6, w6 = setup()
+      w6:set_routes(PL)
+      go(w6, ptg(PA, { 77 }))
+      w6:set_route(2004, "D")
+      w6:set_routes({ { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" },
+        { cid = 2005, name = "E" } })
+      one(w6, ptg(PA, { 77 }))
+      local pe6 = route_in(w6, -77)
+      check("shown place keeps its slot: search target and a member",
+        pe6 ~= nil and pe6.slot == 2)
+
+      -- 4, 5: a one-stop NPC leads from the player
+      local f7, d7, w7 = setup()
+      w7:set_routes({ { cid = 2001, name = "A" } })
+      go(w7, ptg(PA, nil))
+      local e7 = route_in(w7, 2001)
+      check("one-stop lead: lead, two stops, the player first",
+        e7 ~= nil and e7.lead == true and #e7.stops == 2 and e7.stops[1].lead == true
+        and e7.stops[1].pos.x == 5 and e7.stops[1].pos.z == 5
+        and e7.stops[1].discovered == true)
+      check("one-stop lead: the NPC stop carries idx, current 2 at its hour",
+        e7.stops[2].idx == 1 and e7.stops[2].pos.x == 1 and e7.current == 2)
+      local b7 = w7:stats().route_builds
+      go(w7, ptg(nil, nil))
+      e7 = route_in(w7, 2001)
+      check("one-stop lead: no player, the cache kept one stop and no rebuild",
+        w7:stats().route_builds == b7 and #e7.stops == 1 and e7.lead == nil
+        and e7.stops[1].lead == nil)
+      d7.hour = 20
+      go(w7, ptg(PA, nil))
+      check("one-stop lead: current nil off its hour", route_in(w7, 2001).lead == true
+        and route_in(w7, 2001).current == nil)
+
+      -- 6: undiscovered two-stop
+      local f8, d8, w8 = setup()
+      undisc(d8)
+      d8.area_nodes[46] = { P(990, 0, 990) }
+      d8.rows[2001] = rows_of({ 6, 12, 49 }, { 12, 18, 46 })
+      w8:set_routes({ { cid = 2001, name = "A" } })
+      go(w8, ptg(PA, nil))
+      local e8 = route_in(w8, 2001)
+      check("undiscovered two-stop: leads with the player and stop 2",
+        e8 ~= nil and e8.lead == true and #e8.stops == 2 and e8.stops[2].idx == 2
+        and e8.stops[2].pos.x == 990)
+      local t8 = ptg(PA, nil)
+      t8.undiscovered = true
+      go(w8, t8)
+      e8 = route_in(w8, 2001)
+      check("undiscovered two-stop: undiscovered shown, no lead, two own stops",
+        e8.lead == nil and #e8.stops == 2 and e8.stops[1].lead == nil)
+
+      -- 6b: a hidden one-stop
+      local f9, d9, w9 = setup()
+      undisc(d9)
+      w9:set_routes({ { cid = 2001, name = "A" } })
+      go(w9, ptg(PA, nil))
+      local e9 = route_in(w9, 2001)
+      check("hidden one-stop: no lead, one stop", e9 ~= nil and e9.lead == nil
+        and #e9.stops == 1)
+      local t9 = ptg(PA, nil)
+      t9.undiscovered = true
+      go(w9, t9)
+      e9 = route_in(w9, 2001)
+      check("hidden one-stop: undiscovered shown, lead with two stops",
+        e9.lead == true and #e9.stops == 2)
+
+      -- 7: the lead player moves
+      local f10, d10, w10 = setup()
+      w10:set_routes({ { cid = 2001, name = "A" } })
+      go(w10, ptg(PA, nil))
+      w10.near["5.0,1.0,5.0"] = 3
+      go(w10, ptg({ x = 6, y = 1, z = 6 }, nil))
+      check("lead player moves: the old near key is dropped",
+        w10.near["5.0,1.0,5.0"] == nil)
+
+      -- 8: lead to two-stop
+      local f11, d11, w11 = setup()
+      w11:set_routes({ { cid = 2001, name = "A" } })
+      go(w11, ptg(PA, nil))
+      w11.near["5.0,1.0,5.0"] = 3
+      d11.rows[2001] = rows_of({ 6, 12, 49 }, { 12, 18, 49 })
+      d11.area_nodes[49] = { P(1, 0, 1), P(2, 0, 2) }
+      bump(d11)
+      go(w11, ptg(PA, nil))
+      local e11 = route_in(w11, 2001)
+      check("lead to two-stop: no lead, two own stops", e11.lead == nil and #e11.stops == 2
+        and e11.stops[1].lead == nil)
+      d11.rows[2001] = rows_of({ 6, 18, 49 })
+      bump(d11)
+      go(w11, ptg({ x = 6, y = 1, z = 6 }, nil))
+      check("lead to two-stop: the record was cleared, A's key stays",
+        route_in(w11, 2001).lead == true and w11.near["5.0,1.0,5.0"] == 3)
+
+      -- 9: all_err places
+      local f12, d12, w12 = setup()
+      w12:set_routes(PL)
+      f12.fail.schedule_now = true
+      go(w12, ptg(PA, { 77 }))
+      check("all_err places: a place publishes as today", route_in(w12, -77) ~= nil
+        and route_in(w12, 2001).err ~= nil)
+      f12.fail.schedule_now = nil
     end
   end
 
