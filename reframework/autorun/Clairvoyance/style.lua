@@ -116,17 +116,16 @@ end
 -- (0..100 percent) and the width factor toward 0.5 on that same fraction.
 -- Channels and alpha round down. Returns argb, width_factor.
 function M.leg_color(argb, end_argb, amount, alpha_end, step, n)
-  local t = step / math.max(1, n - 1)
-  local k = amount * t / 100
+  local d = math.max(1, n - 1)
   local out = 0
   for shift = 0, 16, 8 do
     local c = (argb >> shift) & 0xFF
     local e = (end_argb >> shift) & 0xFF
-    out = out | (math.floor(c + (e - c) * k) << shift)
+    out = out | ((c + (e - c) * amount * step // (100 * d)) << shift)
   end
   local a0 = (argb >> 24) & 0xFF
-  local a = math.floor(a0 * (1 - t * (1 - alpha_end / 100)))
-  return (a << 24) | out, 1 - 0.5 * t
+  local a = a0 * (100 * d - step * (100 - alpha_end)) // (100 * d)
+  return (a << 24) | out, 1 - 0.5 * step / d
 end
 
 local function segments_range(draw, pts, from, to, w, color_abgr)
@@ -139,9 +138,7 @@ local function segments_range(draw, pts, from, to, w, color_abgr)
   end
 end
 
-function M.segments_range(draw, pts, from, to, w, color_abgr)
-  segments_range(draw, pts, from, to, w, color_abgr)
-end
+M.segments_range = segments_range
 
 function M.outline_range(draw, pts, from, to, w, on, outline_argb, o, a)
   if on then

@@ -156,6 +156,8 @@ do -- leg_color
   check("leg_color flat amount 0", c == 0x4CE91E63 and w == 0.5)
   c, w = S.leg_color(0xFFE91E63, 0xFF101010, 50, 30, 3, 4)
   check("leg_color defaults far leg", c == 0x4C7C1739 and w == 0.5)
+  c = S.leg_color(0xFFFFFFFF, 0xFFFFFFFF, 0, 20, 3, 4)
+  check("leg_color far leg is exactly alpha_end", c == 0x33FFFFFF)
 end
 
 do -- outline_range and segments_range
@@ -172,6 +174,12 @@ do -- outline_range and segments_range
   d, calls = rec()
   S.segments_range(d, pts, 1, 5, 2, 0xFF00FF00)
   check("segments_range break skipped", #calls == 2)
+  d, calls = rec()
+  S.segments_range(d, { 0, 0, 10, 0, 20, 0 }, 1, 2, 2, 1)
+  check("segments_range upper bound inclusive, no overrun", #calls == 1)
+  d, calls = rec()
+  S.segments_range(d, { 0, 0, 10, 0, 20, 0 }, 1, 1, 2, 1)
+  check("segments_range single point draws nothing", #calls == 0)
 end
 
 -- resolve reads each group's own override keys (final review M2)
