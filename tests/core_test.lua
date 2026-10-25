@@ -3273,6 +3273,9 @@ do
     ml = core.route_members(fa, relA, { [1] = pl(0, 0), [2] = { x = 100, y = 400, z = 0 } }, nil,
       { routes = 0, places = true }, nmf)
     check("rcc merge ignores y", keys(ml) == "1")
+    ml = core.route_members(fa, relA, { [1] = { x = 0, y = 1000, z = 0 }, [2] = pl(100, 0) }, nil,
+      { routes = 0, places = true, player = { x = 100, y = 1000, z = 0 } }, nmf)
+    check("rcc player distance ignores y", keys(ml) == "2")
 
     local function stops_of(r)
       local t = {}
@@ -3294,6 +3297,10 @@ do
       { pos = pl(0, 0), discovered = true, lead = true }, { pos = pl(10, 10), discovered = true, idx = 2 } } }
     local li = stops_of(run({}, nil, { routes = { leadi } }))
     check("rcc lead idx", #li == 1 and li[1].num == 2 and li[1].key == "r:5:2")
+    local leadb = { cid = 5, name = "N", slot = 1, lead = true, stops = {
+      { pos = pl(0, 0), discovered = true, lead = true }, { pos = pl(10, 10), discovered = true, idx = "x" } } }
+    local lb = stops_of(run({}, nil, { routes = { leadb } }))
+    check("rcc non-number idx falls back", #lb == 1 and lb[1].num == 1)
     check("rcc lead signature", core.signature(lm, {}) ~= core.signature(one, {}))
   end
 
