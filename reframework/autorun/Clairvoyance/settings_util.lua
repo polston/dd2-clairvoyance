@@ -2,6 +2,16 @@
 local M = {}
 local style = require("Clairvoyance.style")
 
+-- The eight route colours, slot 1 first (SPEC 32.14.2); a new table each call.
+local ROUTE_COLORS = { 0xFFE91E63, 0xFF00E5FF, 0xFFFFEB3B, 0xFF76FF03,
+  0xFFD500F9, 0xFF2979FF, 0xFF1DE9B6, 0xFFB388FF }
+local DIM_ALPHA_DEFAULT = 25
+function M.default_route_colors()
+  local t = {}
+  for i = 1, #ROUTE_COLORS do t[i] = ROUTE_COLORS[i] end
+  return t
+end
+
 function M.defaults()
   local t = {
     enabled = true, show_minimap = true, icon_color = 0xFFFFD34D, debug = false,
@@ -30,12 +40,15 @@ function M.defaults()
     coords_map_cursor = true, coords_minimap = true,
     world_kind_ng_shard = true, world_kind_kept = true, world_kind_quest = true,
     world_kind_trap = true, world_kind_pawn = true,
-    color_npc_search = 0xFFF06292, color_route_stop = 0xFFF8BBD0,
+    color_npc_search = 0xFFF06292,
     color_hint_pin = 0xFF00E676,
     icon_npc_search = 31, icon_route_stop = 25, icon_hint_pin = 58,
     -- v14 styling and routes (SPEC 23.4)
     outline_on = true, outline_color = 0xFF000000, outline_width = 1,
-    route_line_color = 0xFFE91E63, route_line_width = 3, route_stop_size = 100,
+    route_colors = M.default_route_colors(), route_line_width = 3, route_stop_size = 100,
+    route_gradient = true, route_gradient_end = 0xFF101010,
+    route_gradient_amount = 50, route_gradient_alpha = 30,
+    route_legend = true, focus_place_routes = true, focus_dim_alpha = DIM_ALPHA_DEFAULT,
     route_number_color = 0xFFFFFFFF, route_number_size = 0,
     route_path = 1, route_world_path = false, names_color = 0xFFFFFFFF,
     -- monster kinds switched off, per class (SPEC 29.2.1)
@@ -142,10 +155,12 @@ local function bool_field(raw, k, d)
   return d[k]
 end
 
+local function is_argb(v)
+  return type(v) == "number" and v == math.floor(v) and v >= 0 and v <= 0xFFFFFFFF
+end
 local function argb_field(raw, k, d)
   local v = raw[k]
-  if type(v) == "number" and v == math.floor(v)
-    and v >= 0 and v <= 0xFFFFFFFF then
+  if is_argb(v) then
     return v
   end
   return d[k]
@@ -246,14 +261,15 @@ local BOOL_KEYS = { "enabled", "debug", "show_startable", "show_in_progress",
   "show_completed", "show_unavailable", "show_locked", "show_overhead", "show_minimap",
   "reveal_gate_names", "show_quest_items", "journal_spoilers",
   "matching_icons", "step_icons", "inventory_quest_marks", "route_world_path",
-  "coords_map_cursor", "coords_minimap", "focus_tracked" }
+  "coords_map_cursor", "coords_minimap", "focus_tracked", "route_legend",
+  "focus_place_routes" }
 for _, k in ipairs(M.WORLD_BOOLS) do BOOL_KEYS[#BOOL_KEYS + 1] = k end
 for _, k in ipairs(M.WORLD_KIND_BOOLS) do BOOL_KEYS[#BOOL_KEYS + 1] = k end
 local COLOR_KEYS = { "icon_color", "color_in_progress", "color_completed",
   "color_unavailable", "color_locked", "color_quest_item",
   "color_chest", "color_treasure", "color_monster", "color_seller",
   "color_token", "color_beetle",
-  "color_npc_search", "color_route_stop", "color_hint_pin", "color_focus_place" }
+  "color_npc_search", "color_hint_pin", "color_focus_place" }
 local ICON_KEYS = { "icon_startable", "icon_in_progress", "icon_completed",
   "icon_unavailable", "icon_locked", "icon_quest_item",
   "icon_chest", "icon_treasure", "icon_monster", "icon_seller",
@@ -263,11 +279,12 @@ M.ICON_KEYS, M.COLOR_KEYS = ICON_KEYS, COLOR_KEYS
 
 -- The v14 style keys by field rule (SPEC 23.4). route_number_size and
 -- route_path have their own rules and are not in these lists.
-local STYLE_BOOL_KEYS = { "outline_on" }
-local STYLE_COLOR_KEYS = { "outline_color", "route_line_color",
+local STYLE_BOOL_KEYS = { "outline_on", "route_gradient" }
+local STYLE_COLOR_KEYS = { "outline_color", "route_gradient_end",
   "route_number_color", "names_color" }
 local STYLE_INT_RANGE = { outline_width = { 1, 4 }, route_line_width = { 1, 8 },
-  route_stop_size = { 50, 200 } }
+  route_stop_size = { 50, 200 }, route_gradient_amount = { 0, 100 },
+  route_gradient_alpha = { 0, 100 } }
 for _, g in ipairs(style.GROUPS) do
   local p = "style_" .. g .. "_"
   STYLE_BOOL_KEYS[#STYLE_BOOL_KEYS + 1] = p .. "override"
@@ -305,6 +322,7 @@ do
   table.sort(ks)
   for _, k in ipairs(ks) do a[#a + 1] = k end
   a[#a + 1] = "route_number_size"
+  a[#a + 1] = "route_colors"
   for _, k in ipairs(ICON_KEYS) do a[#a + 1] = k end
   for _, k in ipairs(COLOR_KEYS) do a[#a + 1] = k end
 end
@@ -316,13 +334,13 @@ M.PANEL_ORDER = {
     "reveal_gate_names", "journal_spoilers", "step_icons" } },
   { id = "world_markers", keys = panel_world },
   { id = "npcs", keys = { "show_overhead", "overhead_distance",
-    "overhead_names", "route_path", "route_world_path" } },
+    "overhead_names", "route_path", "route_world_path", "route_legend" } },
   { id = "items", keys = { "inventory_quest_marks" } },
   { id = "map", keys = { "show_minimap", "matching_icons",
     "coords_map_cursor", "coords_minimap" } },
   { id = "appearance", keys = panel_appearance },
   { id = "quest_tree", keys = { "focus_qids", "focus_tracked", "focus_unrelated",
-    "focus_routes" } },
+    "focus_dim_alpha", "focus_routes", "focus_place_routes" } },
   { id = "world", keys = {} },
   { id = "status", keys = { "debug" } },
 }
@@ -362,6 +380,8 @@ RULE.search_text = { "text" }
 RULE.focus_unrelated = { "int", 0, 1 }
 RULE.focus_routes = { "int", 0, 2 }
 RULE.focus_qids = { "qid_list" }
+RULE.focus_dim_alpha = { "int", 5, 100 }
+RULE.route_colors = { "color_list", 8 }
 
 local QID_MAX = 16
 -- Whole numbers above 0, repeats dropped, first 16; a non-table gives an empty list.
@@ -382,6 +402,22 @@ local function qid_list_field(v)
   return out
 end
 
+-- Exactly n colours: each entry through the color rule, default i when it
+-- fails; a non-table gives the defaults. Always a new table.
+local function color_list_field(v, n)
+  local out = {}
+  local dl = M.default_route_colors()
+  for i = 1, n do
+    local e = type(v) == "table" and v[i] or nil
+    if is_argb(e) then
+      out[i] = e
+    else
+      out[i] = dl[i]
+    end
+  end
+  return out
+end
+
 -- The validated value of raw[k] under its rule (the default when invalid).
 local function field(raw, k, d)
   local r = RULE[k]
@@ -393,6 +429,7 @@ local function field(raw, k, d)
   elseif kind == "float" then return range_field(raw, k, d, r[2], r[3])
   elseif kind == "size" then return number_size_field(raw, k)
   elseif kind == "qid_list" then return qid_list_field(raw[k])
+  elseif kind == "color_list" then return color_list_field(raw[k], r[2])
   end
   return M.cut_search(raw[k])
 end
@@ -597,8 +634,16 @@ function M.validate(raw)
   for _, k in ipairs(STYLE_COLOR_KEYS) do out[k] = field(raw, k, d) end
   for _, k in ipairs({ "overhead_distance", "world_max_markers", "search_text",
     "overhead_names", "route_number_size", "route_path", "focus_qids",
-    "focus_unrelated", "focus_routes" }) do
+    "focus_unrelated", "focus_routes", "focus_dim_alpha" }) do
     out[k] = field(raw, k, d)
+  end
+  -- route_colors; the retired route_line_color seeds entry 1 when no list
+  -- is stored (SPEC 32.14.2.2). route_line_color is never written back.
+  if type(raw.route_colors) ~= "table" and type(raw.route_line_color) == "number"
+      and raw.route_line_color ~= ROUTE_COLORS[1] then
+    out.route_colors = field({ route_colors = { raw.route_line_color } }, "route_colors", d)
+  else
+    out.route_colors = field(raw, "route_colors", d)
   end
   for k in pairs(STYLE_INT_RANGE) do out[k] = field(raw, k, d) end
   local mo = type(raw.world_monster_off) == "table" and raw.world_monster_off or {}
@@ -618,8 +663,15 @@ function M.set_key(settings, key, v)
   local kind = r[1]
   local want = (kind == "bool" and "boolean")
     or ((kind == "int" or kind == "float" or kind == "size") and "number")
-    or (kind == "text" and "string") or (kind == "qid_list" and "table") or nil
+    or (kind == "text" and "string") or (kind == "qid_list" and "table")
+    or (kind == "color_list" and "table") or nil
   if want and (type(v) ~= want or v ~= v) then return false end
+  if kind == "color_list" then
+    if #v ~= r[2] then return false end
+    for i = 1, r[2] do
+      if not is_argb(v[i]) then return false end
+    end
+  end
   local out = field({ [key] = v }, key, DEFAULTS)
   if (kind == "color" or kind == "icon" or kind == "float") and out ~= v then
     return false
@@ -636,8 +688,7 @@ M.COLOR_KEY = {
   chest = "color_chest", treasure = "color_treasure",
   monster = "color_monster", seller = "color_seller", shop = "color_seller",
   token = "color_token", beetle = "color_beetle",
-  npc_search = "color_npc_search", route_stop = "color_route_stop",
-  hint_pin = "color_hint_pin",
+  npc_search = "color_npc_search", hint_pin = "color_hint_pin",
   focus_npc = "color_npc_search", focus_place = "color_focus_place",
 }
 M.ICON_KEY = {
@@ -683,16 +734,29 @@ function M.reset_appearance(settings)
   end
   for k in pairs(STYLE_INT_RANGE) do settings[k] = d[k] end
   settings.route_number_size = d.route_number_size
+  settings.route_colors = d.route_colors
 end
 
--- Marker color: the category color, alpha byte halved when the marker
--- is done (opened / looted), faded (SPEC 27.6) or dim (SPEC 32.6.4); once when
--- several apply.
+-- Marker color: the category color (the route colour for a route stop), alpha
+-- byte halved when the marker is done (opened / looted) or faded (SPEC 27.6),
+-- scaled by focus_dim_alpha when dim (SPEC 32.14.6); the lowest when several apply.
 function M.marker_color(settings, m)
-  local c = M.color_of(settings, m.cat)
+  local c
+  if m.cat == "route_stop" then
+    local rc = settings.route_colors
+    c = rc and (rc[m.slot] or rc[1]) or ROUTE_COLORS[1]
+  else
+    c = M.color_of(settings, m.cat)
+  end
   if not (m.done or m.faded or m.dim) then return c end
-  local a = (c >> 24) & 0xFF
-  return ((a // 2) << 24) | (c & 0x00FFFFFF)
+  local a0 = (c >> 24) & 0xFF
+  local a = a0
+  if m.done or m.faded then a = a0 // 2 end
+  if m.dim then
+    local da = a0 * (settings.focus_dim_alpha or DIM_ALPHA_DEFAULT) // 100
+    if da < a then a = da end
+  end
+  return (a << 24) | (c & 0x00FFFFFF)
 end
 
 -- One-time migration from the pre-rename data file names: load the new

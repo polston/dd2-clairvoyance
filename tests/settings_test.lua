@@ -138,11 +138,12 @@ check("journal_spoilers stored false kept",
 -- plus 8 v14 keys (SPEC 22.6), plus 83 style and route keys (SPEC 23.4),
 -- plus 2 coordinate readout keys, plus 5 chest kind keys, plus
 -- world_first_token (SPEC 28.9.4), plus 4 focus keys, 2 focus place appearance
--- keys and 4 focus_place style keys (SPEC 32))
+-- keys and 4 focus_place style keys (SPEC 32), plus 8 route colour, gradient
+-- and fade keys minus the 2 retired ones (SPEC 32.14))
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 162", n == 162)
+  check("defaults key count is 168", n == 168)
   check("first token default on", D.world_first_token == true)
 end
 
@@ -276,7 +277,7 @@ do
   for _, k in ipairs(su.ICON_KEYS) do if su.V12_ICON[k] then ni = ni + 1 end end
   for _, k in ipairs(su.COLOR_KEYS) do if su.V12_COLOR[k] then nc = nc + 1 end end
   check("V12_ICON keys are ICON_KEYS", ni == 16 and #su.ICON_KEYS == 16)
-  check("V12_COLOR keys are COLOR_KEYS", nc == 12 and #su.COLOR_KEYS == 16)
+  check("V12_COLOR keys are COLOR_KEYS", nc == 12 and #su.COLOR_KEYS == 15)
 
   -- reset_appearance
   local S = {}
@@ -325,7 +326,6 @@ do
   check("overhead_names default 0", D.overhead_names == 0)
   check("inventory_quest_marks default true", D.inventory_quest_marks == true)
   check("color_npc_search default", D.color_npc_search == 0xFFF06292)
-  check("color_route_stop default", D.color_route_stop == 0xFFF8BBD0)
   check("color_hint_pin default", D.color_hint_pin == 0xFF00E676)
   check("icon_npc_search default", D.icon_npc_search == 31)
   check("icon_route_stop default", D.icon_route_stop == 25)
@@ -342,7 +342,7 @@ do
     su.validate({ inventory_quest_marks = true }).inventory_quest_marks == true)
   check("inventory_quest_marks non-bool -> true",
     su.validate({ inventory_quest_marks = "no" }).inventory_quest_marks == true)
-  for _, k in ipairs({ "color_npc_search", "color_route_stop", "color_hint_pin" }) do
+  for _, k in ipairs({ "color_npc_search", "color_hint_pin" }) do
     check(k .. " kept", su.validate({ [k] = 0xFF112233 })[k] == 0xFF112233)
     check(k .. " negative rejected", su.validate({ [k] = -1 })[k] == D[k])
     check(k .. " float rejected", su.validate({ [k] = 1.5 })[k] == D[k])
@@ -372,7 +372,6 @@ do
   check("WORLD_LABEL route_stop", su.WORLD_LABEL.route_stop == "Route stops")
   check("WORLD_LABEL hint_pin", su.WORLD_LABEL.hint_pin == "Hint pins")
   check("COLOR_KEY npc_search", su.COLOR_KEY.npc_search == "color_npc_search")
-  check("COLOR_KEY route_stop", su.COLOR_KEY.route_stop == "color_route_stop")
   check("COLOR_KEY hint_pin", su.COLOR_KEY.hint_pin == "color_hint_pin")
   check("ICON_KEY npc_search", su.ICON_KEY.npc_search == "icon_npc_search")
   check("ICON_KEY route_stop", su.ICON_KEY.route_stop == "icon_route_stop")
@@ -380,14 +379,14 @@ do
   local R = {}
   for k, v in pairs(D) do R[k] = v end
   for _, k in ipairs({ "icon_npc_search", "icon_route_stop", "icon_hint_pin" }) do R[k] = 9 end
-  for _, k in ipairs({ "color_npc_search", "color_route_stop", "color_hint_pin" }) do R[k] = 0xFF010203 end
+  for _, k in ipairs({ "color_npc_search", "color_hint_pin" }) do R[k] = 0xFF010203 end
   su.reset_appearance(R)
   local all = true
   for _, k in ipairs({ "icon_npc_search", "icon_route_stop", "icon_hint_pin",
-    "color_npc_search", "color_route_stop", "color_hint_pin" }) do
+    "color_npc_search", "color_hint_pin" }) do
     if R[k] ~= D[k] then all = false end
   end
-  check("reset_appearance restores the six v14 keys", all)
+  check("reset_appearance restores the five v14 keys", all)
 end
 
 -- one-time migration: a renamed data file falls back to its old-named file
@@ -410,7 +409,7 @@ do
   local style = require("Clairvoyance.style")
   local d = su.defaults()
   check("v14 outline defaults", d.outline_on == true and d.outline_color == 0xFF000000 and d.outline_width == 1)
-  local want = { route_line_color = 0xFFE91E63, route_line_width = 3, route_stop_size = 100,
+  local want = { route_line_width = 3, route_stop_size = 100,
     route_number_color = 0xFFFFFFFF, route_number_size = 0, route_path = 1,
     route_world_path = false, names_color = 0xFFFFFFFF }
   for k, w in pairs(want) do check("default " .. k, d[k] == w) end
@@ -451,6 +450,9 @@ do
     if old[k] == nil then
       if k == "focus_qids" then
         if type(o[k]) ~= "table" or #o[k] ~= 0 then allnew = false; print("missing default " .. k) end
+      elseif k == "route_colors" then
+        if type(o[k]) ~= "table" or #o[k] ~= 8 then allnew = false; print("missing default " .. k) end
+        for i = 1, 8 do if o[k][i] ~= w[i] then allnew = false; print("missing default " .. k) end end
       elseif k == "world_monster_off" then
         if type(o[k]) ~= "table" or next(o[k].large or { 1 }) ~= nil
           or next(o[k].small or { 1 }) ~= nil then allnew = false; print("missing default " .. k) end
@@ -458,7 +460,7 @@ do
     end
   end
   check("v13 table gets every new default", allnew)
-  check("COLOR_KEYS now 16", #su.COLOR_KEYS == 16)
+  check("COLOR_KEYS now 15", #su.COLOR_KEYS == 15)
 
   -- set_key
   local S = su.defaults()
@@ -508,7 +510,8 @@ do
   local cover = true
   for k in pairs(d) do
     local isnew = k:match("^outline_") or k:match("^style_") or k:match("^route_") or k == "names_color"
-    if isnew and k ~= "route_path" and k ~= "route_world_path" and not listed[k] then cover = false; print("unlisted " .. k) end
+    if isnew and k ~= "route_path" and k ~= "route_world_path" and k ~= "route_legend"
+        and k ~= "route_colors" and not listed[k] then cover = false; print("unlisted " .. k) end
   end
   check("lists cover every 23.4 key", cover)
 
@@ -843,14 +846,95 @@ do
   local qt
   for _, p in ipairs(su.PANEL_ORDER) do if p.id == "quest_tree" then qt = p end end
   check("quest_tree panel keys", table.concat(qt.keys, ",")
-    == "focus_qids,focus_tracked,focus_unrelated,focus_routes")
+    == "focus_qids,focus_tracked,focus_unrelated,focus_dim_alpha,focus_routes,focus_place_routes")
   check("focus_npc colour and icon are npc_search's", su.color_of(D, "focus_npc") == 0xFFF06292
     and su.icon_of(D, "focus_npc") == 31)
   check("focus_place colour and icon", su.color_of(D, "focus_place") == 0xFFFFAB40
     and su.icon_of(D, "focus_place") == 26)
-  check("marker_color dim halves", su.marker_color(D, { cat = "chest", dim = true }) == 0x7FC8A27A)
-  check("marker_color dim+done+faded halves once",
-    su.marker_color(D, { cat = "chest", dim = true, done = true, faded = true }) == 0x7FC8A27A)
+  -- marker_color dim / fade (SPEC 32.14.6)
+  check("marker_color dim alpha", su.marker_color(D, { cat = "chest", dim = true }) == 0x3FC8A27A)
+  check("marker_color faded halves", su.marker_color(D, { cat = "chest", faded = true }) == 0x7FC8A27A)
+  check("marker_color done halves", su.marker_color(D, { cat = "chest", done = true }) == 0x7FC8A27A)
+  do
+    local S80 = su.defaults()
+    S80.focus_dim_alpha = 80
+    check("marker_color dim 80 + done takes done", su.marker_color(S80,
+      { cat = "chest", dim = true, done = true }) == 0x7FC8A27A)
+  end
+  check("marker_color dim+done+faded takes the lowest",
+    su.marker_color(D, { cat = "chest", dim = true, done = true, faded = true }) == 0x3FC8A27A)
+
+  -- route colour list, gradient keys, retired keys (SPEC 32.14)
+  local want8 = { 0xFFE91E63, 0xFF00E5FF, 0xFFFFEB3B, 0xFF76FF03, 0xFFD500F9,
+    0xFF2979FF, 0xFF1DE9B6, 0xFFB388FF }
+  local rcd = su.defaults().route_colors
+  local same8 = #rcd == 8
+  for i = 1, 8 do if rcd[i] ~= want8[i] then same8 = false end end
+  check("route_colors default", same8)
+  local rv = su.validate({ route_colors = { 0xFF112233, "x" } }).route_colors
+  local rok = #rv == 8 and rv[1] == 0xFF112233
+  for i = 2, 8 do if rv[i] ~= want8[i] then rok = false end end
+  check("route_colors validate fills defaults", rok)
+  local rn = su.validate({ route_colors = 5 }).route_colors
+  local rnok = #rn == 8
+  for i = 1, 8 do if rn[i] ~= want8[i] then rnok = false end end
+  check("route_colors non-table gives defaults", rnok)
+  local ra = su.validate({}).route_colors
+  local rb = su.validate({}).route_colors
+  ra[2] = 0xFF000001
+  check("route_colors validate returns fresh tables",
+    ra ~= rb and rb[2] == want8[2] and su.defaults().route_colors[2] == want8[2]
+    and ra ~= su.defaults().route_colors)
+  local raw8 = { 0xFF010101, 0xFF020202, 0xFF030303, 0xFF040404, 0xFF050505,
+    0xFF060606, 0xFF070707, 0xFF080808 }
+  local got8 = su.validate({ route_colors = raw8 }).route_colors
+  check("route_colors validate copies a full list", got8 ~= raw8 and got8[8] == 0xFF080808)
+  check("route_line_color migrates",
+    su.validate({ route_line_color = 0xFF00FF00 }).route_colors[1] == 0xFF00FF00
+    and su.validate({ route_line_color = 0xFF00FF00 }).route_line_color == nil)
+  check("route_colors wins over route_line_color",
+    su.validate({ route_line_color = 0xFF00FF00,
+      route_colors = { 0xFF010101 } }).route_colors[1] == 0xFF010101)
+  check("route_line_color default leaves entry 1",
+    su.validate({ route_line_color = 0xFFE91E63 }).route_colors[1] == 0xFFE91E63)
+  do
+    local SK = su.defaults()
+    local cp = {}
+    for i = 1, 8 do cp[i] = SK.route_colors[i] end
+    cp[3] = 0xFF123456
+    check("set_key route_colors stores", su.set_key(SK, "route_colors", cp) == true
+      and SK.route_colors[3] == 0xFF123456)
+    local keep = SK.route_colors
+    check("set_key route_colors number", su.set_key(SK, "route_colors", 5) == false and SK.route_colors == keep)
+    check("set_key route_colors short", su.set_key(SK, "route_colors",
+      { 1, 2, 3, 4, 5, 6, 7 }) == false and SK.route_colors == keep)
+    check("set_key route_colors nine", su.set_key(SK, "route_colors",
+      { 1, 2, 3, 4, 5, 6, 7, 8, 9 }) == false and SK.route_colors == keep)
+    check("set_key route_colors bad entry", su.set_key(SK, "route_colors",
+      { 1, 2, 3, 4, 5, 6, 7, "x" }) == false and SK.route_colors == keep)
+  end
+  check("gradient defaults", D.route_gradient == true and D.route_gradient_end == 0xFF101010
+    and D.route_gradient_amount == 50 and D.route_gradient_alpha == 30
+    and D.route_legend == true and D.focus_place_routes == true and D.focus_dim_alpha == 25)
+  check("gradient clamps", su.validate({ route_gradient_amount = 150 }).route_gradient_amount == 100
+    and su.validate({ focus_dim_alpha = 2 }).focus_dim_alpha == 5
+    and su.validate({ focus_dim_alpha = "x" }).focus_dim_alpha == 25)
+  check("retired keys", D.route_line_color == nil and D.color_route_stop == nil
+    and su.COLOR_KEY.route_stop == nil and #su.COLOR_KEYS == 15)
+  do
+    local RS = su.defaults()
+    RS.route_colors[2] = 0xFF000002
+    RS.route_gradient = false; RS.route_gradient_end = 0xFF000003
+    RS.route_gradient_amount = 7; RS.route_gradient_alpha = 8
+    RS.focus_dim_alpha = 60
+    su.reset_appearance(RS)
+    check("reset appearance restores route colours and gradient",
+      RS.route_colors[2] == want8[2] and RS.route_gradient == true
+      and RS.route_gradient_end == 0xFF101010 and RS.route_gradient_amount == 50
+      and RS.route_gradient_alpha == 30 and RS.focus_dim_alpha == 60)
+  end
+  check("marker_color route_stop slot", su.marker_color(D, { cat = "route_stop", slot = 3 }) == want8[3]
+    and su.marker_color(D, { cat = "route_stop" }) == want8[1])
 end
 if failures > 0 then os.exit(1) end
 print("settings_test: all OK")
