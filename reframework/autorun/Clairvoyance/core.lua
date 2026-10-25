@@ -2804,14 +2804,17 @@ function M.compute(adapter, show)
     if type(route) == "table" and type(route.stops) == "table"
       and type(route.cid) == "number" and route.place == nil then
       for n, s in ipairs(route.stops) do
-        if type(s) == "table" and valid_pos(s.pos)
+        if type(s) == "table" and s.lead ~= true and valid_pos(s.pos)
           and (s.discovered ~= false or undisc) then
+          -- SPEC 32.14.11.4: num is the number shown; a lead entry's first
+          -- stop is the player, so its stops count from 1 after it.
+          local num = s.idx or (route.lead == true and n - 1) or n
           markers[#markers + 1] = {
-            key = string.format("r:%d:%d", math.floor(route.cid), n),
+            key = string.format("r:%d:%d", math.floor(route.cid), math.floor(num)),
             cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
             label = string.format("%s %02d-%02d", tostring(route.name),
               math.floor(tonumber(s.from) or 0), math.floor(tonumber(s.to) or 0)),
-            cid = route.cid, stop = n, slot = route.slot }
+            cid = route.cid, stop = n, num = num, slot = route.slot }
         end
       end
     end
@@ -2996,7 +2999,8 @@ function M.signature(markers, committed)
       m.key, math.floor(c.x), math.floor(c.y), math.floor(c.z),
       table.concat(m.qids, ","), m.label or "", m.hover or "",
       (m.cat or "") .. (m.done and "|d" or "") .. (m.faded and "|f" or "") .. (m.dim and "|m" or "") .. (m.step and ("|s" .. m.step) or "")
-        .. (m.slot and ("|k" .. m.slot) or ""))
+        .. (m.slot and ("|k" .. m.slot) or "")
+        .. (m.cat == "route_stop" and ("|t" .. tostring(m.stop)) or ""))
   end
   table.sort(parts)
   return table.concat(parts, "|"), new_committed
@@ -3030,19 +3034,58 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
       end
     end
     if opt ~= nil and opt.places == true and places ~= nil then
-      local pseen = {}
+      -- SPEC 32.14.11.1: gather the candidates, order them (prev first, then
+      -- nearest the player, then candidate order), keep one place per 150 m
+      -- cluster, and publish the kept ones in candidate order.
+      local pseen, cand = {}, {}
       for _, qid in ipairs(active) do
         local rel = quest_rel ~= nil and quest_rel[qid] or nil
         for _, d in ipairs(rel ~= nil and rel.dest or {}) do
           local key = d.key
           if key ~= nil and not pseen[key] and places[key] ~= nil then
             pseen[key] = true
-            total = total + 1
-            local pextra = (target_cid ~= nil and not inlist[target_cid]) and 1 or 0
-            if #list + pextra < 8 then
-              list[#list + 1] = { cid = -key, place = key, name = name_of(nil, key) }
-            end
+            cand[#cand + 1] = { key = key, pos = places[key], ord = #cand + 1 }
           end
+        end
+      end
+      local prev = opt.prev
+      local player = opt.player
+      local dp = {}
+      if player ~= nil then
+        for _, c in ipairs(cand) do
+          if c.pos ~= nil then
+            local dx, dz = c.pos.x - player.x, c.pos.z - player.z
+            dp[c] = dx * dx + dz * dz
+          end
+        end
+      end
+      table.sort(cand, function(a, b)
+        local pa = prev ~= nil and prev[a.key] == true
+        local pb = prev ~= nil and prev[b.key] == true
+        if pa ~= pb then return pa end
+        if player ~= nil then
+          local da, db = dp[a] or math.huge, dp[b] or math.huge
+          if da ~= db then return da < db end
+        end
+        return a.ord < b.ord
+      end)
+      local kept = {}
+      for _, c in ipairs(cand) do
+        local near = false
+        for _, k in ipairs(kept) do
+          if k.pos ~= nil and c.pos ~= nil then
+            local dx, dz = c.pos.x - k.pos.x, c.pos.z - k.pos.z
+            if dx * dx + dz * dz <= 22500 then near = true; break end
+          end
+        end
+        if not near then kept[#kept + 1] = c end
+      end
+      table.sort(kept, function(a, b) return a.ord < b.ord end)
+      for _, c in ipairs(kept) do
+        total = total + 1
+        local pextra = (target_cid ~= nil and not inlist[target_cid]) and 1 or 0
+        if #list + pextra < 8 then
+          list[#list + 1] = { cid = -c.key, place = c.key, name = name_of(nil, c.key) }
         end
       end
     end

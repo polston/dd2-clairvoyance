@@ -3232,6 +3232,65 @@ do
   l, n = core.route_members(f7, rel8, plc, nil, { routes = 1, places = true }, nm)
   check("rc 8c: a free seat takes the place", cids(l) == "1,2,3,4,5,6,7,-77" and n == 8)
 
+  -- SPEC 32.14.11: close places merge, lead route stops
+  do
+    local function pl(x, z) return { x = x, y = 0, z = z } end
+    local function nmf(c, k) return k and ("P" .. k) or "N" end
+    local function keys(lst)
+      local t = {}
+      for _, e in ipairs(lst) do t[#t + 1] = tostring(e.place) end
+      return table.concat(t, ",")
+    end
+    local fa = { active = { 1 }, quests = { [1] = {} } }
+    local relA = { [1] = { dest = { { key = 1 }, { key = 2 } } } }
+    local function two(x2, opt)
+      local o = { routes = 0, places = true }
+      for k, v in pairs(opt or {}) do o[k] = v end
+      return core.route_members(fa, relA, { [1] = pl(0, 0), [2] = pl(x2, 0) }, nil, o, nmf)
+    end
+    local ml, mn, mt = two(149, { player = pl(140, 0) })
+    check("rcc merge nearest", keys(ml) == "2" and mn == 1 and mt == 1)
+    ml, mn = two(151)
+    check("rcc merge bounds: 151 keeps both", keys(ml) == "1,2" and mn == 2)
+    ml, mn = two(150)
+    check("rcc merge bounds: 150 keeps key 1 only", keys(ml) == "1" and mn == 1)
+    ml = two(149, { player = pl(140, 0), prev = { [1] = true } })
+    check("rcc prev sticky", keys(ml) == "1")
+    local fb = { active = { 1, 2 }, quests = { [1] = {}, [2] = {} } }
+    ml = core.route_members(fb, { [1] = { dest = { { key = 1 } } }, [2] = { dest = { { key = 2 } } } },
+      { [1] = pl(0, 0), [2] = pl(40, 0) }, nil, { routes = 0, places = true, player = pl(0, 0) }, nmf)
+    check("rcc merge across quests", keys(ml) == "1")
+    ml, mn, mt = core.route_members(fb,
+      { [1] = { dest = { { key = 1 } } }, [2] = { dest = { { key = 1 }, { key = 2 } } } },
+      { [1] = pl(0, 0), [2] = pl(300, 0) }, nil, { routes = 0, places = true }, nmf)
+    check("rcc shared key", keys(ml) == "1,2" and mt == 2)
+    ml = core.route_members(fa, { [1] = { dest = { { key = 1 }, { key = 2 }, { key = 3 } } } },
+      { [1] = pl(0, 0), [2] = pl(100, 0), [3] = pl(500, 0) }, nil, { routes = 0, places = true }, nmf)
+    check("rcc no player", keys(ml) == "1,3")
+
+    local function stops_of(r)
+      local t = {}
+      for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then t[#t + 1] = mm end end
+      return t
+    end
+    local leadr = { cid = 5, name = "N", slot = 1, lead = true, stops = {
+      { pos = pl(0, 0), discovered = true, lead = true }, { pos = pl(10, 10), discovered = true } } }
+    local lm = stops_of(run({}, nil, { routes = { leadr } }))
+    check("rcc lead markers", #lm == 1 and lm[1].stop == 2 and lm[1].num == 1 and lm[1].key == "r:5:1")
+    local plain = stops_of(run({}, nil, { routes = { { cid = 5, name = "N", slot = 1, stops = {
+      { pos = pl(0, 0), discovered = true }, { pos = pl(10, 10), discovered = true } } } } }))
+    check("rcc plain markers", #plain == 2 and plain[1].num == 1 and plain[2].num == 2
+      and plain[1].key == "r:5:1" and plain[2].key == "r:5:2")
+    local one = stops_of(run({}, nil, { routes = { { cid = 5, name = "N", slot = 1, stops = {
+      { pos = pl(10, 10), discovered = true } } } } }))
+    check("rcc lead key", #one == 1 and one[1].key == lm[1].key)
+    local leadi = { cid = 5, name = "N", slot = 1, lead = true, stops = {
+      { pos = pl(0, 0), discovered = true, lead = true }, { pos = pl(10, 10), discovered = true, idx = 2 } } }
+    local li = stops_of(run({}, nil, { routes = { leadi } }))
+    check("rcc lead idx", #li == 1 and li[1].num == 2 and li[1].key == "r:5:2")
+    check("rcc lead signature", core.signature(lm, {}) ~= core.signature(one, {}))
+  end
+
   -- hint pins, with a query active, outside the cap
   r = run({ chests = {} }, Q("zzz"), { world_max_markers = 0,
     hint_pins = { { qid = 30, i = 2, label = "Look here", pos = P(9) } } })
