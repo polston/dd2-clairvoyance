@@ -38,6 +38,12 @@ def build_blob(a, b):
     return usr + rsz
 
 
+def build_scene(a, b, pad=0):
+    """A scene file holding one t.Pair instance; pad bytes sit between header and RSZ block."""
+    hdr = struct.pack("<4s5i5Q", b"SCN\0", 0, 0, 0, 0, 0, 64, 64, 64, 64, 64 + pad)
+    return hdr + b"\0" * pad + build_blob(a, b)[48:]
+
+
 def header(major, minor, feature, count):
     return struct.pack("<4sBBHII", b"KPKA", major, minor, feature, count, 0)
 
@@ -93,6 +99,23 @@ class RszTests(unittest.TestCase):
         self.assertEqual(insts[0].fields, {"a": 7, "b": -9})
         with self.assertRaises(qnml_rsz.DecodeError):
             qnml_rsz.decode(build_blob(7, -9) + b"\0", PAIR_LAYOUTS)
+
+    def test_rsz_scene(self):
+        insts = qnml_rsz.decode(build_scene(7, -9), PAIR_LAYOUTS)
+        self.assertEqual([(i.type, i.fields) for i in insts], [("t.Pair", {"a": 7, "b": -9})])
+        with self.assertRaises(qnml_rsz.DecodeError):
+            qnml_rsz.decode(build_scene(7, -9) + b"\0", PAIR_LAYOUTS)
+
+    def test_rsz_scene_uses_the_header_offset(self):
+        # a decoy RSZ magic in the padding must not be taken for the block
+        s = build_scene(3, 4, pad=16)
+        s = s[:64] + b"RSZ\0" + s[68:]
+        self.assertEqual(qnml_rsz.decode(s, PAIR_LAYOUTS)[0].fields, {"a": 3, "b": 4})
+
+    def test_rsz_unknown_container(self):
+        with self.assertRaises(qnml_rsz.DecodeError) as cm:
+            qnml_rsz.decode(b"XYZ\0" + build_blob(1, 2)[4:], PAIR_LAYOUTS)
+        self.assertEqual(str(cm.exception), "not a user-data or scene file")
 
     def test_layout_failure_message(self):
         with self.assertRaises(ew.ExtractError) as cm:
