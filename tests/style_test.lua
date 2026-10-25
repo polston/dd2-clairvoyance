@@ -143,6 +143,37 @@ do -- polyline
   check("polyline off", #calls == 1)
 end
 
+do -- leg_color
+  local c, w = S.leg_color(0xFFE91E63, 0xFF101010, 50, 30, 0, 4)
+  check("leg_color step 0", c == 0xFFE91E63 and w == 1)
+  c, w = S.leg_color(0xFF000000, 0xFF646464, 100, 30, 3, 4)
+  check("leg_color last step", c == 0x4C646464 and w == 0.5)
+  c, w = S.leg_color(0xFF000000, 0xFF646464, 100, 100, 1, 3)
+  check("leg_color half", c == 0xFF323232 and w == 0.75)
+  c, w = S.leg_color(0xFFE91E63, 0xFF101010, 50, 30, 0, 1)
+  check("leg_color flat n 1", c == 0xFFE91E63 and w == 1)
+  c, w = S.leg_color(0xFFE91E63, 0xFF101010, 0, 30, 3, 4)
+  check("leg_color flat amount 0", c == 0x4CE91E63 and w == 0.5)
+  c, w = S.leg_color(0xFFE91E63, 0xFF101010, 50, 30, 3, 4)
+  check("leg_color defaults far leg", c == 0x4C7C1739 and w == 0.5)
+end
+
+do -- outline_range and segments_range
+  local pts = { 1, 1, 2, 2, false, false, 3, 3, 4, 4 }
+  local d, calls = rec()
+  S.outline_range(d, pts, 4, 5, 2, true, 0xFF000000, 1, 1)
+  check("outline_range one segment", #calls == 1 and calls[1][9] == 0xFF000000)
+  d, calls = rec()
+  S.outline_range(d, pts, 4, 5, 2, false, 0xFF000000, 1, 1)
+  check("outline_range off", #calls == 0)
+  d, calls = rec()
+  S.segments_range(d, pts, 4, 5, 2, 0xFF00FF00)
+  check("segments_range one quad", #calls == 1 and calls[1][9] == 0xFF00FF00)
+  d, calls = rec()
+  S.segments_range(d, pts, 1, 5, 2, 0xFF00FF00)
+  check("segments_range break skipped", #calls == 2)
+end
+
 -- resolve reads each group's own override keys (final review M2)
 do
   for _, g in ipairs(S.GROUPS) do

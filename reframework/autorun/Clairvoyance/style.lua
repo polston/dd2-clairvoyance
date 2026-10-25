@@ -111,8 +111,26 @@ function M.line(draw, x1, y1, x2, y2, w, color_abgr)
   draw.filled_quad(a, b, c, d, e, f, g, h, color_abgr)
 end
 
-local function segments(draw, pts, w, color_abgr)
-  for i = 1, #pts // 2 - 1 do
+-- Route leg colour (SPEC 32.14.3.3). amount (0..100) moves only the RGB
+-- toward end_argb by step / max(1, n - 1); alpha fades toward alpha_end
+-- (0..100 percent) and the width factor toward 0.5 on that same fraction.
+-- Channels and alpha round down. Returns argb, width_factor.
+function M.leg_color(argb, end_argb, amount, alpha_end, step, n)
+  local t = step / math.max(1, n - 1)
+  local k = amount * t / 100
+  local out = 0
+  for shift = 0, 16, 8 do
+    local c = (argb >> shift) & 0xFF
+    local e = (end_argb >> shift) & 0xFF
+    out = out | (math.floor(c + (e - c) * k) << shift)
+  end
+  local a0 = (argb >> 24) & 0xFF
+  local a = math.floor(a0 * (1 - t * (1 - alpha_end / 100)))
+  return (a << 24) | out, 1 - 0.5 * t
+end
+
+local function segments_range(draw, pts, from, to, w, color_abgr)
+  for i = from, to - 1 do
     local x1, y1 = pts[2 * i - 1], pts[2 * i]
     local x2, y2 = pts[2 * i + 1], pts[2 * i + 2]
     if x1 ~= false and x2 ~= false then
@@ -121,9 +139,20 @@ local function segments(draw, pts, w, color_abgr)
   end
 end
 
+function M.segments_range(draw, pts, from, to, w, color_abgr)
+  segments_range(draw, pts, from, to, w, color_abgr)
+end
+
+function M.outline_range(draw, pts, from, to, w, on, outline_argb, o, a)
+  if on then
+    segments_range(draw, pts, from, to, w + 2 * o, outline_abgr(outline_argb, a))
+  end
+end
+
 function M.polyline(draw, pts, w, color_abgr, on, outline_argb, o, a)
-  if on then segments(draw, pts, w + 2 * o, outline_abgr(outline_argb, a)) end
-  segments(draw, pts, w, color_abgr)
+  local n = #pts // 2
+  M.outline_range(draw, pts, 1, n, w, on, outline_argb, o, a)
+  segments_range(draw, pts, 1, n, w, color_abgr)
 end
 
 return M
