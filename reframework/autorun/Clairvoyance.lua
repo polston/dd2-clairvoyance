@@ -185,6 +185,7 @@ end
 -- v14 (SPEC 22.11.3): the opened Hints nodes' qids, and the pins of those
 -- whose step is the active one now (pins bypass the search and the cap).
 wt.hints, wt.hints_open = {}, {}   -- hints by qid (npcs.parse_hints); qid -> step idx
+wt.quest_rel, wt.quest_pak, wt.focus_tracked_qid = nil, nil, nil   -- quest focus (SPEC 32)
 wt.hint_inputs = function()
   local qids, pins = {}, {}
   local rb = snapshot ~= nil and snapshot.rec_by or nil
@@ -209,6 +210,63 @@ wt.hint_inputs = function()
     end
   end
   return qids, pins
+end
+-- Quest focus to the world round (SPEC 32.7, Contract 3): the previous
+-- snapshot's focus table as is, and the sorted unique dest keys of the
+-- active quests.
+wt.focus_world = function(snap)
+  local f = snap ~= nil and snap.focus or nil
+  if f == nil or f.active == nil or #f.active == 0 then return nil, nil end
+  local keys, have = {}, {}
+  for _, qid in ipairs(f.active) do
+    local rel = wt.quest_rel ~= nil and wt.quest_rel[qid] or nil
+    for _, d in ipairs(rel ~= nil and rel.dest or {}) do
+      if type(d.key) == "number" and d.key > 0 and not have[d.key] then
+        have[d.key] = true; keys[#keys + 1] = d.key
+      end
+    end
+  end
+  table.sort(keys)
+  if #keys == 0 then keys = nil end
+  return f, keys
+end
+-- Route members (SPEC 32.7.1, Contract 4): the focus NPCs the world walks
+-- schedules for, capped so the search target and members total at most 8.
+wt.route_members = function(snap, input)
+  local list, seen, inlist = {}, {}, {}
+  local total = wt.route_cid ~= nil and 1 or 0
+  local f = snap ~= nil and snap.focus or nil
+  local opt = settings.focus_routes
+  if opt ~= nil and opt > 0 and f ~= nil and f.active ~= nil and #f.active > 0 then
+    local names
+    for _, qid in ipairs(f.active) do
+      local q = f.quests ~= nil and f.quests[qid] or nil
+      local src = q ~= nil and (opt == 1 and q.step_npcs or q.npcs) or nil
+      for _, cid in ipairs(src or {}) do
+        if not seen[cid] then
+          seen[cid] = true
+          if cid ~= wt.route_cid then total = total + 1 end
+          local extra = (wt.route_cid ~= nil and not inlist[wt.route_cid]) and 1 or 0
+          if cid == wt.route_cid or #list + extra < 8 then
+            if names == nil then
+              names = {}
+              for _, n in ipairs(input ~= nil and input.npcs or {}) do names[n.cid] = n.name end
+            end
+            local nm = names[cid]
+            if nm == nil then
+              local okn, v = pcall(adapter.npc_name, cid)
+              nm = okn and type(v) == "string" and v ~= "" and v or ("NPC " .. cid)
+            end
+            list[#list + 1] = { cid = cid, name = nm }
+            inlist[cid] = true
+          end
+        end
+      end
+    end
+  end
+  local extra = (wt.route_cid ~= nil and not inlist[wt.route_cid]) and 1 or 0
+  wt.routes_n, wt.routes_total = #list + extra, total
+  return list, total
 end
 -- v14 (SPEC 10.3b): one failure guard per new frame layer, state in a table
 -- of its own. Log each distinct message once (16 cap); 30 failing frames in
@@ -411,7 +469,7 @@ do
   icons.route_recs, icons.nums = {}, {}
   icons.npcs = require("Clairvoyance.npcs")
   icons.fit_pts, icons.fit, icons.fit_opt = {}, {}, { similarity = false }
-  icons.end_rows, icons.ends, icons.ends_n = {}, {}, 0
+  icons.end_rows, icons.ends, icons.ends_n, icons.slot_of, icons.slot_cids = {}, {}, {}, {}, {}
   icons.route_pts, icons.scr, icons.fonts = {}, {}, {}
   -- Route numbers beside the stop records read this frame. Hoisted; the font
   -- is pushed around the loop and popped even when a draw raises.
@@ -490,12 +548,24 @@ do
     local recs, fp, nf = icons.recs, icons.fit_pts, 0
     local rr, nrr = icons.route_recs, 0
     local fill_at = icons.fill_at
-    local rows, ends = icons.end_rows, icons.ends
-    for i = 1, icons.ends_n do ends[i] = nil end
+    local rows, ends, ends_n = icons.end_rows, icons.ends, icons.ends_n
+    local slot_of, slot_cids = icons.slot_of, icons.slot_cids
+    for k = 1, 8 do
+      local c = slot_cids[k]
+      if c ~= nil then slot_of[c] = nil; slot_cids[k] = nil end
+      local ek = ends[k]
+      if ek ~= nil then
+        for i = 1, ends_n[k] do ek[i] = nil end
+      end
+    end
     local input = wt.q("input", nil)
-    local route = input ~= nil and input.route or nil
-    local stops = route ~= nil and route.stops or nil
-    local nstops = stops ~= nil and #stops or 0
+    local routes = input ~= nil and input.routes or nil
+    local nroutes = routes ~= nil and math.min(#routes, 8) or 0
+    for k = 1, nroutes do
+      local c = routes[k].cid
+      slot_of[c] = k
+      slot_cids[k] = c
+    end
     for i = 1, #recs do
       local rec = recs[i]
       local m = rec.marker
@@ -504,48 +574,73 @@ do
         local row = fp[nf]
         if row == nil then row = {}; fp[nf] = row end
         row[1], row[2], row[3], row[4] = m.pos.x, m.pos.z, rec.lx, rec.ly
-        if m.cat == "route_stop" and type(m.stop) == "number" then
+        local slot = m.cat == "route_stop" and type(m.stop) == "number"
+          and slot_of[m.cid] or nil
+        if slot ~= nil then
           nrr = nrr + 1
           rr[nrr] = rec
-          local e = rows[m.stop]
-          if e == nil then e = {}; rows[m.stop] = e end
+          local rk = rows[slot]
+          if rk == nil then rk = {}; rows[slot] = rk; ends[slot] = {}; ends_n[slot] = 0 end
+          local e = rk[m.stop]
+          if e == nil then e = {}; rk[m.stop] = e end
           e.lx, e.ly, e.mx, e.mz = rec.lx, rec.ly, nil, nil
-          ends[m.stop] = e
-          if m.stop > icons.ends_n then icons.ends_n = m.stop end
+          ends[slot][m.stop] = e
+          if m.stop > ends_n[slot] then ends_n[slot] = m.stop end
         end
       end
     end
     for i = #rr, nrr + 1, -1 do rr[i] = nil end
     if nrr > 0 then icons.draw_numbers(nrr) end
-    local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
-    if pairs_ == nil or #pairs_ == 0 then wt.path_draw_ms = 0; return end
-    local fit = icons.npcs.fit(fp, nf, icons.fit_opt, icons.fit)
-    for i = 1, nstops do
-      if ends[i] == nil then
-        local p = stops[i].pos
-        if type(p) == "table" then
-          local e = rows[i]
-          if e == nil then e = {}; rows[i] = e end
-          e.lx, e.ly, e.mx, e.mz = nil, nil, p.x, p.z
-          ends[i] = e
-          if i > icons.ends_n then icons.ends_n = i end
-        end
+    local pmap = wt.q("route_paths", nil, settings.world_undiscovered)
+    local any = false
+    if pmap ~= nil then
+      for k = 1, nroutes do
+        local pp = pmap[routes[k].cid]
+        if pp ~= nil and #pp > 0 then any = true; break end
       end
     end
-    local t0 = os.clock()
-    local n = icons.npcs.route_polyline(pairs_, ends, fit, settings.route_path,
-      icons.route_pts)
-    local sn = icons.to_screen_pts(icons.route_pts, n)
-    if sn > 0 then
-      local st = wt.styles.route_line
-      local k = icons:k()
-      local col = settings.route_line_color
-      local t1 = st.on and os.clock() or nil
-      wt.style.polyline(draw, icons.scr, settings.route_line_width * k,
-        A.argb_to_abgr(col), st.on, st.color, wt.style.offset(st.width, k), wt.a(col))
-      if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
+    if not any then wt.path_draw_ms = 0; return end
+    local fit = icons.npcs.fit(fp, nf, icons.fit_opt, icons.fit)
+    local total_ms = 0
+    for mk = 1, nroutes do
+      local member = routes[mk]
+      local pairs_ = pmap[member.cid]
+      if pairs_ ~= nil and #pairs_ > 0 then
+        local stops = member.stops
+        local ek = ends[mk]
+        if ek == nil then
+          ek = {}; ends[mk] = ek; ends_n[mk] = 0; rows[mk] = rows[mk] or {}
+        end
+        local rk = rows[mk]
+        for i = 1, type(stops) == "table" and #stops or 0 do
+          if ek[i] == nil then
+            local p = stops[i].pos
+            if type(p) == "table" then
+              local e = rk[i]
+              if e == nil then e = {}; rk[i] = e end
+              e.lx, e.ly, e.mx, e.mz = nil, nil, p.x, p.z
+              ek[i] = e
+              if i > ends_n[mk] then ends_n[mk] = i end
+            end
+          end
+        end
+        local t0 = os.clock()
+        local n = icons.npcs.route_polyline(pairs_, ek, fit, settings.route_path,
+          icons.route_pts)
+        local sn = icons.to_screen_pts(icons.route_pts, n)
+        if sn > 0 then
+          local st = wt.styles.route_line
+          local k = icons:k()
+          local col = settings.route_line_color
+          local t1 = st.on and os.clock() or nil
+          wt.style.polyline(draw, icons.scr, settings.route_line_width * k,
+            A.argb_to_abgr(col), st.on, st.color, wt.style.offset(st.width, k), wt.a(col))
+          if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
+        end
+        total_ms = total_ms + (os.clock() - t0) * 1000
+      end
     end
-    wt.path_draw_ms = (os.clock() - t0) * 1000
+    wt.path_draw_ms = total_ms
   end
   -- One debug line for the walking-path costs (SPEC 23.6.10).
   wt.path_line = function()
@@ -892,6 +987,18 @@ re.on_frame(function()
       item_menu_open = icons.itemmenu ~= nil and icons.itemmenu:open(),
     }
     show.hint_qids, show.hint_pins = wt.hint_inputs()
+    -- SPEC 32.4.2: the tracked read runs every tick, tree open or not
+    if settings.focus_tracked then
+      local okt, tq = pcall(adapter.tracked_qid)
+      wt.focus_tracked_qid = okt and type(tq) == "number" and tq or nil
+    else
+      wt.focus_tracked_qid = nil
+    end
+    show.focus_qids = settings.focus_qids
+    show.focus_tracked_qid = wt.focus_tracked_qid
+    show.quest_rel = wt.quest_rel
+    show.focus_unrelated = settings.focus_unrelated
+    show.focus_on = snapshot ~= nil and snapshot.focus ~= nil
     -- SPEC 22.8.4: the route NPC lasts while the search shows it
     if wt.route_cid ~= nil then
       local keep = false
@@ -946,6 +1053,16 @@ re.on_frame(function()
       tg.reveal_gate_names = settings.reveal_gate_names   -- chest quest names (SPEC 27.4.2)
       tg.search = show.search ~= nil
       tg.npc_cids = snapshot ~= nil and snapshot.npc_match_cids or nil   -- Ruling 10
+      -- quest focus (SPEC 32.7): previous snapshot's focus, route members, poke on a set change
+      tg.focus, tg.focus_keys = wt.focus_world(snapshot)
+      wt.q("set_routes", nil, (wt.route_members(snapshot, wt.q("input", nil))))
+      local fa = snapshot ~= nil and snapshot.focus ~= nil and snapshot.focus.active or nil
+      local fs = table.concat(fa or {}, ",") .. "|" .. tostring(settings.focus_unrelated)
+      if fs ~= wt.focus_sig then
+        wt.focus_sig = fs
+        wt.focus_pokes = (wt.focus_pokes or 0) + 1
+        wt.q("poke", nil)
+      end
       -- SPEC 28.8.2: the full map's UI object or the game's paused-GUI read holds throttled rounds
       local hold = ui_map ~= nil or adapter.map_menu_open() == true
       if wt:refresh(now, gate, tg, hold) then wt.line_txt = nil end
@@ -959,15 +1076,21 @@ re.on_frame(function()
     show.map_origin = wt.map_origin
     show.world_givers = wt.q("givers", {})
     show.world = wt.q("input", nil)
-    show.route = (show.world or {}).route   -- SPEC 22.8.4
+    show.routes = (show.world or {}).routes   -- SPEC 22.8.4, 32.13
     -- the frame layers do no work while there is no route and no pin
-    wt.route_on = type(show.route) == "table" and type(show.route.stops) == "table"
-      and #show.route.stops > 0
+    wt.route_on = false
+    if type(show.routes) == "table" then
+      for ri = 1, #show.routes do
+        local rs = show.routes[ri].stops
+        if type(rs) == "table" and #rs > 0 then wt.route_on = true; break end
+      end
+    end
     wt.has_pts = wt.route_on or #show.hint_pins > 0
     -- v5 (SPEC 12.3a): own pcall so a raised walk never skips compute;
     -- inside the timed window so Tick ms includes it; skipped when the
     -- category is hidden (SPEC 9.9).
-    if show.in_progress and adapter.refresh_objectives ~= nil then
+    if (show.in_progress or show.focus_on) and adapter.refresh_objectives ~= nil then
+      wt.obj_walks = (wt.obj_walks or 0) + 1
       local tw = os.clock()
       local ok_o, err_o = pcall(adapter.refresh_objectives)
       last_walk_ms = (os.clock() - tw) * 1000.0
@@ -1443,7 +1566,7 @@ local function overhead_draw_one(marker, px, py, pz, d2, name_d2)
       Vector3f.new(px, py + OVERHEAD_Y_OFFSET, pz))
   end
   if sp == nil then return 0 end
-  local argb = su.color_of(settings, marker.cat)
+  local argb = su.marker_color(settings, marker)
   -- SPEC 21.6: the category picture when it can be drawn, else the v12 dots.
   local pid = su.icon_for(settings, marker, "head", marker.step, icons.drawable_fn)
   local pic = icons:drawable(pid)
@@ -1766,6 +1889,53 @@ local function install_debug()
         save_settings(); want_update = true; last_tick = 0.0
         return true
       end,
+      -- SPEC 32.9: the focus set's per-quest list sizes, NPC positions and markers
+      focus = function()
+        local fs = snapshot ~= nil and snapshot.focus or nil
+        local out = { active = {}, quests = {}, counts = snapshot ~= nil and snapshot.focus_counts or nil,
+          walks = wt.obj_walks or 0, focus_pokes = wt.focus_pokes or 0, routes = {},
+          routes_total = wt.routes_total }
+        for _, r in ipairs((wt.q("input", nil) or {}).routes or {}) do
+          out.routes[#out.routes + 1] = { cid = r.cid, name = r.name, stops = #(r.stops or {}) }
+        end
+        local nq = 0
+        for _ in pairs(wt.quest_rel or {}) do nq = nq + 1 end
+        out.file = { quests = nq, pak = wt.quest_pak }
+        if fs == nil then return out end
+        local marked_ids = {}
+        local function note(m)
+          local k = type(m) == "table" and m.key or nil
+          local id = type(k) == "string" and k:match("^[cn]:(%-?%d+)$") or nil
+          if id ~= nil then marked_ids[tonumber(id)] = true end
+          if type(m) == "table" and m.cid ~= nil
+            and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller") then
+            marked_ids[m.cid] = true
+          end
+        end
+        for _, m in ipairs(snapshot.markers or {}) do note(m) end
+        for _, m in ipairs(snapshot.fullmap_world or {}) do note(m) end
+        for i, qid in ipairs(fs.active or {}) do
+          out.active[i] = qid
+          local q = (fs.quests or {})[qid] or {}
+          local e = { npcs = #(q.npcs or {}), step_npcs = #(q.step_npcs or {}),
+            items = #(q.items or {}), places = #(q.places or {}),
+            no_pos = {}, positioned = 0, marked = 0 }
+          for _, cid in ipairs(q.npcs or {}) do
+            local okp, pos = pcall(adapter.npc_pos, cid)
+            if not okp or pos == nil then
+              e.no_pos[#e.no_pos + 1] = cid
+            else
+              local oka, alive = pcall(adapter.npc_alive, cid)
+              if not (oka and alive == false) then
+                e.positioned = e.positioned + 1
+                if marked_ids[cid] then e.marked = e.marked + 1 end
+              end
+            end
+          end
+          out.quests[qid] = e
+        end
+        return out
+      end,
       -- stats plus at most 20 rows (counts and labels); positions go to the log only
       world = function()
         local st = wt.q("stats", {})
@@ -1821,7 +1991,10 @@ local function install_debug()
         end
         st.npc_rows = nr
         st.npc_names = #((wt.q("input", nil) or {}).npcs or {})
-        st.route = (wt.q("input", nil) or {}).route
+        st.routes = (wt.q("input", nil) or {}).routes
+        local es = 0
+        for _ in pairs(icons.ends) do es = es + 1 end
+        st.end_slots = es
         return st
       end,
       state = function()
@@ -1850,7 +2023,26 @@ install_debug()
 local JUMP_TIP = "Opens the map here"
 -- Opens the node itself; returns whether it was open. The detail model is
 -- built once per snapshot (its inputs only change when the snapshot does).
-local function draw_detail(label, rec, qid, j, ja, spoilers)
+-- Quest focus (SPEC 32): whether a quest is focused (listed, or the tracked
+-- one while Focus tracked is on), and the list toggle behind the row box.
+wt.is_focused = function(qid)
+  for _, q in ipairs(settings.focus_qids) do
+    if q == qid then return true end
+  end
+  return settings.focus_tracked and qid == wt.focus_tracked_qid or false
+end
+wt.focus_toggle = function(qid, on, rec)
+  local list = {}
+  for _, q in ipairs(settings.focus_qids) do
+    if q ~= qid then list[#list + 1] = q end
+  end
+  if on then list[#list + 1] = qid end
+  su.set_key(settings, "focus_qids", list)
+  if rec ~= nil then rec.row_label = nil end
+  want_update = true; last_tick = 0.0; save_settings()
+end
+
+local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
   if not imgui.tree_node(label) then return false end
   local ok, err = pcall(function()
     local cache = snapshot.detail
@@ -1870,6 +2062,26 @@ local function draw_detail(label, rec, qid, j, ja, spoilers)
     if d.jump ~= nil then
       if imgui.button(d.jump_id) then jump_pending = d.jump end
       if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+    end
+    if focus_kind == "row" and rec ~= nil and rec.cat ~= "completed"
+        and rec.cat ~= "failed" and rec.cat ~= "canceled" then
+      d.focus_id = d.focus_id or ("Focus##qf_" .. qid)
+      local listed = false
+      for _, q in ipairs(settings.focus_qids) do
+        if q == qid then listed = true; break end
+      end
+      local c, v = imgui.checkbox(d.focus_id, listed)
+      if c and (listed or #settings.focus_qids < 16) then wt.focus_toggle(qid, v, rec) end
+      if not listed and #settings.focus_qids >= 16 and imgui.is_item_hovered() then
+        imgui.set_tooltip("At most 16 quests in focus")
+      end
+    elseif focus_kind == "tracked" then
+      local c, v = imgui.checkbox("Focus tracked##qf_tracked", settings.focus_tracked)
+      if c then
+        su.set_key(settings, "focus_tracked", v)
+        if rec ~= nil then rec.row_label = nil end
+        want_update = true; last_tick = 0.0; save_settings()
+      end
     end
     -- v14 (SPEC 22.11.2): the Hints node. Opening it is the spoiler gate;
     -- the step in its id starts a new step's node closed.
@@ -1907,6 +2119,8 @@ do
   local sec = {}
   local groups = wt.style.GROUPS
   local route_labels = { "Straight lines", "Walking path" }
+  local unrelated_labels = { "Hide", "Dim" }
+  local focus_route_labels = { "None", "Current step's NPCs", "Every related NPC" }
   local cat_rows = {
     { "startable", "Startable" }, { "in_progress", "In progress" },
     { "completed", "Completed" }, { "unavailable", "Unavailable" },
@@ -1917,6 +2131,7 @@ do
     { "npc_search", su.WORLD_LABEL.npc_search },
     { "route_stop", su.WORLD_LABEL.route_stop },
     { "hint_pin", su.WORLD_LABEL.hint_pin },
+    { "focus_place", "Quest focus places" },
   }
   -- the override sub-tree names: the category's name, then the three extras
   local gname = { route_line = "Route line", names = "Names", items = "Item menu" }
@@ -2019,8 +2234,14 @@ do
           local nrows = snapshot.npc_rows or {}
           if #nrows > 0 and imgui.tree_node(
               string.format("NPCs (%d)###qnml_nr", #nrows)) then
-            local rt = (wt.q("input", nil) or {}).route
+            local rts = (wt.q("input", nil) or {}).routes
             for _, r in ipairs(nrows) do
+              local rt = nil
+              if rts ~= nil then
+                for ri = 1, #rts do
+                  if rts[ri].cid == r.cid then rt = rts[ri]; break end
+                end
+              end
               if r.text == nil then
                 local tx = tostring(r.name)
                 if not r.alive then
@@ -2053,7 +2274,7 @@ do
                 end
                 want_update = true; last_tick = 0.0
               end
-              if wt.route_cid == r.cid and rt ~= nil and rt.cid == r.cid then
+              if wt.route_cid == r.cid and rt ~= nil then
                 if rt.err ~= nil then
                   imgui.text("route unavailable")
                 elseif (rt.unplaced or 0) > 0 then
@@ -2062,7 +2283,7 @@ do
                 if rt.err == nil and rt.off_schedule then
                   imgui.text("not at a scheduled place right now")
                 end
-                local ps = wt.q("path_status", nil, settings.route_path)
+                local ps = wt.q("path_status", nil, settings.route_path, r.cid)
                 if ps ~= nil then imgui.text(ps) end
               end
             end
@@ -2340,7 +2561,33 @@ do
           local jt, jat = snapshot.journal or {}, snapshot.journal_all or {}
           snapshot.summary = snapshot.summary or core.summary_nodes(snapshot)
           for _, s in ipairs(snapshot.summary) do
-            draw_detail(s.label, s.rec, s.qid, jt, jat, spoilers)
+            draw_detail(s.label, s.rec, s.qid, jt, jat, spoilers,
+              s.qid == snapshot.tracked_qid and "tracked" or nil)
+          end
+          if snapshot.focus ~= nil and #snapshot.focus.active > 0 then
+            snapshot.focus_clear_label = snapshot.focus_clear_label
+              or ("Clear focus (" .. #snapshot.focus.active .. ")##qf_clear")
+            if imgui.button(snapshot.focus_clear_label) then
+              su.set_key(settings, "focus_qids", {})
+              su.set_key(settings, "focus_tracked", false)
+              want_update = true; last_tick = 0.0; save_settings()
+            end
+            local c, idx = imgui.combo("Unrelated markers##focus_unrelated",
+              settings.focus_unrelated + 1, unrelated_labels)
+            if c then
+              su.set_key(settings, "focus_unrelated", idx - 1)
+              want_update = true; last_tick = 0.0; save_settings()
+            end
+            c, idx = imgui.combo("Routes##focus_routes",
+              settings.focus_routes + 1, focus_route_labels)
+            if c then
+              su.set_key(settings, "focus_routes", idx - 1)
+              want_update = true; last_tick = 0.0; save_settings()
+            end
+            if settings.focus_routes > 0 then
+              imgui.text(string.format("Routes: %d of %d",
+                wt.routes_n or 0, wt.routes_total or 0))
+            end
           end
           local order = { "Melve", "Vernworth", "Checkpoint Rest Town",
             "Harve", "Bakbattahl", "Sacred Arbor", "Volcanic Island",
@@ -2367,8 +2614,9 @@ do
                   imgui.text_colored("*", A.argb_to_abgr(
                     su.color_of(settings, r.grp)))
                   imgui.same_line()
-                  r.row_label = r.row_label or core.row_label(r, snapshot.nearest_qid)
-                  if draw_detail(r.row_label, r, r.qid, jt, jat, spoilers) then
+                  r.row_label = r.row_label or core.row_label(r, snapshot.nearest_qid,
+                    wt.is_focused(r.qid))
+                  if draw_detail(r.row_label, r, r.qid, jt, jat, spoilers, "row") then
                     exp[r.qid] = true
                   end
                 end
@@ -2816,28 +3064,32 @@ end)
 -- A node out of range or off screen is a break; one polyline call draws all.
 wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
   local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
-  if pairs_ == nil then return end
+  local routes = (wt.q("input", nil) or {}).routes
+  if pairs_ == nil or routes == nil then return end
   local buf, n = wt.path_scr, 0
-  for k = 1, #pairs_ do
-    local pts = pairs_[k].pts
-    if pts ~= nil then
-      if n > 0 then buf[n + 1], buf[n + 2] = false, false; n = n + 2 end
-      for q = 1, #pts - 2, 3 do
-        local px, py, pz = pts[q] - ox, pts[q + 1] - oy + 0.3, pts[q + 2] - oz
-        local dx, dy, dz = px - cx, py - cy, pz - cz
-        local sx, sy = false, false
-        if dx * dx + dy * dy + dz * dz <= max_d2 then
-          local sp
-          if proj_vec_reuse then
-            proj_vec.x, proj_vec.y, proj_vec.z = px, py, pz
-            sp = draw.world_to_screen(proj_vec)
-          else
-            sp = draw.world_to_screen(Vector3f.new(px, py, pz))
+  for ri = 1, #routes do
+    local pl = pairs_[routes[ri].cid]
+    for k = 1, pl ~= nil and #pl or 0 do
+      local pts = pl[k].pts
+      if pts ~= nil then
+        if n > 0 then buf[n + 1], buf[n + 2] = false, false; n = n + 2 end
+        for q = 1, #pts - 2, 3 do
+          local px, py, pz = pts[q] - ox, pts[q + 1] - oy + 0.3, pts[q + 2] - oz
+          local dx, dy, dz = px - cx, py - cy, pz - cz
+          local sx, sy = false, false
+          if dx * dx + dy * dy + dz * dz <= max_d2 then
+            local sp
+            if proj_vec_reuse then
+              proj_vec.x, proj_vec.y, proj_vec.z = px, py, pz
+              sp = draw.world_to_screen(proj_vec)
+            else
+              sp = draw.world_to_screen(Vector3f.new(px, py, pz))
+            end
+            if sp ~= nil then sx, sy = sp.x, sp.y end
           end
-          if sp ~= nil then sx, sy = sp.x, sp.y end
+          buf[n + 1], buf[n + 2] = sx, sy
+          n = n + 2
         end
-        buf[n + 1], buf[n + 2] = sx, sy
-        n = n + 2
       end
     end
   end
@@ -3039,6 +3291,25 @@ do
     if #errs > 0 then error(#errs .. " hint entries dropped, first: " .. errs[1], 0) end
   end)
   if not okh then logmsg("hints: " .. tostring(why)) end
+end
+
+-- quest focus (SPEC 32.3): the quests file; a missing or bad file leaves
+-- wt.quest_rel nil and logs one line. The pak stamp never rejects the file.
+do
+  local okq, why = pcall(function()
+    local t = json.load_file("Clairvoyance_quests.json")
+    if t == nil then error("quests file missing or unreadable", 0) end
+    local quests, info = require("Clairvoyance.npcs").parse_quests(t)
+    wt.quest_rel = quests
+    wt.quest_pak = info.pak
+    local line = string.format("quests: %d quests, pak %s, places pak %s", info.kept,
+      tostring(wt.quest_pak), tostring(((wt.q("stats", {}) or {}).places or {}).pak))
+    if info.dropped > 0 then
+      line = line .. string.format(", %d dropped, first: %s", info.dropped, tostring(info.first))
+    end
+    logmsg(line)
+  end)
+  if not okq then logmsg("quests: " .. tostring(why)) end
 end
 
 logmsg("loaded")
