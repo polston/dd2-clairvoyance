@@ -363,8 +363,8 @@ RULE.focus_unrelated = { "int", 0, 1 }
 RULE.focus_routes = { "int", 0, 2 }
 RULE.focus_qids = { "qid_list" }
 
--- The validated value of raw[k] under its rule (the default when invalid).
 local QID_MAX = 16
+-- Whole numbers above 0, repeats dropped, first 16; a non-table gives an empty list.
 local function qid_list_field(v)
   local out = {}
   if type(v) ~= "table" then return out end
@@ -382,6 +382,7 @@ local function qid_list_field(v)
   return out
 end
 
+-- The validated value of raw[k] under its rule (the default when invalid).
 local function field(raw, k, d)
   local r = RULE[k]
   local kind = r[1]
@@ -685,7 +686,8 @@ function M.reset_appearance(settings)
 end
 
 -- Marker color: the category color, alpha byte halved when the marker
--- is done (opened / looted) or faded (SPEC 27.6); once when both.
+-- is done (opened / looted), faded (SPEC 27.6) or dim (SPEC 32.6.4); once when
+-- several apply.
 function M.marker_color(settings, m)
   local c = M.color_of(settings, m.cat)
   if not (m.done or m.faded or m.dim) then return c end

@@ -834,6 +834,7 @@ do
   check("focus_unrelated clamps", V({ focus_unrelated = 3 }).focus_unrelated == 1)
   check("focus_routes clamps and floors", V({ focus_routes = -2 }).focus_routes == 0
     and V({ focus_routes = 1.7 }).focus_routes == 1)
+  check("focus_qids fresh per defaults()", su.defaults().focus_qids ~= su.defaults().focus_qids)
   check("focus_tracked kept", V({ focus_tracked = true }).focus_tracked == true)
   local S = su.defaults()
   check("set_key focus_qids", su.set_key(S, "focus_qids", { 4, 4, 9 }) == true
