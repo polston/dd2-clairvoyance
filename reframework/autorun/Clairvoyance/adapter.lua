@@ -3373,7 +3373,7 @@ do
     end
     if c == "route_stop" then
       return A.guid_parse(ROUTE_GUID_PREFIX .. string.format("%012x",
-        (m.cid * 32 + m.stop) % 0x1000000000000))
+        (m.cid * 32 + (m.num or m.stop)) % 0x1000000000000))
     end
     if c == "hint_pin" then
       return A.guid_parse(PIN_GUID_PREFIX .. string.format("%012x",
