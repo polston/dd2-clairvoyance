@@ -3544,6 +3544,8 @@ function A.make()
   end
   -- SPEC 32.6.1.2: focused quests (main included) join the objective walk and
   -- the item round; nil or an empty list clears the set
+  -- The memo keys on table identity, so a caller passes a new table when the
+  -- content changes.
   function a.set_focus_qids(list)
     if list == items.focus_src then return end   -- the same table as last time
     items.focus_src = list

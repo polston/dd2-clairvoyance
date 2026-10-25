@@ -1574,7 +1574,8 @@ function M.new(a, reads, io)
   end
 
   -- memoised on the identity of the focus table (the caller hands the same
-  -- table until the focus changes)
+  -- table until the focus changes). The memo keys on table identity, so a
+  -- caller passes a new table when the content changes.
   local function focus_sets(f)
     if type(f) ~= "table" then return build_focus_sets(f) end
     if S.fsrc ~= f then

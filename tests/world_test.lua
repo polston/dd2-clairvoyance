@@ -2789,6 +2789,23 @@ do
       local grew = collectgarbage("count") - mem0
       collectgarbage("restart")
       check("set_routes: a repeated identical call allocates nothing", grew < 1 and w.route_gen == g)
+      -- the early return compares name and cid, not only the length
+      w:set_routes({ { cid = 2001, name = "X" }, L3[2], L3[3] })
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: a changed name behind an equal length is published",
+        route_in(w, 2001).name == "X")
+      w:set_routes({ L3[1], L3[2], { cid = 2004, name = "Cc" } })
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: a changed cid behind an equal length is published",
+        cids(w) == "2001,2002,2004" and route_in(w, 2003) == nil)
+      w:set_routes(L3)
+      w:poke()
+      settle(w, 1)
+      check("set_routes: the original list is published again",
+        route_in(w, 2001).name == "Aa" and cids(w) == "2001,2002,2003")
+      g = w.route_gen
       local b = stub.calls.route_stops
       w:set_routes({ L3[1], L3[2], L3[3], D4 })
       check("set_routes: an added member builds alone", w.route_gen == g + 1
@@ -3128,6 +3145,12 @@ do
         route_in(w, 2001).err ~= nil and route_in(w, -77).err == nil
         and #route_in(w, -77).stops == 2)
       f.fail.schedule_now = nil
+      -- the same cid without its place: the early return must not hide it
+      w:set_routes({ { cid = 2001, name = "A" }, { cid = -77, name = "Q" } })
+      w:poke()
+      settle(w, 2)
+      check("place no build: a dropped place behind an equal length is published",
+        route_in(w, -77) ~= nil and route_in(w, -77).place == nil)
     end
 
     -- 3: waits for the key and the player, holding no slot
@@ -5357,6 +5380,21 @@ do
     okm = okm and ran == true and #w2:input().chests == 0
   end
   check("focus: malformed collects nothing", okm)
+  -- the memo keys on the focus table: a new table on the same world rebuilds
+  do
+    local wf = cworld({ treasure = true, focus = FQ({ 11020 }) })
+    local tgf = { treasure = true, focus = FQ({ 11020 }) }
+    wf:refresh(1, true, tgf)
+    wf:poke()
+    local c1 = wf:input().chests
+    local ok1 = find(c1, "g1") ~= nil and find(c1, "i1") == nil
+    tgf.focus = FQ({ 55 }, { 78 })
+    wf:poke()
+    wf:refresh(2, true, tgf)
+    local c2 = wf:input().chests
+    check("focus: a new focus table on the same world rebuilds the sets",
+      ok1 and find(c2, "i1") ~= nil and find(c2, "g1") == nil)
+  end
   local w4, f4 = cworld({ treasure = true, focus = { active = { "x" }, quests = {} } })
   check("focus: no-number list reads no records", #w4:input().chests == 0 and (f4.reads_n.save_records or 0) == 0)
   local function sworld(tg)
