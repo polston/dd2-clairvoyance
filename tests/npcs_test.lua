@@ -470,7 +470,13 @@ do
   check("route_polyline starts skipped", n == 9 and st[1] == 1 and st[2] == 0 and st[3] == 6)
   local o2 = {}
   local n2 = N.route_polyline({ { i = 1, j = 2 }, { i = 2, j = 3 } }, ends, nil, 0, o2)
-  check("route_polyline starts nil same output", n2 == 9 and o2[1] == 1 and o2[6] == 3 and o2[9] == 6)
+  local parts = {}
+  for i = 1, n2 do parts[i] = tostring(o2[i]) end
+  check("route_polyline starts nil same output",
+    n2 == 9 and #o2 == 9 and table.concat(parts, ",") == "1,2,3,4,false,3,4,5,6")
+  n = N.route_polyline({ { i = 1, j = 2 } }, ends, nil, 0, o, st)
+  check("route_polyline starts cleared past last pair",
+    n == 4 and st[1] == 1 and st[2] == nil and st[3] == nil)
 end
 
 -- review fixes: stale pops, freed finished jobs, cleared failed fits
