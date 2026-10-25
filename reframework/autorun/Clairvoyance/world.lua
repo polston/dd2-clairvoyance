@@ -257,7 +257,8 @@ function M.new(a, reads, io)
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
       target_member = nil, members = {}, member_of = {}, route_cache = {},
       route_fail = {}, fail_seq = 0,
-      -- SPEC 32.14: sticky route colour slots, cid -> slot and slot -> cid
+      -- SPEC 32.14: sticky route colour slots; slot_of (cid -> slot) and
+      -- slot_cid (slot -> cid) together are the spec's S.slots
       slot_of = {}, slot_cid = {},
       -- SPEC 32.7.5: focused quests' key locations found so far
       key_pos = {},
@@ -1236,6 +1237,7 @@ function M.new(a, reads, io)
   end
 
   local ROUTE_ERR = "route unavailable"
+  local ROUTE_SLOTS = 8 -- the colour slots (the eight route_colors)
 
   -- the raw route for the set NPC at this hour; nil for an NPC with no
   -- route (Ruling 3); raises on any failed read
@@ -1351,7 +1353,7 @@ function M.new(a, reads, io)
     for _, e in ipairs(out) do
       local s = S.slot_of[e.cid]
       if s == nil then
-        for k = 1, 8 do
+        for k = 1, ROUTE_SLOTS do
           if S.slot_cid[k] == nil then s = k; break end
         end
         if s ~= nil then

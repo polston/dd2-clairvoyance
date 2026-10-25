@@ -3049,7 +3049,8 @@ do
       d.hour = 10
       settle(w, 0)
       check("current: hour 10 is the second stop", route_in(w, 2001).current == 2)
-      check("current: no stop at the hour is nil", route_in(w, 2002).current == nil)
+      check("current: no stop at the hour is nil", route_in(w, 2002).current == nil
+        and route_in(w, 2002).stops ~= nil and route_in(w, 2002).err == nil)
       d.hour = 23
       w:poke()
       settle(w, 1)
