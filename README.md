@@ -123,10 +123,10 @@ slices the first time a walking-path route is shown.
 
 Up to eight routes show at once, each in its own color (the eight colors are
 set under Appearance, Route). With "Gradient" on, the legs of a route shift
-toward the "Gradient end color" (by "Gradient amount") and get fainter (down
-to "Far end opacity") and thinner the further they are from the stop the
-route stands at. "Route legend" lists every shown route,
-in its color, at the top left of the full map; the stop a route stands at
+toward the "Gradient end color" (by "Gradient amount (%)") and get fainter
+(down to "Far end opacity (%)") and thinner the further they are from the
+stop the route stands at. "Route legend" lists every shown route, in its
+color, at the top left of the full map; the stop a route stands at
 shows the route's name after its number. With quest focus on, "Routes to quest
 places" also draws a route to each destination place of the focused quests,
 counted in the same eight, and "Routes: n of N" says how many of the
@@ -153,8 +153,8 @@ numbers are in the same space as the search results and markers.
    larger displays). Outlines are drawn on pictures the mod draws through the
    D2DX plugin and on its text, not on the game's own icon glyphs.
 2. Route: the eight route colors, the gradient (on or off, end color, amount
-   and far end opacity), line width, stop picture size, and the stop number's color and
-   size.
+   and far end opacity), line width, stop picture size, and the stop number's
+   color and size.
 3. Names color.
 4. Overrides: for each marker category, the route line, the names and the item
    menu, an Override checkbox with its own outline on or off, color and width.
