@@ -2677,7 +2677,7 @@ function M.compute(adapter, show)
     end
     for _, m in ipairs(markers) do
       local cid = M.marker_cid(m)
-      if cid ~= nil then quest_by_cid[cid] = m end
+      if cid ~= nil and not m.focus_kept then quest_by_cid[cid] = m end
     end
     local wms, merged, cover
     wms, world_panel, merged, cover = M.world_markers_cached(show.world, show,

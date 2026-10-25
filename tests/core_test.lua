@@ -4292,6 +4292,17 @@ do
   check("fq 10: in progress, the objective marker is not the giver", has(r.markers, "c:8") ~= nil
     and table.concat(r.focus.quests[30].npcs, ",") == "9,8"
     and table.concat(r.focus.quests[30].step_npcs, ",") == "8")
+  r = run({}, nil, { quest_items = false, focus_qids = { 30 } }, many)
+  check("fq 6d: unfocused needs stay off with Quest items off",
+    count_id(r, 300) == 40 and count_id(r, 301) == 0)
+  local qg = { acceptable = { 20 }, hints = { [20] = 9001 }, npc_pos = { [9001] = P(1) },
+    names = { [20] = "Twenty" } }
+  local sw = { sellers = { { shop = 5, item = 2, item_name = "Elixir", cid = 9001, npc = "N",
+    qids = {}, quest = "Q", pos = P(4), maybe_locked = false, discovered = true } } }
+  r = run(sw, Q("elixir"), { focus_qids = { 20 } }, qg)
+  local sell = has(r.markers, "w:sell:5:2")
+  check("fq 11: a focus-kept quest marker does not absorb a matching seller",
+    sell ~= nil and core.is_result(sell) == true)
 end
 
 if failures > 0 then os.exit(1) end
