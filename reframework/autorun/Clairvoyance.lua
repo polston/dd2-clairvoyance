@@ -1898,7 +1898,7 @@ local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
         if q == qid then listed = true; break end
       end
       local c, v = imgui.checkbox(d.focus_id, listed)
-      if c then wt.focus_toggle(qid, v, rec) end
+      if c and (listed or #settings.focus_qids < 16) then wt.focus_toggle(qid, v, rec) end
       if not listed and #settings.focus_qids >= 16 and imgui.is_item_hovered() then
         imgui.set_tooltip("At most 16 quests in focus")
       end
