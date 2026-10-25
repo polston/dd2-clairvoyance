@@ -260,6 +260,8 @@ function M.new(a, reads, io)
       -- SPEC 32.14: sticky route colour slots; slot_of (cid -> slot) and
       -- slot_cid (slot -> cid) together are the spec's S.slots
       slot_of = {}, slot_cid = {},
+      -- SPEC 32.14.5.4: place cid -> the stop key of its last player stop
+      place_from = {},
       -- SPEC 32.7.5: focused quests' key locations found so far
       key_pos = {},
       sent = {}, walk_i = 0, walk_n = 0, walk_acc = {},
@@ -1293,14 +1295,19 @@ function M.new(a, reads, io)
     return (t ~= nil and t.cid == cid) or S.member_of[cid] ~= nil
   end
 
-  -- a cid that left the route set drops its per-cid state
-  local function leave(cid)
-    if cid == nil or live(cid) then return end
+  local function free_slot(cid)
     local slot = S.slot_of[cid]
     if slot ~= nil then
       S.slot_of[cid] = nil
       S.slot_cid[slot] = nil
     end
+  end
+
+  -- a cid that left the route set drops its per-cid state
+  local function leave(cid)
+    if cid == nil or live(cid) then return end
+    free_slot(cid)
+    S.place_from[cid] = nil
     S.route_cache[cid] = nil
     S.route_fail[cid] = nil
     if w.rps ~= nil then w.rps[cid] = nil end
@@ -1366,12 +1373,43 @@ function M.new(a, reads, io)
     return out
   end
 
-  local function routes_round()
+  local function stop_key(p)
+    return string.format("%.1f,%.1f,%.1f", p.x, p.y, p.z)
+  end
+
+  -- a place member's entry (SPEC 32.14.5.3): the player to the place, both
+  -- discovered; nil (and no slot held) until both positions exist. When the
+  -- player stop moved, the old stop's walking-graph node is dropped.
+  local function place_entry(m, tg)
+    local pl = type(tg) == "table" and tg.player or nil
+    local kp = S.key_pos[m.place]
+    if not valid_pos(pl) or kp == nil then
+      free_slot(m.cid)
+      return nil
+    end
+    local from = stop_key(pl)
+    local old = S.place_from[m.cid]
+    if old ~= nil and old ~= from then w.near[old] = nil end
+    S.place_from[m.cid] = from
+    return { cid = m.cid, place = m.place, name = m.name,
+             stops = { { pos = pcopy(pl), discovered = true },
+                       { pos = pcopy(kp), discovered = true } } }
+  end
+
+  local function routes_round(tg)
     local list = published()
     if #list == 0 then return nil, false end
     local function all_err()
       local out = {}
-      for i, m in ipairs(list) do out[i] = { cid = m.cid, name = m.name, err = ROUTE_ERR } end
+      for _, m in ipairs(list) do
+        if m.place ~= nil then
+          local pe = place_entry(m, tg)
+          if pe ~= nil then out[#out + 1] = pe end
+        else
+          out[#out + 1] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
+        end
+      end
+      if #out == 0 then return nil, false end
       return give_slots(out), false
     end
     if type(reads.schedule_now) ~= "function" then return all_err() end
@@ -1383,7 +1421,8 @@ function M.new(a, reads, io)
     local has_sig = type(reads.current_sig) == "function"
     for i, m in ipairs(list) do
       local sig, bad = "", false
-      if has_sig then
+      local is_place = m.place ~= nil
+      if has_sig and not is_place then
         local ts = clock()
         local oks, a, l, k, o = pcall(reads.current_sig, m.cid)
         stats.ms.route_sig = (stats.ms.route_sig or 0) + (clock() - ts) * 1000
@@ -1393,8 +1432,8 @@ function M.new(a, reads, io)
           bad = true
         end
       end
-      local e = { m = m, sig = sig, bad = bad }
-      if not bad then
+      local e = { m = m, sig = sig, bad = bad, place = is_place }
+      if not bad and not is_place then
         local c = S.route_cache[m.cid]
         e.key = tostring(day) .. "|" .. tostring(hour) .. "|" .. sig
         e.stale = c == nil or c.hour ~= hour or c.day ~= day or c.sig ~= sig
@@ -1435,7 +1474,10 @@ function M.new(a, reads, io)
     local out, again = {}, false
     for _, e in ipairs(info) do
       local m = e.m
-      if e.bad or e.failed then
+      if e.place then
+        local pe = place_entry(m, tg)
+        if pe ~= nil then out[#out + 1] = pe end
+      elseif e.bad or e.failed then
         out[#out + 1] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
       else
         local c = S.route_cache[m.cid]
@@ -1892,7 +1934,7 @@ function M.new(a, reads, io)
     end
     t = clock()
     local more_routes
-    out.routes, more_routes = routes_round()
+    out.routes, more_routes = routes_round(tg)
     lap("route", t)
     return out, again or more_routes
   end
@@ -1981,6 +2023,7 @@ function M.new(a, reads, io)
 
   -- SPEC 22.8: the route NPC; the next refresh builds it
   function w:set_route(cid, name)
+    if type(cid) ~= "number" or cid <= 0 then return end
     local old = S.target_member and S.target_member.cid
     S.target_member = { cid = cid, name = name }
     if cid ~= old then
@@ -2003,8 +2046,10 @@ function M.new(a, reads, io)
     local members, member_of = {}, {}
     if type(list) == "table" then
       for _, e in ipairs(list) do
-        if type(e) == "table" and type(e.cid) == "number" and member_of[e.cid] == nil then
-          local m = { cid = e.cid, name = e.name }
+        if type(e) == "table" and type(e.cid) == "number" and member_of[e.cid] == nil
+            and (e.place == nil
+              or (type(e.place) == "number" and e.place > 0 and e.place % 1 == 0)) then
+          local m = { cid = e.cid, name = e.name, place = e.place }
           members[#members + 1] = m
           member_of[e.cid] = m
         end
@@ -2283,10 +2328,6 @@ function M.new(a, reads, io)
     end
     w.graph = { n = nn, x = c.x, y = c.y, z = c.z, ls = ls, lc = lc, lt = lt }
     w.copy = nil
-  end
-
-  local function stop_key(p)
-    return string.format("%.1f,%.1f,%.1f", p.x, p.y, p.z)
   end
 
   local function same_route(c, cid, stops, undisc)

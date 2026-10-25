@@ -2721,6 +2721,8 @@ do
         d.cur[c] = { area = 49, location = 0 }
       end
       d.area_nodes[49] = { P(1, 0, 1) }
+      d.keypos = {}
+      f.reads.key_pos = function(k) return d.keypos[k] end
       f.reads.schedule_rows = function(cid)
         f.reads_n.schedule_rows = (f.reads_n.schedule_rows or 0) + 1
         if d.bad[cid] then error("fake bad cid") end
@@ -3068,6 +3070,119 @@ do
       w:set_routes(mem(2002, 2001))
       settle(w, 1)
       check("slots: reset starts again from 1", slots(w) == "2002=1,2001=2")
+    end
+
+    -- place routes (SPEC 32.14.5)
+    local function ptg(player, keys)
+      local t = on("search")
+      t.player, t.focus_keys = player, keys
+      return t
+    end
+    local PL = { { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" } }
+
+    -- 1: a place member
+    f, d = sfix()
+    w = f.new()
+    d.keypos[77] = P(10, 0, 10)
+    if type(w.set_routes) == "function" then
+      w:set_routes(PL)
+      local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
+      local n = 0
+      repeat n = n + 1 until not w:refresh(0, true, t1) or n > 20
+      local pe = route_in(w, -77)
+      check("place member: after the NPC, with the place and two stops",
+        cids(w) == "2001,-77" and pe ~= nil and pe.place == 77 and pe.name == "Q"
+        and pe.stops ~= nil and #pe.stops == 2)
+      check("place member: stops are the player and the place, both discovered",
+        pe ~= nil and pe.stops ~= nil and pe.stops[1].pos.x == 5 and pe.stops[1].pos.y == 1
+        and pe.stops[2].pos.x == 10 and pe.stops[2].pos.z == 10
+        and pe.stops[1].discovered == true and pe.stops[2].discovered == true)
+      check("place member: a slot and no current", pe ~= nil and pe.slot == 2
+        and pe.current == nil and pe.err == nil)
+    end
+
+    -- 2: no build, no signature read, no schedule_now failure
+    f, d = sfix()
+    w = f.new()
+    d.keypos[77] = P(10, 0, 10)
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = -77, place = 77, name = "Q" } })
+      local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
+      w:refresh(0, true, t1)
+      check("place no build: only the place leaves no build and no signature read",
+        route_in(w, -77) ~= nil and w:stats().route_builds == 0
+        and (f.reads_n.current_sig or 0) == 0 and stub.calls.route_stops == 0)
+      w:set_routes(PL)
+      f.fail.schedule_now = true
+      w:poke()
+      w:refresh(1, true, t1)
+      check("place no build: schedule_now failing errs the NPC, not the place",
+        route_in(w, 2001).err ~= nil and route_in(w, -77).err == nil
+        and #route_in(w, -77).stops == 2)
+      f.fail.schedule_now = nil
+    end
+
+    -- 3: waits for the key and the player, holding no slot
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" } })
+      local n = 0
+      local t0 = ptg(nil, { 77 })
+      d.keypos[77] = P(10, 0, 10)
+      repeat n = n + 1 until not w:refresh(0, true, t0) or n > 20
+      check("place waits: no player, no place entry and the NPC takes slot 1",
+        route_in(w, -77) == nil and slots(w) == "2001=1")
+      d.keypos[77] = nil
+      local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
+      w:reset()
+      w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" } })
+      n = 0
+      repeat n = n + 1 until not w:refresh(1, true, t1) or n > 20
+      check("place waits: no key position, no place entry",
+        route_in(w, -77) == nil and slots(w) == "2001=1")
+      d.keypos[77] = P(10, 0, 10)
+      w:poke()
+      w:refresh(2, true, t1)
+      check("place waits: both present, the entry appears with the next slot",
+        route_in(w, -77) ~= nil and slots(w) == "-77=2,2001=1")
+      w:poke()
+      w:refresh(3, true, t0)
+      check("place waits: the player gone frees the slot",
+        route_in(w, -77) == nil and slots(w) == "2001=1")
+    end
+
+    -- 4: guards
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = -5, place = 0, name = "Z" }, { cid = -6, place = 1.5, name = "Y" },
+        { cid = 2001, name = "A" } })
+      settle(w, 0)
+      check("place guards: place 0 and 1.5 are dropped", cids(w) == "2001")
+      local g = w.route_gen
+      w:set_route(-5, "Z")
+      w:set_route(0, "Z")
+      check("place guards: set_route ignores a cid at or below 0",
+        w.route_gen == g and cids(w) == "2001")
+    end
+
+    -- 5: moving the player drops the old near key
+    f, d = sfix()
+    w = f.new()
+    d.keypos[77] = P(10, 0, 10)
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = -77, place = 77, name = "Q" } })
+      w:refresh(0, true, ptg({ x = 5, y = 1, z = 5 }, { 77 }))
+      w.near["5.0,1.0,5.0"] = 3
+      w.near["10.0,0.0,10.0"] = 4
+      w:poke()
+      w:refresh(1, true, ptg({ x = 5, y = 1, z = 5 }, { 77 }))
+      check("place re-path: an unmoved player keeps its near key", w.near["5.0,1.0,5.0"] == 3)
+      w:poke()
+      w:refresh(2, true, ptg({ x = 6, y = 1, z = 6 }, { 77 }))
+      check("place re-path: a moved player drops the old near key only",
+        w.near["5.0,1.0,5.0"] == nil and w.near["10.0,0.0,10.0"] == 4)
     end
   end
 
