@@ -4364,6 +4364,25 @@ do
   check("fw 3b: under a search only the related entries that match are results",
     s400 ~= nil and s400.focus_kept == nil and core.is_result(s400) == true
     and g1.focus_kept == true and core.is_result(g1) == false)
+  -- fix round 1: cover, cache invalidation, uncached skip
+  local wn = wset()
+  wn.sellers[2] = nil   -- the unrelated seller of cid 77 would cover it too
+  wn.npcs = { { cid = 77, name = "Vendor", pos = P(15), alive = true, discovered = true } }
+  r = run(wn, Q("vendor"), { focus_qids = { 20 }, quest_rel = wrel }, wq)
+  check("fw 10: a related seller covers its NPC match", has(r.markers, "w:sell:9:400") ~= nil
+    and has(r.markers, "w:npc:77") == nil)
+  local cw = wset()
+  local cs = { world_chests = false, world_sellers = false }
+  local ca = core.world_markers_cached(cw, cs, P(0), {}, nil, nil,
+    { qids = { [20] = true }, items = {}, key = "20|" })
+  local cb = core.world_markers_cached(cw, cs, P(0), {}, nil, nil,
+    { qids = { [99] = true }, items = {}, key = "99|" })
+  check("fw 11: a new fx key rebuilds the cached related list",
+    relkeys(ca) == "w:chest:g1,w:sell:9:400" and relkeys(cb) == "w:sell:9:401")
+  local uo = core.world_markers(wset(), {}, P(0), {}, nil, fx)
+  local ng = 0
+  for _, m in ipairs(uo) do if m.key == "w:chest:g1" then ng = ng + 1 end end
+  check("fw 8b: uncached, categories on: a related chest is drawn once", ng == 1)
 
   -- Task 3.8: focus NPC and destination markers, the hide/dim pass, counts
   local function npc(cid, name, pos)

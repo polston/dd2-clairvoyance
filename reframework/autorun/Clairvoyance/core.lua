@@ -1478,6 +1478,11 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       cover[c.cid] = c.key
     end
   end
+  for _, c in ipairs(rel or {}) do
+    if c.cat == "seller" and type(c.cid) == "number" and cover[c.cid] == nil then
+      cover[c.cid] = c.key
+    end
+  end
   if shops and #shops > 0 and #kept < cap then
     table.sort(shops, function(x, y)
       if has_origin and x.d ~= y.d then return x.d < y.d end
@@ -1618,7 +1623,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
     markers[#markers + 1] = { key = c.key, cat = c.cat, qids = c.qids,
       pos = pos_copy(c.pos), label = c.label, done = c.done, world_ord = c.world_ord,
       hover = c.hover, why = c.why, faded = c.faded,
-      cid = (c.cat == "seller" or c.cat == "shop") and c.cid or nil,
+      cid = c.cat == "seller" and c.cid or nil,
       related = true, focus_kept = c.focus_kept }
   end
   return markers, panel, merged, cover
