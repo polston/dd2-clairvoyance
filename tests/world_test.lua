@@ -130,16 +130,16 @@ local function chest_row(uid, x, z, ix, gimmick)
   return { uid = uid, pos = P(x, 0, z), gimmick = gimmick or 10, table_ix = ix or 1 }
 end
 
+local function find(list, uid)
+  for _, e in ipairs(list or {}) do if e.uid == uid then return e end end
+  return nil
+end
+
 local function route_in(w, cid)
   local l = w:input() and w:input().routes
   if type(l) ~= "table" then return nil end
   if cid == nil then return l[1] end
   for _, e in ipairs(l) do if e.cid == cid then return e end end
-  return nil
-end
-
-local function find(list, uid)
-  for _, e in ipairs(list or {}) do if e.uid == uid then return e end end
   return nil
 end
 
@@ -2367,6 +2367,7 @@ do
     w:refresh(6, true, tg)
     check("route: set again builds", route_in(w) ~= nil)
     w:set_route(2002, "Bb")
+    check("routes: set_route removes the old target at once", route_in(w, 2001) == nil)
     w:refresh(6.5, true, tg)
     check("routes: set_route to another cid replaces the target",
       type(w:input().routes) == "table" and #w:input().routes == 1
