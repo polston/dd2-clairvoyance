@@ -257,6 +257,8 @@ function M.new(a, reads, io)
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
       target_member = nil, members = {}, member_of = {}, route_cache = {},
       route_fail = {}, fail_seq = 0,
+      -- SPEC 32.7.5: focused quests' key locations found so far
+      key_pos = {},
       sent = {}, walk_i = 0, walk_n = 0, walk_acc = {},
       -- SPEC 31: the reserved rows kept while the selector signature holds
       res = nil }
@@ -463,7 +465,7 @@ function M.new(a, reads, io)
   -- section's time under stats.ms["step_" .. name] and notes the key so the
   -- next round clears it; call() adds up the ACCUM names over the round
   -- instead of keeping the last call's time.
-  local ACCUM = { schedule_pos = true, route_sig = true }
+  local ACCUM = { schedule_pos = true, route_sig = true, key_pos = true }
   -- reads that run only on some rounds: their timing is cleared each round
   local CONDITIONAL_READS = { "reserved_rows", "reserved_sig" }
   local STEP_KEY = setmetatable({}, { __index = function(t, n)
@@ -1818,6 +1820,27 @@ function M.new(a, reads, io)
       out.npcs, more = npc_round(tg)
       lap("npcs", t)
       again = again or more == true
+    end
+    if type(tg.focus_keys) == "table" then
+      t = clock()
+      local places, seen = {}, {}
+      for _, v in ipairs(tg.focus_keys) do
+        local key = to_int(v)
+        if key ~= nil and key > 0 and not seen[key] then
+          seen[key] = true
+          local p = S.key_pos[key]
+          if p == nil then
+            local ok, v2 = call("key_pos", key)
+            if ok and valid_pos(v2) then
+              p = pcopy(v2)
+              S.key_pos[key] = p
+            end
+          end
+          if p ~= nil then places[key] = pcopy(p) end
+        end
+      end
+      out.focus_places = places
+      lap("focus_places", t)
     end
     t = clock()
     local more_routes

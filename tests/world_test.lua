@@ -4859,5 +4859,54 @@ do
   check("focus: Sellers on lists all", #sworld({ sellers = true, focus = FQ({ 55 }) }) == 1)
 end
 
+-- 35. focus key positions (SPEC 32.7.5)
+do
+  local function kfix()
+    local f = fixture()
+    f.reads.key_pos = function(k)
+      f.reads_n.key_pos = (f.reads_n.key_pos or 0) + 1
+      if f.fail.key_pos then error("x") end
+      return f.data.kpos[k]
+    end
+    f.data.kpos = { [2302] = P(1, 2, 3) }
+    return f
+  end
+  local function fps(w) return (w:input() or {}).focus_places end
+  local f = kfix()
+  local w = f.new()
+  local tg = { treasure = true, focus_keys = { 2302, 2309, 2302 } }
+  w:refresh(0, true, tg)
+  local fp = fps(w) or {}
+  check("focus places: resolved key", fp[2302] ~= nil and fp[2302].x == 1 and fp[2302].y == 2
+    and fp[2302].z == 3)
+  check("focus places: unresolved key absent", fps(w) ~= nil and fp[2309] == nil)
+  check("focus places: one read per key per round", f.reads_n.key_pos == 2)
+  w:poke()
+  w:refresh(0, true, tg)
+  check("focus places: found keys cached", f.reads_n.key_pos == 3)
+  f.data.kpos[2309] = P(4, 5, 6)
+  w:poke()
+  w:refresh(0, true, tg)
+  fp = fps(w) or {}
+  check("focus places: a later read resolves", fp[2309] ~= nil and fp[2309].x == 4)
+  local n = f.reads_n.key_pos or 0
+  w:reset()
+  w:refresh(0, true, tg)
+  check("focus places: reset drops the cache", f.reads_n.key_pos == n + 2)
+  n = f.reads_n.key_pos or 0
+  w:poke()
+  w:refresh(0, true, { treasure = true })
+  check("focus places: no list, no table, no read", fps(w) == nil and (f.reads_n.key_pos or 0) == n)
+  w:poke()
+  w:refresh(0, true, { treasure = true, focus_keys = { 0, -1, 1.5, "x" } })
+  check("focus places: bad keys skipped", (f.reads_n.key_pos or 0) == n
+    and next(fps(w) or { 0 }) == nil)
+  local f2 = kfix()
+  f2.fail.key_pos = true
+  local w2 = f2.new()
+  local ran = w2:refresh(0, true, tg)
+  check("focus places: raising read", ran == true and next(fps(w2) or { 0 }) == nil)
+end
+
 if failures > 0 then os.exit(1) end
 print("world_test: all OK")
