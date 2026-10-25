@@ -18,6 +18,8 @@ local function quest_display_name(adapter, qid)
 end
 M.quest_display_name = quest_display_name
 
+local MERGE_STOP_M = 150 -- stops this close (metres) merge into one
+
 local function pos_key(p)
   return string.format("p:%d:%d:%d",
     math.floor(p.x), math.floor(p.y), math.floor(p.z))
@@ -3075,7 +3077,7 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
         for _, k in ipairs(kept) do
           if k.pos ~= nil and c.pos ~= nil then
             local dx, dz = c.pos.x - k.pos.x, c.pos.z - k.pos.z
-            if dx * dx + dz * dz <= 22500 then near = true; break end
+            if dx * dx + dz * dz <= MERGE_STOP_M * MERGE_STOP_M then near = true; break end
           end
         end
         if not near then kept[#kept + 1] = c end

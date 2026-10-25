@@ -1419,6 +1419,7 @@ function M.new(a, reads, io)
           if pe ~= nil then out[#out + 1] = pe end
         else
           out[#out + 1] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
+          S.place_from[m.cid] = nil
         end
       end
       if #out == 0 then return nil, false end

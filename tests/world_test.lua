@@ -3437,6 +3437,18 @@ do
       check("all_err places: a place publishes as today", route_in(w12, -77) ~= nil
         and route_in(w12, 2001).err ~= nil)
       f12.fail.schedule_now = nil
+
+      -- 9b: an all_err round clears an NPC entry's lead record
+      local f18, d18, w18 = setup()
+      w18:set_routes({ { cid = 2001, name = "A" } })
+      go(w18, ptg(PA, nil))
+      w18.near["5.0,1.0,5.0"] = 3
+      f18.fail.schedule_now = true
+      go(w18, ptg(PA, nil))
+      f18.fail.schedule_now = nil
+      go(w18, ptg({ x = 6, y = 1, z = 6 }, nil))
+      check("all_err NPC entry: the record was cleared, A's key stays",
+        w18.near["5.0,1.0,5.0"] == 3)
     end
   end
 

@@ -161,7 +161,8 @@ numbers are in the same space as the search results and markers.
 3. Names color.
 4. Overrides: for each marker category, the route line, the names and the item
    menu, an Override checkbox with its own outline on or off, color and width.
-5. Icons and colors: the icon and color of each category.
+5. Icons and colors: the icon and color of each marker category. Route stops
+   are not set here; they take the eight route colors under Route.
 
 "Reset appearance to defaults" puts every category icon and color and every
 appearance setting back to its default; it leaves the two NPCs route path
