@@ -581,6 +581,9 @@ do
   check("quests: nil input", next(q) == nil and info.kept == 0 and info.pak == nil and info.first == nil)
   q, info = N.parse_quests({ pak = 5 })
   check("quests: no quests table, non-string pak", next(q) == nil and info.pak == nil)
+  q, info = N.parse_quests({ version = "1", quests = { ["5"] = { decoded = 1 } } })
+  check("quests: decoded only when true, version only when a number",
+    q[5] and q[5].decoded == false and info.version == nil)
 end
 
 if failures > 0 then
