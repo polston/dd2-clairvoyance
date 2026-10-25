@@ -914,7 +914,7 @@ do
       { 1, 2, 3, 4, 5, 6, 7, "x" }) == false and SK.route_colors == keep)
   end
   check("gradient defaults", D.route_gradient == true and D.route_gradient_end == 0xFF101010
-    and D.route_gradient_amount == 50 and D.route_gradient_alpha == 30
+    and D.route_gradient_amount == 80 and D.route_gradient_alpha == 15
     and D.route_legend == true and D.focus_place_routes == true and D.focus_dim_alpha == 25)
   check("gradient clamps", su.validate({ route_gradient_amount = 150 }).route_gradient_amount == 100
     and su.validate({ focus_dim_alpha = 2 }).focus_dim_alpha == 5
@@ -930,8 +930,8 @@ do
     su.reset_appearance(RS)
     check("reset appearance restores route colours and gradient",
       RS.route_colors[2] == want8[2] and RS.route_gradient == true
-      and RS.route_gradient_end == 0xFF101010 and RS.route_gradient_amount == 50
-      and RS.route_gradient_alpha == 30 and RS.focus_dim_alpha == 60)
+      and RS.route_gradient_end == 0xFF101010 and RS.route_gradient_amount == 80
+      and RS.route_gradient_alpha == 15 and RS.focus_dim_alpha == 60)
   end
   check("marker_color route_stop slot", su.marker_color(D, { cat = "route_stop", slot = 3 }) == want8[3]
     and su.marker_color(D, { cat = "route_stop" }) == want8[1])

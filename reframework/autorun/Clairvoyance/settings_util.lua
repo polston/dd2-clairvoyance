@@ -47,7 +47,7 @@ function M.defaults()
     outline_on = true, outline_color = 0xFF000000, outline_width = 1,
     route_colors = M.default_route_colors(), route_line_width = 3, route_stop_size = 100,
     route_gradient = true, route_gradient_end = 0xFF101010,
-    route_gradient_amount = 50, route_gradient_alpha = 30,
+    route_gradient_amount = 80, route_gradient_alpha = 15,
     route_legend = true, focus_place_routes = true, focus_dim_alpha = DIM_ALPHA_DEFAULT,
     route_number_color = 0xFFFFFFFF, route_number_size = 0,
     route_path = 1, route_world_path = false, names_color = 0xFFFFFFFF,
