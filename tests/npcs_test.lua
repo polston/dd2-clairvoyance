@@ -443,6 +443,42 @@ do
   check("polyline clears tail", n == 4 and #out == 4 and out[5] == nil)
 end
 
+-- leg_steps and polyline starts
+do
+  local function steps(pr, cur, out)
+    local n = N.leg_steps(pr, cur, out)
+    return n, table.concat(out, ",", 1, n)
+  end
+  local p3 = { { i = 1, j = 2 }, { i = 2, j = 3 }, { i = 3, j = 4 } }
+  local out = { 9, 9, 9, 9, 9 }
+  local n, s = steps(p3, 2, out)
+  check("leg_steps", n == 3 and s == "2,0,1" and out[4] == nil and out[5] == nil)
+  n, s = steps(p3, nil, out)
+  check("leg_steps no current", n == 3 and s == "0,0,0")
+  n, s = steps(p3, 4, out)
+  check("leg_steps overnight", n == 3 and s == "0,1,2")
+  n, s = steps({ { i = 2, j = 3 }, { i = 3, j = 4 } }, 1, out)
+  check("leg_steps overnight short", n == 2 and s == "0,1")
+  n, s = steps({ { i = 1, j = 2 }, { i = 2, j = 4 }, { i = 4, j = 5 } }, 3, out)
+  check("leg_steps spanning", n == 3 and s == "2,0,1")
+
+  local ends = { { lx = 1, ly = 2 }, { lx = 3, ly = 4 }, { lx = 5, ly = 6 } }
+  local o, st = {}, {}
+  n = N.route_polyline({ { i = 1, j = 2 }, { i = 2, j = 3 } }, ends, nil, 0, o, st)
+  check("route_polyline starts", n == 9 and st[1] == 1 and st[2] == 6 and o[5] == false)
+  n = N.route_polyline({ { i = 1, j = 2 }, { i = 2, j = 9 }, { i = 2, j = 3 } }, ends, nil, 0, o, st)
+  check("route_polyline starts skipped", n == 9 and st[1] == 1 and st[2] == 0 and st[3] == 6)
+  local o2 = {}
+  local n2 = N.route_polyline({ { i = 1, j = 2 }, { i = 2, j = 3 } }, ends, nil, 0, o2)
+  local parts = {}
+  for i = 1, n2 do parts[i] = tostring(o2[i]) end
+  check("route_polyline starts nil same output",
+    n2 == 9 and #o2 == 9 and table.concat(parts, ",") == "1,2,3,4,false,3,4,5,6")
+  n = N.route_polyline({ { i = 1, j = 2 } }, ends, nil, 0, o, st)
+  check("route_polyline starts cleared past last pair",
+    n == 4 and st[1] == 1 and st[2] == nil and st[3] == nil)
+end
+
 -- review fixes: stale pops, freed finished jobs, cleared failed fits
 do
   local g = { n = 3, x = { 0, 1, 2 }, y = { 0, 0, 0 }, z = { 0, 0, 0 },
