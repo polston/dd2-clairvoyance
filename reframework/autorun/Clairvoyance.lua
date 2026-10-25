@@ -469,7 +469,7 @@ do
   icons.route_recs, icons.nums = {}, {}
   icons.npcs = require("Clairvoyance.npcs")
   icons.fit_pts, icons.fit, icons.fit_opt = {}, {}, { similarity = false }
-  icons.end_rows, icons.ends, icons.ends_n = {}, {}, 0
+  icons.end_rows, icons.ends, icons.ends_n, icons.slot_of, icons.slot_cids = {}, {}, {}, {}, {}
   icons.route_pts, icons.scr, icons.fonts = {}, {}, {}
   -- Route numbers beside the stop records read this frame. Hoisted; the font
   -- is pushed around the loop and popped even when a draw raises.
@@ -548,12 +548,24 @@ do
     local recs, fp, nf = icons.recs, icons.fit_pts, 0
     local rr, nrr = icons.route_recs, 0
     local fill_at = icons.fill_at
-    local rows, ends = icons.end_rows, icons.ends
-    for i = 1, icons.ends_n do ends[i] = nil end
+    local rows, ends, ends_n = icons.end_rows, icons.ends, icons.ends_n
+    local slot_of, slot_cids = icons.slot_of, icons.slot_cids
+    for k = 1, 8 do
+      local c = slot_cids[k]
+      if c ~= nil then slot_of[c] = nil; slot_cids[k] = nil end
+      local ek = ends[k]
+      if ek ~= nil then
+        for i = 1, ends_n[k] do ek[i] = nil end
+      end
+    end
     local input = wt.q("input", nil)
-    local route = input ~= nil and input.route or nil
-    local stops = route ~= nil and route.stops or nil
-    local nstops = stops ~= nil and #stops or 0
+    local routes = input ~= nil and input.routes or nil
+    local nroutes = routes ~= nil and math.min(#routes, 8) or 0
+    for k = 1, nroutes do
+      local c = routes[k].cid
+      slot_of[c] = k
+      slot_cids[k] = c
+    end
     for i = 1, #recs do
       local rec = recs[i]
       local m = rec.marker
@@ -562,48 +574,73 @@ do
         local row = fp[nf]
         if row == nil then row = {}; fp[nf] = row end
         row[1], row[2], row[3], row[4] = m.pos.x, m.pos.z, rec.lx, rec.ly
-        if m.cat == "route_stop" and type(m.stop) == "number" then
+        local slot = m.cat == "route_stop" and type(m.stop) == "number"
+          and slot_of[m.cid] or nil
+        if slot ~= nil then
           nrr = nrr + 1
           rr[nrr] = rec
-          local e = rows[m.stop]
-          if e == nil then e = {}; rows[m.stop] = e end
+          local rk = rows[slot]
+          if rk == nil then rk = {}; rows[slot] = rk; ends[slot] = {}; ends_n[slot] = 0 end
+          local e = rk[m.stop]
+          if e == nil then e = {}; rk[m.stop] = e end
           e.lx, e.ly, e.mx, e.mz = rec.lx, rec.ly, nil, nil
-          ends[m.stop] = e
-          if m.stop > icons.ends_n then icons.ends_n = m.stop end
+          ends[slot][m.stop] = e
+          if m.stop > ends_n[slot] then ends_n[slot] = m.stop end
         end
       end
     end
     for i = #rr, nrr + 1, -1 do rr[i] = nil end
     if nrr > 0 then icons.draw_numbers(nrr) end
-    local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
-    if pairs_ == nil or #pairs_ == 0 then wt.path_draw_ms = 0; return end
-    local fit = icons.npcs.fit(fp, nf, icons.fit_opt, icons.fit)
-    for i = 1, nstops do
-      if ends[i] == nil then
-        local p = stops[i].pos
-        if type(p) == "table" then
-          local e = rows[i]
-          if e == nil then e = {}; rows[i] = e end
-          e.lx, e.ly, e.mx, e.mz = nil, nil, p.x, p.z
-          ends[i] = e
-          if i > icons.ends_n then icons.ends_n = i end
-        end
+    local pmap = wt.q("route_paths", nil, settings.world_undiscovered)
+    local any = false
+    if pmap ~= nil then
+      for k = 1, nroutes do
+        local pp = pmap[routes[k].cid]
+        if pp ~= nil and #pp > 0 then any = true; break end
       end
     end
-    local t0 = os.clock()
-    local n = icons.npcs.route_polyline(pairs_, ends, fit, settings.route_path,
-      icons.route_pts)
-    local sn = icons.to_screen_pts(icons.route_pts, n)
-    if sn > 0 then
-      local st = wt.styles.route_line
-      local k = icons:k()
-      local col = settings.route_line_color
-      local t1 = st.on and os.clock() or nil
-      wt.style.polyline(draw, icons.scr, settings.route_line_width * k,
-        A.argb_to_abgr(col), st.on, st.color, wt.style.offset(st.width, k), wt.a(col))
-      if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
+    if not any then wt.path_draw_ms = 0; return end
+    local fit = icons.npcs.fit(fp, nf, icons.fit_opt, icons.fit)
+    local total_ms = 0
+    for mk = 1, nroutes do
+      local member = routes[mk]
+      local pairs_ = pmap[member.cid]
+      if pairs_ ~= nil and #pairs_ > 0 then
+        local stops = member.stops
+        local ek = ends[mk]
+        if ek == nil then
+          ek = {}; ends[mk] = ek; ends_n[mk] = 0; rows[mk] = rows[mk] or {}
+        end
+        local rk = rows[mk]
+        for i = 1, type(stops) == "table" and #stops or 0 do
+          if ek[i] == nil then
+            local p = stops[i].pos
+            if type(p) == "table" then
+              local e = rk[i]
+              if e == nil then e = {}; rk[i] = e end
+              e.lx, e.ly, e.mx, e.mz = nil, nil, p.x, p.z
+              ek[i] = e
+              if i > ends_n[mk] then ends_n[mk] = i end
+            end
+          end
+        end
+        local t0 = os.clock()
+        local n = icons.npcs.route_polyline(pairs_, ek, fit, settings.route_path,
+          icons.route_pts)
+        local sn = icons.to_screen_pts(icons.route_pts, n)
+        if sn > 0 then
+          local st = wt.styles.route_line
+          local k = icons:k()
+          local col = settings.route_line_color
+          local t1 = st.on and os.clock() or nil
+          wt.style.polyline(draw, icons.scr, settings.route_line_width * k,
+            A.argb_to_abgr(col), st.on, st.color, wt.style.offset(st.width, k), wt.a(col))
+          if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
+        end
+        total_ms = total_ms + (os.clock() - t0) * 1000
+      end
     end
-    wt.path_draw_ms = (os.clock() - t0) * 1000
+    wt.path_draw_ms = total_ms
   end
   -- One debug line for the walking-path costs (SPEC 23.6.10).
   wt.path_line = function()
@@ -1039,10 +1076,15 @@ re.on_frame(function()
     show.map_origin = wt.map_origin
     show.world_givers = wt.q("givers", {})
     show.world = wt.q("input", nil)
-    show.route = (show.world or {}).route   -- SPEC 22.8.4
+    show.routes = (show.world or {}).routes   -- SPEC 22.8.4, 32.13
     -- the frame layers do no work while there is no route and no pin
-    wt.route_on = type(show.route) == "table" and type(show.route.stops) == "table"
-      and #show.route.stops > 0
+    wt.route_on = false
+    if type(show.routes) == "table" then
+      for ri = 1, #show.routes do
+        local rs = show.routes[ri].stops
+        if type(rs) == "table" and #rs > 0 then wt.route_on = true; break end
+      end
+    end
     wt.has_pts = wt.route_on or #show.hint_pins > 0
     -- v5 (SPEC 12.3a): own pcall so a raised walk never skips compute;
     -- inside the timed window so Tick ms includes it; skipped when the
@@ -1524,7 +1566,7 @@ local function overhead_draw_one(marker, px, py, pz, d2, name_d2)
       Vector3f.new(px, py + OVERHEAD_Y_OFFSET, pz))
   end
   if sp == nil then return 0 end
-  local argb = su.color_of(settings, marker.cat)
+  local argb = su.marker_color(settings, marker)
   -- SPEC 21.6: the category picture when it can be drawn, else the v12 dots.
   local pid = su.icon_for(settings, marker, "head", marker.step, icons.drawable_fn)
   local pic = icons:drawable(pid)
@@ -1949,7 +1991,8 @@ local function install_debug()
         end
         st.npc_rows = nr
         st.npc_names = #((wt.q("input", nil) or {}).npcs or {})
-        st.route = (wt.q("input", nil) or {}).route
+        st.routes = (wt.q("input", nil) or {}).routes
+        st.end_slots = #icons.ends
         return st
       end,
       state = function()
@@ -2147,8 +2190,14 @@ do
           local nrows = snapshot.npc_rows or {}
           if #nrows > 0 and imgui.tree_node(
               string.format("NPCs (%d)###qnml_nr", #nrows)) then
-            local rt = (wt.q("input", nil) or {}).route
+            local rts = (wt.q("input", nil) or {}).routes
             for _, r in ipairs(nrows) do
+              local rt = nil
+              if rts ~= nil then
+                for ri = 1, #rts do
+                  if rts[ri].cid == r.cid then rt = rts[ri]; break end
+                end
+              end
               if r.text == nil then
                 local tx = tostring(r.name)
                 if not r.alive then
@@ -2181,7 +2230,7 @@ do
                 end
                 want_update = true; last_tick = 0.0
               end
-              if wt.route_cid == r.cid and rt ~= nil and rt.cid == r.cid then
+              if wt.route_cid == r.cid and rt ~= nil then
                 if rt.err ~= nil then
                   imgui.text("route unavailable")
                 elseif (rt.unplaced or 0) > 0 then
@@ -2190,7 +2239,7 @@ do
                 if rt.err == nil and rt.off_schedule then
                   imgui.text("not at a scheduled place right now")
                 end
-                local ps = wt.q("path_status", nil, settings.route_path)
+                local ps = wt.q("path_status", nil, settings.route_path, r.cid)
                 if ps ~= nil then imgui.text(ps) end
               end
             end
@@ -2944,10 +2993,13 @@ end)
 -- A node out of range or off screen is a break; one polyline call draws all.
 wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
   local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
-  if pairs_ == nil then return end
+  local routes = (wt.q("input", nil) or {}).routes
+  if pairs_ == nil or routes == nil then return end
   local buf, n = wt.path_scr, 0
-  for k = 1, #pairs_ do
-    local pts = pairs_[k].pts
+  for ri = 1, #routes do
+   local pl = pairs_[routes[ri].cid]
+   for k = 1, pl ~= nil and #pl or 0 do
+    local pts = pl[k].pts
     if pts ~= nil then
       if n > 0 then buf[n + 1], buf[n + 2] = false, false; n = n + 2 end
       for q = 1, #pts - 2, 3 do
@@ -2968,6 +3020,7 @@ wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
         n = n + 2
       end
     end
+   end
   end
   for j = #buf, n + 1, -1 do buf[j] = nil end
   if n == 0 then return end
