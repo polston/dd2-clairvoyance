@@ -68,29 +68,40 @@ do
   wt.leg_to = {}                        -- last point index of each leg, reused
   wt.leg_calls, wt.world_path_ms = 0, 0
   wt.a = function(argb) return ((argb >> 24) & 0xFF) / 255 end
+  -- the colour of a route slot, or nil without a slot
+  wt.slot_color = function(slot) return slot ~= nil and settings.route_colors[slot] or nil end
+  wt.leg_argb, wt.leg_abgr, wt.leg_wf = {}, {}, {}   -- each leg's colour and width factor, reused
   -- Draw one route's legs from a point buffer: every leg's outline first,
   -- then every leg's fill, each leg tinted by its step (SPEC 32.14). starts[p]
   -- is the first point index of pair p (0 = skipped); nb the buffer's point
   -- count; w the base width and k the display scale.
   wt.draw_legs = function(buf, nb, starts, np, steps, nsteps, base, w, k, st)
     local sty, to = wt.style, wt.leg_to
-    local nxt = nb + 2
-    for p = np, 1, -1 do
-      local s = starts[p]
-      if s ~= 0 then to[p] = nxt - 2; nxt = s else to[p] = 0 end
-    end
+    local largb, labgr, lwf = wt.leg_argb, wt.leg_abgr, wt.leg_wf
     local grad = settings.route_gradient
     local amount = settings.route_gradient_amount
     local fills = 0
     local fin, aend = settings.route_gradient_end, settings.route_gradient_alpha
+    local nxt = nb + 2
+    for p = np, 1, -1 do
+      local s = starts[p]
+      if s ~= 0 then
+        to[p] = nxt - 2; nxt = s
+        if to[p] >= s then
+          local argb, wf = sty.leg_color(base, fin, amount, aend, grad and steps[p] or 0, nsteps)
+          largb[p], labgr[p], lwf[p] = argb, A.argb_to_abgr(argb), wf
+        end
+      else
+        to[p] = 0
+      end
+    end
     if st.on then
       local t1 = os.clock()
       local o = sty.offset(st.width, k)
       for p = 1, np do
         local s = starts[p]
         if s ~= 0 and to[p] >= s then
-          local argb, wf = sty.leg_color(base, fin, amount, aend, grad and steps[p] or 0, nsteps)
-          sty.outline_range(draw, buf, s, to[p], w * wf, true, st.color, o, wt.a(argb))
+          sty.outline_range(draw, buf, s, to[p], w * lwf[p], true, st.color, o, wt.a(largb[p]))
         end
       end
       wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000
@@ -98,8 +109,7 @@ do
     for p = 1, np do
       local s = starts[p]
       if s ~= 0 and to[p] >= s then
-        local argb, wf = sty.leg_color(base, fin, amount, aend, grad and steps[p] or 0, nsteps)
-        sty.segments_range(draw, buf, s, to[p], w * wf, A.argb_to_abgr(argb))
+        sty.segments_range(draw, buf, s, to[p], w * lwf[p], labgr[p])
         fills = fills + 1
       end
     end
@@ -526,7 +536,7 @@ do
   icons.end_rows, icons.ends, icons.ends_n, icons.slot_of, icons.slot_cids = {}, {}, {}, {}, {}
   icons.route_pts, icons.scr, icons.fonts = {}, {}, {}
   icons.drew, icons.legend_rows = {}, {}   -- per route index: drew a leg or stop this frame; legend rows by slot
-  for k = 1, 8 do icons.drew[k] = false; icons.legend_rows[k] = { on = false, name = "", label = "", abgr = 0, a = 1 } end
+  for k = 1, su.ROUTE_SLOTS do icons.drew[k] = false; icons.legend_rows[k] = { on = false, name = "", label = "", abgr = 0, a = 1 } end
   icons.legend_tally, icons.legend_seen = {}, {}
   wt.legend_n = 0
   icons.route_starts, icons.scr_starts, icons.leg_steps = {}, {}, {}
@@ -571,7 +581,7 @@ do
     local route = routes ~= nil and ri ~= nil and routes[ri] or nil
     if route == nil or route.current ~= m.stop or route.slot == nil
       or type(route.name) ~= "string" then return end
-    local base = settings.route_colors[route.slot]
+    local base = wt.slot_color(route.slot)
     if base == nil then return end
     local w = icons.num_w[num]
     if w == nil then
@@ -647,7 +657,7 @@ do
     local fill_at = icons.fill_at
     local rows, ends, ends_n = icons.end_rows, icons.ends, icons.ends_n
     local slot_of, slot_cids = icons.slot_of, icons.slot_cids
-    for k = 1, 8 do
+    for k = 1, su.ROUTE_SLOTS do
       local c = slot_cids[k]
       if c ~= nil then slot_of[c] = nil; slot_cids[k] = nil end
       local ek = ends[k]
@@ -657,11 +667,11 @@ do
     end
     local input = wt.q("input", nil)
     local routes = input ~= nil and input.routes or nil
-    local nroutes = routes ~= nil and math.min(#routes, 8) or 0
+    local nroutes = routes ~= nil and math.min(#routes, su.ROUTE_SLOTS) or 0
     wt.leg_calls = 0
     icons.cur_routes = routes
     local drew = icons.drew
-    for k = 1, 8 do drew[k] = false end
+    for k = 1, su.ROUTE_SLOTS do drew[k] = false end
     for k = 1, nroutes do
       local c = routes[k].cid
       slot_of[c] = k
@@ -731,7 +741,7 @@ do
           icons.route_pts, icons.route_starts)
         local np = #pairs_
         local sn = icons.to_screen_pts(icons.route_pts, n, icons.route_starts, np)
-        local base = member.slot ~= nil and settings.route_colors[member.slot] or nil
+        local base = wt.slot_color(member.slot)
         if sn > 0 and base ~= nil then
           local nsteps = icons.npcs.leg_steps(pairs_, member.current, icons.leg_steps)
           local nfill = wt.draw_legs(icons.scr, sn // 2, icons.scr_starts, np, icons.leg_steps,
@@ -758,14 +768,14 @@ do
   wt.legend_layer = wt.layer()
   icons.legend = function()
     local rows = icons.legend_rows
-    for k = 1, 8 do rows[k].on = false end
+    for k = 1, su.ROUTE_SLOTS do rows[k].on = false end
     wt.legend_n = 0
     if not settings.route_legend then return end
     local routes = icons.cur_routes
     local drew = icons.drew
-    for i = 1, routes ~= nil and math.min(#routes, 8) or 0 do
+    for i = 1, routes ~= nil and math.min(#routes, su.ROUTE_SLOTS) or 0 do
       local r = routes[i]
-      local base = r.slot ~= nil and settings.route_colors[r.slot] or nil
+      local base = wt.slot_color(r.slot)
       if drew[i] and base ~= nil then
         local row = rows[r.slot]
         row.on, row.name, row.abgr, row.a = true, r.name or "", A.argb_to_abgr(base), wt.a(base)
@@ -775,13 +785,13 @@ do
     -- in slot order, so each row still names one line.
     local tally = icons.legend_tally
     for k in pairs(tally) do tally[k] = nil end
-    for k = 1, 8 do
+    for k = 1, su.ROUTE_SLOTS do
       local row = rows[k]
       if row.on then tally[row.name] = (tally[row.name] or 0) + 1 end
     end
     local seen = icons.legend_seen
     for k in pairs(seen) do seen[k] = nil end
-    for k = 1, 8 do
+    for k = 1, su.ROUTE_SLOTS do
       local row = rows[k]
       if row.on then
         local c = 0
@@ -796,7 +806,7 @@ do
     local dk = wt.dk
     local o = wt.style.offset(st.width, dk)
     local x, y, n = 24 * dk, 150 * dk, 0
-    for k = 1, 8 do
+    for k = 1, su.ROUTE_SLOTS do
       local row = rows[k]
       if row.on then
         draw.filled_rect(x, y + 3 * dk, 12 * dk, 12 * dk, row.abgr)
@@ -1759,7 +1769,7 @@ local function overhead_draw_one(marker, px, py, pz, d2, name_d2)
     local tx, ty = sp.x - w / 2, sp.y + label_dy
     local lc = 0xFFFFFFFF
     if marker.dim then
-      local da = settings.focus_dim_alpha or 25
+      local da = settings.focus_dim_alpha or su.DIM_ALPHA_DEFAULT
       lc = ((da * 255 // 100) << 24) | 0x00FFFFFF
     end
     wt.style.text(draw, label, tx, ty, lc, st.on, st.color, o)
@@ -2213,15 +2223,22 @@ wt.is_focused = function(qid)
   end
   return settings.focus_tracked and qid == wt.focus_tracked_qid or false
 end
+-- set one focus setting; on an accepted value refresh the world and save
+wt.focus_set = function(key, v)
+  if su.set_key(settings, key, v) then
+    want_update = true; last_tick = 0.0; save_settings()
+    return true
+  end
+  return false
+end
 wt.focus_toggle = function(qid, on, rec)
   local list = {}
   for _, q in ipairs(settings.focus_qids) do
     if q ~= qid then list[#list + 1] = q end
   end
   if on then list[#list + 1] = qid end
-  su.set_key(settings, "focus_qids", list)
+  wt.focus_set("focus_qids", list)
   if rec ~= nil then rec.row_label = nil end
-  want_update = true; last_tick = 0.0; save_settings()
 end
 
 local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
@@ -2254,17 +2271,16 @@ local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
         if q == qid then listed = true; break end
       end
       local c, v = imgui.checkbox(d.focus_id, listed)
-      if c and (listed or #settings.focus_qids < 16) then wt.focus_toggle(qid, v, rec) end
-      if not listed and #settings.focus_qids >= 16 and imgui.is_item_hovered() then
+      if c and (listed or #settings.focus_qids < su.QID_MAX) then wt.focus_toggle(qid, v, rec) end
+      if not listed and #settings.focus_qids >= su.QID_MAX and imgui.is_item_hovered() then
         imgui.set_tooltip("At most 16 quests in focus")
       end
     elseif focus_kind == "tracked" then
       if d.jump ~= nil then imgui.same_line() end
       local c, v = imgui.checkbox("Focus tracked##qf_tracked", settings.focus_tracked)
       if c then
-        su.set_key(settings, "focus_tracked", v)
+        wt.focus_set("focus_tracked", v)
         if rec ~= nil then rec.row_label = nil end
-        want_update = true; last_tick = 0.0; save_settings()
       end
     end
     -- v14 (SPEC 22.11.2): the Hints node. Opening it is the spoiler gate;
@@ -2684,12 +2700,12 @@ do
       imgui.tree_pop()
     end
     if imgui.tree_node("Route##ap_route") then
-      for k = 1, 8 do
+      for k = 1, su.ROUTE_SLOTS do
         local cur = settings.route_colors[k]
         local c, v = imgui.color_picker_argb("Route " .. k .. "##route_color_" .. k, cur)
         if c then
           local list = {}
-          for j = 1, 8 do list[j] = settings.route_colors[j] end
+          for j = 1, su.ROUTE_SLOTS do list[j] = settings.route_colors[j] end
           list[k] = v
           if su.set_key(settings, "route_colors", list) then
             want_update = true; save_settings()
@@ -2772,33 +2788,22 @@ do
               or ("Clear focus (" .. #snapshot.focus.active .. ")##qf_clear")
             if imgui.button(snapshot.focus_clear_label) then
               su.set_key(settings, "focus_qids", {})
-              su.set_key(settings, "focus_tracked", false)
-              want_update = true; last_tick = 0.0; save_settings()
+              wt.focus_set("focus_tracked", false)
             end
             local c, idx = imgui.combo("Unrelated markers##focus_unrelated",
               settings.focus_unrelated + 1, unrelated_labels)
-            if c then
-              su.set_key(settings, "focus_unrelated", idx - 1)
-              want_update = true; last_tick = 0.0; save_settings()
-            end
+            if c then wt.focus_set("focus_unrelated", idx - 1) end
             if settings.focus_unrelated == 1 then
               local dc, dv = imgui.slider_int("Unrelated opacity (%)##focus_dim_alpha",
                 settings.focus_dim_alpha, 5, 100)
-              if dc and su.set_key(settings, "focus_dim_alpha", dv) then
-                want_update = true; last_tick = 0.0; save_settings()
-              end
+              if dc then wt.focus_set("focus_dim_alpha", dv) end
             end
             c, idx = imgui.combo("Routes##focus_routes",
               settings.focus_routes + 1, focus_route_labels)
-            if c then
-              su.set_key(settings, "focus_routes", idx - 1)
-              want_update = true; last_tick = 0.0; save_settings()
-            end
+            if c then wt.focus_set("focus_routes", idx - 1) end
             local pc, pv = imgui.checkbox("Routes to quest places##focus_place_routes",
               settings.focus_place_routes)
-            if pc and su.set_key(settings, "focus_place_routes", pv) then
-              want_update = true; last_tick = 0.0; save_settings()
-            end
+            if pc then wt.focus_set("focus_place_routes", pv) end
             if settings.focus_routes > 0 or settings.focus_place_routes then
               imgui.text(string.format("Routes: %d of %d",
                 wt.routes_n or 0, wt.routes_total or 0))
@@ -3279,11 +3284,12 @@ end)
 -- A node out of range or off screen is a break; one polyline call draws all.
 wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
   local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
-  local routes = (wt.q("input", nil) or {}).routes
+  local inp = wt.q("input", nil)
+  local routes = inp ~= nil and inp.routes or nil
   if pairs_ == nil or routes == nil then return end
   local t0 = os.clock()
   local bufs, startss = wt.path_bufs, wt.path_starts
-  for ri = 1, math.min(#routes, 8) do
+  for ri = 1, math.min(#routes, su.ROUTE_SLOTS) do
     local route = routes[ri]
     local pl = pairs_[route.cid]
     local buf, n = bufs[ri], 0
@@ -3317,7 +3323,7 @@ wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
     end
     for j = #starts, npl + 1, -1 do starts[j] = nil end
     for j = #buf, n + 1, -1 do buf[j] = nil end
-    local base = route.slot ~= nil and settings.route_colors[route.slot] or nil
+    local base = wt.slot_color(route.slot)
     if n > 0 and base ~= nil then
       local nsteps = icons.npcs.leg_steps(pl, route.current, icons.leg_steps)
       wt.draw_legs(buf, n // 2, starts, npl, icons.leg_steps, nsteps, base,

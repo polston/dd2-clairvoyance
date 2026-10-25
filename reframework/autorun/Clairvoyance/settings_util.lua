@@ -6,6 +6,8 @@ local style = require("Clairvoyance.style")
 local ROUTE_COLORS = { 0xFFE91E63, 0xFF00E5FF, 0xFFFFEB3B, 0xFF76FF03,
   0xFFD500F9, 0xFF2979FF, 0xFF1DE9B6, 0xFFB388FF }
 local DIM_ALPHA_DEFAULT = 25
+M.DIM_ALPHA_DEFAULT = DIM_ALPHA_DEFAULT
+M.ROUTE_SLOTS = 8 -- the colour slots (one per published route)
 function M.default_route_colors()
   local t = {}
   for i = 1, #ROUTE_COLORS do t[i] = ROUTE_COLORS[i] end
@@ -381,9 +383,10 @@ RULE.focus_unrelated = { "int", 0, 1 }
 RULE.focus_routes = { "int", 0, 2 }
 RULE.focus_qids = { "qid_list" }
 RULE.focus_dim_alpha = { "int", 5, 100 }
-RULE.route_colors = { "color_list", 8 }
+RULE.route_colors = { "color_list", M.ROUTE_SLOTS }
 
 local QID_MAX = 16
+M.QID_MAX = QID_MAX
 -- Whole numbers above 0, repeats dropped, first 16; a non-table gives an empty list.
 local function qid_list_field(v)
   local out = {}
