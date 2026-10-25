@@ -2265,6 +2265,12 @@ local function is_side_quest(qid)
     return qid >= 20000 and qid <= 39999
 end
 
+-- the quests the objective walk and the item round both cover: side quests
+-- and the focused ones (SPEC 32.6.1.2)
+items.walks_quest = function(q)
+    return is_side_quest(q) or (items.focus_set ~= nil and items.focus_set[q])
+end
+
 -- SPEC 12.3a: one processor-list walk per call. Records only; the pure
 -- builder (injected core.objective_table) selects and orders.
 local function objective_walk_failed()
@@ -2410,7 +2416,7 @@ local function refresh_objectives_body()
     if prog == nil then objective_walk_failed() return end
     local progressing = {}
     for _, qid in ipairs(prog) do
-        if is_side_quest(qid) or (items.focus_set ~= nil and items.focus_set[qid]) then progressing[qid] = true end
+        if items.walks_quest(qid) then progressing[qid] = true end
     end
     if next(progressing) == nil then
         -- No side quest in progress: skip the walk, but still commit so
@@ -3184,7 +3190,7 @@ local function item_round_needs(now)
     if prog == nil then item_round_failed() return end
     local wanted = {}
     for _, q in ipairs(prog) do
-        if not wanted[q] and (is_side_quest(q) or (items.focus_set ~= nil and items.focus_set[q])) then wanted[q] = true end
+        if not wanted[q] and items.walks_quest(q) then wanted[q] = true end
     end
     if next(wanted) == nil then
         commit_item_needs({})
@@ -3539,6 +3545,8 @@ function A.make()
   -- SPEC 32.6.1.2: focused quests (main included) join the objective walk and
   -- the item round; nil or an empty list clears the set
   function a.set_focus_qids(list)
+    if list == items.focus_src then return end   -- the same table as last time
+    items.focus_src = list
     local set
     if type(list) == "table" then
       for _, q in ipairs(list) do
