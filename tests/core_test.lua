@@ -4168,6 +4168,42 @@ do
     and #rn[20].places == 0)
   local rm = core.related_sets(ra, { 40 }, rel, places, { givers = {}, prog = {} })
   check("rs 10: quest with nothing", rm[40] ~= nil and #rm[40].npcs == 0 and #rm[40].step_npcs == 0)
+
+  -- each memo input alone forces a recompute, from a state that just hit the memo
+  local function base()
+    local b = core.related_sets(ra, { 20, 30 }, rel, places, live)
+    return b, core.related_sets(ra, { 20, 30 }, rel, places, live) == b
+  end
+  local b, hit = base()
+  check("rs 11: baseline hits the memo", hit)
+  local rp = core.related_sets(ra, { 20, 30 }, rel, places, { givers = live.givers, prog = {} })
+  check("rs 12: a changed in-progress flag recomputes", rp ~= b and j(rp[20].step_npcs) == "7,8,5")
+  b, hit = base()
+  local orig_oc = ra.objective_cids
+  local fresh_obj = { [20] = { 7, 8, 0 } }
+  ra.objective_cids = function(q) return fresh_obj[q] end
+  check("rs 13: a new objective array recomputes",
+    hit and core.related_sets(ra, { 20, 30 }, rel, places, live) ~= b)
+  ra.objective_cids = orig_oc
+  b, hit = base()
+  local orig_needs = ra.item_needs
+  ra.item_needs = function() return { [20] = { { id = 300 }, { id = 301 } } } end
+  check("rs 14: a new needs table recomputes",
+    hit and core.related_sets(ra, { 20, 30 }, rel, places, live) ~= b)
+  ra.item_needs = orig_needs
+  -- two quests alike in every other input, so only the order differs
+  local live2 = { givers = { [60] = 5, [61] = 5 }, prog = {} }
+  local b2 = core.related_sets(ra, { 60, 61 }, nil, places, live2)
+  check("rs 15: the same ids in another order recompute",
+    core.related_sets(ra, { 60, 61 }, nil, places, live2) == b2
+    and core.related_sets(ra, { 61, 60 }, nil, places, live2) ~= b2)
+  b, hit = base()
+  local rel2 = { [20] = rel[20], [30] = rel[30] }
+  check("rs 16: a new quest file recomputes",
+    hit and core.related_sets(ra, { 20, 30 }, rel2, places, live) ~= b)
+  local rsort = { [50] = { cast = {}, npcs = {}, items = {}, dest = { { key = 46 }, { key = 44 } } } }
+  local rso = core.related_sets(ra, { 50 }, rsort, places, { givers = {}, prog = {} })
+  check("rs 17: places come back ascending", j(rso[50].places) == "44,46")
 end
 
 if failures > 0 then os.exit(1) end
