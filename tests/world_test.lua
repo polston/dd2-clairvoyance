@@ -2707,6 +2707,211 @@ do
     check("reset all: spawned gone", #w.spawned == 0)
   end
 
+  -- set_routes: members from the focus list (plan Task 2.2)
+  do
+    local function sfix()
+      local f, d = nfix()
+      d.bad = {}
+      for c = 2001, 2008 do
+        d.rows[c] = rows_of({ 6, 18, 49 })
+        d.cur[c] = { area = 49, location = 0 }
+      end
+      d.area_nodes[49] = { P(1, 0, 1) }
+      f.reads.schedule_rows = function(cid)
+        f.reads_n.schedule_rows = (f.reads_n.schedule_rows or 0) + 1
+        if d.bad[cid] then error("fake bad cid") end
+        return d.rows[cid]
+      end
+      return f, d
+    end
+    local L3 = { { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" }, { cid = 2003, name = "Cc" } }
+    local D4 = { cid = 2004, name = "Dd" }
+    local tg = on("search")
+    local function cids(w)
+      local t = {}
+      for i, e in ipairs((w:input() or {}).routes or {}) do t[i] = e.cid end
+      return table.concat(t, ",")
+    end
+    local function settle(w, now)
+      local n = 0
+      repeat n = n + 1 until not w:refresh(now, true, tg) or n > 20
+      return n
+    end
+    local f, d = sfix()
+    local w = f.new()
+    check("set_routes: exists", type(w.set_routes) == "function")
+    if type(w.set_routes) == "function" then
+      -- 1-4 at now 0
+      w:set_routes(L3)
+      local r1 = w:refresh(0, true, tg)
+      check("set_routes: one build per round", r1 == true and stub.calls.route_stops == 1
+        and cids(w) == "2001" and w:stats().route_builds == 1)
+      local r2 = w:refresh(0, true, tg)
+      local r3 = w:refresh(0, true, tg)
+      check("set_routes: run-again builds the rest", r2 == true and r3 == true
+        and stub.calls.route_stops == 3 and cids(w) == "2001,2002,2003"
+        and w:refresh(0, true, tg) == false)
+      local n0 = f.reads_n.current_sig
+      local sig0 = f.reads.current_sig
+      f.reads.current_sig = function(...) f.clock_t = f.clock_t + 0.001; return sig0(...) end
+      w:poke()
+      w:refresh(0, true, tg)
+      w:poke()
+      w:refresh(0, true, tg)
+      f.reads.current_sig = sig0
+      check("set_routes: every member's sig read each round",
+        f.reads_n.current_sig == n0 + 6 and stub.calls.route_stops == 3)
+      check("set_routes: route_sig adds every member's read",
+        math.abs((w:stats().ms.route_sig or 0) - 3) < 1e-6)
+      d.hour = 8
+      w:poke()
+      w:refresh(0, true, tg)
+      check("set_routes: hour change rebuilds one per round", stub.calls.route_stops == 4
+        and #w:input().routes == 3 and w:stats().route_builds == 4)
+      check("set_routes: the stale rest run again", w:refresh(0, true, tg) == true
+        and w:refresh(0, true, tg) == true and w:refresh(0, true, tg) == false
+        and stub.calls.route_stops == 6)
+      -- 5-9 at now 1
+      local g = w.route_gen
+      w:set_routes(L3)
+      check("set_routes: idempotent", w.route_gen == g and w:refresh(1, true, tg) == false)
+      local b = stub.calls.route_stops
+      w:set_routes({ L3[1], L3[2], L3[3], D4 })
+      check("set_routes: an added member builds alone", w.route_gen == g + 1
+        and w:refresh(1, true, tg) == true and stub.calls.route_stops == b + 1
+        and cids(w) == "2001,2002,2003,2004")
+      g = w.route_gen
+      w:set_routes({ L3[1], L3[3], D4 })
+      check("set_routes: a removed member leaves at once", w.route_gen == g + 1
+        and route_in(w, 2002) == nil and cids(w) == "2001,2003,2004")
+      check("set_routes: a removal pokes", w:refresh(1, true, tg) == true)
+      g, b = w.route_gen, stub.calls.route_stops
+      w:set_routes({ D4, L3[3], { cid = 2001, name = "Ax" } })
+      local r8 = w:refresh(1, true, tg)
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: name or order change neither pokes nor bumps", w.route_gen == g
+        and r8 == false and cids(w) == "2004,2003,2001" and route_in(w, 2001).name == "Ax"
+        and stub.calls.route_stops == b)
+      w:set_routes({ { cid = 2001 }, { cid = 2001 }, { cid = "x" }, { cid = 2003 } })
+      settle(w, 1)
+      check("set_routes: repeats and bad cids dropped", cids(w) == "2001,2003")
+    end
+
+    -- 10: a failing member does not block the rest; failed members retry in turn
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      d.bad[2001] = true
+      w:set_routes(L3)
+      local n = settle(w, 0)
+      check("set_routes: a failing member does not block the rest", n == 4
+        and route_in(w, 2001).err == "route unavailable"
+        and route_in(w, 2002).stops ~= nil and route_in(w, 2003).stops ~= nil)
+      local b, nb = stub.calls.route_stops, w:stats().route_builds
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: a failed member is retried once a round",
+        route_in(w, 2001).err == "route unavailable" and stub.calls.route_stops == b
+        and w:stats().route_builds == nb + 1 and w:refresh(1, true, tg) == false)
+      d.bad[2001] = nil
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: a failed member recovers", route_in(w, 2001).err == nil)
+    end
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      d.bad[2001], d.bad[2002] = true, true
+      w:set_routes(L3)
+      settle(w, 0)
+      d.bad[2002] = nil
+      w:poke()
+      w:refresh(1, true, tg)
+      local first = route_in(w, 2002).err
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: failed members are retried in turn",
+        first == "route unavailable" and route_in(w, 2002).err == nil
+        and route_in(w, 2001).err == "route unavailable")
+    end
+
+    -- 11: the search target lives apart from the members (Contract 4)
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_route(2001, "Aa")
+      w:set_routes({ L3[2], L3[3] })
+      settle(w, 0)
+      check("set_routes: target first, then the members", cids(w) == "2001,2002,2003")
+      local g = w.route_gen
+      w:set_routes({ L3[2], L3[3] })
+      check("set_routes: the per-tick call keeps the target", cids(w) == "2001,2002,2003"
+        and w.route_gen == g and w:refresh(1, true, tg) == false)
+      w:clear_route()
+      check("set_routes: clear_route drops only the target", cids(w) == "2002,2003")
+      w:set_route(2002, "Bb")
+      w:refresh(1, true, tg)
+      check("set_routes: a target that is a member is published once, first",
+        cids(w) == "2002,2003")
+      -- 12: reset empties target and members; the next set_routes brings them back
+      w:reset()
+      w:refresh(5, true, tg)
+      local empty = w:input().routes == nil
+      w:set_routes(L3)
+      settle(w, 6)
+      check("set_routes: reset empties the members", empty and cids(w) == "2001,2002,2003")
+    end
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes({ L3[2], L3[1] })
+      w:set_route(2001, "Aa")
+      settle(w, 0)
+      check("set_routes: a member that becomes the target moves first", cids(w) == "2001,2002")
+      local b = stub.calls.route_stops
+      w:clear_route()
+      check("set_routes: clear_route keeps a member with the target's cid",
+        route_in(w, 2001) ~= nil and #w:input().routes == 2)
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: that member keeps its cache, at its member place",
+        cids(w) == "2002,2001" and stub.calls.route_stops == b)
+    end
+
+    -- 13: members alone run a round
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(L3)
+      check("set_routes: members alone run a round", w:refresh(0, true, {}) == true
+        and w:input().routes ~= nil)
+    end
+
+    -- 14: eight members and an hour change: one build per round (SPEC 32.7.2.2)
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      local L8 = {}
+      for c = 2001, 2008 do L8[#L8 + 1] = { cid = c, name = "N" .. c } end
+      w:set_routes(L8)
+      settle(w, 0)
+      local b0 = w:stats().route_builds
+      d.hour = 8
+      w:poke()
+      local rounds, one_each = 0, true
+      while true do
+        local b = w:stats().route_builds
+        if not w:refresh(0, true, tg) then break end
+        rounds = rounds + 1
+        if w:stats().route_builds ~= b + 1 or #w:input().routes ~= 8 then one_each = false end
+        if rounds > 20 then break end
+      end
+      check("set_routes: eight members, one rebuild per round", b0 == 8 and rounds == 8
+        and one_each and w:stats().route_builds == 16)
+    end
+  end
+
   -- quest override rows replace the live overwrite list in a copy (SPEC 26.4)
   do
     local function qrun(qfn, with_cur)
@@ -3989,6 +4194,8 @@ do
     check("wants: " .. k, world.wants_round({ [k] = true }) == true)
   end
   check("wants: unrelated toggle", world.wants_round({ reveal_gate_names = true }) == false)
+  check("wants: members", world.wants_round({}, 1) == true)
+  check("wants: zero members", world.wants_round({}, 0) == false)
 
   local function held_world()
     local f = fixture()
@@ -4018,6 +4225,12 @@ do
   w:set_route(2058, "Dudley")
   check("hold: set_route runs once", w:refresh(31, true, TG, true) == true)
   check("hold: and then not again", w:refresh(32, true, TG, true) == false)
+  if type(w.set_routes) == "function" then
+    w:set_routes({ { cid = 2058, name = "Dudley" }, { cid = 2059, name = "Ee" } })
+    check("hold: set_routes change runs once", w:refresh(33, true, TG, true) == true)
+    w:set_routes({ { cid = 2058, name = "Dudley" }, { cid = 2059, name = "Ee" } })
+    check("hold: unchanged set_routes holds", w:refresh(34, true, TG, true) == false)
+  end
 
   -- a changed NPC list under search runs inside the throttle
   local f2, w2 = held_world()
