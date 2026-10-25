@@ -1240,7 +1240,7 @@ function M.new(a, reads, io)
 
   local ROUTE_ERR = "route unavailable"
   local ROUTE_SLOTS = 8 -- the colour slots (the eight route_colors)
-  local PLACE_STOP_M = 30 -- a place this close to a drawn NPC stop is held back
+  local PLACE_STOP_M = 150 -- a place this close to a drawn NPC stop is held back
 
   -- the raw route for the set NPC at this hour; nil for an NPC with no
   -- route (Ruling 3); raises on any failed read

@@ -3083,7 +3083,7 @@ do
     -- 1: a place member
     f, d = sfix()
     w = f.new()
-    d.keypos[77] = P(100, 0, 100)
+    d.keypos[77] = P(200, 0, 200)
     if type(w.set_routes) == "function" then
       w:set_routes(PL)
       local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
@@ -3095,7 +3095,7 @@ do
         and pe.stops ~= nil and #pe.stops == 2)
       check("place member: stops are the player and the place, both discovered",
         pe ~= nil and pe.stops ~= nil and pe.stops[1].pos.x == 5 and pe.stops[1].pos.y == 1
-        and pe.stops[2].pos.x == 100 and pe.stops[2].pos.z == 100
+        and pe.stops[2].pos.x == 200 and pe.stops[2].pos.z == 200
         and pe.stops[1].discovered == true and pe.stops[2].discovered == true)
       check("place member: a slot and no current", pe ~= nil and pe.slot == 2
         and pe.current == nil and pe.err == nil)
@@ -3129,7 +3129,7 @@ do
       w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" } })
       local n = 0
       local t0 = ptg(nil, { 77 })
-      d.keypos[77] = P(100, 0, 100)
+      d.keypos[77] = P(200, 0, 200)
       repeat n = n + 1 until not w:refresh(0, true, t0) or n > 20
       check("place waits: no player, no place entry and the NPC takes slot 1",
         route_in(w, -77) == nil and slots(w) == "2001=1")
@@ -3141,7 +3141,7 @@ do
       repeat n = n + 1 until not w:refresh(1, true, t1) or n > 20
       check("place waits: no key position, no place entry",
         route_in(w, -77) == nil and slots(w) == "2001=1")
-      d.keypos[77] = P(100, 0, 100)
+      d.keypos[77] = P(200, 0, 200)
       w:poke()
       w:refresh(2, true, t1)
       check("place waits: both present, the entry appears with the next slot",
@@ -3181,19 +3181,19 @@ do
     -- 5: moving the player drops the old near key
     f, d = sfix()
     w = f.new()
-    d.keypos[77] = P(100, 0, 100)
+    d.keypos[77] = P(200, 0, 200)
     if type(w.set_routes) == "function" then
       w:set_routes({ { cid = -77, place = 77, name = "Q" } })
       w:refresh(0, true, ptg({ x = 5, y = 1, z = 5 }, { 77 }))
       w.near["5.0,1.0,5.0"] = 3
-      w.near["100.0,0.0,100.0"] = 4
+      w.near["200.0,0.0,200.0"] = 4
       w:poke()
       w:refresh(1, true, ptg({ x = 5, y = 1, z = 5 }, { 77 }))
       check("place re-path: an unmoved player keeps its near key", w.near["5.0,1.0,5.0"] == 3)
       w:poke()
       w:refresh(2, true, ptg({ x = 6, y = 1, z = 6 }, { 77 }))
       check("place re-path: a moved player drops the old near key only",
-        w.near["5.0,1.0,5.0"] == nil and w.near["100.0,0.0,100.0"] == 4)
+        w.near["5.0,1.0,5.0"] == nil and w.near["200.0,0.0,200.0"] == 4)
     end
 
     -- route clean-up (SPEC 32.14.11.2, 11.3): places held back, one-stop lead
@@ -3221,34 +3221,34 @@ do
       end
       local function setup(kp)
         local ff, dd = sfix()
-        dd.keypos[77] = kp or P(100, 0, 100)
+        dd.keypos[77] = kp or P(200, 0, 200)
         return ff, dd, ff.new()
       end
       local function bump(dd) dd.sig = (dd.sig or "") .. "x" end
 
       -- 1: a place on an NPC stop is not published
-      local f1, d1, w1 = setup(P(30, 0, 1))
+      local f1, d1, w1 = setup(P(150, 0, 1))
       w1:set_routes(PL)
       go(w1, ptg(PA, { 77 }))
-      check("place on NPC stop: 29 m, no place entry", route_in(w1, -77) == nil
+      check("place on NPC stop: 149 m, no place entry", route_in(w1, -77) == nil
         and route_in(w1, 2001) ~= nil)
       w1:set_routes({ { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" },
         { cid = 2002, name = "B" } })
       go(w1, ptg(PA, { 77 }))
       check("place on NPC stop: a joining member takes the would-be slot",
         slots(w1) == "2001=1,2002=2")
-      d1.keypos[77] = P(32, 0, 1)
+      d1.keypos[77] = P(152, 0, 1)
       w1:reset()
       w1:set_routes(PL)
       go(w1, ptg(PA, { 77 }))
-      check("place on NPC stop: 31 m, the place publishes", route_in(w1, -77) ~= nil)
+      check("place on NPC stop: 151 m, the place publishes", route_in(w1, -77) ~= nil)
 
       -- 1b: a held place frees its slot
       local f2, d2, w2 = setup()
       w2:set_routes(PL)
       go(w2, ptg(PA, { 77 }))
       check("held place frees slot: precondition", slots(w2) == "2001=1,-77=2")
-      d2.area_nodes[50] = { P(100, 0, 90) }
+      d2.area_nodes[50] = { P(200, 0, 190) }
       d2.rows[2001] = rows_of({ 6, 18, 50 })
       bump(d2)
       go(w2, ptg(PA, { 77 }))
@@ -3410,11 +3410,11 @@ do
       check("lead error round: the record was cleared, A's key stays",
         route_in(w14, 2001).lead == true and w14.near["5.0,1.0,5.0"] == 3)
 
-      -- 1c: exactly 30 m from a drawn stop is held
-      local f15, d15, w15 = setup(P(31, 0, 1))
+      -- 1c: exactly 150 m from a drawn stop is held
+      local f15, d15, w15 = setup(P(151, 0, 1))
       w15:set_routes(PL)
       go(w15, ptg(PA, { 77 }))
-      check("place on NPC stop: exactly 30 m, no place entry", route_in(w15, -77) == nil
+      check("place on NPC stop: exactly 150 m, no place entry", route_in(w15, -77) == nil
         and route_in(w15, 2001) ~= nil)
 
       -- 9: all_err places
