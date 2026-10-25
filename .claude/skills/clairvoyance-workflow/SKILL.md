@@ -53,9 +53,9 @@ sources, in this order of preference.
 The mod exposes a debug table `QNML_DEBUG` while its Debug setting is on. It
 offers `state`, `world`, `focus`, `route`, `set`, `jump`, `expand` and others;
 see the `_G.QNML_DEBUG = {` block in `reframework/autorun/Clairvoyance.lua`.
-To reach internals, try `debug.getupvalue` on those functions. Unverified: first
-probe `return type(debug) .. " " .. type(debug and debug.getupvalue)` to see
-whether the framework's Lua exposes the `debug` library.
+Reach internals with `debug.getupvalue` on those functions (the framework's
+Lua exposes the `debug` library; checked in game 2026-10-25), for example
+the world tracker as the `wt` upvalue of `D.state`.
 
 1. Install the dev harness once: copy `tools/probe/qnml_check.lua` into the
    game's `reframework/autorun/`. The operator then presses Reset Scripts. It
@@ -101,7 +101,7 @@ whether the framework's Lua exposes the `debug` library.
    sends input in screen coordinates. A point at pixel (px,py) in the shot is
    screen (X+px, Y+py), using the X,Y that shot.ps1 prints (`saved WxH at X,Y`).
    Escape is sent as `key 27 1` (virtual key 27, scan code 1) to close the map;
-   whether the game needs the scan code is untested.
+   without the scan code the game ignores it (checked in game).
 4. World rounds are held while the full map is open or a pause menu is up.
    Close both before timing world rounds.
 
