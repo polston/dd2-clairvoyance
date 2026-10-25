@@ -90,6 +90,39 @@ class Check(unittest.TestCase):
         self.assertIn("skipped: no hint text", out)
 
 
+class MainCheckout(unittest.TestCase):
+    def test_default_ref_found_through_main_checkout(self):
+        """From a worktree, reference/hints is read from the main checkout."""
+        with tempfile.TemporaryDirectory() as main, tempfile.TemporaryDirectory() as cwd:
+            os.makedirs(os.path.join(main, ".git"))
+            os.makedirs(os.path.join(main, "reference", "hints", "5"))
+            with open(os.path.join(main, "reference", "hints", "5", "1.txt"), "w") as f:
+                f.write(words(10))
+            hf = os.path.join(cwd, "h.json")
+            with open(hf, "w") as f:
+                json.dump({"5": {"quest": words(8)}}, f)
+            out = io.StringIO()
+            old = os.getcwd()
+            os.chdir(cwd)
+            try:
+                with (mock.patch.object(hints_check, "common_dir",
+                                        return_value=os.path.join(main, ".git")),
+                      contextlib.redirect_stdout(out)):
+                    code = hints_check.main(["--hints", hf])
+            finally:
+                os.chdir(old)
+            self.assertEqual(code, 1)
+            self.assertIn("qid 5 shares", out.getvalue())
+
+    def test_main_path_under_main_checkout(self):
+        with tempfile.TemporaryDirectory() as main:
+            os.makedirs(os.path.join(main, ".git"))
+            with mock.patch.object(hints_check, "common_dir",
+                                   return_value=os.path.join(main, ".git")):
+                self.assertEqual(hints_check.main_path("reference", "hints"),
+                                 os.path.join(main, "reference", "hints"))
+
+
 class MergePins(unittest.TestCase):
     pin = {"qid": 7, "idx": 2, "label": "Gate", "x": 1.0, "y": 2.0, "z": 3.0}
 

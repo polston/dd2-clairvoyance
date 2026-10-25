@@ -21,3 +21,4 @@
    from the committed `data/Clairvoyance_places.json`; releases are automatic from
    Conventional Commit types on push to master (`scripts/next_version.py`), never hand-tagged.
 6. Commit titles must follow Conventional Commits: `type(scope)?!?: description` with type feat, fix, perf, refactor, docs, test, build, ci, chore, style or revert.
+7. How the work is done (game research, in-game probes in `tools/probe/`, and the spec, plan, parallel-lane build and landing process): `.claude/skills/clairvoyance-workflow/SKILL.md`. Read it before starting a ROADMAP item.

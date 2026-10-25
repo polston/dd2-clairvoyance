@@ -10,6 +10,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from key_check import common_dir  # noqa: E402
+
 RUN = 8
 
 
@@ -31,6 +34,15 @@ def shared_runs(a, b, n=RUN):
             seen.add(g)
             out.append(" ".join(g))
     return out
+
+
+def main_path(*parts):
+    """A path under the main checkout (reference/ and the sources file live only
+    there), else relative to the current directory."""
+    cd = common_dir()
+    if cd:
+        return os.path.join(os.path.dirname(cd), *parts)
+    return os.path.join(*parts)
 
 
 def hint_texts(entry):
@@ -73,8 +85,11 @@ def check(hints, ref_dir):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--hints", default="data/Clairvoyance_hints.json")
-    ap.add_argument("--ref", default="reference/hints")
+    ap.add_argument("--ref", default=None,
+                    help="default: reference/hints in the main checkout")
     args = ap.parse_args(argv)
+    if args.ref is None:
+        args.ref = main_path("reference", "hints")
     with open(args.hints, encoding="utf-8") as f:
         hints = json.load(f)
     if not os.path.isdir(args.ref):
