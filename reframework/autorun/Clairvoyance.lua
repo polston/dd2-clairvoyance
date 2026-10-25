@@ -65,7 +65,44 @@ do
   wt.any_on = true                      -- some group has its outline on
   wt.path_draw_ms = 0
   wt.path_scr = {}                      -- reused screen buffer for the in-world path
+  wt.path_bufs, wt.path_starts = {}, {} -- per-route world buffers and each pair's first point index
+  wt.leg_to = {}                        -- last point index of each leg, reused
+  wt.leg_calls, wt.world_path_ms = 0, 0
   wt.a = function(argb) return ((argb >> 24) & 0xFF) / 255 end
+  -- Draw one route's legs from a point buffer: every leg's outline first,
+  -- then every leg's fill, each leg tinted by its step (SPEC 32.14). starts[p]
+  -- is the first point index of pair p (0 = skipped); nb the buffer's point
+  -- count; w the base width and k the display scale.
+  wt.draw_legs = function(buf, nb, starts, np, steps, nsteps, base, w, k, st)
+    local sty, to = wt.style, wt.leg_to
+    local nxt = nb + 2
+    for p = np, 1, -1 do
+      local s = starts[p]
+      if s ~= 0 then to[p] = nxt - 2; nxt = s else to[p] = 0 end
+    end
+    local amount = settings.route_gradient and settings.route_gradient_amount or 0
+    local fin, aend = settings.route_gradient_end, settings.route_gradient_alpha
+    if st.on then
+      local t1 = os.clock()
+      local o = sty.offset(st.width, k)
+      for p = 1, np do
+        local s = starts[p]
+        if s ~= 0 and to[p] >= s then
+          local argb, wf = sty.leg_color(base, fin, amount, aend, steps[p], nsteps)
+          sty.outline_range(draw, buf, s, to[p], w * wf, true, st.color, o, wt.a(argb))
+        end
+      end
+      wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000
+    end
+    for p = 1, np do
+      local s = starts[p]
+      if s ~= 0 and to[p] >= s then
+        local argb, wf = sty.leg_color(base, fin, amount, aend, steps[p], nsteps)
+        sty.segments_range(draw, buf, s, to[p], w * wf, A.argb_to_abgr(argb))
+        wt.leg_calls = wt.leg_calls + 1
+      end
+    end
+  end
   wt.refresh_styles = function()
     local gs, styles = wt.style.GROUPS, wt.styles
     local any = false
@@ -480,6 +517,7 @@ do
   icons.fit_pts, icons.fit, icons.fit_opt = {}, {}, { similarity = false }
   icons.end_rows, icons.ends, icons.ends_n, icons.slot_of, icons.slot_cids = {}, {}, {}, {}, {}
   icons.route_pts, icons.scr, icons.fonts = {}, {}, {}
+  icons.route_starts, icons.scr_starts, icons.leg_steps = {}, {}, {}
   -- Route numbers beside the stop records read this frame. Hoisted; the font
   -- is pushed around the loop and popped even when a draw raises.
   icons.number_loop = function(nrr, px)
@@ -525,10 +563,15 @@ do
   -- Full-map layout points of every pair -> screen points (x, y pairs; a
   -- false, false pair is a break). Two consecutive off-screen points get a
   -- break between them; a point is never replaced.
-  icons.to_screen_pts = function(pts, n)
+  icons.to_screen_pts = function(pts, n, starts, ns)
     local scr, sn = icons.scr, 0
     local W, H = wt.dw, wt.dh
     local prev_off = nil
+    local ss, np = icons.scr_starts, 1
+    if starts ~= nil then
+      for p = 1, ns do ss[p] = 0 end
+      for p = #ss, ns + 1, -1 do ss[p] = nil end
+    end
     local i = 1
     while i <= n do
       local x = pts[i]
@@ -543,6 +586,13 @@ do
         if prev_off and off then
           scr[sn + 1], scr[sn + 2] = false, false
           sn = sn + 2
+        end
+        if starts ~= nil then
+          while np <= ns and starts[np] == 0 do np = np + 1 end
+          if np <= ns and starts[np] == i then
+            ss[np] = sn // 2 + 1
+            np = np + 1
+          end
         end
         scr[sn + 1], scr[sn + 2] = sx, sy
         sn = sn + 2
@@ -570,6 +620,7 @@ do
     local input = wt.q("input", nil)
     local routes = input ~= nil and input.routes or nil
     local nroutes = routes ~= nil and math.min(#routes, 8) or 0
+    wt.leg_calls = 0
     for k = 1, nroutes do
       local c = routes[k].cid
       slot_of[c] = k
@@ -583,18 +634,18 @@ do
         local row = fp[nf]
         if row == nil then row = {}; fp[nf] = row end
         row[1], row[2], row[3], row[4] = m.pos.x, m.pos.z, rec.lx, rec.ly
-        local slot = m.cat == "route_stop" and type(m.stop) == "number"
+        local li = m.cat == "route_stop" and type(m.stop) == "number"
           and slot_of[m.cid] or nil
-        if slot ~= nil then
+        if li ~= nil then
           nrr = nrr + 1
           rr[nrr] = rec
-          local rk = rows[slot]
-          if rk == nil then rk = {}; rows[slot] = rk; ends[slot] = {}; ends_n[slot] = 0 end
+          local rk = rows[li]
+          if rk == nil then rk = {}; rows[li] = rk; ends[li] = {}; ends_n[li] = 0 end
           local e = rk[m.stop]
           if e == nil then e = {}; rk[m.stop] = e end
           e.lx, e.ly, e.mx, e.mz = rec.lx, rec.ly, nil, nil
-          ends[slot][m.stop] = e
-          if m.stop > ends_n[slot] then ends_n[slot] = m.stop end
+          ends[li][m.stop] = e
+          if m.stop > ends_n[li] then ends_n[li] = m.stop end
         end
       end
     end
@@ -635,16 +686,15 @@ do
         end
         local t0 = os.clock()
         local n = icons.npcs.route_polyline(pairs_, ek, fit, settings.route_path,
-          icons.route_pts)
-        local sn = icons.to_screen_pts(icons.route_pts, n)
-        if sn > 0 then
-          local st = wt.styles.route_line
-          local k = icons:k()
-          local col = settings.route_line_color
-          local t1 = st.on and os.clock() or nil
-          wt.style.polyline(draw, icons.scr, settings.route_line_width * k,
-            A.argb_to_abgr(col), st.on, st.color, wt.style.offset(st.width, k), wt.a(col))
-          if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
+          icons.route_pts, icons.route_starts)
+        local np = #pairs_
+        local sn = icons.to_screen_pts(icons.route_pts, n, icons.route_starts, np)
+        local base = member.slot ~= nil and settings.route_colors[member.slot] or nil
+        if sn > 0 and base ~= nil then
+          local nsteps = icons.npcs.leg_steps(pairs_, member.current, icons.leg_steps)
+          wt.draw_legs(icons.scr, sn // 2, icons.scr_starts, np, icons.leg_steps,
+            nsteps, base, settings.route_line_width * icons:k(), icons:k(),
+            wt.styles.route_line)
         end
         total_ms = total_ms + (os.clock() - t0) * 1000
       end
@@ -2516,7 +2566,22 @@ do
       imgui.tree_pop()
     end
     if imgui.tree_node("Route##ap_route") then
-      cc("Line color", "route_line_color")
+      for k = 1, 8 do
+        local cur = settings.route_colors[k]
+        local c, v = imgui.color_picker_argb("Route " .. k .. "##route_color_" .. k, cur)
+        if c then
+          local list = {}
+          for j = 1, 8 do list[j] = settings.route_colors[j] end
+          list[k] = v
+          if su.set_key(settings, "route_colors", list) then
+            want_update = true; save_settings()
+          end
+        end
+      end
+      ck("Gradient", "route_gradient")
+      cc("Gradient end color", "route_gradient_end")
+      cs("Gradient amount (%)", "route_gradient_amount", 0, 100)
+      cs("Far end opacity (%)", "route_gradient_alpha", 0, 100)
       cs("Line width", "route_line_width", 1, 8)
       cs("Stop size (%)", "route_stop_size", 50, 200)
       cc("Number color", "route_number_color")
@@ -2553,8 +2618,10 @@ do
             settings[ik] = su.ICON_CHOICES[ni][1]; want_update = true; save_settings()
             icons:preload_all()
           end
-          local pc, nv = imgui.color_picker_argb("Color##" .. r[1], settings[ck_])
-          if pc then settings[ck_] = nv; want_update = true; save_settings() end
+          if ck_ ~= nil then
+            local pc, nv = imgui.color_picker_argb("Color##" .. r[1], settings[ck_])
+            if pc then settings[ck_] = nv; want_update = true; save_settings() end
+          end
           imgui.tree_pop()
         end
       end
@@ -3084,13 +3151,21 @@ wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
   local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
   local routes = (wt.q("input", nil) or {}).routes
   if pairs_ == nil or routes == nil then return end
-  local buf, n = wt.path_scr, 0
-  for ri = 1, #routes do
-    local pl = pairs_[routes[ri].cid]
-    for k = 1, pl ~= nil and #pl or 0 do
+  local t0 = os.clock()
+  local bufs, startss = wt.path_bufs, wt.path_starts
+  for ri = 1, math.min(#routes, 8) do
+    local route = routes[ri]
+    local pl = pairs_[route.cid]
+    local buf, n = bufs[ri], 0
+    if buf == nil then buf = {}; bufs[ri] = buf; startss[ri] = {} end
+    local starts = startss[ri]
+    local npl = pl ~= nil and #pl or 0
+    for k = 1, npl do
       local pts = pl[k].pts
+      starts[k] = 0
       if pts ~= nil then
         if n > 0 then buf[n + 1], buf[n + 2] = false, false; n = n + 2 end
+        starts[k] = n // 2 + 1
         for q = 1, #pts - 2, 3 do
           local px, py, pz = pts[q] - ox, pts[q + 1] - oy + 0.3, pts[q + 2] - oz
           local dx, dy, dz = px - cx, py - cy, pz - cz
@@ -3110,15 +3185,16 @@ wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
         end
       end
     end
+    for j = #starts, npl + 1, -1 do starts[j] = nil end
+    for j = #buf, n + 1, -1 do buf[j] = nil end
+    local base = route.slot ~= nil and settings.route_colors[route.slot] or nil
+    if n > 0 and base ~= nil then
+      local nsteps = icons.npcs.leg_steps(pl, route.current, icons.leg_steps)
+      wt.draw_legs(buf, n // 2, starts, npl, icons.leg_steps, nsteps, base,
+        settings.route_line_width * wt.dk, wt.dk, wt.styles.route_line)
+    end
   end
-  for j = #buf, n + 1, -1 do buf[j] = nil end
-  if n == 0 then return end
-  local st = wt.styles.route_line
-  local col = settings.route_line_color
-  local t1 = st.on and os.clock() or nil
-  wt.style.polyline(draw, buf, settings.route_line_width * wt.dk,
-    A.argb_to_abgr(col), st.on, st.color, wt.style.offset(st.width, wt.dk), wt.a(col))
-  if t1 ~= nil then wt.outline_acc = wt.outline_acc + (os.clock() - t1) * 1000 end
+  wt.world_path_ms = (os.clock() - t0) * 1000
 end
 wt.route_frame = function()
   if not settings.enabled or not settings.show_overhead or not wt.has_pts
