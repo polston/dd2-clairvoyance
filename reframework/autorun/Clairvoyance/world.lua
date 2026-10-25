@@ -1240,6 +1240,7 @@ function M.new(a, reads, io)
 
   local ROUTE_ERR = "route unavailable"
   local ROUTE_SLOTS = 8 -- the colour slots (the eight route_colors)
+  local PLACE_STOP_M = 30 -- a place this close to a drawn NPC stop is held back
 
   -- the raw route for the set NPC at this hour; nil for an NPC with no
   -- route (Ruling 3); raises on any failed read
@@ -1492,6 +1493,7 @@ function M.new(a, reads, io)
       if not e.place then
         if e.bad or e.failed then
           ents[i] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
+          S.place_from[m.cid] = nil
         else
           local c = S.route_cache[m.cid]
           if e.stale then again = true end
@@ -1531,7 +1533,7 @@ function M.new(a, reads, io)
         if not held and kp ~= nil then
           for _, p in ipairs(block) do
             local dx, dz = kp.x - p.x, kp.z - p.z
-            if dx * dx + dz * dz <= 900 then held = true; break end
+            if dx * dx + dz * dz <= PLACE_STOP_M * PLACE_STOP_M then held = true; break end
           end
         end
         local pe = nil

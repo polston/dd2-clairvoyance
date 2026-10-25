@@ -3386,6 +3386,37 @@ do
       check("lead to two-stop: the record was cleared, A's key stays",
         route_in(w11, 2001).lead == true and w11.near["5.0,1.0,5.0"] == 3)
 
+      -- 5: no player, a fresh NPC never led
+      local f13, d13, w13 = setup()
+      w13:set_routes({ { cid = 2001, name = "A" } })
+      w13.near["5.0,1.0,5.0"] = 3
+      go(w13, ptg(nil, nil))
+      local e13 = route_in(w13, 2001)
+      check("no player no lead: one stop, no lead, near key untouched",
+        e13 ~= nil and e13.lead == nil and #e13.stops == 1 and e13.stops[1].lead == nil
+        and w13.near["5.0,1.0,5.0"] == 3)
+
+      -- 8b: an error round clears the lead record
+      local f14, d14, w14 = setup()
+      w14:set_routes({ { cid = 2001, name = "A" } })
+      go(w14, ptg(PA, nil))
+      w14.near["5.0,1.0,5.0"] = 3
+      f14.fail.current_sig = true
+      go(w14, ptg(PA, nil))
+      check("lead error round: the NPC entry is an error entry",
+        route_in(w14, 2001) ~= nil and route_in(w14, 2001).err ~= nil)
+      f14.fail.current_sig = nil
+      go(w14, ptg({ x = 6, y = 1, z = 6 }, nil))
+      check("lead error round: the record was cleared, A's key stays",
+        route_in(w14, 2001).lead == true and w14.near["5.0,1.0,5.0"] == 3)
+
+      -- 1c: exactly 30 m from a drawn stop is held
+      local f15, d15, w15 = setup(P(31, 0, 1))
+      w15:set_routes(PL)
+      go(w15, ptg(PA, { 77 }))
+      check("place on NPC stop: exactly 30 m, no place entry", route_in(w15, -77) == nil
+        and route_in(w15, 2001) ~= nil)
+
       -- 9: all_err places
       local f12, d12, w12 = setup()
       w12:set_routes(PL)
