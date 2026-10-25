@@ -2100,6 +2100,10 @@ do
   function stub.today(day, hour)
     return { week = math.floor(day / 7) % 4 + 1, weekday = day % 7, hour = hour }
   end
+  function stub.in_hours(h, lo, hi)
+    if lo < hi then return h >= lo and h < hi end
+    return h >= lo or h < hi
+  end
   function stub.route_stops(rows, today, area_pos, cur)
     stub.calls.route_stops = stub.calls.route_stops + 1
     stub.last_cur, stub.last_today = cur, today
