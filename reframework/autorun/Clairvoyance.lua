@@ -3281,7 +3281,7 @@ end)
 -- Camera space = map space minus the player's offset, read each frame; no
 -- offset means nothing this frame. Own failure counters (10.3b).
 -- v14 (SPEC 23.6.8): the ready walking paths in the world, nodes raised 0.3 m.
--- A node out of range or off screen is a break; one polyline call draws all.
+-- A node out of range or off screen is a break; one buffer per route, drawn leg by leg.
 wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
   local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
   local inp = wt.q("input", nil)
