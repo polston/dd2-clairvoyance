@@ -31,6 +31,8 @@ map and in your view.
 11. Every picture and text the mod draws can have an outline, one global
     setting with an optional override per marker category. The route line
     and the route stop pictures have their own color and size settings.
+    Routes use eight colors, one per shown route, with an optional fade along
+    each route and a legend of the shown routes.
 12. A searched NPC's daily route can follow the game's own walking paths
     instead of straight lines, on the full map and, optionally, in the world.
 13. Chests say what kind they are in their label ("stays opened in NG+",
@@ -119,6 +121,18 @@ world" draws the walking path in the world too. The path search needs a copy of
 the game's walking graph, which the mod makes over a second or two in small
 slices the first time a walking-path route is shown.
 
+Up to eight routes show at once, each in its own color (the eight colors are
+set under Appearance, Route). With "Gradient" on, the legs of a route shift
+toward the "Gradient end color" (by "Gradient amount (%)") and get fainter
+(down to "Far end opacity (%)") and thinner the further they are from the
+stop the route stands at. "Route legend" lists every shown route, in its
+color, at the top left of the full map; the stop a route stands at
+shows the route's name after its number. With quest focus on, "Routes to quest
+places" also draws a route to each destination place of the focused quests,
+counted in the same eight, and "Routes: n of N" says how many of the
+candidate routes are shown. "Unrelated opacity (%)" sets how faint Dim
+markers are; Dim markers are drawn without an outline.
+
 ### Items
 
 "Mark quest items in the item menu" puts a dot on each quest-related slot in
@@ -138,8 +152,9 @@ numbers are in the same space as the search results and markers.
 1. Outlines: on or off, color and width (1 to 4 pixels at 1080 lines; wider on
    larger displays). Outlines are drawn on pictures the mod draws through the
    D2DX plugin and on its text, not on the game's own icon glyphs.
-2. Route: line color and width, stop picture size, and the stop number's color
-   and size.
+2. Route: the eight route colors, the gradient (on or off, end color, amount
+   and far end opacity), line width, stop picture size, and the stop number's
+   color and size.
 3. Names color.
 4. Overrides: for each marker category, the route line, the names and the item
    menu, an Override checkbox with its own outline on or off, color and width.
