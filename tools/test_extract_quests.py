@@ -53,12 +53,19 @@ class RelationTests(unittest.TestCase):
         add("app.quest.action.PlayEventData.TalkDirectSetting.TalkNPC", _NpcID=PLAYER)
         add("app.quest.action.NpcControlParam", _NpcID=999)
         add("app.Other", _NpcID=107, _ItemID=299)
-        for (t, f), v in zip(eq.ITEM_FIELDS, range(201, 207)):
+        for (t, f), v in zip(eq.ITEM_FIELDS, range(201, 205)):
             add(t, **{f: v})
         add("app.quest.condition.CheckDeliverParam", _ItemID=0)
         add("app.quest.condition.CheckDeliverParam", _ItemID=-1)
         self.assertEqual(eq.scene_relations(insts, kept),
-                         ({101, 102, 103, 104, 105, 106}, {201, 202, 203, 204, 205, 206}))
+                         ({101, 102, 103, 104, 105, 106}, {201, 202, 203, 204}))
+
+    def test_scene_given_and_used_items_left_out(self):
+        kept = eq.kept_chara(CHARA)
+        insts = [inst(1, "app.quest.action.ItemSetting.Item", _ItemId=211),
+                 inst(2, "app.quest.condition.CheckPlayerActionParam", _ItemID=212),
+                 inst(3, "app.quest.action.UniqueAction046Param", _ItemID=213)]
+        self.assertEqual(eq.scene_relations(insts, kept), (set(), set()))
 
     def test_scene_holder_and_job_master_fields(self):
         kept = eq.kept_chara(CHARA)

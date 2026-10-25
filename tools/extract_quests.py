@@ -35,10 +35,7 @@ NPC_FIELDS = (
 ITEM_FIELDS = (
     ("app.quest.condition.CheckHasItemParam.ItemInfo", "_ID"),
     ("app.quest.condition.CheckDeliverParam", "_ItemID"),
-    ("app.quest.action.ItemSetting.Item", "_ItemId"),
     ("app.quest.condition.CheckEquipItemParam", "_ItemID"),
-    ("app.quest.condition.CheckPlayerActionParam", "_ItemID"),
-    ("app.quest.action.UniqueAction046Param", "_ItemID"),
     ("app.quest.condition.CheckJobMasterItemParam", "_ItemID"),
 )
 CONTEXT_TYPE = "app.QuestContextData.ContextData"
