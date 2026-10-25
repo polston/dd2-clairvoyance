@@ -1246,7 +1246,7 @@ end
 
 -- Uncached candidates: every included entry counts in `known`; with a
 -- query only the matching ones become candidates (before make_cand).
-local function world_candidates(world, show, boxes, q, spot)
+local function world_candidates(world, show, boxes, q, spot, skip)
   local cands, known = {}, {}
   local ctx = world_ctx(show, boxes)
   ctx.spot = spot
@@ -1266,7 +1266,7 @@ local function world_candidates(world, show, boxes, q, spot)
             known.monster_small = known.monster_small + 1
           end
           if cat == "monster" then count_kind(known.kinds, e) end
-          if not (cat == "monster" and kind_off(e, show))
+          if not (skip and skip[e]) and not (cat == "monster" and kind_off(e, show))
             and entry_search(cat, e, drops, gc, q, ctx) then
             cands[#cands + 1] = make_cand(cat, e, ctx)
           end
@@ -1297,6 +1297,63 @@ local function first_token_cand(world, show)
   end
   return { cat = "token", qids = {}, key = "w:tok1:" .. tostring(t.uid),
     pos = t.pos, label = tostring(t.name) }
+end
+
+-- v19 (SPEC 32.6): the world entries related to the focused quests: chests
+-- whose gate quest is focused or that hold a needed item, and sellers of a
+-- focused quest. Returns { { cat, e }, ... } in world order and the set of
+-- their entry tables. Entries without a valid position are left out.
+local function focus_entries(world, fx)
+  local list, set = {}, {}
+  if fx == nil then return list, set end
+  for _, e in ipairs(world.chests or {}) do
+    if valid_pos(e.pos) then
+      local hit = false
+      for _, q in ipairs(type(e.gate_qids) == "table" and e.gate_qids or {}) do
+        if fx.qids[q] then hit = true; break end
+      end
+      if not hit and e.item ~= nil and fx.items[e.item] then hit = true end
+      if not hit then
+        for _, id in ipairs(type(e.item_ids) == "table" and e.item_ids or {}) do
+          if fx.items[id] then hit = true; break end
+        end
+      end
+      if hit then list[#list + 1] = { cat = "chest", e = e }; set[e] = true end
+    end
+  end
+  for _, e in ipairs(world.sellers or {}) do
+    if valid_pos(e.pos) then
+      local hit = false
+      for _, q in ipairs(type(e.qids) == "table" and e.qids or {}) do
+        if fx.qids[q] then hit = true; break end
+      end
+      if hit then list[#list + 1] = { cat = "seller", e = e }; set[e] = true end
+    end
+  end
+  return list, set
+end
+
+-- The candidates of the related entries, ordered by key: outside the toggles
+-- and kind filters, never hidden by the cap. A hidden one (opened, undiscovered,
+-- at a box) is dropped. Under a query, one that does not match is marked
+-- focus_kept (drawn, but not a result).
+local function related_cands(list, world, show, boxes, q, labels)
+  local rctx = world_ctx(show, boxes)
+  rctx.show_kind = {}
+  rctx.labels = labels
+  local drops = q ~= nil and world.drops or nil
+  local gc = { hay = {}, match = {} }
+  local out = {}
+  for _, p in ipairs(list) do
+    local ok = entry_search(p.cat, p.e, drops, gc, q, rctx)
+    local c = make_cand(p.cat, p.e, rctx)
+    if not c.hidden then
+      if not ok then c.focus_kept = true end
+      out[#out + 1] = c
+    end
+  end
+  table.sort(out, function(x, y) return x.key < y.key end)
+  return out
 end
 
 local function world_cap(show)
@@ -1391,7 +1448,7 @@ end
 -- the cap left out an `offmap` entry (SPEC 20.5.5, 20.5.7); neither is a
 -- marker or counted in `shown`.
 local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-                            quest_cids, ft, kcounts)
+                            quest_cids, ft, kcounts, rel)
   -- Nearest win the cap (ties by key); no origin: (category, key) order.
   local function by_pick(x, y)
     if has_origin then
@@ -1459,6 +1516,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
   -- follow the distance order (as item_ord).
   table.sort(kept, function(x, y) return x.key < y.key end)
   for i, c in ipairs(kept) do c.world_ord = i end
+  for i, c in ipairs(rel or {}) do c.world_ord = #kept + i end
 
   table.sort(kept, function(x, y)
     if x.cat ~= y.cat then return WORLD_CAT_RANK[x.cat] < WORLD_CAT_RANK[y.cat] end
@@ -1474,7 +1532,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       pos = pos_copy(c.pos),
       label = c.label, done = c.done, world_ord = c.world_ord, hover = c.hover,
       why = c.why, faded = c.faded }
-    if c.cat == "npc_search" then m.cid = c.cid end
+    if c.cat == "npc_search" or c.cat == "shop" or c.cat == "seller" then m.cid = c.cid end
     if c.cat == "monster" then
       m.small = c.small
       m.kind = c.kind
@@ -1555,6 +1613,14 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
     markers[#markers + 1] = m
     panel.token.first = m
   end
+  -- v19 (SPEC 32.6): the related entries go last, outside the cap and the panel
+  for _, c in ipairs(rel or {}) do
+    markers[#markers + 1] = { key = c.key, cat = c.cat, qids = c.qids,
+      pos = pos_copy(c.pos), label = c.label, done = c.done, world_ord = c.world_ord,
+      hover = c.hover, why = c.why, faded = c.faded,
+      cid = (c.cat == "seller" or c.cat == "shop") and c.cid or nil,
+      related = true, focus_kept = c.focus_kept }
+  end
   return markers, panel, merged, cover
 end
 
@@ -1563,7 +1629,7 @@ end
 -- merge into that marker's hover instead of drawing. Returns markers,
 -- panel, merged where merged is a list of { cid, line }. Uncached; the
 -- per-tick entry point is world_markers_cached.
-function M.world_markers(world, show, origin, boxes, quest_cids)
+function M.world_markers(world, show, origin, boxes, quest_cids, fx)
   world = world or {}
   show = show or {}
   local panel = new_panel()
@@ -1573,7 +1639,8 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   local kept, merged, shops, shop_all, hits = {}, {}, {}, {}, {}
   local shops_on = show.world_shops == true
   local ft = first_token_cand(world, show)
-  local cands, known, shop_of = world_candidates(world, show, boxes, show.search, ft ~= nil)
+  local flist, fset = focus_entries(world, fx)
+  local cands, known, shop_of = world_candidates(world, show, boxes, show.search, ft ~= nil, fset)
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = known[cat] end
   panel.monster.small_known = known.monster_small
   local kcounts = known.kinds
@@ -1586,7 +1653,7 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids, ft, kcounts)
+    quest_cids, ft, kcounts, related_cands(flist, world, show, boxes, show.search))
 end
 
 -- Cached entry point (SPEC 17.10.10). A 256-unit grid of the world's
@@ -1685,7 +1752,7 @@ local function add_cat(g, world, cat, show)
   M.world_stats.cell_entries[cat] = put_n
 end
 
-function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
+function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats, fx)
   world = world or {}
   show = show or {}
   stats = stats or M.world_stats
@@ -1756,7 +1823,18 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
     ft = g.ft
   end
   ctx.spot = ft ~= nil
+  -- v19 (SPEC 32.6): the related entries, kept on the grid record while the
+  -- key is the same (the grid itself changes with the world table)
+  local flist, fset = {}, {}
+  if fx ~= nil then
+    if g.fx_key ~= fx.key or g.fx_list == nil then
+      g.fx_key = fx.key
+      g.fx_list, g.fx_set = focus_entries(world, fx)
+    end
+    flist, fset = g.fx_list, g.fx_set
+  end
   local function take(cat, e)
+    if fset[e] then return end
     if cat == "monster" and kind_off(e, show) then return end
     if not entry_search(cat, e, drops, g, q, ctx) then return end
     stats.cand_builds = stats.cand_builds + 1
@@ -1823,7 +1901,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids, ft, g.kinds)
+    quest_cids, ft, g.kinds, related_cands(flist, world, show, boxes, q, g.labels))
 end
 
 -- The settlement nearest to pos by 3D distance (first wins a tie), or nil.
@@ -2596,7 +2674,7 @@ function M.compute(adapter, show)
 
   -- v19 (SPEC 32.5): the related sets of the focused quests. A giver is the
   -- hint, else the marker's NPC (not in progress), else the first candidate.
-  local focus_result
+  local focus_result, fx
   if #active > 0 then
     local givers = {}
     for qid, rec in pairs(focus_rec) do
@@ -2605,6 +2683,18 @@ function M.compute(adapter, show)
     local rs = M.related_sets(adapter, active, show.quest_rel,
       (show.world or {}).focus_places, { givers = givers, prog = prog })
     focus_result = { active = active, quests = rs }
+    -- v19 (SPEC 32.6): what the world entries are matched against
+    local qset, iset, qs, is = {}, {}, {}, {}
+    for _, qid in ipairs(active) do
+      if not qset[qid] then qset[qid] = true; qs[#qs + 1] = qid end
+      for _, id in ipairs(rs[qid] and rs[qid].items or {}) do
+        if not iset[id] then iset[id] = true; is[#is + 1] = id end
+      end
+    end
+    table.sort(qs)
+    table.sort(is)
+    fx = { qids = qset, items = iset,
+      key = table.concat(qs, ",") .. "|" .. table.concat(is, ",") }
   end
 
   -- v13 (SPEC 21.8): current step of a lone in-progress quest per marker.
@@ -2681,7 +2771,7 @@ function M.compute(adapter, show)
     end
     local wms, merged, cover
     wms, world_panel, merged, cover = M.world_markers_cached(show.world, show,
-      show.world_origin, boxes, quest_by_cid)
+      show.world_origin, boxes, quest_by_cid, nil, fx)
     if q ~= nil then
       local matches = M.npc_matches(show.world.npcs, q)
       npc_match_cids = M.npc_match_cids(matches)
@@ -2697,7 +2787,7 @@ function M.compute(adapter, show)
     -- to a throwaway table, so the player pass stays the one the stats describe.
     if valid_pos(show.map_origin) then
       fullmap_world = M.world_markers_cached(show.world, show,
-        show.map_origin, boxes, quest_by_cid, { grid_builds = 0, cand_builds = 0 })
+        show.map_origin, boxes, quest_by_cid, { grid_builds = 0, cand_builds = 0 }, fx)
     end
   end
 

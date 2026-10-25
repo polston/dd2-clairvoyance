@@ -4303,6 +4303,67 @@ do
   local sell = has(r.markers, "w:sell:5:2")
   check("fq 11: a focus-kept quest marker does not absorb a matching seller",
     sell ~= nil and core.is_result(sell) == true)
+
+  -- Task 3.7: related world entries, held apart from the cap and the search
+  local function wset()
+    return { chests = {
+        { uid = "g1", pos = P(10), state = "unopened", gate_qids = { 20 }, kinds = { "quest" } },
+        { uid = "i1", pos = P(20), state = "unopened", item = 302 },
+        { uid = "i2", pos = P(30), state = "unopened", item_ids = { 7, 302 } },
+        { uid = "o1", pos = P(35), state = "opened", gate_qids = { 20 } },
+        { uid = "u1", pos = P(5), state = "unopened" } },
+      sellers = { { shop = 9, item = 400, item_name = "Herb", cid = 77, npc = "Vendor",
+        qids = { 20 }, quest = "Twenty", pos = P(15) },
+        { shop = 9, item = 401, item_name = "Salt", cid = 77, npc = "Vendor",
+        qids = { 99 }, quest = "Other", pos = P(16) } } }
+  end
+  local wq = { acceptable = { 20 }, hints = { [20] = 5 }, npc_pos = { [5] = P(1) }, names = { [20] = "Twenty" } }
+  local wrel = { [20] = { cast = {}, npcs = {}, items = { 302 }, dest = {} } }
+  local REL = "w:chest:g1,w:chest:i1,w:chest:i2,w:sell:9:400"
+  local function relkeys(list)
+    local t = {}
+    for _, m in ipairs(list or {}) do if m.related then t[#t + 1] = m.key end end
+    table.sort(t)
+    return table.concat(t, ",")
+  end
+  r = run(wset(), nil, { world_chests = false, world_sellers = false, focus_qids = { 20 }, quest_rel = wrel }, wq)
+  check("fw 1: related entries of off categories", relkeys(r.markers) == REL
+    and has(r.markers, "w:chest:u1") == nil and has(r.markers, "w:chest:o1") == nil)
+  check("fw 1b: also in the full-map pass", relkeys(r.fullmap_world) == REL)
+  check("fw 1c: not counted in the panel", r.world.chest.shown == 0 and r.world.seller.shown == 0)
+  r = run(wset(), nil, { world_max_markers = 0, focus_qids = { 20 }, quest_rel = wrel }, wq)
+  check("fw 2: no cap slot", relkeys(r.markers) == REL and has(r.markers, "w:chest:u1") == nil)
+  r = run(wset(), Q("zzz"), { focus_qids = { 20 }, quest_rel = wrel }, wq)
+  check("fw 3: no search filter", relkeys(r.markers) == REL)
+  r = run(wset(), nil, { world_kind_quest = false, focus_qids = { 20 }, quest_rel = wrel }, wq)
+  check("fw 4: kind filters do not hide a related chest", has(r.markers, "w:chest:g1") ~= nil)
+  -- dim, so Task 3.8's hide pass keeps the unrelated u1 and seller 401 in these two checks
+  r = run(wset(), nil, { focus_qids = { 20 }, quest_rel = wrel, focus_unrelated = 1 }, wq)
+  local n_g1, ords, odup = 0, {}, false
+  for _, m in ipairs(r.markers) do
+    if m.key == "w:chest:g1" then n_g1 = n_g1 + 1 end
+    if m.world_ord then
+      if ords[m.world_ord] then odup = true end
+      ords[m.world_ord] = true
+    end
+  end
+  check("fw 5: drawn once, world_ord unique", n_g1 == 1 and not odup
+    and has(r.markers, "w:chest:u1") ~= nil and not has(r.markers, "w:chest:u1").related)
+  check("fw 6: seller markers carry cid", has(r.markers, "w:sell:9:401").cid == 77)
+  r = run(wset(), nil, { world_chests = false, world_sellers = false }, wq)
+  check("fw 7: no focus: off categories build nothing", relkeys(r.markers) == ""
+    and has(r.markers, "w:chest:g1") == nil)
+  local fx = { qids = { [20] = true }, items = { [302] = true }, key = "20|302" }
+  local um = core.world_markers(wset(), { world_chests = false, world_sellers = false }, P(0), {}, nil, fx)
+  check("fw 8: uncached path matches", relkeys(um) == REL)
+  local sw2 = { shops = { { shop = 3, pos = P(12), items = { { id = 1, name = "Rope" } }, npc = "Bo", cid = 55 } } }
+  r = run(sw2, nil, { world_shops = true })
+  check("fw 9: shop markers carry cid", has(r.markers, "w:shop:3") ~= nil and has(r.markers, "w:shop:3").cid == 55)
+  r = run(wset(), Q("herb"), { focus_qids = { 20 }, quest_rel = wrel }, wq)
+  local s400, g1 = has(r.markers, "w:sell:9:400"), has(r.markers, "w:chest:g1") or {}
+  check("fw 3b: under a search only the related entries that match are results",
+    s400 ~= nil and s400.focus_kept == nil and core.is_result(s400) == true
+    and g1.focus_kept == true and core.is_result(g1) == false)
 end
 
 if failures > 0 then os.exit(1) end
