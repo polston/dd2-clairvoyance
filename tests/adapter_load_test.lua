@@ -724,6 +724,16 @@ do
   assert(aw.objective_cids(side_qid) == nil, "non-side progressing commits empty")
   assert(aw.objective_cids(3) == nil and aw.objective_stats().kept == 0,
     "non-side quest's processor is not kept")
+  -- (8b) a focused main quest reaches the objective walk, and clearing the
+  -- focus excludes it again
+  aw.set_focus_qids({ 3 })
+  procs = { p3, saved_procs[1] }   -- count change rebuilds the slot index
+  aw.refresh_objectives()
+  local h1 = aw.objective_cids(3)
+  assert(h1 ~= nil and h1[1] == npc_cid, "focused main quest reaches the walk")
+  aw.set_focus_qids(nil)
+  aw.refresh_objectives()
+  assert(aw.objective_cids(3) == nil, "unfocused main quest excluded again")
   procs = saved_procs
   prog_ids = { side_qid }
   -- (9) every unreadable-entry path is counted as skipped
@@ -2376,6 +2386,9 @@ do
   -- v14 marker ids (SPEC 22.6.6)
   do
     local rg = A.map_marker_guid({ cat = "route_stop", cid = 7, stop = 3 })
+    assert(A.map_marker_guid({ cat = "route_stop", cid = 7, stop = 2, num = 1 })
+        == "51a1c0de-0000-4003-8000-" .. string.format("%012x", 7 * 32 + 1),
+      "MG route_stop uses num when set")
     local hg = A.map_marker_guid({ cat = "hint_pin", qid = 20090, i = 1 })
     local qg = A.map_marker_guid({ cat = "in_progress", qids = { 20090 } })
     assert(rg == "51a1c0de-0000-4003-8000-" .. string.format("%012x", 7 * 32 + 3),
@@ -2388,6 +2401,16 @@ do
         (0x7fffffffffff * 32 + 9) % 0x1000000000000), "MG modulo 2^48")
     assert(A.map_marker_guid({ cat = "npc_search", world_ord = 4 })
       == "51a1c0de-0000-4002-8000-000000000004", "MG npc_search keeps the world guid")
+    local okn, ng = pcall(A.map_marker_guid, { cat = "focus_npc", cid = 1234, qids = {} })
+    local okp, pg = pcall(A.map_marker_guid, { cat = "focus_place", place = 77, qids = {} })
+    assert(okn and ng == "51a1c0de-0000-4005-8000-" .. string.format("%012x", 1234),
+      "MG focus_npc layout: " .. tostring(ng))
+    assert(okp and pg == "51a1c0de-0000-4006-8000-" .. string.format("%012x", 77),
+      "MG focus_place layout: " .. tostring(pg))
+    assert(ng ~= A.map_marker_guid({ cat = "focus_place", place = 1234, qids = {} }),
+      "MG focus_npc and focus_place differ for one number")
+    assert(A.map_marker_guid({ cat = "focus_npc", cid = 0x1000000000005, qids = {} })
+      == "51a1c0de-0000-4005-8000-000000000005", "MG focus_npc modulo 2^48")
   end
   A.guid_parse = real_gp
 
@@ -2603,6 +2626,21 @@ do
     and IS.cls_reads == 0 and (IS.gets["app.ItemManager"] or 0) == 0
     and (IS.gets["app.GimmickManager"] or 0) == 0,
     "IW13 main quest excluded: empty table committed, no walk, held or scan")
+  -- IW13b a focused main quest reaches the item-needs walk, and clearing the
+  -- focus excludes it again
+  ifresh()
+  IS.prog = { 10100 }
+  IS.procs = { iproc(10100, { has_item({ { id = 376, num = 1, lv = 4 } }) }) }
+  ai.set_focus_qids({ 10100 })
+  ai.refresh_items()
+  local hn = (ai.item_needs() or {})[10100]
+  assert(hn ~= nil and hn[1].id == 376, "IW13b focused main quest reaches the item walk")
+  ai.set_focus_qids(nil)
+  ifresh()
+  IS.prog = { 10100 }
+  IS.procs = { iproc(10100, { has_item({ { id = 376, num = 1, lv = 4 } }) }) }
+  ai.refresh_items()
+  assert((ai.item_needs() or {})[10100] == nil, "IW13b unfocused excluded again")
   -- IW5 10 s throttle, attempt-start stamp, rounds per attempt
   ifresh()
   ai.refresh_items()
@@ -3292,6 +3330,17 @@ do
   cc = cdict_calls
   a.npc_name(42)
   assert(cdict_calls == cc + 1, "JR16 miss cache cleared")
+
+  -- QF set_focus_qids stores a set and clears on nil or empty
+  a.set_focus_qids({ 10010, 10020, "x" })
+  local fs = a.focus_set()
+  assert(fs ~= nil and fs[10010] and fs[10020] and fs.x == nil and fs[1] == nil,
+    "QF1 numbers stored as a set")
+  a.set_focus_qids({})
+  assert(a.focus_set() == nil, "QF2 empty list clears")
+  a.set_focus_qids({ 10010 })
+  a.set_focus_qids(nil)
+  assert(a.focus_set() == nil, "QF3 nil clears")
 
   sdk.get_managed_singleton, sdk.find_type_definition, Vector3f = prev_gms, prev_ftd, prev_v3
 end

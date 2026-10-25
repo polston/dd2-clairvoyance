@@ -18,6 +18,10 @@ local function quest_display_name(adapter, qid)
 end
 M.quest_display_name = quest_display_name
 
+local MERGE_STOP_M = 150 -- stops this close (metres) merge into one
+M.MERGE_STOP_M = MERGE_STOP_M
+local ROUTE_CAP = 8 -- most published routes (the target counts)
+
 local function pos_key(p)
   return string.format("p:%d:%d:%d",
     math.floor(p.x), math.floor(p.y), math.floor(p.z))
@@ -265,16 +269,33 @@ local function quest_hay(adapter, g)
   return h
 end
 
-function M.item_markers(adapter, shown_inprog, origin, q)
+-- v19 (SPEC 32): `focus_inprog` (set or nil) marks the focused in-progress
+-- quests. An entry whose item such a quest needs skips the query and the cap
+-- and shares the one item_ord sequence with the rest.
+function M.item_markers(adapter, shown_inprog, origin, q, focus_inprog)
   local needs
   if adapter.item_needs then
     M.world_stats.item_need_reads = M.world_stats.item_need_reads + 1
     needs = adapter.item_needs()
   end
   if type(needs) ~= "table" then return {}, 0 end
-  local by_id = M.needs_by_item(needs, shown_inprog)   -- item id -> needing shown quests
+  local keep_qids = shown_inprog
+  if type(focus_inprog) == "table" and next(focus_inprog) ~= nil then
+    keep_qids = {}
+    for qid, on in pairs(shown_inprog) do if on then keep_qids[qid] = true end end
+    for qid, on in pairs(focus_inprog) do if on then keep_qids[qid] = true end end
+  end
+  local by_id = M.needs_by_item(needs, keep_qids)   -- item id -> needing shown quests
   if next(by_id) == nil then return {}, 0 end
-  for _, qs in pairs(by_id) do table.sort(qs) end
+  local focus_item = {}   -- item id -> a focused quest needs it
+  for id, qs in pairs(by_id) do
+    table.sort(qs)
+    if type(focus_inprog) == "table" then
+      for _, qid in ipairs(qs) do
+        if focus_inprog[qid] then focus_item[id] = true end
+      end
+    end
+  end
 
   local recs = {}
   local locs = adapter.item_locations and adapter.item_locations() or nil
@@ -337,9 +358,23 @@ function M.item_markers(adapter, shown_inprog, origin, q)
         m = query_match(q, hay_join(parts))
         ok[e.item_id] = m
       end
-      if m then matched[#matched + 1] = e end
+      if m then
+        matched[#matched + 1] = e
+      elseif focus_item[e.item_id] then
+        e.focus_kept = true
+        matched[#matched + 1] = e
+      end
     end
     entries = matched
+  end
+  -- Related needs are held out of the cap and put back after it.
+  local held = {}
+  if next(focus_item) ~= nil then
+    local rest = {}
+    for _, e in ipairs(entries) do
+      if focus_item[e.item_id] then held[#held + 1] = e else rest[#rest + 1] = e end
+    end
+    entries = rest
   end
   local capped = 0
   if #entries > M.ITEM_MARKER_MAX then
@@ -364,6 +399,7 @@ function M.item_markers(adapter, shown_inprog, origin, q)
     capped = #entries - M.ITEM_MARKER_MAX
     for i = #entries, M.ITEM_MARKER_MAX + 1, -1 do entries[i] = nil end
   end
+  for _, e in ipairs(held) do entries[#entries + 1] = e end
   -- Kept set back in (item_id, key) order so item_ord (marker identity)
   -- does not shuffle as the origin moves.
   table.sort(entries, by_id_key)
@@ -394,7 +430,7 @@ function M.item_markers(adapter, shown_inprog, origin, q)
       pos = { x = r.pos.x, y = r.pos.y, z = r.pos.z },
       live = type(lv) == "table" and { x = lv.x, y = lv.y, z = lv.z } or nil,
       qids = qs, item_id = id, cat = "quest_item",
-      label = label, item_ord = o,
+      label = label, item_ord = o, focus_kept = e.focus_kept,
     }
   end
   return markers, capped
@@ -1214,7 +1250,7 @@ end
 
 -- Uncached candidates: every included entry counts in `known`; with a
 -- query only the matching ones become candidates (before make_cand).
-local function world_candidates(world, show, boxes, q, spot)
+local function world_candidates(world, show, boxes, q, spot, skip)
   local cands, known = {}, {}
   local ctx = world_ctx(show, boxes)
   ctx.spot = spot
@@ -1234,7 +1270,7 @@ local function world_candidates(world, show, boxes, q, spot)
             known.monster_small = known.monster_small + 1
           end
           if cat == "monster" then count_kind(known.kinds, e) end
-          if not (cat == "monster" and kind_off(e, show))
+          if not (skip and skip[e]) and not (cat == "monster" and kind_off(e, show))
             and entry_search(cat, e, drops, gc, q, ctx) then
             cands[#cands + 1] = make_cand(cat, e, ctx)
           end
@@ -1265,6 +1301,58 @@ local function first_token_cand(world, show)
   end
   return { cat = "token", qids = {}, key = "w:tok1:" .. tostring(t.uid),
     pos = t.pos, label = tostring(t.name) }
+end
+
+-- v19 (SPEC 32.6): the world entries related to the focused quests: chests
+-- whose gate quest is focused or that hold a needed item, and sellers of a
+-- focused quest. Returns { { cat, e }, ... } in world order and the set of
+-- their entry tables. Entries without a valid position are left out.
+local function focus_entries(world, fx)
+  local list, set = {}, {}
+  if fx == nil then return list, set end
+  local function any_in(s, l)
+    if type(l) ~= "table" then return false end
+    for _, v in ipairs(l) do
+      if s[v] then return true end
+    end
+    return false
+  end
+  for _, e in ipairs(world.chests or {}) do
+    if valid_pos(e.pos) then
+      local hit = any_in(fx.qids, e.gate_qids) or (e.item ~= nil and fx.items[e.item])
+        or any_in(fx.items, e.item_ids)
+      if hit then list[#list + 1] = { cat = "chest", e = e }; set[e] = true end
+    end
+  end
+  for _, e in ipairs(world.sellers or {}) do
+    if valid_pos(e.pos) then
+      if any_in(fx.qids, e.qids) then list[#list + 1] = { cat = "seller", e = e }; set[e] = true end
+    end
+  end
+  return list, set
+end
+
+-- The candidates of the related entries, ordered by key: outside the toggles
+-- and kind filters, never hidden by the cap. A hidden one (opened, undiscovered,
+-- at a box) is dropped. Under a query, one that does not match is marked
+-- focus_kept (drawn, but not a result).
+local function related_cands(list, world, show, boxes, q, labels)
+  local rctx = world_ctx(show, boxes)
+  rctx.show_kind = {}
+  rctx.labels = labels
+  local drops = q ~= nil and world.drops or nil
+  local gc = { hay = {}, match = {} }
+  local out = {}
+  for _, p in ipairs(list) do
+    local ok = entry_search(p.cat, p.e, drops, gc, q, rctx)
+    local c = make_cand(p.cat, p.e, rctx)
+    if not c.hidden then
+      if not ok then c.focus_kept = true end
+      out[#out + 1] = c
+    end
+  end
+  table.sort(out, function(x, y) return x.key < y.key end)
+  return out
 end
 
 local function world_cap(show)
@@ -1359,7 +1447,7 @@ end
 -- the cap left out an `offmap` entry (SPEC 20.5.5, 20.5.7); neither is a
 -- marker or counted in `shown`.
 local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-                            quest_cids, ft, kcounts)
+                            quest_cids, ft, kcounts, rel)
   -- Nearest win the cap (ties by key); no origin: (category, key) order.
   local function by_pick(x, y)
     if has_origin then
@@ -1386,6 +1474,11 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
   for _, c in ipairs(kept) do
     if (c.cat == "shop" or c.cat == "seller") and type(c.cid) == "number"
       and cover[c.cid] == nil then
+      cover[c.cid] = c.key
+    end
+  end
+  for _, c in ipairs(rel or {}) do
+    if c.cat == "seller" and type(c.cid) == "number" and cover[c.cid] == nil then
       cover[c.cid] = c.key
     end
   end
@@ -1427,6 +1520,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
   -- follow the distance order (as item_ord).
   table.sort(kept, function(x, y) return x.key < y.key end)
   for i, c in ipairs(kept) do c.world_ord = i end
+  for i, c in ipairs(rel or {}) do c.world_ord = #kept + i end
 
   table.sort(kept, function(x, y)
     if x.cat ~= y.cat then return WORLD_CAT_RANK[x.cat] < WORLD_CAT_RANK[y.cat] end
@@ -1442,7 +1536,7 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
       pos = pos_copy(c.pos),
       label = c.label, done = c.done, world_ord = c.world_ord, hover = c.hover,
       why = c.why, faded = c.faded }
-    if c.cat == "npc_search" then m.cid = c.cid end
+    if c.cat == "npc_search" or c.cat == "shop" or c.cat == "seller" then m.cid = c.cid end
     if c.cat == "monster" then
       m.small = c.small
       m.kind = c.kind
@@ -1523,6 +1617,14 @@ local function world_finish(kept, merged, panel, cap, has_origin, shops, shop_al
     markers[#markers + 1] = m
     panel.token.first = m
   end
+  -- v19 (SPEC 32.6): the related entries go last, outside the cap and the panel
+  for _, c in ipairs(rel or {}) do
+    markers[#markers + 1] = { key = c.key, cat = c.cat, qids = c.qids,
+      pos = pos_copy(c.pos), label = c.label, done = c.done, world_ord = c.world_ord,
+      hover = c.hover, why = c.why, faded = c.faded,
+      cid = c.cat == "seller" and c.cid or nil,
+      related = true, focus_kept = c.focus_kept }
+  end
   return markers, panel, merged, cover
 end
 
@@ -1531,7 +1633,7 @@ end
 -- merge into that marker's hover instead of drawing. Returns markers,
 -- panel, merged where merged is a list of { cid, line }. Uncached; the
 -- per-tick entry point is world_markers_cached.
-function M.world_markers(world, show, origin, boxes, quest_cids)
+function M.world_markers(world, show, origin, boxes, quest_cids, fx)
   world = world or {}
   show = show or {}
   local panel = new_panel()
@@ -1541,7 +1643,8 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   local kept, merged, shops, shop_all, hits = {}, {}, {}, {}, {}
   local shops_on = show.world_shops == true
   local ft = first_token_cand(world, show)
-  local cands, known, shop_of = world_candidates(world, show, boxes, show.search, ft ~= nil)
+  local flist, fset = focus_entries(world, fx)
+  local cands, known, shop_of = world_candidates(world, show, boxes, show.search, ft ~= nil, fset)
   for _, cat in ipairs(M.WORLD_CATS) do panel[cat].known = known[cat] end
   panel.monster.small_known = known.monster_small
   local kcounts = known.kinds
@@ -1554,7 +1657,7 @@ function M.world_markers(world, show, origin, boxes, quest_cids)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids, ft, kcounts)
+    quest_cids, ft, kcounts, related_cands(flist, world, show, boxes, show.search))
 end
 
 -- Cached entry point (SPEC 17.10.10). A 256-unit grid of the world's
@@ -1653,7 +1756,7 @@ local function add_cat(g, world, cat, show)
   M.world_stats.cell_entries[cat] = put_n
 end
 
-function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
+function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats, fx)
   world = world or {}
   show = show or {}
   stats = stats or M.world_stats
@@ -1724,7 +1827,18 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
     ft = g.ft
   end
   ctx.spot = ft ~= nil
+  -- v19 (SPEC 32.6): the related entries, kept on the grid record while the
+  -- key is the same (the grid itself changes with the world table)
+  local flist, fset = {}, {}
+  if fx ~= nil then
+    if g.fx_key ~= fx.key or g.fx_list == nil then
+      g.fx_key = fx.key
+      g.fx_list, g.fx_set = focus_entries(world, fx)
+    end
+    flist, fset = g.fx_list, g.fx_set
+  end
   local function take(cat, e)
+    if fset[e] then return end
     if cat == "monster" and kind_off(e, show) then return end
     if not entry_search(cat, e, drops, g, q, ctx) then return end
     stats.cand_builds = stats.cand_builds + 1
@@ -1791,7 +1905,7 @@ function M.world_markers_cached(world, show, origin, boxes, quest_cids, stats)
   end
   merge_shops(kept, shops, shop_of, hits)
   return world_finish(kept, merged, panel, cap, has_origin, shops, shop_all,
-    quest_cids, ft, g.kinds)
+    quest_cids, ft, g.kinds, related_cands(flist, world, show, boxes, q, g.labels))
 end
 
 -- The settlement nearest to pos by 3D distance (first wins a tie), or nil.
@@ -1811,6 +1925,24 @@ end
 -- Seeker's Token spot is kept as a marker but listed nowhere (SPEC 28.9.3).
 function M.is_result(m)
   return m.cat ~= "route_stop" and m.cat ~= "hint_pin" and not m.first_seeker
+    and m.cat ~= "focus_npc" and m.cat ~= "focus_place" and not m.focus_kept
+end
+
+-- v19 (SPEC 32): the focused quests that are still live, tracked first, then
+-- focus_qids in order; numbers above 0 only, no repeats, minus quests whose
+-- state is completed, failed or canceled.
+function M.focus_active(focus_qids, tracked_qid, adapter)
+  local out, seen = {}, {}
+  local function add(q)
+    if type(q) ~= "number" or q <= 0 or seen[q] then return end
+    seen[q] = true
+    local st = adapter.quest_state(q)
+    if st == "completed" or st == "failed" or st == "canceled" then return end
+    out[#out + 1] = q
+  end
+  add(tracked_qid)
+  for _, q in ipairs(type(focus_qids) == "table" and focus_qids or {}) do add(q) end
+  return out
 end
 
 -- The `limit` (default WORLD_ROWS, ten) nearest entries to origin as panel
@@ -1970,11 +2102,11 @@ local function usable(e) return type(e) == "table" and not e.missing end
 local function nonempty(s) return type(s) == "string" and s ~= "" end
 
 -- Row label: the visible text, tags, then a stable ImGui id after ###.
-function M.row_label(rec, nearest_qid)
+function M.row_label(rec, nearest_qid, focused)
   local tags = ""
   if rec.tracked then tags = tags .. " [tracked]" end
   if rec.qid == nearest_qid then tags = tags .. " [nearest]" end
-  return rec.name .. " - " .. rec.state .. (rec.waiting or "") .. tags
+  return (focused and "[F] " or "") .. rec.name .. " - " .. rec.state .. (rec.waiting or "") .. tags
     .. "###qd_" .. rec.qid
 end
 
@@ -2195,6 +2327,104 @@ local function giver_position(adapter, qid, cands, static, world_in, givers)
   return nil
 end
 
+-- v19 (SPEC 32.5): the related NPCs, items and places of each focused quest.
+-- Pure; the caller resolves each giver and the in-progress set into `live`.
+-- The previous result table itself is returned while every input matches.
+local related_memo = nil
+local focus_names_memo = {}   -- cid -> name, cached on the identity of world.npcs
+
+local function related_same(m, adapter, active, rel, places, needs, live, objs)
+  if m == nil or m.adapter ~= adapter or m.rel ~= rel or m.places ~= places
+    or m.needs ~= needs or #m.active ~= #active then
+    return false
+  end
+  for i, qid in ipairs(active) do
+    if m.active[i] ~= qid or m.givers[i] ~= live.givers[qid]
+      or m.prog[i] ~= (live.prog[qid] == true) or m.objs[i] ~= objs[i] then
+      return false
+    end
+  end
+  return true
+end
+
+function M.related_sets(adapter, active, rel, places, live)
+  live = live or {}
+  local givers, prog = live.givers or {}, live.prog or {}
+  live = { givers = givers, prog = prog }
+  local needs = adapter.item_needs and adapter.item_needs() or nil
+  local objs = {}
+  for i, qid in ipairs(active) do
+    objs[i] = adapter.objective_cids and adapter.objective_cids(qid) or false
+  end
+  local m = related_memo
+  if related_same(m, adapter, active, rel, places, needs, live, objs) then
+    return m.result
+  end
+
+  local function good(c)
+    return type(c) == "number" and c > 0 and not adapter.is_generic(c)
+  end
+  local result = {}
+  for i, qid in ipairs(active) do
+    local entry = type(rel) == "table" and rel[qid] or nil
+    local npcs, nseen, step, sseen = {}, {}, {}, {}
+    local function add(list, seen, c)
+      if good(c) and not seen[c] then seen[c] = true; list[#list + 1] = c end
+    end
+    local function add_all(list, seen, src)
+      for _, c in ipairs(type(src) == "table" and src or {}) do add(list, seen, c) end
+    end
+    local giver = givers[qid]
+    local oc = objs[i] or nil
+    add(npcs, nseen, giver)
+    add_all(npcs, nseen, oc)
+    add_all(npcs, nseen, adapter.cast_ids(qid))
+    add_all(step, sseen, oc)
+    if entry ~= nil then
+      add_all(npcs, nseen, entry.cast)
+      add_all(npcs, nseen, entry.npcs)
+      for _, d in ipairs(type(entry.dest) == "table" and entry.dest or {}) do
+        if type(d) == "table" then add(npcs, nseen, d.cid) end
+      end
+    end
+    if not prog[qid] then add(step, sseen, giver) end
+
+    local items, iseen = {}, {}
+    local function add_item(id)
+      if type(id) == "number" and not iseen[id] then iseen[id] = true; items[#items + 1] = id end
+    end
+    if entry ~= nil and type(entry.items) == "table" then
+      for _, id in ipairs(entry.items) do add_item(id) end
+    end
+    if type(needs) == "table" and type(needs[qid]) == "table" then
+      for _, n in ipairs(needs[qid]) do
+        if type(n) == "table" then add_item(n.id) end
+      end
+    end
+
+    local pl, pseen = {}, {}
+    if entry ~= nil and type(places) == "table" and type(entry.dest) == "table" then
+      for _, d in ipairs(entry.dest) do
+        if type(d) == "table" and d.key ~= nil and places[d.key] ~= nil and not pseen[d.key] then
+          pseen[d.key] = true; pl[#pl + 1] = d.key
+        end
+      end
+      table.sort(pl)
+    end
+    result[qid] = { npcs = npcs, step_npcs = step, items = items, places = pl }
+  end
+
+  local keep_active, keep_givers, keep_prog = {}, {}, {}
+  for i, qid in ipairs(active) do
+    keep_active[i] = qid
+    keep_givers[i] = givers[qid]
+    keep_prog[i] = (prog[qid] == true)
+  end
+  related_memo = { adapter = adapter, active = keep_active, givers = keep_givers,
+    prog = keep_prog, rel = rel, places = places, needs = needs, objs = objs, result = result }
+  return result
+end
+
 -- v13 (SPEC 21.8.2): step reads for in-progress quests, newest data carried
 -- through prev. Never-read first, then oldest; at most STEP_CAP reads per
 -- tick and one per qid per STEP_MIN_AGE seconds.
@@ -2265,11 +2495,21 @@ function M.compute(adapter, show)
   if show.tree_open and adapter.quest_region then quests, rec_by = {}, {} end
   local shown_inprog = {}   -- v8: in-progress qids that survive the visibility drop
 
+  -- v19 (SPEC 32): the focused quests that are live. focus_inprog is set here,
+  -- before the loop, whose first statement drops main quests.
+  local active = M.focus_active(show.focus_qids, show.focus_tracked_qid, adapter)
+  local fset, focus_inprog, focus_rec = {}, {}, {}
+  for _, qid in ipairs(active) do
+    fset[qid] = true
+    if prog[qid] then focus_inprog[qid] = true end
+  end
+
   for _, qid in ipairs(qids) do
     repeat
       if not adapter.is_side(qid) then break end
 
       local hint, cands = giver_candidates(adapter, qid)
+      if fset[qid] then focus_rec[qid] = { hint = hint, first = cands[1] } end
 
       -- Category: specific before generic (SPEC §9.2).
       local cat
@@ -2330,8 +2570,8 @@ function M.compute(adapter, show)
       end
       -- Visibility BEFORE resolution: hidden quests never reach groups,
       -- labels, unresolved, or unnamed (SPEC §9.3).
-      if not show[GROUP[cat]] then break end
-      if cat == "in_progress" then shown_inprog[qid] = true end
+      if not show[GROUP[cat]] and not fset[qid] then break end
+      if cat == "in_progress" and show[GROUP[cat]] then shown_inprog[qid] = true end
       -- A locked quest that no name source can label (no log entry, nothing
       -- learned, nothing in the game's text files) gets no marker rather
       -- than a "Quest <qid>" placeholder. An empty name counts as no name.
@@ -2403,6 +2643,7 @@ function M.compute(adapter, show)
         rec.pos = { x = pos.x, y = pos.y, z = pos.z }
         rec.giver = M.marker_cid(g) or hint
       end
+      if focus_rec[qid] ~= nil then focus_rec[qid].cid = M.marker_cid(g) end
       g.qids[#g.qids + 1] = qid
       g.raw_cats[qid] = cat
       if cat == "in_progress" then g.inprog[#g.inprog + 1] = qid end
@@ -2425,7 +2666,40 @@ function M.compute(adapter, show)
     -- SPEC 19.8.1: filtered before the item markers and quest_by_cid
     if q == nil or query_match(q, quest_hay(adapter, g)) then
       markers[#markers + 1] = g
+    else
+      for _, qid in ipairs(g.qids) do
+        if fset[qid] then
+          g.focus_kept = true
+          markers[#markers + 1] = g
+          break
+        end
+      end
     end
+  end
+
+  -- v19 (SPEC 32.5): the related sets of the focused quests. A giver is the
+  -- hint, else the marker's NPC (not in progress), else the first candidate.
+  local focus_result, fx
+  if #active > 0 then
+    local givers = {}
+    for qid, rec in pairs(focus_rec) do
+      givers[qid] = rec.hint or (not prog[qid] and rec.cid) or rec.first
+    end
+    local rs = M.related_sets(adapter, active, show.quest_rel,
+      (show.world or {}).focus_places, { givers = givers, prog = prog })
+    focus_result = { active = active, quests = rs }
+    -- v19 (SPEC 32.6): what the world entries are matched against
+    local qset, iset, qs, is = {}, {}, {}, {}
+    for _, qid in ipairs(active) do
+      if not qset[qid] then qset[qid] = true; qs[#qs + 1] = qid end
+      for _, id in ipairs(rs[qid] and rs[qid].items or {}) do
+        if not iset[id] then iset[id] = true; is[#is + 1] = id end
+      end
+    end
+    table.sort(qs)
+    table.sort(is)
+    fx = { qids = qset, items = iset,
+      key = table.concat(qs, ",") .. "|" .. table.concat(is, ",") }
   end
 
   -- v13 (SPEC 21.8): current step of a lone in-progress quest per marker.
@@ -2476,9 +2750,11 @@ function M.compute(adapter, show)
 
   -- v8 (SPEC 15.3h): item markers, appended AFTER every quest marker
   local item_capped = 0
-  if show.quest_items and show.in_progress and adapter.item_needs ~= nil then
+  local item_toggles = show.quest_items and show.in_progress
+  if (item_toggles or next(focus_inprog) ~= nil) and adapter.item_needs ~= nil then
     local ims
-    ims, item_capped = M.item_markers(adapter, shown_inprog, show.origin, q)
+    ims, item_capped = M.item_markers(adapter, item_toggles and shown_inprog or {},
+      show.origin, q, focus_inprog)
     for _, m in ipairs(ims) do markers[#markers + 1] = m end
   end
 
@@ -2496,11 +2772,11 @@ function M.compute(adapter, show)
     end
     for _, m in ipairs(markers) do
       local cid = M.marker_cid(m)
-      if cid ~= nil then quest_by_cid[cid] = m end
+      if cid ~= nil and not m.focus_kept then quest_by_cid[cid] = m end
     end
     local wms, merged, cover
     wms, world_panel, merged, cover = M.world_markers_cached(show.world, show,
-      show.world_origin, boxes, quest_by_cid)
+      show.world_origin, boxes, quest_by_cid, nil, fx)
     if q ~= nil then
       local matches = M.npc_matches(show.world.npcs, q)
       npc_match_cids = M.npc_match_cids(matches)
@@ -2516,25 +2792,29 @@ function M.compute(adapter, show)
     -- to a throwaway table, so the player pass stays the one the stats describe.
     if valid_pos(show.map_origin) then
       fullmap_world = M.world_markers_cached(show.world, show,
-        show.map_origin, boxes, quest_by_cid, { grid_builds = 0, cand_builds = 0 })
+        show.map_origin, boxes, quest_by_cid, { grid_builds = 0, cand_builds = 0 }, fx)
     end
   end
 
   -- v14 (SPEC 22.8.4, 22.11.3): the route stops and hint pins, outside the
   -- cap and the search filter. cid / stop and qid / i identify the icon.
   local undisc = show.world_undiscovered == true
-  local route = show.route
-  if type(route) == "table" and type(route.stops) == "table"
-    and type(route.cid) == "number" then
-    for n, s in ipairs(route.stops) do
-      if type(s) == "table" and valid_pos(s.pos)
-        and (s.discovered ~= false or undisc) then
-        markers[#markers + 1] = {
-          key = string.format("r:%d:%d", math.floor(route.cid), n),
-          cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
-          label = string.format("%s %02d-%02d", tostring(route.name),
-            math.floor(tonumber(s.from) or 0), math.floor(tonumber(s.to) or 0)),
-          cid = route.cid, stop = n }
+  for _, route in ipairs(type(show.routes) == "table" and show.routes or {}) do
+    if type(route) == "table" and type(route.stops) == "table"
+      and type(route.cid) == "number" and route.place == nil then
+      for n, s in ipairs(route.stops) do
+        if type(s) == "table" and s.lead ~= true and valid_pos(s.pos)
+          and (s.discovered ~= false or undisc) then
+          -- SPEC 32.14.11.4: num is the number shown; a lead entry's first
+          -- stop is the player, so its stops count from 1 after it.
+          local num = tonumber(s.idx) or (route.lead == true and n - 1) or n
+          markers[#markers + 1] = {
+            key = string.format("r:%d:%d", math.floor(route.cid), math.floor(num)),
+            cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
+            label = string.format("%s %02d-%02d", tostring(route.name),
+              math.floor(tonumber(s.from) or 0), math.floor(tonumber(s.to) or 0)),
+            cid = route.cid, stop = n, num = num, slot = route.slot }
+        end
       end
     end
   end
@@ -2546,6 +2826,128 @@ function M.compute(adapter, show)
         cat = "hint_pin", qids = {}, pos = pos_copy(p.pos),
         label = tostring(p.label or ""), qid = p.qid, i = p.i }
     end
+  end
+
+  -- v19 (SPEC 32.6.2): focus NPC and destination markers, then the hide/dim
+  -- pass over both marker lists.
+  local focus_counts
+  if focus_result ~= nil then
+    local rs = focus_result.quests
+    local akey = {}
+    for _, qid in ipairs(active) do akey[qid] = true end
+    -- 1. cid -> covering marker key (first marker per cid)
+    local cover_key, rel_keys = {}, {}
+    -- a world marker covers only when the full map also holds it (SPEC 32.6.2)
+    local fm_keys
+    if fullmap_world ~= nil then
+      fm_keys = {}
+      for _, m in ipairs(fullmap_world) do fm_keys[m.key] = true end
+    end
+    for _, m in ipairs(markers) do
+      local cid = M.marker_cid(m)
+      if cid == nil and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller")
+        and (fm_keys == nil or fm_keys[m.key]) then
+        cid = m.cid
+      end
+      if type(cid) == "number" and cover_key[cid] == nil then cover_key[cid] = m.key end
+    end
+    -- 2. focus NPC markers
+    local names
+    local wn = (show.world or {}).npcs
+    if type(wn) == "table" then
+      if focus_names_memo.src ~= wn then
+        local map = {}
+        for _, e in ipairs(wn) do
+          if type(e) == "table" and e.cid ~= nil and map[e.cid] == nil then map[e.cid] = e.name end
+        end
+        focus_names_memo.src, focus_names_memo.map = wn, map
+      end
+      names = focus_names_memo.map
+    end
+    local no_pos, seen_cid, added = {}, {}, 0
+    for _, qid in ipairs(active) do
+      for _, cid in ipairs(rs[qid] and rs[qid].npcs or {}) do
+        if not seen_cid[cid] then
+          seen_cid[cid] = true
+          local covered = cover_key[cid]
+          if covered ~= nil then rel_keys[covered] = true end
+          if adapter.npc_alive(cid) ~= false then
+            local x, y, z = adapter.npc_pos(cid)
+            if x == nil then
+              no_pos[#no_pos + 1] = cid
+            elseif covered == nil then
+              local label = names and names[cid]
+              if label == nil or label == "" then
+                label = adapter.npc_name and adapter.npc_name(cid) or nil
+              end
+              if label == nil or label == "" then label = "NPC " .. cid end
+              markers[#markers + 1] = { key = string.format("n:%d", cid), cat = "focus_npc",
+                cid = cid, qids = {}, pos = { x = x, y = y, z = z }, label = label }
+              added = added + 1
+            end
+          end
+        end
+      end
+    end
+    -- 3. destination markers, one per place key
+    local fplaces = (show.world or {}).focus_places
+    local pk, pseen = {}, {}
+    for _, qid in ipairs(active) do
+      for _, key in ipairs(rs[qid] and rs[qid].places or {}) do
+        if not pseen[key] then pseen[key] = true; pk[#pk + 1] = key end
+      end
+    end
+    for _, key in ipairs(pk) do
+      local pp = type(fplaces) == "table" and fplaces[key] or nil
+      if valid_pos(pp) then
+        local nms = {}
+        for _, qid in ipairs(active) do
+          for _, k2 in ipairs(rs[qid] and rs[qid].places or {}) do
+            if k2 == key then
+              nms[#nms + 1] = M.gate_name(qid, adapter, show.reveal_gate_names)
+              break
+            end
+          end
+        end
+        markers[#markers + 1] = { key = "f:" .. tostring(key), cat = "focus_place",
+          place = key, qids = {}, pos = pos_copy(pp), label = table.concat(nms, " / ") }
+        added = added + 1
+      end
+    end
+    -- 4. the hide / dim pass
+    local dim = show.focus_unrelated == 1
+    local function related(m)
+      if m.cat == "focus_npc" or m.cat == "focus_place" or m.cat == "route_stop"
+        or m.related or rel_keys[m.key] then return true end
+      if m.cat == "hint_pin" and akey[m.qid] then return true end
+      for _, qid in ipairs(m.qids or {}) do
+        if akey[qid] then return true end
+      end
+      return false
+    end
+    local function pass(list, counts)
+      local n = 0
+      for i = 1, #list do
+        local m = list[i]
+        local keep = true
+        if related(m) then
+          if counts then counts.related = counts.related + 1 end
+        elseif q ~= nil and M.is_result(m) then
+          keep = true
+        elseif dim then
+          m.dim = true
+          if counts then counts.dimmed = counts.dimmed + 1 end
+        else
+          keep = false
+          if counts then counts.hidden = counts.hidden + 1 end
+        end
+        if keep then n = n + 1; list[n] = m end
+      end
+      for i = #list, n + 1, -1 do list[i] = nil end
+    end
+    focus_counts = { related = 0, added = added, dimmed = 0, hidden = 0, no_pos = no_pos }
+    pass(markers, focus_counts)
+    if fullmap_world ~= nil then pass(fullmap_world) end
   end
 
   return {
@@ -2567,6 +2969,8 @@ function M.compute(adapter, show)
     hint_steps = hint_steps,
     npc_rows = npc_rows,
     npc_match_cids = npc_match_cids,
+    focus = focus_result,
+    focus_counts = focus_counts,
   }
 end
 
@@ -2593,15 +2997,105 @@ function M.signature(markers, committed)
     parts[#parts + 1] = string.format("%s=%d:%d:%d[%s]{%s}{%s}<%s>",
       m.key, math.floor(c.x), math.floor(c.y), math.floor(c.z),
       table.concat(m.qids, ","), m.label or "", m.hover or "",
-      (m.cat or "") .. (m.done and "|d" or "") .. (m.faded and "|f" or "") .. (m.step and ("|s" .. m.step) or ""))
+      (m.cat or "") .. (m.done and "|d" or "") .. (m.faded and "|f" or "") .. (m.dim and "|m" or "") .. (m.step and ("|s" .. m.step) or "")
+        .. (m.slot and ("|k" .. m.slot) or "")
+        .. (m.cat == "route_stop" and ("|t" .. tostring(m.stop)) or ""))
   end
   table.sort(parts)
   return table.concat(parts, "|"), new_committed
 end
 
+-- Route members (SPEC 32.7.1, 32.14): the focus NPCs the world walks
+-- schedules for (unique cids in active-quest order, the target counted once),
+-- then the destination places present in `places`; at most 8 published
+-- routes with the target, places last. Returns list, n (published), total (kept candidates + target).
+function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
+  local list, seen, inlist = {}, {}, {}
+  local total = target_cid ~= nil and 1 or 0
+  local active = focus ~= nil and focus.active or nil
+  local mode = opt ~= nil and opt.routes or 0
+  -- slots held back for the target while it is not yet in the list
+  local function reserve() return (target_cid ~= nil and not inlist[target_cid]) and 1 or 0 end
+  if active ~= nil and #active > 0 then
+    if mode > 0 then
+      for _, qid in ipairs(active) do
+        local q = focus.quests ~= nil and focus.quests[qid] or nil
+        local src = q ~= nil and (mode == 1 and q.step_npcs or q.npcs) or nil
+        for _, cid in ipairs(src or {}) do
+          if not seen[cid] then
+            seen[cid] = true
+            if cid ~= target_cid then total = total + 1 end
+            if cid == target_cid or #list + reserve() < ROUTE_CAP then
+              list[#list + 1] = { cid = cid, name = name_of(cid, nil) }
+              inlist[cid] = true
+            end
+          end
+        end
+      end
+    end
+    if opt ~= nil and opt.places == true and places ~= nil then
+      -- SPEC 32.14.11.1: gather the candidates, order them (prev first, then
+      -- nearest the player, then candidate order), keep one place per 150 m
+      -- cluster, and publish the kept ones in candidate order.
+      local pseen, cand = {}, {}
+      for _, qid in ipairs(active) do
+        local rel = quest_rel ~= nil and quest_rel[qid] or nil
+        for _, d in ipairs(rel ~= nil and rel.dest or {}) do
+          local key = d.key
+          if key ~= nil and not pseen[key] and places[key] ~= nil then
+            pseen[key] = true
+            cand[#cand + 1] = { key = key, pos = places[key], ord = #cand + 1 }
+          end
+        end
+      end
+      local prev = opt.prev
+      local player = opt.player
+      local dp = {}
+      if player ~= nil then
+        for _, c in ipairs(cand) do
+          if c.pos ~= nil then
+            local dx, dz = c.pos.x - player.x, c.pos.z - player.z
+            dp[c] = dx * dx + dz * dz
+          end
+        end
+      end
+      table.sort(cand, function(a, b)
+        local pa = prev ~= nil and prev[a.key] == true
+        local pb = prev ~= nil and prev[b.key] == true
+        if pa ~= pb then return pa end
+        if player ~= nil then
+          local da, db = dp[a] or math.huge, dp[b] or math.huge
+          if da ~= db then return da < db end
+        end
+        return a.ord < b.ord
+      end)
+      local kept = {}
+      for _, c in ipairs(cand) do
+        local near = false
+        for _, k in ipairs(kept) do
+          if k.pos ~= nil and c.pos ~= nil then
+            local dx, dz = c.pos.x - k.pos.x, c.pos.z - k.pos.z
+            if dx * dx + dz * dz <= MERGE_STOP_M * MERGE_STOP_M then near = true; break end
+          end
+        end
+        if not near then kept[#kept + 1] = c end
+      end
+      table.sort(kept, function(a, b) return a.ord < b.ord end)
+      for _, c in ipairs(kept) do
+        total = total + 1
+        if #list + reserve() < ROUTE_CAP then
+          list[#list + 1] = { cid = -c.key, place = c.key, name = name_of(nil, c.key) }
+        end
+      end
+    end
+  end
+  return list, #list + reserve(), total
+end
+
 -- v3 overhead layer (SPEC §10.2c): pure helpers, no sdk.
 function M.marker_cid(m)
   if type(m) ~= "table" or type(m.key) ~= "string" then return nil end
+  if m.cat == "focus_npc" then return m.cid end
   return tonumber(m.key:match("^c:(%d+)$"))
 end
 
@@ -2647,18 +3141,21 @@ function M.overhead_points(markers, cam, radius)
 end
 
 -- v8 (SPEC 15.3a): the item round runs only while BOTH toggles are on;
--- otherwise the tick invalidates (zero managed calls).
+-- otherwise the tick invalidates (zero managed calls). v19 (SPEC 32.6.1): the
+-- round also runs while show.focus_on.
 function M.item_walk_wanted(show)
   return show ~= nil and ((show.in_progress == true and show.quest_items == true)
     or show.world_sellers == true
-    or (show.inventory_quest_marks == true and show.item_menu_open == true))
+    or (show.inventory_quest_marks == true and show.item_menu_open == true)
+    or show.focus_on == true)
 end
 
 -- v14 (SPEC 22.10.1): "full" when the round also feeds the quest-item and
--- seller markers, "needs" when only the item menu marks want it.
+-- seller markers, "needs" when only the item menu marks want it. v19 (SPEC
+-- 32.6.1): also "full" while show.focus_on.
 function M.item_walk_mode(show)
   if show ~= nil and ((show.in_progress == true and show.quest_items == true)
-    or show.world_sellers == true) then
+    or show.world_sellers == true or show.focus_on == true) then
     return "full"
   end
   return "needs"
@@ -2692,7 +3189,8 @@ function M.minimap_markers(markers, origin, radius, cap)
       -- quest and item markers 0, route stops and hint pins 1, world 2
       local w = 0
       if WORLD_DEF[m.cat] ~= nil then w = 2
-      elseif m.cat == "route_stop" or m.cat == "hint_pin" then w = 1 end
+      elseif m.cat == "route_stop" or m.cat == "hint_pin"
+        or m.cat == "focus_place" then w = 1 end
       if lim >= 1 and (n < lim or before(w, d2, m.key, sel[n])) then
         local i = n < lim and n + 1 or n
         if n < lim then n = n + 1 end

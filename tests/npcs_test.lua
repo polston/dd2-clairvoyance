@@ -443,6 +443,42 @@ do
   check("polyline clears tail", n == 4 and #out == 4 and out[5] == nil)
 end
 
+-- leg_steps and polyline starts
+do
+  local function steps(pr, cur, out)
+    local n = N.leg_steps(pr, cur, out)
+    return n, table.concat(out, ",", 1, n)
+  end
+  local p3 = { { i = 1, j = 2 }, { i = 2, j = 3 }, { i = 3, j = 4 } }
+  local out = { 9, 9, 9, 9, 9 }
+  local n, s = steps(p3, 2, out)
+  check("leg_steps", n == 3 and s == "2,0,1" and out[4] == nil and out[5] == nil)
+  n, s = steps(p3, nil, out)
+  check("leg_steps no current", n == 3 and s == "0,0,0")
+  n, s = steps(p3, 4, out)
+  check("leg_steps overnight", n == 3 and s == "0,1,2")
+  n, s = steps({ { i = 2, j = 3 }, { i = 3, j = 4 } }, 1, out)
+  check("leg_steps overnight short", n == 2 and s == "0,1")
+  n, s = steps({ { i = 1, j = 2 }, { i = 2, j = 4 }, { i = 4, j = 5 } }, 3, out)
+  check("leg_steps spanning", n == 3 and s == "2,0,1")
+
+  local ends = { { lx = 1, ly = 2 }, { lx = 3, ly = 4 }, { lx = 5, ly = 6 } }
+  local o, st = {}, {}
+  n = N.route_polyline({ { i = 1, j = 2 }, { i = 2, j = 3 } }, ends, nil, 0, o, st)
+  check("route_polyline starts", n == 9 and st[1] == 1 and st[2] == 6 and o[5] == false)
+  n = N.route_polyline({ { i = 1, j = 2 }, { i = 2, j = 9 }, { i = 2, j = 3 } }, ends, nil, 0, o, st)
+  check("route_polyline starts skipped", n == 9 and st[1] == 1 and st[2] == 0 and st[3] == 6)
+  local o2 = {}
+  local n2 = N.route_polyline({ { i = 1, j = 2 }, { i = 2, j = 3 } }, ends, nil, 0, o2)
+  local parts = {}
+  for i = 1, n2 do parts[i] = tostring(o2[i]) end
+  check("route_polyline starts nil same output",
+    n2 == 9 and #o2 == 9 and table.concat(parts, ",") == "1,2,3,4,false,3,4,5,6")
+  n = N.route_polyline({ { i = 1, j = 2 } }, ends, nil, 0, o, st)
+  check("route_polyline starts cleared past last pair",
+    n == 4 and st[1] == 1 and st[2] == nil and st[3] == nil)
+end
+
 -- review fixes: stale pops, freed finished jobs, cleared failed fits
 do
   local g = { n = 3, x = { 0, 1, 2 }, y = { 0, 0, 0 }, z = { 0, 0, 0 },
@@ -556,6 +592,34 @@ do
   check("has_text quest text", N.has_text(h[2]) == true)
   check("has_text step text", N.has_text(h[3]) == true)
   check("has_text nil", N.has_text(nil) == false)
+end
+
+do
+  local q, info = N.parse_quests({ version = 1, pak = "p7", quests = {
+    ["10010"] = { cast = { 5, 6.0, -1, 2.5, "7" }, npcs = { 8 }, items = { 300 },
+      dest = { { cid = 9 }, { key = 44 }, { cid = 0, key = 0 }, "x", { cid = 10, key = 45 } },
+      decoded = true },
+    ["1.5"] = { cast = { 1 } }, ["-3"] = {}, abc = {}, ["10020"] = "x",
+    ["10030"] = { cast = 5, npcs = { a = 1 }, decoded = false } } })
+  local a = q[10010]
+  check("quests: lists keep positive whole numbers", a and table.concat(a.cast, ",") == "5,6"
+    and math.type(a.cast[2]) == "integer" and a.npcs[1] == 8 and a.items[1] == 300 and a.decoded == true)
+  check("quests: dest keeps entries with a positive cid or key", a and #a.dest == 3
+    and a.dest[1].cid == 9 and a.dest[1].key == nil and a.dest[2].key == 44
+    and a.dest[3].cid == 10 and a.dest[3].key == 45)
+  local b = q[10030]
+  check("quests: bad fields become empty lists", b and #b.cast == 0 and #b.npcs == 0
+    and #b.items == 0 and #b.dest == 0 and b.decoded == false)
+  check("quests: bad keys and non-table entries dropped", q[10020] == nil
+    and info.kept == 2 and info.dropped == 4 and info.pak == "p7" and info.version == 1
+    and info.first == "-3")
+  q, info = N.parse_quests(nil)
+  check("quests: nil input", next(q) == nil and info.kept == 0 and info.pak == nil and info.first == nil)
+  q, info = N.parse_quests({ pak = 5 })
+  check("quests: no quests table, non-string pak", next(q) == nil and info.pak == nil)
+  q, info = N.parse_quests({ version = "1", quests = { ["5"] = { decoded = 1 } } })
+  check("quests: decoded only when true, version only when a number",
+    q[5] and q[5].decoded == false and info.version == nil)
 end
 
 if failures > 0 then

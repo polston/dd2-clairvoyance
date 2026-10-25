@@ -1,10 +1,14 @@
-"""Decoder for the game's user-data files (a USR container around an RSZ block).
+"""Decoder for the game's user-data and scene files (a USR or SCN container around an RSZ block).
 
 Standard library only. Field layouts come from tools/layouts.json (see build_layouts.py).
 
 File layout:
   USR header: magic b"USR\0", resource count, user-data count, info count (i32 x3),
               resource table, user-data table, data offset (u64 x3)
+  SCN header: 64 bytes, magic b"SCN\0", counts for info, resource, folder, prefab and
+              user-data (i32 x5), offsets of the folder, resource, prefab and user-data tables
+              and of the data (u64 x5); the data offset (byte 56) is the RSZ block, which runs
+              to the last byte of the file
   RSZ block at the data offset (every RSZ offset is relative to it):
               magic b"RSZ\0", version u32, object count, instance count, user-data count,
               reserved (i32 x4 in all), instance offset, data offset, user-data offset (u64 x3),
@@ -107,7 +111,7 @@ class _Reader:
 
 
 def decode(data, layouts):
-    """Decode a user-data file to a list of instances (instance ids 1.. in order).
+    """Decode a user-data or scene file to a list of instances (instance ids 1.. in order).
 
     A Ref's idx is the 1-based instance id; use deref(). Raises DecodeError when a type has no
     layout, the data is truncated, or the file is not consumed to its last byte.
@@ -126,9 +130,12 @@ def deref(insts, ref):
 
 
 def _decode(buf, types):
-    if buf[:4] != b"USR\0":
-        raise DecodeError("not a user-data file")
-    res_count, ud_count, _info, _res_tbl, _ud_tbl, base = struct.unpack_from("<iiiQQQ", buf, 4)
+    if buf[:4] == b"USR\0":
+        base = struct.unpack_from("<iiiQQQ", buf, 4)[-1]
+    elif buf[:4] == b"SCN\0":
+        base = struct.unpack_from("<5i5Q", buf, 4)[-1]
+    else:
+        raise DecodeError("not a user-data or scene file")
     if buf[base:base + 4] != b"RSZ\0":
         raise DecodeError("no RSZ block")
     (_ver, obj_count, inst_count, ud_n, _r, inst_off, data_off, ud_off) = struct.unpack_from(

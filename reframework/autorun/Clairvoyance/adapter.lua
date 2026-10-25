@@ -2265,6 +2265,12 @@ local function is_side_quest(qid)
     return qid >= 20000 and qid <= 39999
 end
 
+-- the quests the objective walk and the item round both cover: side quests
+-- and the focused ones (SPEC 32.6.1.2)
+items.walks_quest = function(q)
+    return is_side_quest(q) or (items.focus_set ~= nil and items.focus_set[q])
+end
+
 -- SPEC 12.3a: one processor-list walk per call. Records only; the pure
 -- builder (injected core.objective_table) selects and orders.
 local function objective_walk_failed()
@@ -2410,7 +2416,7 @@ local function refresh_objectives_body()
     if prog == nil then objective_walk_failed() return end
     local progressing = {}
     for _, qid in ipairs(prog) do
-        if is_side_quest(qid) then progressing[qid] = true end
+        if items.walks_quest(qid) then progressing[qid] = true end
     end
     if next(progressing) == nil then
         -- No side quest in progress: skip the walk, but still commit so
@@ -3184,7 +3190,7 @@ local function item_round_needs(now)
     if prog == nil then item_round_failed() return end
     local wanted = {}
     for _, q in ipairs(prog) do
-        if not wanted[q] and is_side_quest(q) then wanted[q] = true end
+        if not wanted[q] and items.walks_quest(q) then wanted[q] = true end
     end
     if next(wanted) == nil then
         commit_item_needs({})
@@ -3340,7 +3346,8 @@ end
 -- item marker shares a UniqId with a quest marker or another item marker
 -- in one snapshot. A.map_marker_guid is the ONE place that picks the
 -- prefix per marker; add_markers passes every marker through it.
--- Prefixes: quest ...-4000-, item ...-4001-, world ...-4002-.
+-- Prefixes: quest ...-4000-, item ...-4001-, world ...-4002-, route ...-4003-,
+-- pin ...-4004-, focus npc ...-4005-, focus place ...-4006-.
 do
   local ITEM_GUID_PREFIX = "51a1c0de-0000-4001-8000-"
   function A.item_marker_guid(id, ord)
@@ -3358,11 +3365,21 @@ do
   -- v14 (SPEC 22.6.6): route stops and hint pins; 32 slots per owner
   local ROUTE_GUID_PREFIX = "51a1c0de-0000-4003-8000-"
   local PIN_GUID_PREFIX = "51a1c0de-0000-4004-8000-"
+  local FOCUS_NPC_GUID_PREFIX = "51a1c0de-0000-4005-8000-"
+  local FOCUS_PLACE_GUID_PREFIX = "51a1c0de-0000-4006-8000-"
   function A.map_marker_guid(m)
     local c = m.cat
+    if c == "focus_npc" then
+      return A.guid_parse(FOCUS_NPC_GUID_PREFIX .. string.format("%012x",
+        m.cid % 0x1000000000000))
+    end
+    if c == "focus_place" then
+      return A.guid_parse(FOCUS_PLACE_GUID_PREFIX .. string.format("%012x",
+        m.place % 0x1000000000000))
+    end
     if c == "route_stop" then
       return A.guid_parse(ROUTE_GUID_PREFIX .. string.format("%012x",
-        (m.cid * 32 + m.stop) % 0x1000000000000))
+        (m.cid * 32 + (m.num or m.stop)) % 0x1000000000000))
     end
     if c == "hint_pin" then
       return A.guid_parse(PIN_GUID_PREFIX .. string.format("%012x",
@@ -3525,6 +3542,22 @@ function A.make()
     items.static_related = type(map) == "table" and map or nil
     items.related_titles = nil
   end
+  -- SPEC 32.6.1.2: focused quests (main included) join the objective walk and
+  -- the item round; nil or an empty list clears the set
+  -- The memo keys on table identity, so a caller passes a new table when the
+  -- content changes.
+  function a.set_focus_qids(list)
+    if list == items.focus_src then return end   -- the same table as last time
+    items.focus_src = list
+    local set
+    if type(list) == "table" then
+      for _, q in ipairs(list) do
+        if type(q) == "number" then set = set or {}; set[q] = true end
+      end
+    end
+    items.focus_set = set
+  end
+  function a.focus_set() return items.focus_set end
   -- the next refresh_items round runs at once (Ruling 9)
   function a.reset_item_throttle() ITEM_LAST_AT = -math.huge end
   -- SPEC 22.11.4.1: every side quest's step text, keys the 0-based task index

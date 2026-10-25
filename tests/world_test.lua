@@ -135,6 +135,14 @@ local function find(list, uid)
   return nil
 end
 
+local function route_in(w, cid)
+  local l = w:input() and w:input().routes
+  if type(l) ~= "table" then return nil end
+  if cid == nil then return l[1] end
+  for _, e in ipairs(l) do if e.cid == cid then return e end end
+  return nil
+end
+
 local function places(rows, pak)
   return { version = 1, pak = pak or "1:1", rows = rows }
 end
@@ -2092,6 +2100,10 @@ do
   function stub.today(day, hour)
     return { week = math.floor(day / 7) % 4 + 1, weekday = day % 7, hour = hour }
   end
+  function stub.in_hours(h, lo, hi)
+    if lo < hi then return h >= lo and h < hi end
+    return h >= lo or h < hi
+  end
   function stub.route_stops(rows, today, area_pos, cur)
     stub.calls.route_stops = stub.calls.route_stops + 1
     stub.last_cur, stub.last_today = cur, today
@@ -2288,6 +2300,8 @@ do
     d.npcname[2001] = "Aa"
     d.rows[2001] = rows_of({ 6, 18, 49 }, { 18, 6, 46 }, { 0, 1, 99 })
     d.cur[2001] = { area = 49, location = 0, pos = P(5, 5, 5) }
+    d.rows[2002] = rows_of({ 6, 18, 49 })
+    d.cur[2002] = { area = 49, location = 0 }
     d.area_nodes[49] = { P(1, 0, 1), P(2, 0, 2) }
     d.area_nodes[46] = { P(990, 0, 990) }
     d.icons = {
@@ -2299,12 +2313,16 @@ do
     local w = f.new()
     local tg = on("search")
     w:refresh(0, true, tg)
-    check("route: none until set", w:input().route == nil)
+    check("route: none until set", route_in(w) == nil)
     w:set_route(2001, "Aa")
     check("route: set_route then refresh builds on that call",
       w:refresh(1, true, tg) == true)
-    local r = w:input().route
+    local r = route_in(w)
     check("route: cid and name", r ~= nil and r.cid == 2001 and r.name == "Aa")
+    check("routes: a list with one member", type(w:input().routes) == "table"
+      and #w:input().routes == 1 and w:input().routes[1].cid == 2001
+      and w:input().routes[1].name == "Aa")
+    check("routes: no input.route", w:input().route == nil)
     check("route: stops from route_stops", r and #r.stops == 2 and r.stops[1].area == 49
       and r.stops[1].pos.x == 1 and r.stops[2].area == 46)
     check("route: unplaced carried", r and r.unplaced == 1)
@@ -2322,7 +2340,7 @@ do
     w:poke()
     w:refresh(2, true, tg)
     check("route: unchanged hour reuses the cache", stub.calls.route_stops == 1
-      and w:input().route and #w:input().route.stops == 2)
+      and route_in(w) and #route_in(w).stops == 2)
     check("route: cache reads rows once", (f.reads_n.schedule_rows or 0) == 1)
     -- a new day at the same hour rebuilds
     d.day = 34
@@ -2343,17 +2361,24 @@ do
     check("route: next round at the same hour reuses", stub.calls.route_stops == 2)
     -- clear
     w:clear_route()
-    check("route: clear_route drops the published route", w:input().route == nil)
+    check("route: clear_route drops the published route", route_in(w) == nil)
+    check("routes: cleared list is nil", w:input().routes == nil)
     w:poke()
     w:refresh(5, true, tg)
-    check("route: stays cleared", w:input().route == nil)
+    check("route: stays cleared", route_in(w) == nil)
     -- set again, then reset clears it
     w:set_route(2001, "Aa")
     w:refresh(6, true, tg)
-    check("route: set again builds", w:input().route ~= nil)
+    check("route: set again builds", route_in(w) ~= nil)
+    w:set_route(2002, "Bb")
+    check("routes: set_route removes the old target at once", route_in(w, 2001) == nil)
+    w:refresh(6.5, true, tg)
+    check("routes: set_route to another cid replaces the target",
+      type(w:input().routes) == "table" and #w:input().routes == 1
+      and w:input().routes[1].cid == 2002)
     w:reset()
     w:refresh(7, true, tg)
-    check("route: reset clears the route", w:input().route == nil)
+    check("route: reset clears the route", route_in(w) == nil)
   end
 
   -- route errors
@@ -2369,19 +2394,19 @@ do
     f.fail.schedule_rows = true
     w:set_route(2001, "Aa")
     w:refresh(0, true, tg)
-    local r = w:input().route
+    local r = route_in(w)
     check("route err: raising schedule_rows", r ~= nil and r.err == "route unavailable"
       and r.cid == 2001 and r.name == "Aa" and r.stops == nil)
     f.fail.schedule_rows = nil
     w:poke()
     w:refresh(0.5, true, tg)
     check("route err: a failed build is retried the next round, same hour",
-      w:input().route.err == nil and #w:input().route.stops == 1)
+      route_in(w).err == nil and #route_in(w).stops == 1)
     d.hour = 9
     w:set_route(2001, "Aa")
     w:refresh(1, true, tg)
-    check("route err: recovers when the read works", w:input().route.err == nil
-      and #w:input().route.stops == 1)
+    check("route err: recovers when the read works", route_in(w).err == nil
+      and #route_in(w).stops == 1)
     -- -1/-1 current row
     local calls = stub.calls.route_stops
     d.cur[2001] = { area = -1, location = -1, key = 2309, pos = P(1, 1, 1) }
@@ -2389,7 +2414,7 @@ do
     d.hour = 10
     w:set_route(2001, "Aa")
     w:refresh(2, true, tg)
-    r = w:input().route
+    r = route_in(w)
     check("route off: unmatched key publishes stops + off_schedule",
       r.err == nil and #r.stops == 1 and r.off_schedule == true)
     check("route off: route_stops called with the current row",
@@ -2400,22 +2425,22 @@ do
     w:poke()
     w:refresh(2.4, true, tg)
     check("route off: off_schedule clears on an hour-change rebuild alone",
-      w:input().route.err == nil and w:input().route.off_schedule == nil)
+      route_in(w).err == nil and route_in(w).off_schedule == nil)
     w:set_route(2001, "Aa")
     w:refresh(2.5, true, tg)
     check("route off: a matched current row has no off_schedule",
-      w:input().route.err == nil and w:input().route.off_schedule == nil)
+      route_in(w).err == nil and route_in(w).off_schedule == nil)
     d.area_nodes[49] = nil
     d.hour = 14
     w:set_route(2001, "Aa")
     w:refresh(2.55, true, tg)
     check("route off: a matched route with zero placed stops is route unavailable",
-      w:input().route.err == "route unavailable" and w:input().route.stops == nil)
+      route_in(w).err == "route unavailable" and route_in(w).stops == nil)
     d.cur[2001] = { area = -1, location = -1, pos = P(1, 1, 1) }
     d.hour = 13
     w:set_route(2001, "Aa")
     w:refresh(2.6, true, tg)
-    r = w:input().route
+    r = route_in(w)
     check("route off: -1/-1 with nothing placeable is route unavailable",
       r.err == "route unavailable" and r.stops == nil)
     d.area_nodes[49] = { P(1, 0, 1) }
@@ -2426,8 +2451,8 @@ do
     w:set_route(2001, "Aa")
     w:refresh(2.62, true, tg)
     check("route off: nil entry passes nil and has no off_schedule",
-      stub.last_cur == nil and w:input().route.err == nil
-      and w:input().route.off_schedule == nil)
+      stub.last_cur == nil and route_in(w).err == nil
+      and route_in(w).off_schedule == nil)
     -- an overwrite change inside the same hour rebuilds; a failed sig errs
     d.cur[2001] = { area = 49, location = 0 }
     d.sig = "a"
@@ -2441,17 +2466,17 @@ do
     w:poke()
     w:refresh(2.66, true, tg)
     check("route sig: a changed signature in the same hour rebuilds",
-      stub.calls.route_stops == before + 1 and w:input().route.err == nil)
+      stub.calls.route_stops == before + 1 and route_in(w).err == nil)
     f.fail.current_sig = true
     w:poke()
     w:refresh(2.67, true, tg)
     check("route sig: a failed signature read shows route unavailable",
-      w:input().route.err == "route unavailable")
+      route_in(w).err == "route unavailable")
     f.fail.current_sig = nil
     d.sig = nil
     w:poke()
     w:refresh(2.68, true, tg)
-    check("route sig: recovers when the read works", w:input().route.err == nil)
+    check("route sig: recovers when the read works", route_in(w).err == nil)
     -- raising route_stops leaves no partial stops
     d.cur[2001] = { area = 49, location = 0 }
     local orig = stub.route_stops
@@ -2460,14 +2485,14 @@ do
     w:set_route(2001, "Aa")
     w:refresh(3, true, tg)
     stub.route_stops = orig
-    r = w:input().route
+    r = route_in(w)
     check("route err: raising route_stops gives err, no stops",
       r.err == "route unavailable" and r.stops == nil and r.unplaced == nil)
     -- schedule_now failure
     f.fail.schedule_now = true
     w:set_route(2001, "Aa")
     w:refresh(4, true, tg)
-    check("route err: schedule_now failure", w:input().route.err == "route unavailable")
+    check("route err: schedule_now failure", route_in(w).err == "route unavailable")
   end
 
   -- area_nodes through anchor_node; missing nodes leave a stop unplaced
@@ -2482,7 +2507,7 @@ do
     local w = f.new()
     w:set_route(2001, "Aa")
     w:refresh(0, true, on("search"))
-    local r = w:input().route
+    local r = route_in(w)
     check("route: anchor_node picks the stop position", #r.stops == 1
       and r.stops[1].pos.x == 9)
     check("route: empty node list stays unplaced", r.unplaced == 1)
@@ -2506,7 +2531,7 @@ do
     local w = f.new()
     w:set_route(2001, "Aa")
     w:refresh(0, true, on("search"))
-    local r = w:input().route
+    local r = route_in(w)
     check("route key: area -1 with different locations asked separately",
       r and #r.stops == 2 and r.stops[1].discovered == false
       and r.stops[2].discovered == true)
@@ -2678,12 +2703,784 @@ do
     w:set_route(2001, "Aa")
     w:refresh(0, true, on("search"))
     w:spawned_step(200)
-    check("reset all: precondition", #w:input().npcs == 1 and w:input().route ~= nil
+    check("reset all: precondition", #w:input().npcs == 1 and route_in(w) ~= nil
       and #w.spawned == 1)
     w:reset()
     w:refresh(1, true, on("search"))
-    check("reset all: route gone", w:input().route == nil)
+    check("reset all: route gone", route_in(w) == nil)
     check("reset all: spawned gone", #w.spawned == 0)
+  end
+
+  -- set_routes: members from the focus list (plan Task 2.2)
+  do
+    local function sfix()
+      local f, d = nfix()
+      d.bad = {}
+      for c = 2001, 2009 do
+        d.rows[c] = rows_of({ 6, 18, 49 })
+        d.cur[c] = { area = 49, location = 0 }
+      end
+      d.area_nodes[49] = { P(1, 0, 1) }
+      d.keypos = {}
+      f.reads.key_pos = function(k) return d.keypos[k] end
+      f.reads.schedule_rows = function(cid)
+        f.reads_n.schedule_rows = (f.reads_n.schedule_rows or 0) + 1
+        if d.bad[cid] then error("fake bad cid") end
+        return d.rows[cid]
+      end
+      return f, d
+    end
+    local L3 = { { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" }, { cid = 2003, name = "Cc" } }
+    local D4 = { cid = 2004, name = "Dd" }
+    local tg = on("search")
+    local function cids(w)
+      local t = {}
+      for i, e in ipairs((w:input() or {}).routes or {}) do t[i] = e.cid end
+      return table.concat(t, ",")
+    end
+    local function settle(w, now)
+      local n = 0
+      repeat n = n + 1 until not w:refresh(now, true, tg) or n > 20
+      return n
+    end
+    local f, d = sfix()
+    local w = f.new()
+    check("set_routes: exists", type(w.set_routes) == "function")
+    if type(w.set_routes) == "function" then
+      -- 1-4 at now 0
+      w:set_routes(L3)
+      local r1 = w:refresh(0, true, tg)
+      check("set_routes: one build per round", r1 == true and stub.calls.route_stops == 1
+        and cids(w) == "2001" and w:stats().route_builds == 1)
+      local r2 = w:refresh(0, true, tg)
+      local r3 = w:refresh(0, true, tg)
+      check("set_routes: run-again builds the rest", r2 == true and r3 == true
+        and stub.calls.route_stops == 3 and cids(w) == "2001,2002,2003"
+        and w:refresh(0, true, tg) == false)
+      local n0 = f.reads_n.current_sig
+      local sig0 = f.reads.current_sig
+      f.reads.current_sig = function(...) f.clock_t = f.clock_t + 0.001; return sig0(...) end
+      w:poke()
+      w:refresh(0, true, tg)
+      w:poke()
+      w:refresh(0, true, tg)
+      f.reads.current_sig = sig0
+      check("set_routes: every member's sig read each round",
+        f.reads_n.current_sig == n0 + 6 and stub.calls.route_stops == 3)
+      check("set_routes: route_sig adds every member's read",
+        math.abs((w:stats().ms.route_sig or 0) - 3) < 1e-6)
+      d.hour = 8
+      w:poke()
+      w:refresh(0, true, tg)
+      check("set_routes: hour change rebuilds one per round", stub.calls.route_stops == 4
+        and #w:input().routes == 3 and w:stats().route_builds == 4)
+      check("set_routes: the stale rest run again", w:refresh(0, true, tg) == true
+        and w:refresh(0, true, tg) == true and w:refresh(0, true, tg) == false
+        and stub.calls.route_stops == 6)
+      -- 5-9 at now 1
+      local g = w.route_gen
+      w:set_routes(L3)
+      check("set_routes: idempotent", w.route_gen == g and w:refresh(1, true, tg) == false)
+      -- a repeated identical call allocates nothing (early return)
+      collectgarbage("collect")
+      collectgarbage("stop")
+      local mem0 = collectgarbage("count")
+      for _ = 1, 500 do w:set_routes(L3) end
+      local grew = collectgarbage("count") - mem0
+      collectgarbage("restart")
+      check("set_routes: a repeated identical call allocates nothing", grew < 1 and w.route_gen == g)
+      -- the early return compares name and cid, not only the length
+      w:set_routes({ { cid = 2001, name = "X" }, L3[2], L3[3] })
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: a changed name behind an equal length is published",
+        route_in(w, 2001).name == "X")
+      w:set_routes({ L3[1], L3[2], { cid = 2004, name = "Cc" } })
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: a changed cid behind an equal length is published",
+        cids(w) == "2001,2002,2004" and route_in(w, 2003) == nil)
+      w:set_routes(L3)
+      w:poke()
+      settle(w, 1)
+      check("set_routes: the original list is published again",
+        route_in(w, 2001).name == "Aa" and cids(w) == "2001,2002,2003")
+      g = w.route_gen
+      local b = stub.calls.route_stops
+      w:set_routes({ L3[1], L3[2], L3[3], D4 })
+      check("set_routes: an added member builds alone", w.route_gen == g + 1
+        and w:refresh(1, true, tg) == true and stub.calls.route_stops == b + 1
+        and cids(w) == "2001,2002,2003,2004")
+      g = w.route_gen
+      w:set_routes({ L3[1], L3[3], D4 })
+      check("set_routes: a removed member leaves at once", w.route_gen == g + 1
+        and route_in(w, 2002) == nil and cids(w) == "2001,2003,2004")
+      check("set_routes: a removal pokes", w:refresh(1, true, tg) == true)
+      g, b = w.route_gen, stub.calls.route_stops
+      w:set_routes({ D4, L3[3], { cid = 2001, name = "Ax" } })
+      local r8 = w:refresh(1, true, tg)
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: name or order change neither pokes nor bumps", w.route_gen == g
+        and r8 == false and cids(w) == "2004,2003,2001" and route_in(w, 2001).name == "Ax"
+        and stub.calls.route_stops == b)
+      w:set_routes({ { cid = 2001 }, { cid = 2001 }, { cid = "x" }, { cid = 2003 } })
+      settle(w, 1)
+      check("set_routes: repeats and bad cids dropped", cids(w) == "2001,2003")
+    end
+
+    -- 10: a failing member does not block the rest; failed members retry in turn
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      d.bad[2001] = true
+      w:set_routes(L3)
+      local n = settle(w, 0)
+      check("set_routes: a failing member does not block the rest", n == 4
+        and route_in(w, 2001).err == "route unavailable"
+        and route_in(w, 2002).stops ~= nil and route_in(w, 2003).stops ~= nil)
+      local b, nb = stub.calls.route_stops, w:stats().route_builds
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: a failed member is retried once a round",
+        route_in(w, 2001).err == "route unavailable" and stub.calls.route_stops == b
+        and w:stats().route_builds == nb + 1 and w:refresh(1, true, tg) == false)
+      d.bad[2001] = nil
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: a failed member recovers", route_in(w, 2001).err == nil)
+    end
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      d.bad[2001], d.bad[2002] = true, true
+      w:set_routes(L3)
+      settle(w, 0)
+      d.bad[2002] = nil
+      w:poke()
+      w:refresh(1, true, tg)
+      local first = route_in(w, 2002).err
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: failed members are retried in turn",
+        first == "route unavailable" and route_in(w, 2002).err == nil
+        and route_in(w, 2001).err == "route unavailable")
+    end
+
+    -- 11: the search target lives apart from the members (Contract 4)
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_route(2001, "Aa")
+      w:set_routes({ L3[2], L3[3] })
+      settle(w, 0)
+      check("set_routes: target first, then the members", cids(w) == "2001,2002,2003")
+      local g = w.route_gen
+      w:set_routes({ L3[2], L3[3] })
+      check("set_routes: the per-tick call keeps the target", cids(w) == "2001,2002,2003"
+        and w.route_gen == g and w:refresh(1, true, tg) == false)
+      w:clear_route()
+      check("set_routes: clear_route drops only the target", cids(w) == "2002,2003")
+      w:set_route(2002, "Bb")
+      w:refresh(1, true, tg)
+      check("set_routes: a target that is a member is published once, first",
+        cids(w) == "2002,2003")
+      -- the focus list drops the cid that is still the target: no poke, no bump
+      settle(w, 2)
+      local gd = w.route_gen
+      w:set_routes({ L3[3] })
+      check("set_routes: dropping the target's cid is not a removal", w.route_gen == gd
+        and cids(w) == "2002,2003" and w:refresh(3, true, tg) == false)
+      -- the per-tick list carries the target's cid, then the target is cleared
+      w:set_routes({ L3[2], L3[3] })
+      settle(w, 4)
+      local b0 = w:stats().route_builds
+      w:set_routes({ L3[2], L3[3] })
+      w:clear_route()
+      w:poke()
+      w:refresh(5, true, tg)
+      check("set_routes: a per-tick list with the target's cid keeps it after clear_route",
+        cids(w) == "2002,2003" and w:stats().route_builds == b0)
+      -- 12: reset empties target and members; the next set_routes brings them back
+      w:reset()
+      w:refresh(5, true, tg)
+      local empty = w:input().routes == nil
+      w:set_routes(L3)
+      settle(w, 6)
+      check("set_routes: reset empties the members", empty and cids(w) == "2001,2002,2003")
+    end
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes({ L3[2], L3[1] })
+      w:set_route(2001, "Aa")
+      settle(w, 0)
+      check("set_routes: a member that becomes the target moves first", cids(w) == "2001,2002")
+      local b = stub.calls.route_stops
+      w:clear_route()
+      check("set_routes: clear_route keeps a member with the target's cid",
+        route_in(w, 2001) ~= nil and #w:input().routes == 2)
+      w:poke()
+      w:refresh(1, true, tg)
+      check("set_routes: that member keeps its cache, at its member place",
+        cids(w) == "2002,2001" and stub.calls.route_stops == b)
+    end
+
+    -- listing the current target's cid as a new member does not poke or bump
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_route(2002, "Bb")
+      settle(w, 0)
+      local ga = w.route_gen
+      w:set_routes({ L3[2] })
+      check("set_routes: the target's cid listed as a member is not an add",
+        w.route_gen == ga and w:refresh(1, true, tg) == false)
+    end
+
+    -- 13: members alone run a round
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(L3)
+      check("set_routes: members alone run a round", w:refresh(0, true, {}) == true
+        and w:input().routes ~= nil)
+    end
+
+    -- 14: eight members and an hour change: one build per round (SPEC 32.7.2.2)
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      local L8 = {}
+      for c = 2001, 2008 do L8[#L8 + 1] = { cid = c, name = "N" .. c } end
+      w:set_routes(L8)
+      settle(w, 0)
+      local b0 = w:stats().route_builds
+      d.hour = 8
+      w:poke()
+      local rounds, one_each = 0, true
+      while true do
+        local b = w:stats().route_builds
+        if not w:refresh(0, true, tg) then break end
+        rounds = rounds + 1
+        if w:stats().route_builds ~= b + 1 or #w:input().routes ~= 8 then one_each = false end
+        if rounds > 20 then break end
+      end
+      check("set_routes: eight members, one rebuild per round", b0 == 8 and rounds == 8
+        and one_each and w:stats().route_builds == 16)
+    end
+
+    -- route colour slots and the current stop (SPEC 32.14)
+    local function slots(w)
+      local t = {}
+      for i, e in ipairs((w:input() or {}).routes or {}) do t[i] = e.cid .. "=" .. tostring(e.slot) end
+      return table.concat(t, ",")
+    end
+    local function mem(...)
+      local t = {}
+      for _, c in ipairs({ ... }) do t[#t + 1] = { cid = c, name = "N" .. c } end
+      return t
+    end
+
+    -- 1: slots are sticky
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002, 2003))
+      settle(w, 0)
+      check("slots sticky: first three take 1,2,3", slots(w) == "2001=1,2002=2,2003=3")
+      w:set_routes(mem(2001, 2003))
+      settle(w, 0)
+      check("slots sticky: a removal keeps the others", slots(w) == "2001=1,2003=3")
+      w:set_routes(mem(2001, 2003, 2004))
+      settle(w, 0)
+      check("slots sticky: a newcomer takes the lowest free slot",
+        slots(w) == "2001=1,2003=3,2004=2")
+    end
+
+    -- 2: the search target takes the lowest free slot, and frees it
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002))
+      settle(w, 0)
+      w:set_route(2005, "Ee")
+      settle(w, 0)
+      check("target slot: the target takes the lowest free slot though listed first",
+        slots(w) == "2005=3,2001=1,2002=2")
+      w:clear_route()
+      w:set_routes(mem(2001, 2002, 2003))
+      settle(w, 0)
+      check("target slot: clear_route frees it for the next member",
+        slots(w) == "2001=1,2002=2,2003=3")
+    end
+
+    -- 3: error entries carry their slots
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002))
+      settle(w, 0)
+      d.bad[2001] = true
+      w:poke()
+      d.hour = 8
+      settle(w, 1)
+      check("slot on error: a failed build keeps the slot",
+        route_in(w, 2001).err ~= nil and slots(w) == "2001=1,2002=2")
+      d.bad[2001] = nil
+      d.hour = 7
+      settle(w, 2)
+      f.fail.current_sig = true
+      w:poke()
+      settle(w, 3)
+      check("slot on error: a bad signature read keeps the slots",
+        route_in(w, 2001).err ~= nil and route_in(w, 2002).err ~= nil
+        and slots(w) == "2001=1,2002=2")
+      f.fail.current_sig = nil
+      settle(w, 4)
+      f.fail.schedule_now = true
+      w:poke()
+      settle(w, 5)
+      check("slot on error: a schedule_now failure keeps the slots",
+        route_in(w, 2001).err ~= nil and slots(w) == "2001=1,2002=2")
+      f.fail.schedule_now = nil
+      local w2 = f.new()
+      w2:set_routes(mem(2001, 2002))
+      f.fail.schedule_now = true
+      settle(w2, 0)
+      check("slot on error: a schedule_now failure from the start still assigns",
+        slots(w2) == "2001=1,2002=2")
+      f.fail.schedule_now = nil
+    end
+
+    -- 4: past eight
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008))
+      settle(w, 0)
+      w:set_route(2009, "Ii")
+      w:refresh(1, true, tg)
+      check("slots past eight: the ninth has none, the eight keep theirs",
+        #w:input().routes == 9 and route_in(w, 2009).slot == nil
+        and slots(w) == "2009=nil,2001=1,2002=2,2003=3,2004=4,2005=5,2006=6,2007=7,2008=8")
+    end
+
+    -- 5: the current stop
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      d.rows[2001] = rows_of({ 0, 8, 49 }, { 8, 18, 49 }, { 18, 24, 49 })
+      d.rows[2002] = rows_of({ 0, 8, 49 }, { 18, 24, 49 })
+      w:set_routes(mem(2001, 2002))
+      d.hour = 10
+      settle(w, 0)
+      check("current: hour 10 is the second stop", route_in(w, 2001).current == 2)
+      check("current: no stop at the hour is nil", route_in(w, 2002).current == nil
+        and route_in(w, 2002).stops ~= nil and route_in(w, 2002).err == nil)
+      d.hour = 23
+      w:poke()
+      settle(w, 1)
+      check("current: hour 23 is the third stop", route_in(w, 2001).current == 3
+        and route_in(w, 2002).current == 2)
+    end
+
+    -- 6: reset clears the slots
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002))
+      settle(w, 0)
+      w:reset()
+      w:set_routes(mem(2002, 2001))
+      settle(w, 1)
+      check("slots: reset starts again from 1", slots(w) == "2002=1,2001=2")
+    end
+
+    -- place routes (SPEC 32.14.5)
+    local function ptg(player, keys)
+      local t = on("search")
+      t.player, t.focus_keys = player, keys
+      return t
+    end
+    local PL = { { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" } }
+
+    -- 1: a place member
+    f, d = sfix()
+    w = f.new()
+    d.keypos[77] = P(200, 0, 200)
+    if type(w.set_routes) == "function" then
+      w:set_routes(PL)
+      local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
+      local n = 0
+      repeat n = n + 1 until not w:refresh(0, true, t1) or n > 20
+      local pe = route_in(w, -77)
+      check("place member: after the NPC, with the place and two stops",
+        cids(w) == "2001,-77" and pe ~= nil and pe.place == 77 and pe.name == "Q"
+        and pe.stops ~= nil and #pe.stops == 2)
+      check("place member: stops are the player and the place, both discovered",
+        pe ~= nil and pe.stops ~= nil and pe.stops[1].pos.x == 5 and pe.stops[1].pos.y == 1
+        and pe.stops[2].pos.x == 200 and pe.stops[2].pos.z == 200
+        and pe.stops[1].discovered == true and pe.stops[2].discovered == true)
+      check("place member: a slot and no current", pe ~= nil and pe.slot == 2
+        and pe.current == nil and pe.err == nil)
+    end
+
+    -- 2: no build, no signature read, no schedule_now failure
+    f, d = sfix()
+    w = f.new()
+    d.keypos[77] = P(10, 0, 10)
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = -77, place = 77, name = "Q" } })
+      local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
+      w:refresh(0, true, t1)
+      check("place no build: only the place leaves no build and no signature read",
+        route_in(w, -77) ~= nil and w:stats().route_builds == 0
+        and (f.reads_n.current_sig or 0) == 0 and stub.calls.route_stops == 0)
+      w:set_routes(PL)
+      f.fail.schedule_now = true
+      w:poke()
+      w:refresh(1, true, t1)
+      check("place no build: schedule_now failing errs the NPC, not the place",
+        route_in(w, 2001).err ~= nil and route_in(w, -77).err == nil
+        and #route_in(w, -77).stops == 2)
+      f.fail.schedule_now = nil
+      -- the same cid without its place: the early return must not hide it
+      w:set_routes({ { cid = 2001, name = "A" }, { cid = -77, name = "Q" } })
+      w:poke()
+      settle(w, 2)
+      check("place no build: a dropped place behind an equal length is published",
+        route_in(w, -77) ~= nil and route_in(w, -77).place == nil)
+    end
+
+    -- 3: waits for the key and the player, holding no slot
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" } })
+      local n = 0
+      local t0 = ptg(nil, { 77 })
+      d.keypos[77] = P(200, 0, 200)
+      repeat n = n + 1 until not w:refresh(0, true, t0) or n > 20
+      check("place waits: no player, no place entry and the NPC takes slot 1",
+        route_in(w, -77) == nil and slots(w) == "2001=1")
+      d.keypos[77] = nil
+      local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
+      w:reset()
+      w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" } })
+      n = 0
+      repeat n = n + 1 until not w:refresh(1, true, t1) or n > 20
+      check("place waits: no key position, no place entry",
+        route_in(w, -77) == nil and slots(w) == "2001=1")
+      d.keypos[77] = P(200, 0, 200)
+      w:poke()
+      w:refresh(2, true, t1)
+      check("place waits: both present, the entry appears with the next slot",
+        route_in(w, -77) ~= nil and slots(w) == "-77=2,2001=1")
+      w:poke()
+      w:refresh(3, true, t0)
+      check("place waits: the player gone frees the slot",
+        route_in(w, -77) == nil and slots(w) == "2001=1")
+      w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" },
+        { cid = 2002, name = "B" } })
+      local n2 = 0
+      repeat n2 = n2 + 1 until not w:refresh(4, true, t0) or n2 > 20
+      check("place waits: a member joining takes the slot the place freed",
+        slots(w) == "2001=1,2002=2")
+    end
+
+    -- 4: guards
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = 2001, name = "A" } })
+      settle(w, 0)
+      local g0 = w.route_gen
+      -- a kept member would be an add: it bumps route_gen
+      w:set_routes({ { cid = 2001, name = "A" }, { cid = 0, place = 0, name = "Z" },
+        { cid = -1.5, place = 1.5, name = "Y" }, { cid = -9, place = 77, name = "X" },
+        { cid = 2001, place = 77, name = "W" } })
+      check("place guards: place 0, 1.5 and a cid other than -place are dropped",
+        w.route_gen == g0 and cids(w) == "2001")
+      local g = w.route_gen
+      w:set_route(-5, "Z")
+      w:set_route(0, "Z")
+      check("place guards: set_route ignores a cid at or below 0",
+        w.route_gen == g and cids(w) == "2001")
+    end
+
+    -- 5: moving the player drops the old near key
+    f, d = sfix()
+    w = f.new()
+    d.keypos[77] = P(200, 0, 200)
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = -77, place = 77, name = "Q" } })
+      w:refresh(0, true, ptg({ x = 5, y = 1, z = 5 }, { 77 }))
+      w.near["5.0,1.0,5.0"] = 3
+      w.near["200.0,0.0,200.0"] = 4
+      w:poke()
+      w:refresh(1, true, ptg({ x = 5, y = 1, z = 5 }, { 77 }))
+      check("place re-path: an unmoved player keeps its near key", w.near["5.0,1.0,5.0"] == 3)
+      w:poke()
+      w:refresh(2, true, ptg({ x = 6, y = 1, z = 6 }, { 77 }))
+      check("place re-path: a moved player drops the old near key only",
+        w.near["5.0,1.0,5.0"] == nil and w.near["200.0,0.0,200.0"] == 4)
+    end
+
+    -- route clean-up (SPEC 32.14.11.2, 11.3): places held back, one-stop lead
+    do
+      local PA = { x = 5, y = 1, z = 5 }
+      local tick = 0
+      local function go(w, t)
+        local n = 0
+        tick = tick + 1
+        w:poke()
+        repeat n = n + 1 until not w:refresh(tick, true, t) or n > 20
+      end
+      local function one(w, t)
+        tick = tick + 1
+        w:poke()
+        w:refresh(tick, true, t)
+      end
+      local function undisc(dd)
+        dd.icons = {
+          { type = K.SETTLEMENT_TYPE, pos = P(0, 0, 0), disp_id = "a", icon_id = 1 },
+          { type = K.SETTLEMENT_TYPE, pos = P(1000, 0, 1000), disp_id = "b", icon_id = 2 } }
+        dd.msgs = { a = "Town A", b = "Town B" }
+        dd.icons_found = { [2] = true }
+        dd.disc_n = 1
+      end
+      local function setup(kp)
+        local ff, dd = sfix()
+        dd.keypos[77] = kp or P(200, 0, 200)
+        return ff, dd, ff.new()
+      end
+      local function bump(dd) dd.sig = (dd.sig or "") .. "x" end
+
+      -- 1: a place on an NPC stop is not published
+      local f1, d1, w1 = setup(P(150, 0, 1))
+      w1:set_routes(PL)
+      go(w1, ptg(PA, { 77 }))
+      check("place on NPC stop: 149 m, no place entry", route_in(w1, -77) == nil
+        and route_in(w1, 2001) ~= nil)
+      w1:set_routes({ { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" },
+        { cid = 2002, name = "B" } })
+      go(w1, ptg(PA, { 77 }))
+      check("place on NPC stop: a joining member takes the would-be slot",
+        slots(w1) == "2001=1,2002=2")
+      d1.keypos[77] = P(152, 0, 1)
+      w1:reset()
+      w1:set_routes(PL)
+      go(w1, ptg(PA, { 77 }))
+      check("place on NPC stop: 151 m, the place publishes", route_in(w1, -77) ~= nil)
+
+      -- 1b: a held place frees its slot
+      local f2, d2, w2 = setup()
+      w2:set_routes(PL)
+      go(w2, ptg(PA, { 77 }))
+      check("held place frees slot: precondition", slots(w2) == "2001=1,-77=2")
+      d2.area_nodes[50] = { P(200, 0, 190) }
+      d2.rows[2001] = rows_of({ 6, 18, 50 })
+      bump(d2)
+      go(w2, ptg(PA, { 77 }))
+      check("held place frees slot: no place entry", route_in(w2, -77) == nil)
+      w2:set_routes({ { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" },
+        { cid = 2002, name = "B" } })
+      go(w2, ptg(PA, { 77 }))
+      check("held place frees slot: a joining member takes it",
+        slots(w2) == "2001=1,2002=2")
+
+      -- 2: a place on an undiscovered stop
+      local f3, d3, w3 = setup(P(11, 0, 1))
+      undisc(d3)
+      w3:set_routes(PL)
+      go(w3, ptg(PA, { 77 }))
+      check("place on undiscovered stop: published", route_in(w3, -77) ~= nil)
+      local tu = ptg(PA, { 77 })
+      tu.undiscovered = true
+      go(w3, tu)
+      check("place on undiscovered stop: held with undiscovered shown",
+        route_in(w3, -77) == nil)
+
+      -- 3: places wait for NPC builds
+      local f4, d4, w4 = setup()
+      w4:set_routes({ { cid = 2001, name = "A" }, { cid = 2002, name = "B" },
+        { cid = -77, place = 77, name = "Q" } })
+      one(w4, ptg(PA, { 77 }))
+      check("places wait for NPC builds: round 1 has no place",
+        route_in(w4, -77) == nil and w4:stats().route_builds == 1)
+      one(w4, ptg(PA, { 77 }))
+      check("places wait for NPC builds: round 2 has it", route_in(w4, -77) ~= nil
+        and w4:stats().route_builds == 2)
+
+      -- 3b: a shown place keeps its slot
+      local f5, d5, w5 = setup()
+      w5:set_routes(PL)
+      go(w5, ptg(PA, { 77 }))
+      check("shown place keeps its slot: precondition", slots(w5) == "2001=1,-77=2")
+      w5:set_routes({ { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" },
+        { cid = 2003, name = "C" }, { cid = 2004, name = "D" } })
+      one(w5, ptg(PA, { 77 }))
+      local pe5 = route_in(w5, -77)
+      check("shown place keeps its slot: members joining", pe5 ~= nil and pe5.slot == 2
+        and route_in(w5, 2003) ~= nil and route_in(w5, 2004) == nil)
+      local f6, d6, w6 = setup()
+      w6:set_routes(PL)
+      go(w6, ptg(PA, { 77 }))
+      w6:set_route(2004, "D")
+      w6:set_routes({ { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" },
+        { cid = 2005, name = "E" } })
+      one(w6, ptg(PA, { 77 }))
+      local pe6 = route_in(w6, -77)
+      check("shown place keeps its slot: search target and a member",
+        pe6 ~= nil and pe6.slot == 2)
+
+      -- 4, 5: a one-stop NPC leads from the player
+      local f7, d7, w7 = setup()
+      w7:set_routes({ { cid = 2001, name = "A" } })
+      go(w7, ptg(PA, nil))
+      local e7 = route_in(w7, 2001)
+      check("one-stop lead: lead, two stops, the player first",
+        e7 ~= nil and e7.lead == true and #e7.stops == 2 and e7.stops[1].lead == true
+        and e7.stops[1].pos.x == 5 and e7.stops[1].pos.z == 5
+        and e7.stops[1].discovered == true)
+      check("one-stop lead: the NPC stop carries idx, current 2 at its hour",
+        e7.stops[2].idx == 1 and e7.stops[2].pos.x == 1 and e7.current == 2)
+      local b7 = w7:stats().route_builds
+      go(w7, ptg(nil, nil))
+      e7 = route_in(w7, 2001)
+      check("one-stop lead: no player, the cache kept one stop and no rebuild",
+        w7:stats().route_builds == b7 and #e7.stops == 1 and e7.lead == nil
+        and e7.stops[1].lead == nil)
+      d7.hour = 20
+      go(w7, ptg(PA, nil))
+      check("one-stop lead: current nil off its hour", route_in(w7, 2001).lead == true
+        and route_in(w7, 2001).current == nil)
+
+      -- 6: undiscovered two-stop
+      local f8, d8, w8 = setup()
+      undisc(d8)
+      d8.area_nodes[46] = { P(990, 0, 990) }
+      d8.rows[2001] = rows_of({ 6, 12, 49 }, { 12, 18, 46 })
+      w8:set_routes({ { cid = 2001, name = "A" } })
+      go(w8, ptg(PA, nil))
+      local e8 = route_in(w8, 2001)
+      check("undiscovered two-stop: leads with the player and stop 2",
+        e8 ~= nil and e8.lead == true and #e8.stops == 2 and e8.stops[2].idx == 2
+        and e8.stops[2].pos.x == 990)
+      local t8 = ptg(PA, nil)
+      t8.undiscovered = true
+      go(w8, t8)
+      e8 = route_in(w8, 2001)
+      check("undiscovered two-stop: undiscovered shown, no lead, two own stops",
+        e8.lead == nil and #e8.stops == 2 and e8.stops[1].lead == nil)
+
+      -- 6b: a hidden one-stop
+      local f9, d9, w9 = setup()
+      undisc(d9)
+      w9:set_routes({ { cid = 2001, name = "A" } })
+      go(w9, ptg(PA, nil))
+      local e9 = route_in(w9, 2001)
+      check("hidden one-stop: no lead, one stop", e9 ~= nil and e9.lead == nil
+        and #e9.stops == 1)
+      local t9 = ptg(PA, nil)
+      t9.undiscovered = true
+      go(w9, t9)
+      e9 = route_in(w9, 2001)
+      check("hidden one-stop: undiscovered shown, lead with two stops",
+        e9.lead == true and #e9.stops == 2)
+
+      -- 7: the lead player moves
+      local f10, d10, w10 = setup()
+      w10:set_routes({ { cid = 2001, name = "A" } })
+      go(w10, ptg(PA, nil))
+      w10.near["5.0,1.0,5.0"] = 3
+      go(w10, ptg({ x = 6, y = 1, z = 6 }, nil))
+      check("lead player moves: the old near key is dropped",
+        w10.near["5.0,1.0,5.0"] == nil)
+
+      -- 8: lead to two-stop
+      local f11, d11, w11 = setup()
+      w11:set_routes({ { cid = 2001, name = "A" } })
+      go(w11, ptg(PA, nil))
+      w11.near["5.0,1.0,5.0"] = 3
+      d11.rows[2001] = rows_of({ 6, 12, 49 }, { 12, 18, 49 })
+      d11.area_nodes[49] = { P(1, 0, 1), P(2, 0, 2) }
+      bump(d11)
+      go(w11, ptg(PA, nil))
+      local e11 = route_in(w11, 2001)
+      check("lead to two-stop: no lead, two own stops", e11.lead == nil and #e11.stops == 2
+        and e11.stops[1].lead == nil)
+      d11.rows[2001] = rows_of({ 6, 18, 49 })
+      bump(d11)
+      go(w11, ptg({ x = 6, y = 1, z = 6 }, nil))
+      check("lead to two-stop: the record was cleared, A's key stays",
+        route_in(w11, 2001).lead == true and w11.near["5.0,1.0,5.0"] == 3)
+
+      -- 5: no player, a fresh NPC never led
+      local f13, d13, w13 = setup()
+      w13:set_routes({ { cid = 2001, name = "A" } })
+      w13.near["5.0,1.0,5.0"] = 3
+      go(w13, ptg(nil, nil))
+      local e13 = route_in(w13, 2001)
+      check("no player no lead: one stop, no lead, near key untouched",
+        e13 ~= nil and e13.lead == nil and #e13.stops == 1 and e13.stops[1].lead == nil
+        and w13.near["5.0,1.0,5.0"] == 3)
+
+      -- 8b: an error round clears the lead record
+      local f14, d14, w14 = setup()
+      w14:set_routes({ { cid = 2001, name = "A" } })
+      go(w14, ptg(PA, nil))
+      w14.near["5.0,1.0,5.0"] = 3
+      f14.fail.current_sig = true
+      go(w14, ptg(PA, nil))
+      check("lead error round: the NPC entry is an error entry",
+        route_in(w14, 2001) ~= nil and route_in(w14, 2001).err ~= nil)
+      f14.fail.current_sig = nil
+      go(w14, ptg({ x = 6, y = 1, z = 6 }, nil))
+      check("lead error round: the record was cleared, A's key stays",
+        route_in(w14, 2001).lead == true and w14.near["5.0,1.0,5.0"] == 3)
+
+      -- 1c: exactly 150 m from a drawn stop is held
+      local f15, d15, w15 = setup(P(151, 0, 1))
+      w15:set_routes(PL)
+      go(w15, ptg(PA, { 77 }))
+      check("place on NPC stop: exactly 150 m, no place entry", route_in(w15, -77) == nil
+        and route_in(w15, 2001) ~= nil)
+
+      -- 1d: the distance counts z, and ignores y
+      local f16, d16, w16 = setup(P(1, 0, 150))
+      w16:set_routes(PL)
+      go(w16, ptg(PA, { 77 }))
+      check("place on NPC stop: 149 m along z, no place entry", route_in(w16, -77) == nil
+        and route_in(w16, 2001) ~= nil)
+      local f17, d17, w17 = setup(P(1, 500, 152))
+      w17:set_routes(PL)
+      go(w17, ptg(PA, { 77 }))
+      check("place on NPC stop: 151 m along z with a large y offset, the place publishes",
+        route_in(w17, -77) ~= nil)
+
+      -- 9: all_err places
+      local f12, d12, w12 = setup()
+      w12:set_routes(PL)
+      f12.fail.schedule_now = true
+      go(w12, ptg(PA, { 77 }))
+      check("all_err places: a place publishes as today", route_in(w12, -77) ~= nil
+        and route_in(w12, 2001).err ~= nil)
+      f12.fail.schedule_now = nil
+
+      -- 9b: an all_err round clears an NPC entry's lead record
+      local f18, d18, w18 = setup()
+      w18:set_routes({ { cid = 2001, name = "A" } })
+      go(w18, ptg(PA, nil))
+      w18.near["5.0,1.0,5.0"] = 3
+      f18.fail.schedule_now = true
+      go(w18, ptg(PA, nil))
+      f18.fail.schedule_now = nil
+      go(w18, ptg({ x = 6, y = 1, z = 6 }, nil))
+      check("all_err NPC entry: the record was cleared, A's key stays",
+        w18.near["5.0,1.0,5.0"] == 3)
+    end
   end
 
   -- quest override rows replace the live overwrite list in a copy (SPEC 26.4)
@@ -2749,9 +3546,10 @@ do
   local stub = setmetatable({}, { __index = real })
   package.loaded["Clairvoyance.npcs"] = stub
   local fixed_stops = {}
-  function stub.route_stops()
+  local stops_by = {}
+  function stub.route_stops(rows)
     local out = {}
-    for i, p in ipairs(fixed_stops) do
+    for i, p in ipairs(stops_by[rows and rows.cid] or fixed_stops) do
       out[i] = { from = 0, to = 24, area = i, location = 0, pos = p }
     end
     return out, 0
@@ -2788,7 +3586,7 @@ do
         return fn(...)
       end
     end
-    rdef("schedule_rows", function() return {} end)
+    rdef("schedule_rows", function(cid) return { cid = cid } end)
     rdef("schedule_now", function() return d.day, d.hour end)
     rdef("current_row", function() return { area = 1, location = 1 } end)
     rdef("area_nodes", function() return nil end)
@@ -2838,7 +3636,7 @@ do
     while wb.graph == nil and calls_n < 100 do
       wb:path_step(0.5, 1, true)
       calls_n = calls_n + 1
-      local p = pct(wb:path_status(1))
+      local p = pct(wb:path_status(1, 2001))
       if p ~= nil then
         if p < last then mono = false end
         last = p
@@ -2874,7 +3672,7 @@ do
     end
     d.graph_fail_at = 1
     frame()
-    check("fail: status unavailable", w:path_status(1) == "path unavailable")
+    check("fail: status unavailable", w:path_status(1, 2001) == "path unavailable")
     check("fail: no graph, not busy", w.graph == nil and w:path_busy() == false)
     check("fail: logged once", #f.logs == 1)
     frame(); frame()
@@ -2928,7 +3726,7 @@ do
     local seen100 = false
     for _ = 1, 400 do
       w:path_step(0.5, 1, true)
-      if w.graph == nil and pct(w:path_status(1)) == 100 then seen100 = true end
+      if w.graph == nil and pct(w:path_status(1, 2001)) == 100 then seen100 = true end
     end
     check("copy: 100% shown during link resolution", seen100 and w.graph ~= nil
       and w.graph.n == 300 and w.graph.lc[299] == 1 and w.graph.lt[w.graph.ls[299]] == 300)
@@ -3060,23 +3858,23 @@ do
     local f = gfix()
     local w = with_route(f, R3)
     w:path_step(1e6, 1, true)
-    check("route: pairs listed before steps", #w:route_paths(true) == 2
-      and w:route_paths(true)[1].pts == nil)
-    check("route: status finding", w:path_status(1) == "path: finding")
-    check("route: status nil when route_path is 0", w:path_status(0) == nil)
+    check("route: pairs listed before steps", #w:route_paths(true)[2001] == 2
+      and w:route_paths(true)[2001][1].pts == nil)
+    check("route: status finding", w:path_status(1, 2001) == "path: finding")
+    check("route: status nil when route_path is 0", w:path_status(0, 2001) == nil)
     local n = 0
-    while w:path_status(1) ~= "path ready" and n < 50 do
+    while w:path_status(1, 2001) ~= "path ready" and n < 50 do
       w:path_step(1e6, 1, true)
       n = n + 1
     end
-    local l = w:route_paths(true)
+    local l = w:route_paths(true)[2001]
     check("route: both pairs found", #l == 2 and l[1].pts ~= nil and l[2].pts ~= nil)
     check("route: pair 1 runs node 1 to 4", l[1].i == 1 and l[1].j == 2 and #l[1].pts == 12
       and l[1].pts[1] == 0 and l[1].pts[10] == 30 and l[1].pts[12] == 0)
     check("route: pair 2 runs node 4 to 5", l[2].pts ~= nil and l[2].pts[1] == 30
       and l[2].pts[#l[2].pts - 2] == 40)
-    check("route: status ready", w:path_status(1) == "path ready")
-    check("route: list is cached", w:route_paths(true) == l)
+    check("route: status ready", w:path_status(1, 2001) == "path ready")
+    check("route: list is cached", w:route_paths(true)[2001] == l)
     check("route: stats", w.last_expanded ~= nil and w.search_ms_max >= 0 and w.last_pair ~= nil)
     local np = 0
     for _ in pairs(w.paths) do np = np + 1 end
@@ -3099,8 +3897,8 @@ do
     for _ = 1, 5 do w:path_step(1e6, 1, true) end
     check("hour: no new scan or search", calls.scan == 0 and calls.search == 0
       and calls.pairs == pairs_before)
-    check("hour: still ready", w:path_status(1) == "path ready"
-      and w:route_paths(true)[1].pts ~= nil)
+    check("hour: still ready", w:path_status(1, 2001) == "path ready"
+      and w:route_paths(true)[2001][1].pts ~= nil)
   end
 
   -- cancellation of a running search
@@ -3127,6 +3925,101 @@ do
     check("cancel: set_route to another cid", w.path_job == nil)
   end
 
+  -- route members share one walking-path job (plan Task 2.3)
+  do
+    local f = gfix()
+    f.tick = 0.001
+    stops_by[2002] = { P(10, 0, 0), P(40, 0, 0) }
+    local w = with_route(f, R3)
+    w:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" } })
+    w:refresh(1, true, on("search"))
+    local n = 0
+    while w:path_status(1, 2001) ~= "path ready" and n < 200 do
+      w:path_step(0.5, 1, true)
+      n = n + 1
+    end
+    check("members: status takes the member", w:path_status(1, 9999) == nil)
+    check("members: first member first", w:path_status(1, 2002) == "path: finding")
+    w:path_step(0.5, 1, true)
+    check("members: job serves the next member", w.path_job ~= nil and w.path_job.cid == 2002)
+    w:set_route(2003, "Cc")
+    check("members: set_route to another cid keeps another member's job",
+      w.path_job ~= nil and w.path_job.cid == 2002)
+    w:clear_route()
+    check("members: clear_route keeps another member's job", w.path_job ~= nil and w.path_job.cid == 2002)
+    check("members: clear_route keeps a member with the target's cid",
+      route_in(w, 2001) ~= nil and #w:input().routes == 2)
+    w:set_routes({})
+    check("members: removing a member cancels its job", w.path_job == nil)
+  end
+
+  do
+    local f = gfix()
+    stops_by[2002] = { P(10, 0, 0), P(40, 0, 0) }
+    local w = with_route(f, R3)
+    w:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" } })
+    w:refresh(1, true, on("search"))
+    local n = 0
+    while (w:path_status(1, 2001) ~= "path ready" or w:path_status(1, 2002) ~= "path ready") and n < 200 do
+      w:path_step(1e6, 1, true)
+      n = n + 1
+    end
+    check("members: both ready", w:path_status(1, 2002) == "path ready")
+    local rp = w:route_paths(true)
+    local keys = {}
+    for k in pairs(rp) do keys[#keys + 1] = k end
+    table.sort(keys)
+    check("members: route_paths keyed by cid", #keys == 2 and keys[1] == 2001 and keys[2] == 2002
+      and #rp[2002] == 1 and rp[2002][1].pts ~= nil)
+    check("members: route_paths cached", w:route_paths(true) == w:route_paths(true))
+    w:set_routes({ { cid = 2001, name = "Aa" } })
+    check("members: a removed member's pair cache leaves at once", w.rps[2002] == nil)
+    check("members: a removed member's paths leave at once",
+      route_in(w, 2002) == nil and w:route_paths(true)[2002] == nil
+      and w:route_paths(true)[2001] ~= nil)
+  end
+
+  -- two members with the same stops: a reused job reports the cid it serves
+  do
+    local f = gfix()
+    f.tick = 0.001
+    stops_by[2002] = R3
+    local w = with_route(f, R3)
+    w:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" } })
+    w:refresh(1, true, on("search"))
+    for _ = 1, 40 do
+      w:path_step(0.5, 1, true)
+      if w.graph ~= nil then break end
+    end
+    w:path_step(0.5, 1, true)
+    local before = w.path_job ~= nil and w.path_job.cid == 2001
+    w:set_route(2002, "Bb")
+    w:refresh(1, true, on("search"))
+    w:path_step(0.5, 1, true)
+    check("members: a job reused for a shared key serves the new cid",
+      before and w.path_job ~= nil and w.path_job.cid == 2002)
+    stops_by[2002] = nil
+  end
+
+  -- a target that is also a member keeps its job through clear_route
+  do
+    local f = gfix()
+    f.tick = 0.001
+    local w = with_route(f, R3)
+    w:set_routes({ { cid = 2001, name = "Aa" } })
+    for _ = 1, 40 do
+      w:path_step(0.5, 1, true)
+      if w.graph ~= nil then break end
+    end
+    w:path_step(0.5, 1, true)
+    local running = w.path_job ~= nil and w.path_job.cid == 2001
+    w:clear_route()
+    check("members: clear_route keeps the job of a target that is a member",
+      running and w.path_job ~= nil and w.path_job.cid == 2001)
+    w:set_routes({})
+    check("members: the cid leaving both roles cancels its job", w.path_job == nil)
+  end
+
   -- the 64-path cap never evicts the shown route
   do
     local big, nodes = {}, {}
@@ -3137,9 +4030,9 @@ do
       nodes[k] = { (k - 1) * 10, 0, 0, ls }
     end
     big[1] = nodes
-    local function run(w, n)
+    local function run(w, n, cid)
       for _ = 1, n do
-        if w:path_status(1) == "path ready" then break end
+        if w:path_status(1, cid or 2001) == "path ready" then break end
         w:path_step(1e6, 1, true)
       end
     end
@@ -3150,8 +4043,8 @@ do
     run(w, 600)
     local np = 0
     for _ in pairs(w.paths) do np = np + 1 end
-    check("cap: 70 pairs all kept and ready", np == 70 and w:path_status(1) == "path ready")
-    local l = w:route_paths(true)
+    check("cap: 70 pairs all kept and ready", np == 70 and w:path_status(1, 2001) == "path ready")
+    local l = w:route_paths(true)[2001]
     check("cap: every pair has points", #l == 70 and l[1].pts ~= nil and l[70].pts ~= nil)
     -- a short route elsewhere: the oldest paths of the old route go first
     fixed_stops = { P(710, 0, 0), P(720, 0, 0), P(730, 0, 0) }
@@ -3160,9 +4053,17 @@ do
     run(w, 100)
     np = 0
     for _ in pairs(w.paths) do np = np + 1 end
-    check("cap: back to 64, new pairs kept, oldest gone", np == 64 and w:path_status(1) == "path ready"
+    check("cap: back to 64, new pairs kept, oldest gone", np == 64 and w:path_status(1, 2001) == "path ready"
       and w.paths[1 * 1048576 + 2] == nil
       and w.paths[72 * 1048576 + 73] ~= nil and w.paths[73 * 1048576 + 74] ~= nil)
+    stops_by[2002] = pts
+    w:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" } })
+    w:refresh(40, true, on("search"))
+    run(w, 600, 2002)
+    np = 0
+    for _ in pairs(w.paths) do np = np + 1 end
+    check("members: eviction keeps every member's pairs", np == 72
+      and w.paths[1 * 1048576 + 2] ~= nil and w.paths[72 * 1048576 + 73] ~= nil)
   end
 
   -- storing with no route pair cache still caps at 64
@@ -3364,7 +4265,7 @@ do
     w:refresh(0, true, tg)
     w:set_route(2696, "Albert")
     w:refresh(1, true, tg)
-    local r = w:input().route
+    local r = route_in(w)
     check("real route: albert publishes 4 stops", r ~= nil and r.err == nil and #r.stops == 4
       and r.stops[1].from == 6 and r.stops[2].from == 18 and r.stops[3].from == 20
       and r.stops[4].from == 22 and r.stops[4].to == 6)
@@ -3386,7 +4287,7 @@ do
     w:refresh(0, true, tg)
     w:set_route(2697, "Bb")
     w:refresh(1, true, tg)
-    local r = w:input().route
+    local r = route_in(w)
     local bad = 0
     for _, c in ipairs(d.area_calls) do
       if c.area == -1 and c.location == -1 then bad = bad + 1 end
@@ -3417,7 +4318,7 @@ do
     w:refresh(0, true, tg)
     w:set_route(2698, "Cc")
     w:refresh(1, true, tg)
-    local r = w:input().route
+    local r = route_in(w)
     check("real route: key stops get their own discovery answers",
       r ~= nil and r.err == nil and r.stops ~= nil and #r.stops == 2 and r.stops[1].discovered == false
       and r.stops[2].discovered == true)
@@ -3444,7 +4345,7 @@ do
       w:refresh(0, true, tg)
       w:set_route(2696, "Albert")
       w:refresh(1, true, tg)
-      return w:input().route
+      return route_in(w)
     end
 
     do
@@ -3968,6 +4869,10 @@ do
     check("wants: " .. k, world.wants_round({ [k] = true }) == true)
   end
   check("wants: unrelated toggle", world.wants_round({ reveal_gate_names = true }) == false)
+  check("wants: members", world.wants_round({}, 1) == true)
+  check("wants: zero members", world.wants_round({}, 0) == false)
+  check("wants: focus", world.wants_round({ focus = { active = { 1 }, quests = {} } }) == true)
+  check("wants: focus not a table", world.wants_round({ focus = true }) == false)
 
   local function held_world()
     local f = fixture()
@@ -3997,6 +4902,12 @@ do
   w:set_route(2058, "Dudley")
   check("hold: set_route runs once", w:refresh(31, true, TG, true) == true)
   check("hold: and then not again", w:refresh(32, true, TG, true) == false)
+  if type(w.set_routes) == "function" then
+    w:set_routes({ { cid = 2058, name = "Dudley" }, { cid = 2059, name = "Ee" } })
+    check("hold: set_routes change runs once", w:refresh(33, true, TG, true) == true)
+    w:set_routes({ { cid = 2058, name = "Dudley" }, { cid = 2059, name = "Ee" } })
+    check("hold: unchanged set_routes holds", w:refresh(34, true, TG, true) == false)
+  end
 
   -- a changed NPC list under search runs inside the throttle
   local f2, w2 = held_world()
@@ -4416,6 +5327,156 @@ do
     check("reserved: a failed round counts neither", ok2 == false and st.rounds == 2
       and st.reserved_reads + st.reserved_reused == 2)
   end
+end
+
+-- 34. quest focus collection (SPEC 32.6.1)
+do
+  local function FQ(active, items)
+    return { active = active, quests = { [active[1]] = { npcs = {}, step_npcs = {}, items = items or {}, places = {} } } }
+  end
+  local function cworld(tg, reserved)
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chest", "g1", 10, 1, 1, { quest = { any = true, q = { { 11020, true }, { 11030, false } } } }),
+      prow("chest", "i1", 10, 2, 2, { items = { { id = 77, n = 1 }, { id = 78, n = 2 } } }),
+      prow("chest", "p0", 10, 3, 3, {}) }) } })
+    f.data.records = { { key = "g1_0", picked = true, item = 305 } }
+    f.data.reserved = reserved or {}
+    local w = f.new()
+    local ran = w:refresh(0, true, tg)
+    return w, f, ran
+  end
+  local function ids_are(t, a, b) return t ~= nil and #t == 2 and t[1] == a and t[2] == b end
+  local w = cworld(on("chests"))
+  local ch = w:input().chests
+  local g1, i1, p0 = find(ch, "g1"), find(ch, "i1"), find(ch, "p0")
+  check("chest ids: gate_qids", g1 ~= nil and ids_are(g1.gate_qids, 11020, 11030))
+  check("chest ids: item_ids", i1 ~= nil and ids_are(i1.item_ids, 77, 78))
+  check("chest ids: none on a plain chest", p0 ~= nil and p0.gate_qids == nil and p0.item_ids == nil)
+  w = cworld(on("chests"), { chest_row("i1", 5, 5) })
+  i1 = find(w:input().chests, "i1")
+  check("chest ids: a learned chest keeps its item_ids", i1 ~= nil and i1.pos.x == 5
+    and ids_are(i1.item_ids, 77, 78))
+  w = cworld({ treasure = true, focus = FQ({ 11020 }) })
+  ch = w:input().chests
+  g1 = find(ch, "g1")
+  check("focus: gate chest with Chests off", g1 ~= nil and find(ch, "i1") == nil and find(ch, "p0") == nil)
+  check("focus: its state is read", g1 ~= nil and g1.state == "opened" and g1.item == 305)
+  w = cworld({ treasure = true, focus = FQ({ 55 }, { 78 }) })
+  ch = w:input().chests
+  check("focus: item chest with Chests off", find(ch, "i1") ~= nil and find(ch, "g1") == nil)
+  w = cworld({ treasure = true, focus = FQ({ 55 }, { 305 }) })
+  ch = w:input().chests
+  check("focus: record item chest with Chests off", find(ch, "g1") ~= nil and find(ch, "i1") == nil)
+  w = cworld({ chests = true, focus = FQ({ 11020 }) })
+  ch = w:input().chests
+  check("focus: Chests on still lists every chest", find(ch, "g1") ~= nil and find(ch, "i1") ~= nil
+    and find(ch, "p0") ~= nil)
+  local f
+  w, f = cworld({ treasure = true })
+  check("focus off: no chest, no records", #w:input().chests == 0 and (f.reads_n.save_records or 0) == 0)
+  local okm = true
+  for _, fq in ipairs({ { active = "x" }, true }) do
+    local w2, _, ran = cworld({ treasure = true, focus = fq })
+    okm = okm and ran == true and #w2:input().chests == 0
+  end
+  check("focus: malformed collects nothing", okm)
+  -- the memo keys on the focus table: a new table on the same world rebuilds
+  do
+    local wf = cworld({ treasure = true, focus = FQ({ 11020 }) })
+    local tgf = { treasure = true, focus = FQ({ 11020 }) }
+    wf:refresh(1, true, tgf)
+    wf:poke()
+    local c1 = wf:input().chests
+    local ok1 = find(c1, "g1") ~= nil and find(c1, "i1") == nil
+    tgf.focus = FQ({ 55 }, { 78 })
+    wf:poke()
+    wf:refresh(2, true, tgf)
+    local c2 = wf:input().chests
+    check("focus: a new focus table on the same world rebuilds the sets",
+      ok1 and find(c2, "i1") ~= nil and find(c2, "g1") == nil)
+  end
+  local w4, f4 = cworld({ treasure = true, focus = { active = { "x" }, quests = {} } })
+  check("focus: no-number list reads no records", #w4:input().chests == 0 and (f4.reads_n.save_records or 0) == 0)
+  local function sworld(tg)
+    local f2 = fixture()
+    local d = f2.data
+    d.needs = { [100] = { { id = 378, num = 1 } }, [90] = { { id = 378, num = 1 } } }
+    d.qname = { [90] = "Ninety", [100] = "Hundred" }
+    d.iname = { [378] = "Grimoire" }
+    d.sched_ids = { 2058 }
+    d.shop = { [2058] = 41 }
+    d.npcname = { [2058] = "Dudley" }
+    d.sched = { [2058] = P(100, 0, 100) }
+    d.shops = { [41] = { { item = 378, release_qid = 0, sentiment_bit = 0,
+      total_pay = 0, flag = 0, var_cond = 0 } } }
+    local w2 = f2.new()
+    w2:refresh(0, true, tg)
+    return w2:input().sellers or {}
+  end
+  local s = sworld({ treasure = true, focus = FQ({ 90 }) })
+  check("focus: related seller with Sellers off", #s == 1 and s[1].qids[1] == 90 and s[1].qids[2] == 100)
+  check("focus: unrelated seller dropped", #sworld({ treasure = true, focus = FQ({ 55 }) }) == 0)
+  check("focus: Sellers on lists all", #sworld({ sellers = true, focus = FQ({ 55 }) }) == 1)
+  local f3 = fixture()
+  f3.new():refresh(0, true, { focus = FQ({ 90 }) })
+  check("focus: focus alone refreshes discovery", (f3.reads_n.discovered_count or 0) >= 1)
+end
+
+-- 35. focus key positions (SPEC 32.7.5)
+do
+  local function kfix()
+    local f = fixture()
+    f.reads.key_pos = function(k)
+      f.reads_n.key_pos = (f.reads_n.key_pos or 0) + 1
+      if f.fail.key_pos then error("x") end
+      return f.data.kpos[k]
+    end
+    f.data.kpos = { [2302] = P(1, 2, 3) }
+    return f
+  end
+  local function fps(w) return (w:input() or {}).focus_places end
+  local f = kfix()
+  local w = f.new()
+  local tg = { treasure = true, focus_keys = { 2302, 2309, 2302, 2309 } }
+  w:refresh(0, true, tg)
+  local fp = fps(w) or {}
+  check("focus places: resolved key", fp[2302] ~= nil and fp[2302].x == 1 and fp[2302].y == 2
+    and fp[2302].z == 3)
+  check("focus places: unresolved key absent", fps(w) ~= nil and fp[2309] == nil)
+  check("focus places: one read per key per round", f.reads_n.key_pos == 2)
+  w:poke()
+  w:refresh(0, true, tg)
+  check("focus places: found keys cached", f.reads_n.key_pos == 3)
+  f.data.kpos[2309] = P(4, 5, 6)
+  w:poke()
+  w:refresh(0, true, tg)
+  fp = fps(w) or {}
+  check("focus places: a later read resolves", fp[2309] ~= nil and fp[2309].x == 4)
+  local n = f.reads_n.key_pos or 0
+  w:reset()
+  w:refresh(0, true, tg)
+  check("focus places: reset drops the cache", f.reads_n.key_pos == n + 2)
+  n = f.reads_n.key_pos or 0
+  w:poke()
+  w:refresh(0, true, { treasure = true })
+  check("focus places: no list, no table, no read", fps(w) == nil and (f.reads_n.key_pos or 0) == n)
+  w:poke()
+  w:refresh(0, true, { treasure = true, focus_keys = { 0, -1, 1.5, "x" } })
+  check("focus places: bad keys skipped", (f.reads_n.key_pos or 0) == n
+    and next(fps(w) or { 0 }) == nil)
+  local f2 = kfix()
+  f2.fail.key_pos = true
+  local w2 = f2.new()
+  local ran = w2:refresh(0, true, tg)
+  check("focus places: raising read", ran == true and next(fps(w2) or { 0 }) == nil)
+  local f3 = kfix()
+  f3.data.kpos = { [2302] = { x = "a", y = 2, z = 3 } }
+  local w3 = f3.new()
+  w3:refresh(0, true, { treasure = true, focus_keys = { 2302 } })
+  check("focus places: malformed position not published", next(fps(w3) or { 0 }) == nil)
+  w3:poke()
+  w3:refresh(0, true, { treasure = true, focus_keys = { 2302 } })
+  check("focus places: malformed position not cached", f3.reads_n.key_pos == 2)
 end
 
 if failures > 0 then os.exit(1) end

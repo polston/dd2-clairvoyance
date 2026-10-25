@@ -22,6 +22,7 @@ local function in_hours(h, lo, hi)
   if lo < hi then return h >= lo and h < hi end
   return h >= lo or h < hi
 end
+M.in_hours = in_hours
 
 local function applies_today(r, today)
   return in_range(today.week, r.start_week, r.end_week)
@@ -268,6 +269,57 @@ function M.parse_hints(t)
     end
   end
   return hints, errors
+end
+
+-- Quest relations file. A quest key is kept when it is a whole number above 0
+-- and its value is a table; list fields keep only positive whole numbers.
+-- Nothing raises.
+local function pos_int(v)
+  if type(v) ~= "number" then return nil end
+  local i = math.tointeger(v)
+  if i and i > 0 then return i end
+  return nil
+end
+
+local function int_list(t)
+  local out = {}
+  if type(t) ~= "table" or (#t == 0 and next(t) ~= nil) then return out end
+  for _, v in ipairs(t) do
+    local i = pos_int(v)
+    if i then out[#out + 1] = i end
+  end
+  return out
+end
+
+function M.parse_quests(t)
+  local quests = {}
+  local info = { pak = nil, version = nil, kept = 0, dropped = 0, first = nil }
+  if type(t) ~= "table" then return quests, info end
+  if type(t.version) == "number" then info.version = t.version end
+  if type(t.pak) == "string" then info.pak = t.pak end
+  if type(t.quests) ~= "table" then return quests, info end
+  for k, q in pairs(t.quests) do
+    local qid = pos_int(tonumber(k))
+    if qid and type(q) == "table" then
+      local dest = {}
+      if type(q.dest) == "table" and not (#q.dest == 0 and next(q.dest) ~= nil) then
+        for _, d in ipairs(q.dest) do
+          if type(d) == "table" then
+            local cid, key = pos_int(d.cid), pos_int(d.key)
+            if cid or key then dest[#dest + 1] = { cid = cid, key = key } end
+          end
+        end
+      end
+      quests[qid] = { cast = int_list(q.cast), npcs = int_list(q.npcs),
+        items = int_list(q.items), dest = dest, decoded = (q.decoded == true) }
+      info.kept = info.kept + 1
+    else
+      info.dropped = info.dropped + 1
+      local s = tostring(k)
+      if info.first == nil or s < info.first then info.first = s end
+    end
+  end
+  return quests, info
 end
 
 -- True when a parsed hints entry has any text to show (a quest hint or a step).
@@ -563,11 +615,14 @@ function M.fit_apply(fit, mx, mz)
 end
 
 -- Writes every pair into out as flat layout points (x, y, ...) with a false
--- between pairs; clears out past the returned count.
-function M.route_polyline(pairs_, ends, fit, mode, out)
+-- between pairs; clears out past the returned count. When starts is given,
+-- starts[k] is the 1-based index in out of pair k's first x value (0 when the
+-- pair was skipped for a missing end).
+function M.route_polyline(pairs_, ends, fit, mode, out, starts)
   local n = 0
   for k = 1, #pairs_ do
     local p = pairs_[k]
+    if starts then starts[k] = 0 end
     local e1, e2 = ends[p.i], ends[p.j]
     local x1, y1, x2, y2
     if e1 then
@@ -580,6 +635,7 @@ function M.route_polyline(pairs_, ends, fit, mode, out)
     end
     if x1 and x2 then
       if n > 0 then n = n + 1; out[n] = false end
+      if starts then starts[k] = n + 1 end
       out[n + 1] = x1; out[n + 2] = y1; n = n + 2
       local pts = p.pts
       if mode == 1 and pts and fit then
@@ -593,6 +649,27 @@ function M.route_polyline(pairs_, ends, fit, mode, out)
       end
       out[n + 1] = x2; out[n + 2] = y2; n = n + 2
     end
+  end
+  for i = #out, n + 1, -1 do out[i] = nil end
+  if starts then
+    for i = #starts, #pairs_ + 1, -1 do starts[i] = nil end
+  end
+  return n
+end
+
+-- Step of each pair for the leg colours: out[p] = 0 for the current leg (the
+-- first pair whose j is past current, else pair 1), then counting up in list
+-- order, wrapping. current nil gives all 0. Clears out past the returned count.
+function M.leg_steps(pairs_, current, out)
+  local n = #pairs_
+  local base = 1
+  if current then
+    for p = 1, n do
+      if pairs_[p].j > current then base = p; break end
+    end
+  end
+  for p = 1, n do
+    out[p] = current and (p - base) % n or 0
   end
   for i = #out, n + 1, -1 do out[i] = nil end
   return n
