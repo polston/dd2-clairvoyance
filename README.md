@@ -30,7 +30,7 @@ map and in your view.
     current journal step.
 11. Every picture and text the mod draws can have an outline, one global
     setting with an optional override per marker category. The route line
-    and the route stop pictures have their own color and size settings.
+    and the route stop pictures have their own width and size settings.
     Routes use eight colors, one per shown route, with an optional fade along
     each route and a legend of the shown routes.
 12. A searched NPC's daily route can follow the game's own walking paths
@@ -162,7 +162,8 @@ numbers are in the same space as the search results and markers.
 4. Overrides: for each marker category, the route line, the names and the item
    menu, an Override checkbox with its own outline on or off, color and width.
 5. Icons and colors: the icon and color of each marker category. Route stops
-   are not set here; they take the eight route colors under Route.
+   take their route's color from the eight route colors under Route; only
+   their icon is set here.
 
 "Reset appearance to defaults" puts every category icon and color and every
 appearance setting back to its default; it leaves the two NPCs route path
