@@ -185,6 +185,7 @@ end
 -- v14 (SPEC 22.11.3): the opened Hints nodes' qids, and the pins of those
 -- whose step is the active one now (pins bypass the search and the cap).
 wt.hints, wt.hints_open = {}, {}   -- hints by qid (npcs.parse_hints); qid -> step idx
+wt.quest_rel, wt.quest_pak, wt.focus_tracked_qid = nil, nil, nil   -- quest focus (SPEC 32)
 wt.hint_inputs = function()
   local qids, pins = {}, {}
   local rb = snapshot ~= nil and snapshot.rec_by or nil
@@ -892,6 +893,18 @@ re.on_frame(function()
       item_menu_open = icons.itemmenu ~= nil and icons.itemmenu:open(),
     }
     show.hint_qids, show.hint_pins = wt.hint_inputs()
+    -- SPEC 32.4.2: the tracked read runs every tick, tree open or not
+    if settings.focus_tracked then
+      local okt, tq = pcall(adapter.tracked_qid)
+      wt.focus_tracked_qid = okt and type(tq) == "number" and tq or nil
+    else
+      wt.focus_tracked_qid = nil
+    end
+    show.focus_qids = settings.focus_qids
+    show.focus_tracked_qid = wt.focus_tracked_qid
+    show.quest_rel = wt.quest_rel
+    show.focus_unrelated = settings.focus_unrelated
+    show.focus_on = snapshot ~= nil and snapshot.focus ~= nil
     -- SPEC 22.8.4: the route NPC lasts while the search shows it
     if wt.route_cid ~= nil then
       local keep = false
@@ -967,7 +980,8 @@ re.on_frame(function()
     -- v5 (SPEC 12.3a): own pcall so a raised walk never skips compute;
     -- inside the timed window so Tick ms includes it; skipped when the
     -- category is hidden (SPEC 9.9).
-    if show.in_progress and adapter.refresh_objectives ~= nil then
+    if (show.in_progress or show.focus_on) and adapter.refresh_objectives ~= nil then
+      wt.obj_walks = (wt.obj_walks or 0) + 1
       local tw = os.clock()
       local ok_o, err_o = pcall(adapter.refresh_objectives)
       last_walk_ms = (os.clock() - tw) * 1000.0
@@ -1765,6 +1779,50 @@ local function install_debug()
         if not su.set_kind_off(settings, class, su.fam_key(fam), off) then return false end
         save_settings(); want_update = true; last_tick = 0.0
         return true
+      end,
+      -- SPEC 32.9: the focus set's per-quest list sizes, NPC positions and markers
+      focus = function()
+        local fs = snapshot ~= nil and snapshot.focus or nil
+        local out = { active = {}, quests = {}, counts = snapshot ~= nil and snapshot.focus_counts or nil,
+          walks = wt.obj_walks or 0, focus_pokes = wt.focus_pokes, routes = wt.routes_n,
+          routes_total = wt.routes_total }
+        local nq = 0
+        for _ in pairs(wt.quest_rel or {}) do nq = nq + 1 end
+        out.file = { quests = nq, pak = wt.quest_pak }
+        if fs == nil then return out end
+        local marked_ids = {}
+        local function note(m)
+          local k = type(m) == "table" and m.key or nil
+          local id = type(k) == "string" and k:match("^[cn]:(%-?%d+)$") or nil
+          if id ~= nil then marked_ids[tonumber(id)] = true end
+          if type(m) == "table" and m.cid ~= nil
+            and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller") then
+            marked_ids[m.cid] = true
+          end
+        end
+        for _, m in ipairs(snapshot.markers or {}) do note(m) end
+        for _, m in ipairs(snapshot.fullmap_world or {}) do note(m) end
+        for i, qid in ipairs(fs.active or {}) do
+          out.active[i] = qid
+          local q = (fs.quests or {})[qid] or {}
+          local e = { npcs = #(q.npcs or {}), step_npcs = #(q.step_npcs or {}),
+            items = #(q.items or {}), places = #(q.places or {}),
+            no_pos = {}, positioned = 0, marked = 0 }
+          for _, cid in ipairs(q.npcs or {}) do
+            local okp, pos = pcall(adapter.npc_pos, cid)
+            if not okp or pos == nil then
+              e.no_pos[#e.no_pos + 1] = cid
+            else
+              local oka, alive = pcall(adapter.npc_alive, cid)
+              if not (oka and alive == false) then
+                e.positioned = e.positioned + 1
+                if marked_ids[cid] then e.marked = e.marked + 1 end
+              end
+            end
+          end
+          out.quests[qid] = e
+        end
+        return out
       end,
       -- stats plus at most 20 rows (counts and labels); positions go to the log only
       world = function()
@@ -3039,6 +3097,25 @@ do
     if #errs > 0 then error(#errs .. " hint entries dropped, first: " .. errs[1], 0) end
   end)
   if not okh then logmsg("hints: " .. tostring(why)) end
+end
+
+-- quest focus (SPEC 32.3): the quests file; a missing or bad file leaves
+-- wt.quest_rel nil and logs one line. The pak stamp never rejects the file.
+do
+  local okq, why = pcall(function()
+    local t = json.load_file("Clairvoyance_quests.json")
+    if t == nil then error("quests file missing or unreadable", 0) end
+    local quests, info = require("Clairvoyance.npcs").parse_quests(t)
+    wt.quest_rel = quests
+    wt.quest_pak = info.pak
+    local line = string.format("quests: %d quests, pak %s, places pak %s", info.kept,
+      tostring(wt.quest_pak), tostring(((wt.q("stats", {}) or {}).places or {}).pak))
+    if info.dropped > 0 then
+      line = line .. string.format(", %d dropped, first: %s", info.dropped, tostring(info.first))
+    end
+    logmsg(line)
+  end)
+  if not okq then logmsg("quests: " .. tostring(why)) end
 end
 
 logmsg("loaded")
