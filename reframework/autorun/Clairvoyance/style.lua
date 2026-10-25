@@ -4,7 +4,7 @@ local M = {}
 
 M.GROUPS = { "startable", "in_progress", "completed", "unavailable", "locked",
   "quest_item", "chest", "treasure", "token", "beetle", "monster", "seller",
-  "npc_search", "route_stop", "hint_pin", "route_line", "names", "items" }
+  "npc_search", "route_stop", "hint_pin", "focus_place", "route_line", "names", "items" }
 
 local IS_GROUP = {}
 -- per-group key names, built once so resolve concatenates nothing per call
@@ -21,6 +21,7 @@ end
 
 function M.group_of(cat)
   if cat == "shop" then return "seller" end
+  if cat == "focus_npc" then return "npc_search" end
   if IS_GROUP[cat] then return cat end
   return nil
 end
