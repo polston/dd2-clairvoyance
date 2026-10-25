@@ -3003,9 +3003,10 @@ do
   local stub = setmetatable({}, { __index = real })
   package.loaded["Clairvoyance.npcs"] = stub
   local fixed_stops = {}
-  function stub.route_stops()
+  local stops_by = {}
+  function stub.route_stops(rows)
     local out = {}
-    for i, p in ipairs(fixed_stops) do
+    for i, p in ipairs(stops_by[rows and rows.cid] or fixed_stops) do
       out[i] = { from = 0, to = 24, area = i, location = 0, pos = p }
     end
     return out, 0
@@ -3042,7 +3043,7 @@ do
         return fn(...)
       end
     end
-    rdef("schedule_rows", function() return {} end)
+    rdef("schedule_rows", function(cid) return { cid = cid } end)
     rdef("schedule_now", function() return d.day, d.hour end)
     rdef("current_row", function() return { area = 1, location = 1 } end)
     rdef("area_nodes", function() return nil end)
@@ -3092,7 +3093,7 @@ do
     while wb.graph == nil and calls_n < 100 do
       wb:path_step(0.5, 1, true)
       calls_n = calls_n + 1
-      local p = pct(wb:path_status(1))
+      local p = pct(wb:path_status(1, 2001))
       if p ~= nil then
         if p < last then mono = false end
         last = p
@@ -3128,7 +3129,7 @@ do
     end
     d.graph_fail_at = 1
     frame()
-    check("fail: status unavailable", w:path_status(1) == "path unavailable")
+    check("fail: status unavailable", w:path_status(1, 2001) == "path unavailable")
     check("fail: no graph, not busy", w.graph == nil and w:path_busy() == false)
     check("fail: logged once", #f.logs == 1)
     frame(); frame()
@@ -3182,7 +3183,7 @@ do
     local seen100 = false
     for _ = 1, 400 do
       w:path_step(0.5, 1, true)
-      if w.graph == nil and pct(w:path_status(1)) == 100 then seen100 = true end
+      if w.graph == nil and pct(w:path_status(1, 2001)) == 100 then seen100 = true end
     end
     check("copy: 100% shown during link resolution", seen100 and w.graph ~= nil
       and w.graph.n == 300 and w.graph.lc[299] == 1 and w.graph.lt[w.graph.ls[299]] == 300)
@@ -3314,23 +3315,23 @@ do
     local f = gfix()
     local w = with_route(f, R3)
     w:path_step(1e6, 1, true)
-    check("route: pairs listed before steps", #w:route_paths(true) == 2
-      and w:route_paths(true)[1].pts == nil)
-    check("route: status finding", w:path_status(1) == "path: finding")
-    check("route: status nil when route_path is 0", w:path_status(0) == nil)
+    check("route: pairs listed before steps", #w:route_paths(true)[2001] == 2
+      and w:route_paths(true)[2001][1].pts == nil)
+    check("route: status finding", w:path_status(1, 2001) == "path: finding")
+    check("route: status nil when route_path is 0", w:path_status(0, 2001) == nil)
     local n = 0
-    while w:path_status(1) ~= "path ready" and n < 50 do
+    while w:path_status(1, 2001) ~= "path ready" and n < 50 do
       w:path_step(1e6, 1, true)
       n = n + 1
     end
-    local l = w:route_paths(true)
+    local l = w:route_paths(true)[2001]
     check("route: both pairs found", #l == 2 and l[1].pts ~= nil and l[2].pts ~= nil)
     check("route: pair 1 runs node 1 to 4", l[1].i == 1 and l[1].j == 2 and #l[1].pts == 12
       and l[1].pts[1] == 0 and l[1].pts[10] == 30 and l[1].pts[12] == 0)
     check("route: pair 2 runs node 4 to 5", l[2].pts ~= nil and l[2].pts[1] == 30
       and l[2].pts[#l[2].pts - 2] == 40)
-    check("route: status ready", w:path_status(1) == "path ready")
-    check("route: list is cached", w:route_paths(true) == l)
+    check("route: status ready", w:path_status(1, 2001) == "path ready")
+    check("route: list is cached", w:route_paths(true)[2001] == l)
     check("route: stats", w.last_expanded ~= nil and w.search_ms_max >= 0 and w.last_pair ~= nil)
     local np = 0
     for _ in pairs(w.paths) do np = np + 1 end
@@ -3353,8 +3354,8 @@ do
     for _ = 1, 5 do w:path_step(1e6, 1, true) end
     check("hour: no new scan or search", calls.scan == 0 and calls.search == 0
       and calls.pairs == pairs_before)
-    check("hour: still ready", w:path_status(1) == "path ready"
-      and w:route_paths(true)[1].pts ~= nil)
+    check("hour: still ready", w:path_status(1, 2001) == "path ready"
+      and w:route_paths(true)[2001][1].pts ~= nil)
   end
 
   -- cancellation of a running search
@@ -3381,6 +3382,75 @@ do
     check("cancel: set_route to another cid", w.path_job == nil)
   end
 
+  -- route members share one walking-path job (plan Task 2.3)
+  do
+    local f = gfix()
+    f.tick = 0.001
+    stops_by[2002] = { P(10, 0, 0), P(40, 0, 0) }
+    local w = with_route(f, R3)
+    w:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" } })
+    w:refresh(1, true, on("search"))
+    local n = 0
+    while w:path_status(1, 2001) ~= "path ready" and n < 200 do
+      w:path_step(0.5, 1, true)
+      n = n + 1
+    end
+    check("members: status takes the member", w:path_status(1, 9999) == nil)
+    check("members: first member first", w:path_status(1, 2002) == "path: finding")
+    w:path_step(0.5, 1, true)
+    check("members: job serves the next member", w.path_job ~= nil and w.path_job.cid == 2002)
+    w:clear_route()
+    check("members: clear_route keeps another member's job", w.path_job ~= nil and w.path_job.cid == 2002)
+    check("members: clear_route keeps a member with the target's cid",
+      route_in(w, 2001) ~= nil and #w:input().routes == 2)
+    w:set_routes({})
+    check("members: removing a member cancels its job", w.path_job == nil)
+  end
+
+  do
+    local f = gfix()
+    stops_by[2002] = { P(10, 0, 0), P(40, 0, 0) }
+    local w = with_route(f, R3)
+    w:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" } })
+    w:refresh(1, true, on("search"))
+    local n = 0
+    while (w:path_status(1, 2001) ~= "path ready" or w:path_status(1, 2002) ~= "path ready") and n < 200 do
+      w:path_step(1e6, 1, true)
+      n = n + 1
+    end
+    check("members: both ready", w:path_status(1, 2002) == "path ready")
+    local rp = w:route_paths(true)
+    local keys = {}
+    for k in pairs(rp) do keys[#keys + 1] = k end
+    table.sort(keys)
+    check("members: route_paths keyed by cid", #keys == 2 and keys[1] == 2001 and keys[2] == 2002
+      and #rp[2002] == 1 and rp[2002][1].pts ~= nil)
+    check("members: route_paths cached", w:route_paths(true) == w:route_paths(true))
+    w:set_routes({ { cid = 2001, name = "Aa" } })
+    check("members: a removed member's paths leave at once",
+      route_in(w, 2002) == nil and w:route_paths(true)[2002] == nil
+      and w:route_paths(true)[2001] ~= nil)
+  end
+
+  -- a target that is also a member keeps its job through clear_route
+  do
+    local f = gfix()
+    f.tick = 0.001
+    local w = with_route(f, R3)
+    w:set_routes({ { cid = 2001, name = "Aa" } })
+    for _ = 1, 40 do
+      w:path_step(0.5, 1, true)
+      if w.graph ~= nil then break end
+    end
+    w:path_step(0.5, 1, true)
+    local running = w.path_job ~= nil and w.path_job.cid == 2001
+    w:clear_route()
+    check("members: clear_route keeps the job of a target that is a member",
+      running and w.path_job ~= nil and w.path_job.cid == 2001)
+    w:set_routes({})
+    check("members: the cid leaving both roles cancels its job", w.path_job == nil)
+  end
+
   -- the 64-path cap never evicts the shown route
   do
     local big, nodes = {}, {}
@@ -3391,9 +3461,9 @@ do
       nodes[k] = { (k - 1) * 10, 0, 0, ls }
     end
     big[1] = nodes
-    local function run(w, n)
+    local function run(w, n, cid)
       for _ = 1, n do
-        if w:path_status(1) == "path ready" then break end
+        if w:path_status(1, cid or 2001) == "path ready" then break end
         w:path_step(1e6, 1, true)
       end
     end
@@ -3404,8 +3474,8 @@ do
     run(w, 600)
     local np = 0
     for _ in pairs(w.paths) do np = np + 1 end
-    check("cap: 70 pairs all kept and ready", np == 70 and w:path_status(1) == "path ready")
-    local l = w:route_paths(true)
+    check("cap: 70 pairs all kept and ready", np == 70 and w:path_status(1, 2001) == "path ready")
+    local l = w:route_paths(true)[2001]
     check("cap: every pair has points", #l == 70 and l[1].pts ~= nil and l[70].pts ~= nil)
     -- a short route elsewhere: the oldest paths of the old route go first
     fixed_stops = { P(710, 0, 0), P(720, 0, 0), P(730, 0, 0) }
@@ -3414,9 +3484,17 @@ do
     run(w, 100)
     np = 0
     for _ in pairs(w.paths) do np = np + 1 end
-    check("cap: back to 64, new pairs kept, oldest gone", np == 64 and w:path_status(1) == "path ready"
+    check("cap: back to 64, new pairs kept, oldest gone", np == 64 and w:path_status(1, 2001) == "path ready"
       and w.paths[1 * 1048576 + 2] == nil
       and w.paths[72 * 1048576 + 73] ~= nil and w.paths[73 * 1048576 + 74] ~= nil)
+    stops_by[2002] = pts
+    w:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" } })
+    w:refresh(40, true, on("search"))
+    run(w, 600, 2002)
+    np = 0
+    for _ in pairs(w.paths) do np = np + 1 end
+    check("members: eviction keeps every member's pairs", np == 72
+      and w.paths[1 * 1048576 + 2] ~= nil and w.paths[72 * 1048576 + 73] ~= nil)
   end
 
   -- storing with no route pair cache still caps at 64

@@ -1292,6 +1292,8 @@ function M.new(a, reads, io)
     if cid == nil or live(cid) then return end
     S.route_cache[cid] = nil
     S.route_fail[cid] = nil
+    if w.rps ~= nil then w.rps[cid] = nil end
+    if w.path_job ~= nil and w.path_job.cid == cid then w.path_job = nil end
     local l = input_tbl and input_tbl.routes
     if type(l) ~= "table" then return end
     for i = #l, 1, -1 do
@@ -1849,7 +1851,6 @@ function M.new(a, reads, io)
     local old = S.target_member and S.target_member.cid
     S.target_member = { cid = cid, name = name }
     if cid ~= old then
-      w.path_job = nil
       w.route_gen = w.route_gen + 1
       leave(old)
     end
@@ -1897,7 +1898,6 @@ function M.new(a, reads, io)
   function w:clear_route()
     local old = S.target_member and S.target_member.cid
     S.target_member = nil
-    w.path_job = nil
     w.route_gen = w.route_gen + 1
     leave(old)
   end
@@ -2021,21 +2021,31 @@ function M.new(a, reads, io)
   local fail_gen = nil         -- w.route_gen when the copy last failed
   local blockbuf = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {} }
   local copy_failed = false
-  local rp = nil               -- cached route pairs, keys and drawn list
+  w.rps = {}                   -- cid -> cached route pairs, keys and drawn list
   local rp_empty = {}
+  local rp_out, rp_out_key = nil, nil  -- the cached route_paths outer table
 
-  -- the published route stops, or nil when no route is on
-  local function route_stops()
-    local t = S.target_member
+  -- the published entry for the cid when it has a route with stops, else nil
+  local function entry_of(cid)
     local l = input_tbl and input_tbl.routes
-    if t == nil or type(l) ~= "table" then return nil end
+    if cid == nil or type(l) ~= "table" then return nil end
     for _, r in ipairs(l) do
-      if r.cid == t.cid then
-        if r.err == nil and type(r.stops) == "table" and #r.stops > 0 then return r.stops end
+      if r.cid == cid then
+        if r.err == nil and type(r.stops) == "table" and #r.stops > 0 then return r end
         return nil
       end
     end
     return nil
+  end
+
+  -- whether any published entry has stops
+  local function any_route()
+    local l = input_tbl and input_tbl.routes
+    if type(l) ~= "table" then return false end
+    for _, r in ipairs(l) do
+      if r.err == nil and type(r.stops) == "table" and #r.stops > 0 then return true end
+    end
+    return false
   end
 
   local function copy_fail(err)
@@ -2146,9 +2156,8 @@ function M.new(a, reads, io)
     return string.format("%.1f,%.1f,%.1f", p.x, p.y, p.z)
   end
 
-  local function same_route(c, stops, undisc)
-    local t = S.target_member
-    if c.undisc ~= undisc or t == nil or c.cid ~= t.cid or c.n ~= #stops then return false end
+  local function same_route(c, cid, stops, undisc)
+    if c.undisc ~= undisc or c.cid ~= cid or c.n ~= #stops then return false end
     for i = 1, c.n do
       local s = stops[i]
       local p = s.pos
@@ -2160,9 +2169,9 @@ function M.new(a, reads, io)
     return true
   end
 
-  local function build_rp(stops, undisc)
+  local function build_rp(cid, stops, undisc)
     local npcs = require("Clairvoyance.npcs")
-    local c = { cid = S.target_member and S.target_member.cid, undisc = undisc, n = #stops,
+    local c = { cid = cid, undisc = undisc, n = #stops,
       kx = {}, ky = {}, kz = {}, kd = {}, keys = {}, list_ver = -1 }
     for i = 1, c.n do
       local s = stops[i]
@@ -2180,9 +2189,13 @@ function M.new(a, reads, io)
     return c
   end
 
-  local function rp_get(stops, undisc)
-    if rp == nil or not same_route(rp, stops, undisc) then rp = build_rp(stops, undisc) end
-    return rp
+  local function rp_get(cid, stops, undisc)
+    local c = w.rps[cid]
+    if c == nil or not same_route(c, cid, stops, undisc) then
+      c = build_rp(cid, stops, undisc)
+      w.rps[cid] = c
+    end
+    return c
   end
 
   -- the first unresolved item of the route: kind "near" (key, stop index)
@@ -2209,9 +2222,13 @@ function M.new(a, reads, io)
     path_order[#path_order + 1] = pk
     if #path_order > PATH_CAP then
       local keep = {}
-      for _, pr in ipairs(rp and rp.pairs or rp_empty) do
-        local a, b = w.near[rp.keys[pr[1]]], w.near[rp.keys[pr[2]]]
-        if a and b then keep[a * 1048576 + b] = true end
+      for cid, rp in pairs(w.rps) do
+        if live(cid) then
+          for _, pr in ipairs(rp.pairs) do
+            local a, b = w.near[rp.keys[pr[1]]], w.near[rp.keys[pr[2]]]
+            if a and b then keep[a * 1048576 + b] = true end
+          end
+        end
       end
       local i = 1
       while #path_order > PATH_CAP and i <= #path_order do
@@ -2229,17 +2246,26 @@ function M.new(a, reads, io)
 
   w.store_path = store_path
 
-  local function search_slice(stops, budget_ms, undisc)
+  local function search_slice(budget_ms, undisc)
     local npcs = require("Clairvoyance.npcs")
-    local c = rp_get(stops, undisc)
-    local kind, k, a, b = next_target(c)
+    local c, stops, kind, k, a, b
+    for _, r in ipairs(input_tbl and input_tbl.routes or rp_empty) do
+      if r.err == nil and type(r.stops) == "table" and #r.stops > 0 then
+        local rc = rp_get(r.cid, r.stops, undisc)
+        local kd, kk, ka, kb = next_target(rc)
+        if kd ~= nil then
+          c, stops, kind, k, a, b = rc, r.stops, kd, kk, ka, kb
+          break
+        end
+      end
+    end
     if kind == nil then w.path_job = nil; return end
     local t0 = clock()
     local j = w.path_job
     if kind == "near" then
       if j == nil or j.kind ~= "near" or j.key ~= k then
         local p = stops[a].pos
-        j = { kind = "near", key = k, job = npcs.nearest_new(w.graph, p.x, p.y, p.z) }
+        j = { kind = "near", key = k, cid = c.cid, job = npcs.nearest_new(w.graph, p.x, p.y, p.z) }
         w.path_job = j
       end
       if npcs.nearest_step(j.job, budget_ms, clock) == "done" then
@@ -2248,7 +2274,7 @@ function M.new(a, reads, io)
       end
     else
       if j == nil or j.kind ~= "path" or j.pk ~= k then
-        j = { kind = "path", pk = k, job = npcs.path_new(w.graph, a, b) }
+        j = { kind = "path", pk = k, cid = c.cid, job = npcs.path_new(w.graph, a, b) }
         w.path_job = j
       end
       local st = npcs.path_step(j.job, budget_ms, clock)
@@ -2265,8 +2291,7 @@ function M.new(a, reads, io)
   -- SPEC 23.6: the path_step target; one copy slice, else one search slice
   function w:path_step(budget_ms, route_path, undisc)
     undisc = undisc and true or false
-    local stops = route_stops()
-    local on = stops ~= nil
+    local on = any_route()
     local want = on and route_path == 1
     if want and w.copy == nil and w.graph == nil and w.copy_tries < 3
       and (not copy_failed or w.route_gen ~= fail_gen) then
@@ -2279,14 +2304,15 @@ function M.new(a, reads, io)
       local ms = (clock() - t0) * 1000
       if ms > w.copy_ms_max then w.copy_ms_max = ms end
     elseif want and w.graph ~= nil then
-      search_slice(stops, budget_ms, undisc)
+      search_slice(budget_ms, undisc)
     end
   end
 
   function w:path_busy() return w.copy ~= nil end
 
-  function w:path_status(route_path)
-    if route_path ~= 1 or route_stops() == nil then return nil end
+  function w:path_status(route_path, cid)
+    local e = entry_of(cid)
+    if route_path ~= 1 or e == nil then return nil end
     local c = w.copy
     if c ~= nil then
       local pct = 0
@@ -2297,7 +2323,8 @@ function M.new(a, reads, io)
       if copy_failed then return "path unavailable" end
       return "path: copying 0%"
     end
-    if rp == nil or not same_route(rp, route_stops(), rp.undisc) or next_target(rp) ~= nil then
+    local rp = w.rps[cid]
+    if rp == nil or not same_route(rp, cid, e.stops, rp.undisc) or next_target(rp) ~= nil then
       return "path: finding"
     end
     return "path ready"
@@ -2305,11 +2332,28 @@ function M.new(a, reads, io)
 
   -- per pair { i, j, pts }: pts a flat x, y, z list (map space), nil while
   -- not found. Rebuilt only when the route, undisc or w.paths changes.
+  local route_list
   function w:route_paths(undisc)
     undisc = undisc and true or false
-    local stops = route_stops()
-    if stops == nil then return rp_empty end
-    local c = rp_get(stops, undisc)
+    if not any_route() then return rp_empty end
+    local k = rp_out_key
+    if rp_out ~= nil and k.tbl == input_tbl and k.undisc == undisc and k.pver == w.pver
+      and k.gen == w.route_gen then
+      return rp_out
+    end
+    local out = {}
+    for _, r in ipairs(input_tbl.routes) do
+      if r.err == nil and type(r.stops) == "table" and #r.stops > 0 and out[r.cid] == nil then
+        out[r.cid] = route_list(rp_get(r.cid, r.stops, undisc))
+      end
+    end
+    rp_out = out
+    rp_out_key = { tbl = input_tbl, undisc = undisc, pver = w.pver, gen = w.route_gen }
+    return out
+  end
+
+  -- the drawn list of one cached route, rebuilt when w.paths changed
+  route_list = function(c)
     if c.list_ver ~= w.pver then
       local g = w.graph
       local list = {}
