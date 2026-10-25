@@ -2,7 +2,9 @@
 # first generates the places file from the game's pak with tools/extract_world.py
 # and stages it under reframework/data. With -PlacesFile the extractor and its
 # Python/key/game checks are skipped and that file is staged instead (CI uses
-# this with the committed data/Clairvoyance_places.json). With -Version x.y.z the staged
+# this with the committed data/Clairvoyance_places.json). The committed hints
+# file and quests file (data/Clairvoyance_quests.json) ship in both variants.
+# With -Version x.y.z the staged
 # modinfo.ini gets version=x.y.z (the repo file is not modified). The zip never contains tools/.
 param(
     [string]$GameDir = "",
@@ -75,6 +77,13 @@ if (-not (Test-Path -LiteralPath $hintsSrc -PathType Leaf)) { Stop-Build "hints 
 $hintsDst = Join-Path $stage "reframework/data/Clairvoyance_hints.json"
 New-Item -ItemType Directory -Force (Split-Path $hintsDst -Parent) | Out-Null
 Copy-Item $hintsSrc $hintsDst
+
+# The quests file ships in both variants; a repo without it stops the build.
+$questsSrc = Join-Path $Root "data/Clairvoyance_quests.json"
+if (-not (Test-Path -LiteralPath $questsSrc -PathType Leaf)) { Stop-Build "quests file missing: data/Clairvoyance_quests.json" }
+$questsDst = Join-Path $stage "reframework/data/Clairvoyance_quests.json"
+New-Item -ItemType Directory -Force (Split-Path $questsDst -Parent) | Out-Null
+Copy-Item $questsSrc $questsDst
 
 if ($NoPlaces) { $zip = Join-Path $OutDir "Clairvoyance-noplaces.zip" }
 else {

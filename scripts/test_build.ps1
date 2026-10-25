@@ -12,7 +12,7 @@ $havePython = $false
 try { & $Python --version | Out-Null; $havePython = ($LASTEXITCODE -eq 0) } catch { $havePython = $false }
 if (-not $havePython) { Write-Host "build tests: skipped (no Python)" }
 
-function New-Case([string]$name, [string]$stub, [switch]$NoIcons, [switch]$NoHints) {
+function New-Case([string]$name, [string]$stub, [switch]$NoIcons, [switch]$NoHints, [switch]$NoQuests) {
     $d = Join-Path $base $name
     $root = Join-Path $d "root"
     New-Item -ItemType Directory -Force (Join-Path $root "tools") | Out-Null
@@ -27,6 +27,10 @@ function New-Case([string]$name, [string]$stub, [switch]$NoIcons, [switch]$NoHin
     if (-not $NoHints) {
         New-Item -ItemType Directory -Force (Join-Path $root "data") | Out-Null
         Copy-Item (Join-Path $repo "data/Clairvoyance_hints.json") (Join-Path $root "data")
+    }
+    if (-not $NoQuests) {
+        New-Item -ItemType Directory -Force (Join-Path $root "data") | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $root "data/Clairvoyance_quests.json"), [System.Text.Encoding]::ASCII.GetBytes('{"version":1,"pak":"0:0","quests":{}}'))
     }
     Set-Content -Path (Join-Path $root "tools/extract_world.py") -Value $stub -Encoding ASCII
     $game = Join-Path $d "game"
@@ -68,7 +72,7 @@ if ($havePython) {
     $zip = Join-Path $c.Out "Clairvoyance.zip"
     $ok = ($r.Code -eq 0) -and (Test-Path $zip)
     $e = @(); if ($ok) { $e = Get-Entries $zip }
-    Assert-True "zip_contents" ($ok -and ($e -contains "reframework/data/Clairvoyance_places.json") -and ($e -contains "reframework/data/Clairvoyance_hints.json") -and ($e -contains "reframework/images/Clairvoyance/icons/index.json") -and ($e -contains "reframework/images/Clairvoyance/icons/52.png") -and -not ($e | Where-Object { $_ -match $toolsRe }) -and -not ($e | Where-Object { $_ -match "^reframework/images/.*[^/]$" -and $_ -notmatch "^reframework/images/Clairvoyance/icons/(index\.json|[0-9]+\.png)$" })) "code $($r.Code) entries $($e -join ',')"
+    Assert-True "zip_contents" ($ok -and ($e -contains "reframework/data/Clairvoyance_places.json") -and ($e -contains "reframework/data/Clairvoyance_hints.json") -and ($e -contains "reframework/data/Clairvoyance_quests.json") -and ($e -contains "reframework/images/Clairvoyance/icons/index.json") -and ($e -contains "reframework/images/Clairvoyance/icons/52.png") -and -not ($e | Where-Object { $_ -match $toolsRe }) -and -not ($e | Where-Object { $_ -match "^reframework/images/.*[^/]$" -and $_ -notmatch "^reframework/images/Clairvoyance/icons/(index\.json|[0-9]+\.png)$" })) "code $($r.Code) entries $($e -join ',')"
     # the icons folder is required: a scratch repo without it fails the build
     $c = New-Case "t2b" $stub -NoIcons
     $r = Invoke-Build $c @("-GameDir", $c.Game, "-KeyFile", $c.Key)
@@ -99,12 +103,16 @@ if ($havePython) {
 $c = New-Case "t3b" "import sys`nsys.exit(1)" -NoHints
 $r = Invoke-Build $c @("-NoPlaces")
 Assert-True "missing_hints_fails" (($r.Code -ne 0) -and ($r.Text -match "hints file missing")) "code $($r.Code) text $($r.Text)"
+# the quests file is required too
+$c = New-Case "t3c" "import sys`nsys.exit(1)" -NoQuests
+$r = Invoke-Build $c @("-NoPlaces")
+Assert-True "missing_quests_fails" (($r.Code -ne 0) -and ($r.Text -match "quests file missing")) "code $($r.Code) text $($r.Text)"
 # 3
 $c = New-Case "t3" "import sys`nsys.exit(1)"
 $r = Invoke-Build $c @("-NoPlaces")
 $zip = Join-Path $c.Out "Clairvoyance-noplaces.zip"
 $e = @(); if (Test-Path $zip) { $e = Get-Entries $zip }
-Assert-True "noplaces_name" (($r.Code -eq 0) -and ($e.Count -gt 0) -and ($e -contains "reframework/data/Clairvoyance_hints.json") -and -not ($e | Where-Object { $_ -match $toolsRe })) "code $($r.Code)"
+Assert-True "noplaces_name" (($r.Code -eq 0) -and ($e.Count -gt 0) -and ($e -contains "reframework/data/Clairvoyance_hints.json") -and ($e -contains "reframework/data/Clairvoyance_quests.json") -and -not ($e | Where-Object { $_ -match $toolsRe })) "code $($r.Code)"
 # 8 -PlacesFile: no Python, game or key needed; the file is staged verbatim
 $c = New-Case "t8" "import sys`nsys.exit(1)"
 $pf = Join-Path $base "t8_places.json"
