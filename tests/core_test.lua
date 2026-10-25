@@ -4364,6 +4364,70 @@ do
   check("fw 3b: under a search only the related entries that match are results",
     s400 ~= nil and s400.focus_kept == nil and core.is_result(s400) == true
     and g1.focus_kept == true and core.is_result(g1) == false)
+
+  -- Task 3.8: focus NPC and destination markers, the hide/dim pass, counts
+  local function npc(cid, name, pos)
+    return { cid = cid, name = name, pos = pos, alive = true, discovered = true }
+  end
+  local fq = { acceptable = { 20, 21 }, hints = { [20] = 5, [21] = 6 },
+    npc_pos = { [5] = P(1), [6] = P(2), [12] = P(30), [13] = P(40), [17] = P(45) },
+    dead = { [14] = true }, names = { [20] = "Twenty", [21] = "TwentyOne" },
+    npc_names = { [13] = "Mara" } }
+  local frel = { [20] = { cast = {}, npcs = { 12, 13, 14, 16, 17 }, items = {},
+    dest = { { key = 44 }, { key = 45 } } }, [21] = { cast = {}, npcs = {}, items = {}, dest = { { key = 44 } } } }
+  local fw = { npcs = { { cid = 12, name = "Brant" } }, focus_places = { [44] = P(50) } }
+  local FO = { focus_qids = { 20 }, quest_rel = frel, reveal_gate_names = true }
+  r = run(fw, nil, FO, fq)
+  local n12, n13 = has(r.markers, "n:12"), has(r.markers, "n:13")
+  check("ff 1: focus NPC labels", n12 and n12.cat == "focus_npc" and n12.cid == 12 and n12.label == "Brant"
+    and n13 and n13.label == "Mara" and has(r.markers, "n:17").label == "NPC 17")
+  check("ff 2: dead, positionless and covered NPCs get none", has(r.markers, "n:14") == nil
+    and has(r.markers, "n:16") == nil and has(r.markers, "n:5") == nil
+    and table.concat(r.focus_counts.no_pos, ",") == "16")
+  local f44 = has(r.markers, "f:44")
+  check("ff 3: destination marker", f44 and f44.cat == "focus_place" and f44.place == 44
+    and f44.label == "Twenty" and f44.pos.x == 50 and has(r.markers, "f:45") == nil)
+  check("ff 4: hide drops unrelated", has(r.markers, "c:6") == nil and has(r.markers, "c:5") ~= nil)
+  check("ff 5: counts, hide", r.focus_counts.related == 5 and r.focus_counts.added == 4
+    and r.focus_counts.hidden == 1 and r.focus_counts.dimmed == 0)
+  r = run(fw, nil, { focus_qids = { 20, 21 }, quest_rel = frel, reveal_gate_names = true }, fq)
+  check("ff 6: one place marker for two quests", has(r.markers, "f:44").label == "Twenty / TwentyOne"
+    and keys(r.markers, "f:") == "f:44")
+  local FD = { focus_qids = { 20 }, quest_rel = frel, reveal_gate_names = true, focus_unrelated = 1 }
+  r = run(fw, nil, FD, fq)
+  check("ff 7: dim keeps and marks", has(r.markers, "c:6").dim == true and not has(r.markers, "c:5").dim
+    and r.focus_counts.dimmed == 1 and r.focus_counts.hidden == 0)
+  r = run(fw, Q("twentyone"), FO, fq)
+  check("ff 8: search results stay", has(r.markers, "c:6") ~= nil and not has(r.markers, "c:6").dim
+    and has(r.markers, "c:5") ~= nil)
+  r = run(fw, nil, { focus_qids = { 20 }, quest_rel = frel, hint_pins = {
+    { qid = 21, i = 1, pos = P(3), label = "x" }, { qid = 20, i = 1, pos = P(4), label = "y" } },
+    routes = { { cid = 99, name = "Z", stops = { { from = 1, to = 2, pos = P(9), discovered = true } } } } }, fq)
+  check("ff 9: pins of focused quests and every route stop", has(r.markers, "h:20:1") ~= nil
+    and has(r.markers, "h:21:1") == nil and has(r.markers, "r:99:1") ~= nil)
+  local frel6 = { [20] = { cast = {}, npcs = { 6 }, items = {}, dest = {} } }
+  r = run(fw, nil, { focus_qids = { 20 }, quest_rel = frel6 }, fq)
+  check("ff 10: a covering quest marker is related", has(r.markers, "c:6") ~= nil
+    and has(r.markers, "n:6") == nil)
+  local fws = { npcs = { npc(12, "Brant", P(30)) } }
+  r = run(fws, Q("bran"), FO, fq)
+  check("ff 11: an NPC search marker covers its cid", has(r.markers, "w:npc:12") ~= nil
+    and has(r.markers, "n:12") == nil)
+  local fwc = { focus_places = {}, chests = { { uid = "u1", pos = P(5), state = "unopened" } } }
+  r = run(fwc, nil, FO, fq)
+  check("ff 12: full-map pass hidden too", has(r.fullmap_world, "w:chest:u1") == nil)
+  r = run(fwc, nil, FD, fq)
+  check("ff 12b: and dimmed", has(r.fullmap_world, "w:chest:u1").dim == true)
+  r = run(fw, nil, { quest_rel = frel }, fq)
+  check("ff 13: no focus: nothing added or dimmed", keys(r.markers, "n:") == "" and keys(r.markers, "f:") == ""
+    and r.focus_counts == nil and not has(r.markers, "c:6").dim)
+  r = run({ sellers = { { shop = 9, item = 401, item_name = "Salt", cid = 77, npc = "Vendor", qids = { 99 },
+      quest = "Other", pos = P(16) } } }, nil,
+    { focus_qids = { 20 }, quest_rel = { [20] = { cast = {}, npcs = { 77 }, items = {}, dest = {} } } },
+    { acceptable = { 20 }, hints = { [20] = 5 }, npc_pos = { [5] = P(1), [77] = P(15) }, names = { [20] = "Twenty" } })
+  check("ff 14: a covering seller stays in both passes", has(r.markers, "w:sell:9:401") ~= nil
+    and has(r.fullmap_world, "w:sell:9:401") ~= nil and has(r.markers, "n:77") == nil
+    and not has(r.markers, "w:sell:9:401").related)
 end
 
 if failures > 0 then os.exit(1) end

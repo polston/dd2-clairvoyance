@@ -2327,6 +2327,7 @@ end
 -- Pure; the caller resolves each giver and the in-progress set into `live`.
 -- The previous result table itself is returned while every input matches.
 local related_memo = nil
+local focus_names_memo = {}   -- cid -> name, cached on the identity of world.npcs
 
 local function related_same(m, adapter, active, rel, places, needs, live, objs)
   if m == nil or m.adapter ~= adapter or m.rel ~= rel or m.places ~= places
@@ -2820,6 +2821,121 @@ function M.compute(adapter, show)
     end
   end
 
+  -- v19 (SPEC 32.6.2): focus NPC and destination markers, then the hide/dim
+  -- pass over both marker lists.
+  local focus_counts
+  if focus_result ~= nil then
+    local rs = focus_result.quests
+    local akey = {}
+    for _, qid in ipairs(active) do akey[qid] = true end
+    -- 1. cid -> covering marker key (first marker per cid)
+    local cover_key, rel_keys = {}, {}
+    for _, m in ipairs(markers) do
+      local cid = M.marker_cid(m)
+      if cid == nil and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller") then
+        cid = m.cid
+      end
+      if type(cid) == "number" and cover_key[cid] == nil then cover_key[cid] = m.key end
+    end
+    -- 2. focus NPC markers
+    local names
+    local wn = (show.world or {}).npcs
+    if type(wn) == "table" then
+      if focus_names_memo.src ~= wn then
+        local map = {}
+        for _, e in ipairs(wn) do
+          if type(e) == "table" and e.cid ~= nil and map[e.cid] == nil then map[e.cid] = e.name end
+        end
+        focus_names_memo.src, focus_names_memo.map = wn, map
+      end
+      names = focus_names_memo.map
+    end
+    local no_pos, seen_cid, added = {}, {}, 0
+    for _, qid in ipairs(active) do
+      for _, cid in ipairs(rs[qid] and rs[qid].npcs or {}) do
+        if not seen_cid[cid] then
+          seen_cid[cid] = true
+          if cover_key[cid] ~= nil then
+            rel_keys[cover_key[cid]] = true
+          elseif adapter.npc_alive(cid) ~= false then
+            local x, y, z = adapter.npc_pos(cid)
+            if x == nil then
+              no_pos[#no_pos + 1] = cid
+            else
+              local label = names and names[cid]
+              if label == nil or label == "" then
+                label = adapter.npc_name and adapter.npc_name(cid) or nil
+              end
+              if label == nil or label == "" then label = "NPC " .. cid end
+              markers[#markers + 1] = { key = string.format("n:%d", cid), cat = "focus_npc",
+                cid = cid, qids = {}, pos = { x = x, y = y, z = z }, label = label }
+              added = added + 1
+            end
+          end
+        end
+      end
+    end
+    -- 3. destination markers, one per place key
+    local fplaces = (show.world or {}).focus_places
+    local pk, pseen = {}, {}
+    for _, qid in ipairs(active) do
+      for _, key in ipairs(rs[qid] and rs[qid].places or {}) do
+        if not pseen[key] then pseen[key] = true; pk[#pk + 1] = key end
+      end
+    end
+    for _, key in ipairs(pk) do
+      local pp = type(fplaces) == "table" and fplaces[key] or nil
+      if valid_pos(pp) then
+        local nms = {}
+        for _, qid in ipairs(active) do
+          for _, k2 in ipairs(rs[qid] and rs[qid].places or {}) do
+            if k2 == key then
+              nms[#nms + 1] = M.gate_name(qid, adapter, show.reveal_gate_names)
+              break
+            end
+          end
+        end
+        markers[#markers + 1] = { key = "f:" .. tostring(key), cat = "focus_place",
+          place = key, qids = {}, pos = pos_copy(pp), label = table.concat(nms, " / ") }
+        added = added + 1
+      end
+    end
+    -- 4. the hide / dim pass
+    local dim = show.focus_unrelated == 1
+    local function related(m)
+      if m.cat == "focus_npc" or m.cat == "focus_place" or m.cat == "route_stop"
+        or m.related or rel_keys[m.key] then return true end
+      if m.cat == "hint_pin" and akey[m.qid] then return true end
+      for _, qid in ipairs(m.qids or {}) do
+        if akey[qid] then return true end
+      end
+      return false
+    end
+    local function pass(list, counts)
+      local n = 0
+      for i = 1, #list do
+        local m = list[i]
+        local keep = true
+        if related(m) then
+          if counts then counts.related = counts.related + 1 end
+        elseif q ~= nil and M.is_result(m) then
+          keep = true
+        elseif dim then
+          m.dim = true
+          if counts then counts.dimmed = counts.dimmed + 1 end
+        else
+          keep = false
+          if counts then counts.hidden = counts.hidden + 1 end
+        end
+        if keep then n = n + 1; list[n] = m end
+      end
+      for i = #list, n + 1, -1 do list[i] = nil end
+    end
+    focus_counts = { related = 0, added = added, dimmed = 0, hidden = 0, no_pos = no_pos }
+    pass(markers, focus_counts)
+    if fullmap_world ~= nil then pass(fullmap_world) end
+  end
+
   return {
     markers = markers,
     unresolved = unresolved,
@@ -2840,6 +2956,7 @@ function M.compute(adapter, show)
     npc_rows = npc_rows,
     npc_match_cids = npc_match_cids,
     focus = focus_result,
+    focus_counts = focus_counts,
   }
 end
 
