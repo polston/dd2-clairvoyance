@@ -4468,7 +4468,10 @@ do
     and table.concat(r.focus_counts.no_pos, ",") == "77")
   r = run({ npcs = { { cid = 12, name = "Other" } }, focus_places = fw.focus_places }, nil, FO, fq)
   check("ff 17: a new world.npcs table refreshes the names", has(r.markers, "n:12").label == "Other")
-  r = run({ sellers = { seller(9, 401, 6, P(16)) } }, nil, { focus_qids = { 20 }, quest_rel = frel6 }, fq)
+  r = run({ sellers = { seller(9, 401, 77, P(16)) } }, nil,
+    { focus_qids = { 20 }, quest_rel = rel77, map_origin = false }, pos77)
+  check("ff 17b: with no full-map pass the seller covers", r.fullmap_world == nil
+    and has(r.markers, "w:sell:9:401") ~= nil and has(r.markers, "n:77") == nil)
   local rel5 = { [20] = { cast = {}, npcs = { 5 }, items = {}, dest = {} } }
   r = run({ sellers = { seller(9, 401, 5, P(16)) } }, Q("salt"), { focus_qids = { 20 }, quest_rel = rel5 }, fq)
   check("ff 18: the first marker per cid covers", has(r.markers, "c:5").focus_kept == true
