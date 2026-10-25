@@ -7,3 +7,4 @@ tools/hint_sources.local.txt
 __pycache__/
 docs/
 ROADMAP.md
+.superpowers/
