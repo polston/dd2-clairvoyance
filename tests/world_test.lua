@@ -4874,7 +4874,7 @@ do
   local function fps(w) return (w:input() or {}).focus_places end
   local f = kfix()
   local w = f.new()
-  local tg = { treasure = true, focus_keys = { 2302, 2309, 2302 } }
+  local tg = { treasure = true, focus_keys = { 2302, 2309, 2302, 2309 } }
   w:refresh(0, true, tg)
   local fp = fps(w) or {}
   check("focus places: resolved key", fp[2302] ~= nil and fp[2302].x == 1 and fp[2302].y == 2
@@ -4906,6 +4906,14 @@ do
   local w2 = f2.new()
   local ran = w2:refresh(0, true, tg)
   check("focus places: raising read", ran == true and next(fps(w2) or { 0 }) == nil)
+  local f3 = kfix()
+  f3.data.kpos = { [2302] = { x = "a", y = 2, z = 3 } }
+  local w3 = f3.new()
+  w3:refresh(0, true, { treasure = true, focus_keys = { 2302 } })
+  check("focus places: malformed position not published", next(fps(w3) or { 0 }) == nil)
+  w3:poke()
+  w3:refresh(0, true, { treasure = true, focus_keys = { 2302 } })
+  check("focus places: malformed position not cached", f3.reads_n.key_pos == 2)
 end
 
 if failures > 0 then os.exit(1) end
