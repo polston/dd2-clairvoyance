@@ -21,8 +21,12 @@ sources, in this order of preference.
    `python tools/key_check.py` (prints present or missing only). Never print,
    log, copy or commit the key.
 2. `tools/qnml_rsz.py` decodes user-data and scene files. Field layouts come
-   from `tools/layouts.json`, which `tools/build_layouts.py` cuts from the SDK
-   dump kept in `reference/` (gitignored).
+   from `tools/layouts.json`. Regenerate it with
+   `python tools/build_layouts.py --dump <game folder>/il2cpp_dump.json --enums <game folder>/Enums_Internal.hpp --out tools/layouts.json`.
+   The framework writes both dump files into the game folder. They are never
+   copied into the repo. `<game folder>` is the `-GameDir` default in
+   `scripts/deploy.ps1` unless the operator's install differs; pass the same
+   value to deploy.ps1, run.py and the extractors.
 3. A type with no layout in the dump: fit it by hand against real files. Extend
    the field list until the file decodes to its last byte, then add it to
    `NATIVE_LAYOUTS` in `tools/build_layouts.py` and regenerate. That is how
@@ -30,7 +34,17 @@ sources, in this order of preference.
 4. Extractors (`extract_world.py`, `extract_quests.py`, `extract_icons.py`)
    print counts only, never positions or values, and self-check. A failed
    check writes no output file. Their generated files are committed and
-   regenerated after a game patch, never hand-edited.
+   regenerated after a game patch, never hand-edited. Invocations:
+   1. Ad-hoc reads: `import qnml_pak, qnml_rsz, key_check`, then
+      `qnml_pak.Pak(os.path.join(game, 're_chunk_000.pak'), key_check.read_key()).read('<archive path>')`,
+      then `qnml_rsz.decode(data, json.load(open('tools/layouts.json')))`. The
+      base archive only: the extractors refuse patch archives that hold entries.
+   2. `python tools/extract_world.py --game <game folder> --out data/Clairvoyance_places.json`;
+      `python tools/extract_quests.py --game <game folder> --out data/Clairvoyance_quests.json`;
+      `python tools/extract_icons.py --game <game folder>` (writes
+      `reframework/images/Clairvoyance/icons/`).
+   3. No key yet: `python tools/key_check.py --write-from <local file holding the key literal>`.
+      It pulls the `bytes.fromhex(...)` literal without printing it.
 5. Before building on a data source, measure it. Count what decodes and what
    fails, and name the failures. Record the counts in the SPEC section.
 
@@ -39,21 +53,42 @@ sources, in this order of preference.
 The mod exposes a debug table `QNML_DEBUG` while its Debug setting is on. It
 offers `state`, `world`, `focus`, `route`, `set`, `jump`, `expand` and others;
 see the `_G.QNML_DEBUG = {` block in `reframework/autorun/Clairvoyance.lua`.
-Reach internals with `debug.getupvalue` on those functions.
+To reach internals, try `debug.getupvalue` on those functions. Unverified: first
+probe `return type(debug) .. " " .. type(debug and debug.getupvalue)` to see
+whether the framework's Lua exposes the `debug` library.
 
-1. Install the dev harness once. Copy `tools/probe/qnml_check.lua` into the
-   game's `reframework/autorun/`. It is never in the release zip.
-2. The harness runs any Lua chunk written to `reframework/data/qnml_cmd.txt`
-   about twice a second. In that chunk, `D` is `QNML_DEBUG` and `L(s)` logs a
-   `CHK` line. Every 5 s it also logs `D.state()`.
+1. Install the dev harness once: copy `tools/probe/qnml_check.lua` into the
+   game's `reframework/autorun/`. The operator then presses Reset Scripts. It
+   is never in the release zip.
+   1. `QNML_DEBUG` exists only while the mod's Debug setting is on. If the log
+      shows `CHK QNML_DEBUG nil true`, Debug is off. Turn it on in the mod's
+      settings window (driven with the input tools in section 3), then check
+      for `CHK ready`.
+2. The harness polls every 30 frames (about twice a second at 60 fps),
+   starting 120 frames after a script load. Its first poll runs
+   `reframework/data/qnml_boot.txt` once, which is for probes that must run
+   straight after a load. After that it runs whatever is in
+   `reframework/data/qnml_cmd.txt` and blanks the file. In the chunk, `D` is
+   `QNML_DEBUG`, `L(s)` logs `CHK <s>`, and `dump()` logs the state summary.
+   The chunk's return value comes back in the `CHK cmd ok=true <value>` line.
+   Every 5 s the harness logs setup_icon_n, map_ctor_n, the tracked quest and
+   the `D.state().lines` and `.jumps`, each line prefixed `CHK ~ `.
 3. Write the probe chunk to a file and run
-   `python tools/probe/run.py <chunk.lua> [timeout_s] --game <game folder>`. It prints the `CHK`
-   lines and any mod error from `re2_framework_log.txt`.
-4. After `scripts/deploy.ps1` the operator presses Reset Scripts. That is the
-   only step that needs them. Everything else (map, camera, menus, settings)
-   you drive yourself.
+   `python tools/probe/run.py <chunk.lua> [timeout_s] --game <game folder>`.
+   It prints the chunk's `CHK` lines, the `cmd ok=<true|false> <return value or error>`
+   line, and any framework `[error]` line that mentions the mod. On TIMEOUT it
+   clears the queued chunk and exits 1.
+4. Reset Scripts, after installing the harness and after each
+   `scripts/deploy.ps1`, is the only step that needs the operator. Everything
+   else (map, camera, menus, settings) you drive yourself.
 5. A probe that changes settings restores them before it ends, including on
    failure. Leave the game as you found it. Never edit the save file.
+   `D.set(key, v)` writes the settings file `reframework/data/Clairvoyance.json`
+   at once, so a change persists across restarts. Keys: enabled,
+   journal_spoilers, debug, search_text, matching_icons, step_icons,
+   overhead_names, inventory_quest_marks, world_max_markers and the
+   world-tracker toggles in `settings_util.WORLD_BOOLS`. Read the old value
+   from the settings first and restore it inside a pcall-guarded finally.
 6. One probe runs every variant and logs each result. Never ask the operator
    to repeat a test.
 
@@ -63,23 +98,30 @@ Reach internals with `debug.getupvalue` on those functions.
 2. `powershell -File tools/probe/shot.ps1 <out.png>` captures the game window.
    Look at the picture yourself; never ask the operator to observe it.
 3. `powershell -File tools/probe/input.ps1 click X Y | wheel X Y DELTA | key VK [SCAN] | drag X1 Y1 X2 Y2`
-   sends input in screen coordinates. Escape needs its scan code (`key 27 1`)
-   to close the map.
-4. World rounds are held while the full map is open. Close the map before
-   timing world rounds.
+   sends input in screen coordinates. A point at pixel (px,py) in the shot is
+   screen (X+px, Y+py), using the X,Y that shot.ps1 prints (`saved WxH at X,Y`).
+   Escape is sent as `key 27 1` (virtual key 27, scan code 1) to close the map;
+   whether the game needs the scan code is untested.
+4. World rounds are held while the full map is open or a pause menu is up.
+   Close both before timing world rounds.
 
 ### 4. Measuring
 
 1. Take medians over many samples (frames or rounds), with max beside them.
 2. Compare with the feature on and off at the same place in the game.
-3. Record the numbers in the SPEC section with what was measured and where. A
+3. Timing fields live in `D.state()` (`tick_median`, `world_path_ms`, `draw`,
+   `names`). Log them from the chunk with `L(...)`; the periodic dump does not
+   include them.
+4. Record the numbers in the SPEC section with what was measured and where. A
    number whose subject changed after it was taken is re-taken, or stamped
    with the commit it was true at.
 
 ### Hint text research
 
-`tools/hints_fetch.py` downloads guide pages listed in a local sources file
-into `reference/hints/` (gitignored). Hints are paraphrased in our own words.
+`tools/hints_fetch.py` reads `tools/hint_sources.local.txt` (gitignored, one
+`<qid> <url>` per line) and saves each page as `reference/hints/<qid>/<n>.html`
+and `.txt`. Both live in the main checkout. Run the fetch before writing any
+hint text, or the gate's hints check fails. Hints are paraphrased in our own words.
 `tools/hints_check.py` fails on any 8-word run shared with a source. Sources
 are never named in tracked text, comments included; `scripts/provenance.ps1`
 enforces this with the gitignored `scripts/provenance.local.txt` pattern list.
@@ -88,6 +130,12 @@ enforces this with the gitignored `scripts/provenance.local.txt` pattern list.
 
 The spec, plans and ROADMAP live in `docs/`, a separate private git repo that
 is never pushed. Commit edits there, not here.
+
+Worktrees: `docs/`, `reference/`, `.superpowers/` and the `*.local.txt` files
+exist only in the main checkout. Find it with
+`git rev-parse --path-format=absolute --git-common-dir`; its parent directory
+is the main checkout. Ledgers, spec and roadmap edits go there, never into a
+lane worktree.
 
 ### Order of work
 
@@ -116,7 +164,7 @@ is never pushed. Commit edits there, not here.
 
 1. Plans name parallel lanes: file-disjoint groups of tasks with their
    dependencies marked. Each lane gets its own worktree and branch forked from
-   the feature branch (`git worktree add ../clv-<lane> -b feat/<lane>`), one
+   the feature branch (`git worktree add ../clv-<lane> -b feat/<lane> feat/<feature>`), one
    implementer per lane. Lanes merge back into the feature branch as their
    reviews close.
 2. Execution uses subagent-driven development, with explicit models:
@@ -127,13 +175,14 @@ is never pushed. Commit edits there, not here.
    (gitignored), with briefs, reports and review packages beside it. Every
    decision the plan does not settle is recorded there as
    `Ruling: <what> - <why> - <cost if wrong>`, and work continues.
-4. The gate is
-   `powershell -NoProfile -File scripts/check.ps1 -Lua <lua.exe> -Luac <luac.exe>`.
-   It must end `check.ps1: all OK`. Its `locals:` lines give the chunk-level
+4. The gate is `powershell -NoProfile -File scripts/check.ps1` (add
+   `-Lua <path> -Luac <path>` only when they are not on PATH). It must end `check.ps1: all OK`. Its `locals:` lines give the chunk-level
    local budget of `Clairvoyance.lua` and `adapter.lua`. New state goes in
    fields (`wt`, `icons`), not new chunk-level locals.
-5. Lua files keep CRLF line endings. Edit with byte-level reads and writes,
-   never `sed -i`.
+5. The repo stores Lua files with LF. This machine's `core.autocrlf=true`
+   checks them out as CRLF. Whatever tool edits a file, run `git diff --stat`
+   afterwards: it must show only the lines you meant to change, never a
+   whole-file rewrite.
 6. After the lanes merge: deploy, check in game (Part 1), and fold what the
    game shows into the SPEC before calling the feature done.
 

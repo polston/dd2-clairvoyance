@@ -3,11 +3,13 @@
 Add-Type @"
 using System; using System.Runtime.InteropServices;
 public static class In {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, int d, UIntPtr e);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte sc, uint f, UIntPtr e);
 }
 "@
+[void][In]::SetProcessDPIAware()
 $a = $args
 switch ($a[0]) {
   "click" { [In]::SetCursorPos([int]$a[1],[int]$a[2]); Start-Sleep -Milliseconds 120

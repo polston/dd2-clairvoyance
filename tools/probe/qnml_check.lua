@@ -1,7 +1,8 @@
 -- Developer-only in-game probe harness (never in the release zip). Copy it to
 -- the game's reframework/autorun/ and press Reset Scripts. See the
 -- clairvoyance-workflow skill, Part 1.
--- Every 5 s logs QNML_DEBUG.state() as CHK lines; every 30 frames runs any
+-- Every 5 s logs QNML_DEBUG.state() as CHK lines, each prefixed "~ " so run.py
+-- can tell them from a chunk's own output; every 30 frames runs any
 -- Lua chunk written to reframework/data/qnml_cmd.txt with D = QNML_DEBUG.
 local function L(s) log.info("CHK " .. s) end
 local f, last_dump = 0, 0
@@ -12,10 +13,10 @@ local function dump()
   if D == nil then L("QNML_DEBUG nil true"); return end
   local ok, st = pcall(D.state)
   if not ok then L("state error " .. tostring(st)); return end
-  L(string.format("setup_icon_n %s map_ctor_n %s tracked %s",
+  L(string.format("~ setup_icon_n %s map_ctor_n %s tracked %s",
     tostring(st.setup_icon_n), tostring(st.map_ctor_n), tostring(st.tracked_qid)))
-  for _, l in ipairs(st.lines or {}) do L("| " .. l) end
-  for _, j in ipairs(st.jumps or {}) do L("jump " .. j) end
+  for _, l in ipairs(st.lines or {}) do L("~ | " .. l) end
+  for _, j in ipairs(st.jumps or {}) do L("~ jump " .. j) end
 end
 re.on_frame(function()
   f = f + 1

@@ -11,6 +11,9 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from hints_check import main_path  # noqa: E402
+
 USER_AGENT = "Mozilla/5.0 (compatible; hint-research/1.0)"
 TIMEOUT = 30
 SKIP = {"script", "style", "noscript", "template", "head"}
@@ -84,9 +87,15 @@ def fetch(url):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sources", default="tools/hint_sources.local.txt")
-    ap.add_argument("--out", default="reference/hints")
+    ap.add_argument("--sources", default=None,
+                    help="default: tools/hint_sources.local.txt in the main checkout")
+    ap.add_argument("--out", default=None,
+                    help="default: reference/hints in the main checkout")
     args = ap.parse_args(argv)
+    if args.sources is None:
+        args.sources = main_path("tools", "hint_sources.local.txt")
+    if args.out is None:
+        args.out = main_path("reference", "hints")
     with open(args.sources, encoding="utf-8") as f:
         sources = list(parse_sources(f.read()))
     counts = {}

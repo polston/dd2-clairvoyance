@@ -2,15 +2,26 @@
 Usage: python tools/probe/run.py <chunk.lua> [timeout_s] --game <game folder>
 Writes the chunk to reframework/data/qnml_cmd.txt, waits for the harness's
 "CHK cmd ok=" line in re2_framework_log.txt, then prints the CHK lines the
-chunk logged and any Clairvoyance error lines. Prints TIMEOUT when the chunk
-did not finish in time (default 30 s).
+chunk logged and any framework [error] line that mentions the mod. On TIMEOUT
+(default 30 s) it prints TIMEOUT, blanks the queued chunk file so the harness
+cannot run it later, and exits 1.
 """
 import argparse
 import os
+import sys
 import time
 
-# The harness's own periodic dump; not the chunk's output.
-NOISE = ("| ", "setup_icon_n", "jump ")
+# The harness prefixes its own periodic dump lines with this; a chunk's lines
+# never start with it.
+NOISE = "~ "
+
+
+def is_mod_error(line):
+    """A framework or mod error line that mentions the mod or its files."""
+    low = line.lower()
+    if "[error]" in low and ("clairvoyance" in low or "qnml" in low):
+        return True
+    return "[clairvoyance]" in low and "error" in low
 
 
 def main():
@@ -38,14 +49,17 @@ def main():
             break
     if not done:
         print("TIMEOUT")
+        with open(cmd, "w", encoding="utf-8") as f:
+            f.write("")
     for line in text.splitlines():
         if "CHK " in line:
             s = line.split("CHK ", 1)[1]
             if not s.startswith(NOISE):
                 print(s)
-        elif "[Clairvoyance]" in line and "error" in line.lower():
+        elif is_mod_error(line):
             print("LOG", line[-200:])
+    return 0 if done else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
