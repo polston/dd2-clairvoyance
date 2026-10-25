@@ -22,6 +22,7 @@ local function in_hours(h, lo, hi)
   if lo < hi then return h >= lo and h < hi end
   return h >= lo or h < hi
 end
+M.in_hours = in_hours
 
 local function applies_today(r, today)
   return in_range(today.week, r.start_week, r.end_week)

@@ -2100,6 +2100,10 @@ do
   function stub.today(day, hour)
     return { week = math.floor(day / 7) % 4 + 1, weekday = day % 7, hour = hour }
   end
+  function stub.in_hours(h, lo, hi)
+    if lo < hi then return h >= lo and h < hi end
+    return h >= lo or h < hi
+  end
   function stub.route_stops(rows, today, area_pos, cur)
     stub.calls.route_stops = stub.calls.route_stops + 1
     stub.last_cur, stub.last_today = cur, today
@@ -2712,11 +2716,13 @@ do
     local function sfix()
       local f, d = nfix()
       d.bad = {}
-      for c = 2001, 2008 do
+      for c = 2001, 2009 do
         d.rows[c] = rows_of({ 6, 18, 49 })
         d.cur[c] = { area = 49, location = 0 }
       end
       d.area_nodes[49] = { P(1, 0, 1) }
+      d.keypos = {}
+      f.reads.key_pos = function(k) return d.keypos[k] end
       f.reads.schedule_rows = function(cid)
         f.reads_n.schedule_rows = (f.reads_n.schedule_rows or 0) + 1
         if d.bad[cid] then error("fake bad cid") end
@@ -2937,6 +2943,257 @@ do
       end
       check("set_routes: eight members, one rebuild per round", b0 == 8 and rounds == 8
         and one_each and w:stats().route_builds == 16)
+    end
+
+    -- route colour slots and the current stop (SPEC 32.14)
+    local function slots(w)
+      local t = {}
+      for i, e in ipairs((w:input() or {}).routes or {}) do t[i] = e.cid .. "=" .. tostring(e.slot) end
+      return table.concat(t, ",")
+    end
+    local function mem(...)
+      local t = {}
+      for _, c in ipairs({ ... }) do t[#t + 1] = { cid = c, name = "N" .. c } end
+      return t
+    end
+
+    -- 1: slots are sticky
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002, 2003))
+      settle(w, 0)
+      check("slots sticky: first three take 1,2,3", slots(w) == "2001=1,2002=2,2003=3")
+      w:set_routes(mem(2001, 2003))
+      settle(w, 0)
+      check("slots sticky: a removal keeps the others", slots(w) == "2001=1,2003=3")
+      w:set_routes(mem(2001, 2003, 2004))
+      settle(w, 0)
+      check("slots sticky: a newcomer takes the lowest free slot",
+        slots(w) == "2001=1,2003=3,2004=2")
+    end
+
+    -- 2: the search target takes the lowest free slot, and frees it
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002))
+      settle(w, 0)
+      w:set_route(2005, "Ee")
+      settle(w, 0)
+      check("target slot: the target takes the lowest free slot though listed first",
+        slots(w) == "2005=3,2001=1,2002=2")
+      w:clear_route()
+      w:set_routes(mem(2001, 2002, 2003))
+      settle(w, 0)
+      check("target slot: clear_route frees it for the next member",
+        slots(w) == "2001=1,2002=2,2003=3")
+    end
+
+    -- 3: error entries carry their slots
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002))
+      settle(w, 0)
+      d.bad[2001] = true
+      w:poke()
+      d.hour = 8
+      settle(w, 1)
+      check("slot on error: a failed build keeps the slot",
+        route_in(w, 2001).err ~= nil and slots(w) == "2001=1,2002=2")
+      d.bad[2001] = nil
+      d.hour = 7
+      settle(w, 2)
+      f.fail.current_sig = true
+      w:poke()
+      settle(w, 3)
+      check("slot on error: a bad signature read keeps the slots",
+        route_in(w, 2001).err ~= nil and route_in(w, 2002).err ~= nil
+        and slots(w) == "2001=1,2002=2")
+      f.fail.current_sig = nil
+      settle(w, 4)
+      f.fail.schedule_now = true
+      w:poke()
+      settle(w, 5)
+      check("slot on error: a schedule_now failure keeps the slots",
+        route_in(w, 2001).err ~= nil and slots(w) == "2001=1,2002=2")
+      f.fail.schedule_now = nil
+      local w2 = f.new()
+      w2:set_routes(mem(2001, 2002))
+      f.fail.schedule_now = true
+      settle(w2, 0)
+      check("slot on error: a schedule_now failure from the start still assigns",
+        slots(w2) == "2001=1,2002=2")
+      f.fail.schedule_now = nil
+    end
+
+    -- 4: past eight
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008))
+      settle(w, 0)
+      w:set_route(2009, "Ii")
+      w:refresh(1, true, tg)
+      check("slots past eight: the ninth has none, the eight keep theirs",
+        #w:input().routes == 9 and route_in(w, 2009).slot == nil
+        and slots(w) == "2009=nil,2001=1,2002=2,2003=3,2004=4,2005=5,2006=6,2007=7,2008=8")
+    end
+
+    -- 5: the current stop
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      d.rows[2001] = rows_of({ 0, 8, 49 }, { 8, 18, 49 }, { 18, 24, 49 })
+      d.rows[2002] = rows_of({ 0, 8, 49 }, { 18, 24, 49 })
+      w:set_routes(mem(2001, 2002))
+      d.hour = 10
+      settle(w, 0)
+      check("current: hour 10 is the second stop", route_in(w, 2001).current == 2)
+      check("current: no stop at the hour is nil", route_in(w, 2002).current == nil
+        and route_in(w, 2002).stops ~= nil and route_in(w, 2002).err == nil)
+      d.hour = 23
+      w:poke()
+      settle(w, 1)
+      check("current: hour 23 is the third stop", route_in(w, 2001).current == 3
+        and route_in(w, 2002).current == 2)
+    end
+
+    -- 6: reset clears the slots
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002))
+      settle(w, 0)
+      w:reset()
+      w:set_routes(mem(2002, 2001))
+      settle(w, 1)
+      check("slots: reset starts again from 1", slots(w) == "2002=1,2001=2")
+    end
+
+    -- place routes (SPEC 32.14.5)
+    local function ptg(player, keys)
+      local t = on("search")
+      t.player, t.focus_keys = player, keys
+      return t
+    end
+    local PL = { { cid = 2001, name = "A" }, { cid = -77, place = 77, name = "Q" } }
+
+    -- 1: a place member
+    f, d = sfix()
+    w = f.new()
+    d.keypos[77] = P(10, 0, 10)
+    if type(w.set_routes) == "function" then
+      w:set_routes(PL)
+      local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
+      local n = 0
+      repeat n = n + 1 until not w:refresh(0, true, t1) or n > 20
+      local pe = route_in(w, -77)
+      check("place member: after the NPC, with the place and two stops",
+        cids(w) == "2001,-77" and pe ~= nil and pe.place == 77 and pe.name == "Q"
+        and pe.stops ~= nil and #pe.stops == 2)
+      check("place member: stops are the player and the place, both discovered",
+        pe ~= nil and pe.stops ~= nil and pe.stops[1].pos.x == 5 and pe.stops[1].pos.y == 1
+        and pe.stops[2].pos.x == 10 and pe.stops[2].pos.z == 10
+        and pe.stops[1].discovered == true and pe.stops[2].discovered == true)
+      check("place member: a slot and no current", pe ~= nil and pe.slot == 2
+        and pe.current == nil and pe.err == nil)
+    end
+
+    -- 2: no build, no signature read, no schedule_now failure
+    f, d = sfix()
+    w = f.new()
+    d.keypos[77] = P(10, 0, 10)
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = -77, place = 77, name = "Q" } })
+      local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
+      w:refresh(0, true, t1)
+      check("place no build: only the place leaves no build and no signature read",
+        route_in(w, -77) ~= nil and w:stats().route_builds == 0
+        and (f.reads_n.current_sig or 0) == 0 and stub.calls.route_stops == 0)
+      w:set_routes(PL)
+      f.fail.schedule_now = true
+      w:poke()
+      w:refresh(1, true, t1)
+      check("place no build: schedule_now failing errs the NPC, not the place",
+        route_in(w, 2001).err ~= nil and route_in(w, -77).err == nil
+        and #route_in(w, -77).stops == 2)
+      f.fail.schedule_now = nil
+    end
+
+    -- 3: waits for the key and the player, holding no slot
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" } })
+      local n = 0
+      local t0 = ptg(nil, { 77 })
+      d.keypos[77] = P(10, 0, 10)
+      repeat n = n + 1 until not w:refresh(0, true, t0) or n > 20
+      check("place waits: no player, no place entry and the NPC takes slot 1",
+        route_in(w, -77) == nil and slots(w) == "2001=1")
+      d.keypos[77] = nil
+      local t1 = ptg({ x = 5, y = 1, z = 5 }, { 77 })
+      w:reset()
+      w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" } })
+      n = 0
+      repeat n = n + 1 until not w:refresh(1, true, t1) or n > 20
+      check("place waits: no key position, no place entry",
+        route_in(w, -77) == nil and slots(w) == "2001=1")
+      d.keypos[77] = P(10, 0, 10)
+      w:poke()
+      w:refresh(2, true, t1)
+      check("place waits: both present, the entry appears with the next slot",
+        route_in(w, -77) ~= nil and slots(w) == "-77=2,2001=1")
+      w:poke()
+      w:refresh(3, true, t0)
+      check("place waits: the player gone frees the slot",
+        route_in(w, -77) == nil and slots(w) == "2001=1")
+      w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" },
+        { cid = 2002, name = "B" } })
+      local n2 = 0
+      repeat n2 = n2 + 1 until not w:refresh(4, true, t0) or n2 > 20
+      check("place waits: a member joining takes the slot the place freed",
+        slots(w) == "2001=1,2002=2")
+    end
+
+    -- 4: guards
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = 2001, name = "A" } })
+      settle(w, 0)
+      local g0 = w.route_gen
+      -- a kept member would be an add: it bumps route_gen
+      w:set_routes({ { cid = 2001, name = "A" }, { cid = 0, place = 0, name = "Z" },
+        { cid = -1.5, place = 1.5, name = "Y" }, { cid = -9, place = 77, name = "X" },
+        { cid = 2001, place = 77, name = "W" } })
+      check("place guards: place 0, 1.5 and a cid other than -place are dropped",
+        w.route_gen == g0 and cids(w) == "2001")
+      local g = w.route_gen
+      w:set_route(-5, "Z")
+      w:set_route(0, "Z")
+      check("place guards: set_route ignores a cid at or below 0",
+        w.route_gen == g and cids(w) == "2001")
+    end
+
+    -- 5: moving the player drops the old near key
+    f, d = sfix()
+    w = f.new()
+    d.keypos[77] = P(10, 0, 10)
+    if type(w.set_routes) == "function" then
+      w:set_routes({ { cid = -77, place = 77, name = "Q" } })
+      w:refresh(0, true, ptg({ x = 5, y = 1, z = 5 }, { 77 }))
+      w.near["5.0,1.0,5.0"] = 3
+      w.near["10.0,0.0,10.0"] = 4
+      w:poke()
+      w:refresh(1, true, ptg({ x = 5, y = 1, z = 5 }, { 77 }))
+      check("place re-path: an unmoved player keeps its near key", w.near["5.0,1.0,5.0"] == 3)
+      w:poke()
+      w:refresh(2, true, ptg({ x = 6, y = 1, z = 6 }, { 77 }))
+      check("place re-path: a moved player drops the old near key only",
+        w.near["5.0,1.0,5.0"] == nil and w.near["10.0,0.0,10.0"] == 4)
     end
   end
 
