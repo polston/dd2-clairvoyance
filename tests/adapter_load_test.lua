@@ -3303,6 +3303,17 @@ do
   a.npc_name(42)
   assert(cdict_calls == cc + 1, "JR16 miss cache cleared")
 
+  -- QF set_focus_qids stores a set and clears on nil or empty
+  a.set_focus_qids({ 10010, 10020, "x" })
+  local fs = a.focus_set()
+  assert(fs ~= nil and fs[10010] and fs[10020] and fs.x == nil and fs[1] == nil,
+    "QF1 numbers stored as a set")
+  a.set_focus_qids({})
+  assert(a.focus_set() == nil, "QF2 empty list clears")
+  a.set_focus_qids({ 10010 })
+  a.set_focus_qids(nil)
+  assert(a.focus_set() == nil, "QF3 nil clears")
+
   sdk.get_managed_singleton, sdk.find_type_definition, Vector3f = prev_gms, prev_ftd, prev_v3
 end
 
