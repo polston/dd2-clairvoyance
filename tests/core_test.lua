@@ -4204,6 +4204,94 @@ do
   local rsort = { [50] = { cast = {}, npcs = {}, items = {}, dest = { { key = 46 }, { key = 44 } } } }
   local rso = core.related_sets(ra, { 50 }, rsort, places, { givers = {}, prog = {} })
   check("rs 17: places come back ascending", j(rso[50].places) == "44,46")
+
+  -- Task 3.6: focus in the quest loop and the item markers
+  local qx = { acceptable = { 20, 21 }, hints = { [20] = 5, [21] = 6 },
+    npc_pos = { [5] = P(1), [6] = P(2) }, names = { [20] = "Twenty", [21] = "TwentyOne" } }
+  local r = run({}, nil, { startable = false }, qx)
+  check("fq 1a: hidden category, no focus: no marker", has(r.markers, "c:5") == nil and r.focus == nil)
+  r = run({}, nil, { startable = false, focus_qids = { 20 } }, qx)
+  check("fq 1: focused quest passes a hidden category", has(r.markers, "c:5") ~= nil
+    and has(r.markers, "c:6") == nil)
+  r = run({}, Q("zzz"), { focus_qids = { 20 } }, qx)
+  check("fq 2: focused quest marker skips the search", has(r.markers, "c:5") ~= nil)
+  r = run({}, nil, { focus_qids = { 21, 20 }, focus_tracked_qid = 20 }, qx)
+  check("fq 3: result.focus", r.focus ~= nil and table.concat(r.focus.active, ",") == "20,21"
+    and r.focus.quests[20].npcs[1] == 5 and table.concat(r.focus.quests[21].step_npcs, ",") == "6")
+  local qc = { acceptable = { 22 }, casts = { [22] = { 8, 7 } }, npc_pos = { [7] = P(3) },
+    names = { [22] = "TwentyTwo" } }
+  r = run({}, nil, { focus_qids = { 22 } }, qc)
+  check("fq 4: giver from the c: marker before the first candidate",
+    has(r.markers, "c:7") ~= nil and table.concat(r.focus.quests[22].step_npcs, ",") == "7")
+  qx.states = { [20] = "completed" }
+  r = run({}, nil, { completed = true, focus_qids = { 20 } }, qx)
+  check("fq 5: a completed quest is not active", r.focus == nil)
+  qx.states = nil
+  local qi = { progressing = { 30 }, hints = { [30] = 5 }, npc_pos = { [5] = P(1) },
+    names = { [30] = "Thirty" }, item_needs = { [30] = { { id = 300 } } },
+    item_locs = { { id = 300, pos = P(40), src = "placed" } }, item_names = { [300] = "Gem" } }
+  r = run({}, nil, { quest_items = false, focus_qids = { 30 } }, qi)
+  check("fq 6: focused needs with Quest items off", has(r.markers, "i:300:10:0") ~= nil)
+  r = run({}, nil, { in_progress = false, focus_qids = { 30 } }, qi)
+  check("fq 6b: and with In progress off", has(r.markers, "i:300:10:0") ~= nil and has(r.markers, "c:5") ~= nil)
+  r = run({}, nil, { quest_items = false }, qi)
+  check("fq 6c: no focus, Quest items off: none", has(r.markers, "i:300:10:0") == nil)
+  local many = { progressing = { 30, 31 }, hints = { [30] = 5, [31] = 6 },
+    npc_pos = { [5] = P(1), [6] = P(2) }, names = { [30] = "Thirty", [31] = "ThirtyOne" },
+    item_needs = { [30] = { { id = 300 } }, [31] = { { id = 301 } } }, item_locs = {} }
+  for i = 1, 40 do
+    many.item_locs[#many.item_locs + 1] = { id = 300, pos = P(i * 8), src = "placed" }
+    many.item_locs[#many.item_locs + 1] = { id = 301, pos = P(i * 8, 0, 400), src = "placed" }
+  end
+  local function count_id(rr, id)
+    local n = 0
+    for _, m in ipairs(rr.markers) do if m.item_id == id then n = n + 1 end end
+    return n
+  end
+  -- dim, so Task 3.8's hide pass keeps quest 31's items
+  r = run({}, nil, { focus_qids = { 30 }, focus_unrelated = 1 }, many)
+  check("fq 7: related needs take no cap slot", count_id(r, 300) == 40 and count_id(r, 301) == 32)
+  local ords, dup = {}, false
+  for _, m in ipairs(r.markers) do
+    if m.item_id then
+      local k = m.item_id .. ":" .. m.item_ord
+      if ords[k] then dup = true end
+      ords[k] = true
+    end
+  end
+  check("fq 7b: one item_ord sequence", not dup)
+  r = run({}, Q("zzz"), { focus_qids = { 30 } }, many)
+  check("fq 7c: related needs skip the search", count_id(r, 300) == 40 and count_id(r, 301) == 0)
+  local fk, n300 = true, 0
+  for _, m in ipairs(r.markers) do
+    if m.item_id == 300 then n300 = n300 + 1; if m.focus_kept ~= true then fk = false end end
+  end
+  check("fq 7d: item markers kept only by focus are flagged", n300 == 40 and fk)
+  r = run({}, Q("zzz"), { focus_qids = { 20 } }, qx)
+  local c5 = has(r.markers, "c:5") or {}
+  check("fq 2b: a quest marker kept only by focus is not a search result",
+    c5.focus_kept == true and core.is_result(c5) == false)
+  r = run({}, Q("twenty"), { focus_qids = { 20 } }, qx)
+  c5 = has(r.markers, "c:5")
+  check("fq 2c: a matching focused quest marker stays a result",
+    c5 ~= nil and c5.focus_kept == nil and core.is_result(c5) == true)
+  local qm = { progressing = { 50 }, main = { [50] = true }, item_needs = { [50] = { { id = 500 } } },
+    item_locs = { { id = 500, pos = P(40), src = "placed" } }, item_names = { [500] = "Seal" } }
+  r = run({}, nil, { focus_tracked_qid = 50 }, qm)
+  check("fq 8: a focused main quest's needs get item markers", has(r.markers, "i:500:10:0") ~= nil)
+  r = run({}, nil, {}, qm)
+  check("fq 8b: no focus: a main quest's needs get none", has(r.markers, "i:500:10:0") == nil)
+  r = run({}, nil, { focus_tracked_qid = 50,
+    quest_rel = { [50] = { cast = {}, npcs = { 12 }, items = {}, dest = {} } } }, {})
+  check("fq 9: a tracked quest outside every list gets the file's related set",
+    r.focus ~= nil and table.concat(r.focus.active, ",") == "50"
+    and table.concat(r.focus.quests[50].npcs, ",") == "12" and #r.focus.quests[50].step_npcs == 0)
+  local qo = { progressing = { 30 }, casts = { [30] = { 9 } }, objectives = { [30] = { 8 } },
+    npc_pos = { [8] = P(2), [9] = P(3) }, objective_pos = { [8] = P(2) }, names = { [30] = "Thirty" } }
+  r = run({}, nil, { focus_qids = { 30 } }, qo)
+  check("fq 10: in progress, the objective marker is not the giver", has(r.markers, "c:8") ~= nil
+    and table.concat(r.focus.quests[30].npcs, ",") == "9,8"
+    and table.concat(r.focus.quests[30].step_npcs, ",") == "8")
 end
 
 if failures > 0 then os.exit(1) end

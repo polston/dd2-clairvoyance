@@ -265,16 +265,33 @@ local function quest_hay(adapter, g)
   return h
 end
 
-function M.item_markers(adapter, shown_inprog, origin, q)
+-- v19 (SPEC 32): `focus_inprog` (set or nil) marks the focused in-progress
+-- quests. An entry whose item such a quest needs skips the query and the cap
+-- and shares the one item_ord sequence with the rest.
+function M.item_markers(adapter, shown_inprog, origin, q, focus_inprog)
   local needs
   if adapter.item_needs then
     M.world_stats.item_need_reads = M.world_stats.item_need_reads + 1
     needs = adapter.item_needs()
   end
   if type(needs) ~= "table" then return {}, 0 end
-  local by_id = M.needs_by_item(needs, shown_inprog)   -- item id -> needing shown quests
+  local keep_qids = shown_inprog
+  if type(focus_inprog) == "table" and next(focus_inprog) ~= nil then
+    keep_qids = {}
+    for qid, on in pairs(shown_inprog) do if on then keep_qids[qid] = true end end
+    for qid, on in pairs(focus_inprog) do if on then keep_qids[qid] = true end end
+  end
+  local by_id = M.needs_by_item(needs, keep_qids)   -- item id -> needing shown quests
   if next(by_id) == nil then return {}, 0 end
-  for _, qs in pairs(by_id) do table.sort(qs) end
+  local focus_item = {}   -- item id -> a focused quest needs it
+  for id, qs in pairs(by_id) do
+    table.sort(qs)
+    if type(focus_inprog) == "table" then
+      for _, qid in ipairs(qs) do
+        if focus_inprog[qid] then focus_item[id] = true end
+      end
+    end
+  end
 
   local recs = {}
   local locs = adapter.item_locations and adapter.item_locations() or nil
@@ -337,9 +354,23 @@ function M.item_markers(adapter, shown_inprog, origin, q)
         m = query_match(q, hay_join(parts))
         ok[e.item_id] = m
       end
-      if m then matched[#matched + 1] = e end
+      if m then
+        matched[#matched + 1] = e
+      elseif focus_item[e.item_id] then
+        e.focus_kept = true
+        matched[#matched + 1] = e
+      end
     end
     entries = matched
+  end
+  -- Related needs are held out of the cap and put back after it.
+  local held = {}
+  if next(focus_item) ~= nil then
+    local rest = {}
+    for _, e in ipairs(entries) do
+      if focus_item[e.item_id] then held[#held + 1] = e else rest[#rest + 1] = e end
+    end
+    entries = rest
   end
   local capped = 0
   if #entries > M.ITEM_MARKER_MAX then
@@ -364,6 +395,7 @@ function M.item_markers(adapter, shown_inprog, origin, q)
     capped = #entries - M.ITEM_MARKER_MAX
     for i = #entries, M.ITEM_MARKER_MAX + 1, -1 do entries[i] = nil end
   end
+  for _, e in ipairs(held) do entries[#entries + 1] = e end
   -- Kept set back in (item_id, key) order so item_ord (marker identity)
   -- does not shuffle as the origin moves.
   table.sort(entries, by_id_key)
@@ -394,7 +426,7 @@ function M.item_markers(adapter, shown_inprog, origin, q)
       pos = { x = r.pos.x, y = r.pos.y, z = r.pos.z },
       live = type(lv) == "table" and { x = lv.x, y = lv.y, z = lv.z } or nil,
       qids = qs, item_id = id, cat = "quest_item",
-      label = label, item_ord = o,
+      label = label, item_ord = o, focus_kept = e.focus_kept,
     }
   end
   return markers, capped
@@ -1811,7 +1843,7 @@ end
 -- Seeker's Token spot is kept as a marker but listed nowhere (SPEC 28.9.3).
 function M.is_result(m)
   return m.cat ~= "route_stop" and m.cat ~= "hint_pin" and not m.first_seeker
-    and m.cat ~= "focus_npc" and m.cat ~= "focus_place"
+    and m.cat ~= "focus_npc" and m.cat ~= "focus_place" and not m.focus_kept
 end
 
 -- v19 (SPEC 32): the focused quests that are still live, tracked first, then
@@ -2380,11 +2412,21 @@ function M.compute(adapter, show)
   if show.tree_open and adapter.quest_region then quests, rec_by = {}, {} end
   local shown_inprog = {}   -- v8: in-progress qids that survive the visibility drop
 
+  -- v19 (SPEC 32): the focused quests that are live. focus_inprog is set here,
+  -- before the loop, whose first statement drops main quests.
+  local active = M.focus_active(show.focus_qids, show.focus_tracked_qid, adapter)
+  local fset, focus_inprog, focus_rec = {}, {}, {}
+  for _, qid in ipairs(active) do
+    fset[qid] = true
+    if prog[qid] then focus_inprog[qid] = true end
+  end
+
   for _, qid in ipairs(qids) do
     repeat
       if not adapter.is_side(qid) then break end
 
       local hint, cands = giver_candidates(adapter, qid)
+      if fset[qid] then focus_rec[qid] = { hint = hint, first = cands[1] } end
 
       -- Category: specific before generic (SPEC §9.2).
       local cat
@@ -2445,8 +2487,8 @@ function M.compute(adapter, show)
       end
       -- Visibility BEFORE resolution: hidden quests never reach groups,
       -- labels, unresolved, or unnamed (SPEC §9.3).
-      if not show[GROUP[cat]] then break end
-      if cat == "in_progress" then shown_inprog[qid] = true end
+      if not show[GROUP[cat]] and not fset[qid] then break end
+      if cat == "in_progress" and show[GROUP[cat]] then shown_inprog[qid] = true end
       -- A locked quest that no name source can label (no log entry, nothing
       -- learned, nothing in the game's text files) gets no marker rather
       -- than a "Quest <qid>" placeholder. An empty name counts as no name.
@@ -2518,6 +2560,7 @@ function M.compute(adapter, show)
         rec.pos = { x = pos.x, y = pos.y, z = pos.z }
         rec.giver = M.marker_cid(g) or hint
       end
+      if focus_rec[qid] ~= nil then focus_rec[qid].cid = M.marker_cid(g) end
       g.qids[#g.qids + 1] = qid
       g.raw_cats[qid] = cat
       if cat == "in_progress" then g.inprog[#g.inprog + 1] = qid end
@@ -2540,7 +2583,28 @@ function M.compute(adapter, show)
     -- SPEC 19.8.1: filtered before the item markers and quest_by_cid
     if q == nil or query_match(q, quest_hay(adapter, g)) then
       markers[#markers + 1] = g
+    else
+      for _, qid in ipairs(g.qids) do
+        if fset[qid] then
+          g.focus_kept = true
+          markers[#markers + 1] = g
+          break
+        end
+      end
     end
+  end
+
+  -- v19 (SPEC 32.5): the related sets of the focused quests. A giver is the
+  -- hint, else the marker's NPC (not in progress), else the first candidate.
+  local focus_result
+  if #active > 0 then
+    local givers = {}
+    for qid, rec in pairs(focus_rec) do
+      givers[qid] = rec.hint or (not prog[qid] and rec.cid) or rec.first
+    end
+    local rs = M.related_sets(adapter, active, show.quest_rel,
+      (show.world or {}).focus_places, { givers = givers, prog = prog })
+    focus_result = { active = active, quests = rs }
   end
 
   -- v13 (SPEC 21.8): current step of a lone in-progress quest per marker.
@@ -2591,9 +2655,11 @@ function M.compute(adapter, show)
 
   -- v8 (SPEC 15.3h): item markers, appended AFTER every quest marker
   local item_capped = 0
-  if show.quest_items and show.in_progress and adapter.item_needs ~= nil then
+  local item_toggles = show.quest_items and show.in_progress
+  if (item_toggles or next(focus_inprog) ~= nil) and adapter.item_needs ~= nil then
     local ims
-    ims, item_capped = M.item_markers(adapter, shown_inprog, show.origin, q)
+    ims, item_capped = M.item_markers(adapter, item_toggles and shown_inprog or {},
+      show.origin, q, focus_inprog)
     for _, m in ipairs(ims) do markers[#markers + 1] = m end
   end
 
@@ -2683,6 +2749,7 @@ function M.compute(adapter, show)
     hint_steps = hint_steps,
     npc_rows = npc_rows,
     npc_match_cids = npc_match_cids,
+    focus = focus_result,
   }
 end
 
