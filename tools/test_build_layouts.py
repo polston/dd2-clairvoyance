@@ -134,7 +134,16 @@ class LayoutWalkTests(unittest.TestCase):
         sel = bl.select_types(dump)
         for n, layout in bl.NATIVE_LAYOUTS.items():
             self.assertEqual(sel[dump[n]["fqn"]]["fields"], layout)
-        self.assertNotIn(dump["t.NoRsz"]["fqn"], sel)
+
+    def test_reached_type_without_rsz_gets_empty_layout(self):
+        items = [("app.QuestProcessor", dict(fields=[("_n", "Object", "t.NoRsz", False),
+                                                      ("_b", "Object", "t.NoRszBeh", False)])),
+                 ("t.NoRsz", dict()),
+                 ("t.NoRszBeh", dict(parent="via.Behavior"))]
+        dump = self.minimal(self.extras(items))
+        sel = bl.select_types(dump)
+        self.assertEqual(sel[dump["t.NoRsz"]["fqn"]], {"name": "t.NoRsz", "fields": []})
+        self.assertEqual(sel[dump["t.NoRszBeh"]["fqn"]]["fields"], [bl.BEHAVIOR_FLAG])
 
     def test_wanted_entry_shape(self):
         dump = self.minimal({})

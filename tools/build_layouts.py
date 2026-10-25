@@ -193,14 +193,15 @@ def quest_types(dump):
 
 def select_types(dump):
     quest = quest_types(dump)
-    names = set(WANTED_TYPES) | {n for n in quest if dump[n]["fields"] is not None}
+    names = set(WANTED_TYPES) | quest
     missing = {n for n in WANTED_TYPES if n not in dump or dump[n]["fields"] is None}
     missing |= {n for n in QUEST_ROOTS + tuple(NATIVE_LAYOUTS) if n not in dump}
     if missing:
         raise SystemExit("types not found in the dump: %s" % ", ".join(sorted(missing)))
     out = {}
     for n in names:
-        fields = [f[:5] for f in dump[n]["fields"]]
+        # a reached type with no RSZ holds no serialized fields: an empty list
+        fields = [f[:5] for f in dump[n]["fields"] or []]
         if is_behavior(dump, n):
             fields.insert(0, list(BEHAVIOR_FLAG))
         out[dump[n]["fqn"]] = {"name": n, "fields": fields}
