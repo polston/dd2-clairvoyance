@@ -81,7 +81,9 @@ Copy-Item $hintsSrc $hintsDst
 # The quests file ships in both variants; a repo without it stops the build.
 $questsSrc = Join-Path $Root "data/Clairvoyance_quests.json"
 if (-not (Test-Path -LiteralPath $questsSrc -PathType Leaf)) { Stop-Build "quests file missing: data/Clairvoyance_quests.json" }
-Copy-Item $questsSrc (Join-Path $stage "reframework/data/Clairvoyance_quests.json")
+$questsDst = Join-Path $stage "reframework/data/Clairvoyance_quests.json"
+New-Item -ItemType Directory -Force (Split-Path $questsDst -Parent) | Out-Null
+Copy-Item $questsSrc $questsDst
 
 if ($NoPlaces) { $zip = Join-Path $OutDir "Clairvoyance-noplaces.zip" }
 else {
