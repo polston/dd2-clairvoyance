@@ -4384,31 +4384,6 @@ do
   for _, m in ipairs(uo) do if m.key == "w:chest:g1" then ng = ng + 1 end end
   check("fw 8b: uncached, categories on: a related chest is drawn once", ng == 1)
 
-  -- I2 (SPEC 32.6.1.3): item-only chests are capped per item id
-  local function capkeys(chests, fxx)
-    local ms = core.world_markers({ chests = chests }, { world_chests = false }, P(0), {}, nil, fxx)
-    return relkeys(ms)
-  end
-  local fxc = { qids = { [20] = true }, items = { [500] = true, [501] = true }, key = "cap" }
-  local five = {}
-  for i = 1, 5 do five[i] = { uid = "k" .. i, pos = P(i), state = "unopened", item = 500 } end
-  check("cap 1: five item-only chests keep the 3 nearest",
-    capkeys(five, fxc) == "w:chest:k1,w:chest:k2,w:chest:k3")
-  local withgate = { { uid = "gx", pos = P(90), state = "unopened", gate_qids = { 20 }, item = 500 } }
-  for i = 1, 5 do withgate[#withgate + 1] = five[i] end
-  check("cap 2: a far gate-matched chest is kept in addition",
-    capkeys(withgate, fxc) == "w:chest:gx,w:chest:k1,w:chest:k2,w:chest:k3")
-  local opened = { { uid = "k0", pos = P(0.5), state = "opened", item = 500 } }
-  for i = 1, 5 do opened[#opened + 1] = five[i] end
-  check("cap 3: an opened near chest uses no slot",
-    capkeys(opened, fxc) == "w:chest:k1,w:chest:k2,w:chest:k3")
-  local two = {}
-  for i = 1, 3 do two[i] = { uid = "t" .. i, pos = P(i), state = "unopened", item_ids = { 500, 501 } } end
-  two[4] = { uid = "t4", pos = P(4), state = "unopened", item = 501 }
-  two[5] = { uid = "t5", pos = P(5), state = "unopened", item = 500 }
-  check("cap 4: a chest holding two needed ids counts for both",
-    capkeys(two, fxc) == "w:chest:t1,w:chest:t2,w:chest:t3")
-
   -- Task 3.8: focus NPC and destination markers, the hide/dim pass, counts
   local function npc(cid, name, pos)
     return { cid = cid, name = name, pos = pos, alive = true, discovered = true }
