@@ -244,6 +244,7 @@ function M.new(a, reads, io)
     reserved_reused = 0, reserved_reads = 0, route_builds = 0 }
   local res_reused = false
   local S
+  local EMPTY = {} -- shared read-only empty list for the per-row loops
 
   local function new_session()
     return { cast = nil, boss = nil, union = {}, badge = {},
@@ -1240,7 +1241,9 @@ function M.new(a, reads, io)
 
   local ROUTE_ERR = "route unavailable"
   local ROUTE_SLOTS = 8 -- the colour slots (the eight route_colors)
-  local PLACE_STOP_M = 150 -- a place this close to a drawn NPC stop is held back
+  -- a place this close to a drawn NPC stop is held back (SPEC 32.14.11.2 sets
+  -- it to the place-merge distance)
+  local PLACE_STOP_M = core.MERGE_STOP_M
 
   -- the raw route for the set NPC at this hour; nil for an NPC with no
   -- route (Ruling 3); raises on any failed read
@@ -1408,26 +1411,28 @@ function M.new(a, reads, io)
                        { pos = pcopy(kp), discovered = true } } }
   end
 
+  -- every member of the published list as an error entry (places still resolve)
+  local function all_err(list, tg)
+    local out = {}
+    for _, m in ipairs(list) do
+      if m.place ~= nil then
+        local pe = place_entry(m, tg)
+        if pe ~= nil then out[#out + 1] = pe end
+      else
+        out[#out + 1] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
+        S.place_from[m.cid] = nil
+      end
+    end
+    if #out == 0 then return nil, false end
+    return give_slots(out), false
+  end
+
   local function routes_round(tg)
     local list = published()
     if #list == 0 then return nil, false end
-    local function all_err()
-      local out = {}
-      for _, m in ipairs(list) do
-        if m.place ~= nil then
-          local pe = place_entry(m, tg)
-          if pe ~= nil then out[#out + 1] = pe end
-        else
-          out[#out + 1] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
-          S.place_from[m.cid] = nil
-        end
-      end
-      if #out == 0 then return nil, false end
-      return give_slots(out), false
-    end
-    if type(reads.schedule_now) ~= "function" then return all_err() end
+    if type(reads.schedule_now) ~= "function" then return all_err(list, tg) end
     local okn, day, hour = pcall(reads.schedule_now)
-    if not okn or type(day) ~= "number" or type(hour) ~= "number" then return all_err() end
+    if not okn or type(day) ~= "number" or type(hour) ~= "number" then return all_err(list, tg) end
     -- every member's signature is read each round (spec 25.5); a fixture
     -- without the read has none
     local info = {}
@@ -1550,7 +1555,7 @@ function M.new(a, reads, io)
 
   -- The quest focus (SPEC 32.6.1) as sets: the active quest ids (nil unless
   -- the list holds a number) and the item ids the active quests need.
-  local function focus_sets(f)
+  local function build_focus_sets(f)
     local iset = {}
     if type(f) ~= "table" or type(f.active) ~= "table" then return nil, iset end
     local qset, any = {}, false
@@ -1566,6 +1571,17 @@ function M.new(a, reads, io)
     end
     if not any then return nil, iset end
     return qset, iset
+  end
+
+  -- memoised on the identity of the focus table (the caller hands the same
+  -- table until the focus changes)
+  local function focus_sets(f)
+    if type(f) ~= "table" then return build_focus_sets(f) end
+    if S.fsrc ~= f then
+      S.fq, S.fi = build_focus_sets(f)
+      S.fsrc = f
+    end
+    return S.fq, S.fi
   end
 
   -- ----- the round -----
@@ -1740,10 +1756,10 @@ function M.new(a, reads, io)
         end
         local wanted = tg.chests and true or false
         if not wanted and fq then
-          for _, q in ipairs(gate_qids or {}) do
+          for _, q in ipairs(gate_qids or EMPTY) do
             if fq[q] then wanted = true; break end
           end
-          for _, id in ipairs(item_ids or {}) do
+          for _, id in ipairs(item_ids or EMPTY) do
             if wanted then break end
             if fi[id] then wanted = true end
           end
@@ -1860,10 +1876,10 @@ function M.new(a, reads, io)
       t = clock()
       local list = guarded("sellers", compute_sellers)
       lap("sellers", t)
-      for _, s in ipairs(list or {}) do
+      for _, s in ipairs(list or EMPTY) do
         local keep = tg.sellers and true or false
         if not keep then
-          for _, q in ipairs(s.qids or {}) do
+          for _, q in ipairs(s.qids or EMPTY) do
             if fq[q] then keep = true; break end
           end
         end
@@ -2023,12 +2039,17 @@ function M.new(a, reads, io)
     return false
   end
 
+  -- a route entry that has no error and at least one stop
+  local function has_stops(r)
+    return r.err == nil and type(r.stops) == "table" and #r.stops > 0
+  end
+
   -- a round result with a route on: some entry has no error and a stop
   local function routes_on(res)
     local l = res and res.routes
     if type(l) ~= "table" then return false end
     for _, r in ipairs(l) do
-      if r.err == nil and type(r.stops) == "table" and #r.stops > 0 then return true end
+      if has_stops(r) then return true end
     end
     return false
   end
@@ -2098,6 +2119,18 @@ function M.new(a, reads, io)
   -- search target is never touched. A change of membership pokes; a change
   -- of order or name only is published by the next round.
   function w:set_routes(list)
+    -- the same list as the current members: nothing to rebuild
+    if type(list) == "table" and #list == #S.members then
+      local same = true
+      for i, e in ipairs(list) do
+        local m = S.members[i]
+        if type(e) ~= "table" or e.cid ~= m.cid or e.place ~= m.place or e.name ~= m.name then
+          same = false
+          break
+        end
+      end
+      if same then return end
+    end
     local before = {}
     for cid in pairs(S.member_of) do before[cid] = true end
     local t = S.target_member
@@ -2269,7 +2302,7 @@ function M.new(a, reads, io)
     if cid == nil or type(l) ~= "table" then return nil end
     for _, r in ipairs(l) do
       if r.cid == cid then
-        if r.err == nil and type(r.stops) == "table" and #r.stops > 0 then return r end
+        if has_stops(r) then return r end
         return nil
       end
     end
@@ -2278,12 +2311,7 @@ function M.new(a, reads, io)
 
   -- whether any published entry has stops
   local function any_route()
-    local l = input_tbl and input_tbl.routes
-    if type(l) ~= "table" then return false end
-    for _, r in ipairs(l) do
-      if r.err == nil and type(r.stops) == "table" and #r.stops > 0 then return true end
-    end
-    return false
+    return routes_on(input_tbl)
   end
 
   local function copy_fail(err)
@@ -2484,7 +2512,7 @@ function M.new(a, reads, io)
     local npcs = require("Clairvoyance.npcs")
     local c, stops, kind, k, a, b
     for _, r in ipairs(input_tbl and input_tbl.routes or rp_empty) do
-      if r.err == nil and type(r.stops) == "table" and #r.stops > 0 then
+      if has_stops(r) then
         local rc = rp_get(r.cid, r.stops, undisc)
         local kd, kk, ka, kb = next_target(rc)
         if kd ~= nil then
@@ -2578,7 +2606,7 @@ function M.new(a, reads, io)
     end
     local out = {}
     for _, r in ipairs(input_tbl.routes) do
-      if r.err == nil and type(r.stops) == "table" and #r.stops > 0 and out[r.cid] == nil then
+      if has_stops(r) and out[r.cid] == nil then
         out[r.cid] = route_list(rp_get(r.cid, r.stops, undisc))
       end
     end

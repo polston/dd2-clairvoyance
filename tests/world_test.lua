@@ -2781,6 +2781,14 @@ do
       local g = w.route_gen
       w:set_routes(L3)
       check("set_routes: idempotent", w.route_gen == g and w:refresh(1, true, tg) == false)
+      -- a repeated identical call allocates nothing (early return)
+      collectgarbage("collect")
+      collectgarbage("stop")
+      local mem0 = collectgarbage("count")
+      for _ = 1, 500 do w:set_routes(L3) end
+      local grew = collectgarbage("count") - mem0
+      collectgarbage("restart")
+      check("set_routes: a repeated identical call allocates nothing", grew < 1 and w.route_gen == g)
       local b = stub.calls.route_stops
       w:set_routes({ L3[1], L3[2], L3[3], D4 })
       check("set_routes: an added member builds alone", w.route_gen == g + 1
