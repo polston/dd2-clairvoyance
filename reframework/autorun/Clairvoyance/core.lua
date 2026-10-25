@@ -2835,9 +2835,16 @@ function M.compute(adapter, show)
     for _, qid in ipairs(active) do akey[qid] = true end
     -- 1. cid -> covering marker key (first marker per cid)
     local cover_key, rel_keys = {}, {}
+    -- a world marker covers only when the full map also holds it (SPEC 32.6.2)
+    local fm_keys
+    if fullmap_world ~= nil then
+      fm_keys = {}
+      for _, m in ipairs(fullmap_world) do fm_keys[m.key] = true end
+    end
     for _, m in ipairs(markers) do
       local cid = M.marker_cid(m)
-      if cid == nil and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller") then
+      if cid == nil and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller")
+        and (fm_keys == nil or fm_keys[m.key]) then
         cid = m.cid
       end
       if type(cid) == "number" and cover_key[cid] == nil then cover_key[cid] = m.key end
@@ -2860,13 +2867,13 @@ function M.compute(adapter, show)
       for _, cid in ipairs(rs[qid] and rs[qid].npcs or {}) do
         if not seen_cid[cid] then
           seen_cid[cid] = true
-          if cover_key[cid] ~= nil then
-            rel_keys[cover_key[cid]] = true
-          elseif adapter.npc_alive(cid) ~= false then
+          local covered = cover_key[cid]
+          if covered ~= nil then rel_keys[covered] = true end
+          if adapter.npc_alive(cid) ~= false then
             local x, y, z = adapter.npc_pos(cid)
             if x == nil then
               no_pos[#no_pos + 1] = cid
-            else
+            elseif covered == nil then
               local label = names and names[cid]
               if label == nil or label == "" then
                 label = adapter.npc_name and adapter.npc_name(cid) or nil

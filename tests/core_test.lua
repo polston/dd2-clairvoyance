@@ -4447,6 +4447,33 @@ do
   check("ff 14: a covering seller stays in both passes", has(r.markers, "w:sell:9:401") ~= nil
     and has(r.fullmap_world, "w:sell:9:401") ~= nil and has(r.markers, "n:77") == nil
     and not has(r.markers, "w:sell:9:401").related)
+
+  -- fix round 1 for Task 3.8
+  local rel77 = { [20] = { cast = {}, npcs = { 77 }, items = {}, dest = {} } }
+  local pos77 = { acceptable = { 20 }, hints = { [20] = 5 }, npc_pos = { [5] = P(1), [77] = P(15) },
+    names = { [20] = "Twenty" } }
+  local function seller(shop, item, cid, pos)
+    return { shop = shop, item = item, item_name = "Salt", cid = cid, npc = "V", qids = { 99 },
+      quest = "Other", pos = pos }
+  end
+  r = run({ sellers = { seller(9, 401, 77, P(16)), seller(10, 402, 78, P(1000)) } }, nil,
+    { focus_qids = { 20 }, quest_rel = rel77, world_max_markers = 1, map_origin = P(1000) }, pos77)
+  check("ff 15: a seller missing from the full map selection does not cover",
+    has(r.fullmap_world, "w:sell:9:401") == nil
+    and has(r.markers, "n:77") ~= nil)
+  local np = { acceptable = { 20 }, hints = { [20] = 5 }, npc_pos = { [5] = P(1) }, names = { [20] = "Twenty" } }
+  r = run({ sellers = { seller(9, 401, 77, P(16)) } }, nil, { focus_qids = { 20 }, quest_rel = rel77 }, np)
+  check("ff 16: no_pos counts a covered cid without a position",
+    has(r.markers, "w:sell:9:401") ~= nil and has(r.markers, "n:77") == nil
+    and table.concat(r.focus_counts.no_pos, ",") == "77")
+  r = run({ npcs = { { cid = 12, name = "Other" } }, focus_places = fw.focus_places }, nil, FO, fq)
+  check("ff 17: a new world.npcs table refreshes the names", has(r.markers, "n:12").label == "Other")
+  r = run({ sellers = { seller(9, 401, 6, P(16)) } }, nil, { focus_qids = { 20 }, quest_rel = frel6 }, fq)
+  local rel5 = { [20] = { cast = {}, npcs = { 5 }, items = {}, dest = {} } }
+  r = run({ sellers = { seller(9, 401, 5, P(16)) } }, Q("salt"), { focus_qids = { 20 }, quest_rel = rel5 }, fq)
+  check("ff 18: the first marker per cid covers", has(r.markers, "c:5").focus_kept == true
+    and has(r.markers, "w:sell:9:401") ~= nil and r.focus_counts.related == 1
+    and has(r.markers, "n:5") == nil)
 end
 
 if failures > 0 then os.exit(1) end
