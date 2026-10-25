@@ -1559,23 +1559,31 @@ function M.new(a, reads, io)
       if e.k == "chest" and (tg.chests or fq) then
         local row = static[uid] or e
         local gate_qids, item_ids = nil, nil
-        if type(row.quest) == "table" and type(row.quest.q) == "table" then
-          for _, qe in ipairs(row.quest.q) do
-            local qid = type(qe) == "table" and qe[1] or nil
-            if type(qid) == "number" then
-              gate_qids = gate_qids or {}
-              gate_qids[#gate_qids + 1] = qid
+        -- the id lists are kept per uid while the row stays the same table
+        local ck = S.chest_ids and S.chest_ids[uid]
+        if ck ~= nil and ck.row == row then
+          gate_qids, item_ids = ck.g, ck.i
+        else
+          if type(row.quest) == "table" and type(row.quest.q) == "table" then
+            for _, qe in ipairs(row.quest.q) do
+              local qid = type(qe) == "table" and qe[1] or nil
+              if type(qid) == "number" then
+                gate_qids = gate_qids or {}
+                gate_qids[#gate_qids + 1] = qid
+              end
             end
           end
-        end
-        if type(row.items) == "table" then
-          for _, it in ipairs(row.items) do
-            local id = type(it) == "table" and to_int(it.id) or nil
-            if id ~= nil then
-              item_ids = item_ids or {}
-              item_ids[#item_ids + 1] = id
+          if type(row.items) == "table" then
+            for _, it in ipairs(row.items) do
+              local id = type(it) == "table" and to_int(it.id) or nil
+              if id ~= nil then
+                item_ids = item_ids or {}
+                item_ids[#item_ids + 1] = id
+              end
             end
           end
+          S.chest_ids = S.chest_ids or {}
+          S.chest_ids[uid] = { row = row, g = gate_qids, i = item_ids }
         end
         local state, item = "unknown", nil
         local recs = rec_idx and rec_idx[uid] or nil
@@ -1601,25 +1609,25 @@ function M.new(a, reads, io)
           if not wanted and item ~= nil and fi[item] then wanted = true end
         end
         if wanted then
-        local c = { uid = uid, pos = pcopy(e), gimmick = e.id, state = state,
-          item = item, item_name = item ~= nil and item_name(item) or nil,
-          gate_qids = gate_qids, item_ids = item_ids }
-        c.kinds = chest_kinds(row, e, recs)
-        if type(row.quest) == "table" then
-          c.quest_text = quest_text_of(row.quest, tg.reveal_gate_names == true)
-          chest_qs = chest_qs or quest_state_cache()
-          c.quest_met = quest_met_of(row.quest, function(q)
-            local ok, v = pcall(chest_qs, q)
-            if ok then return v end
-            return nil
-          end)
-        end
-        if e.items ~= nil then
-          local built
-          c.items, built = M.item_list(S.chest_lists, uid, e.items, item_name)
-          if built then stats.item_list_builds = stats.item_list_builds + 1 end
-        end
-        out.chests[#out.chests + 1] = c
+          local c = { uid = uid, pos = pcopy(e), gimmick = e.id, state = state,
+            item = item, item_name = item ~= nil and item_name(item) or nil,
+            gate_qids = gate_qids, item_ids = item_ids }
+          c.kinds = chest_kinds(row, e, recs)
+          if type(row.quest) == "table" then
+            c.quest_text = quest_text_of(row.quest, tg.reveal_gate_names == true)
+            chest_qs = chest_qs or quest_state_cache()
+            c.quest_met = quest_met_of(row.quest, function(q)
+              local ok, v = pcall(chest_qs, q)
+              if ok then return v end
+              return nil
+            end)
+          end
+          if e.items ~= nil then
+            local built
+            c.items, built = M.item_list(S.chest_lists, uid, e.items, item_name)
+            if built then stats.item_list_builds = stats.item_list_builds + 1 end
+          end
+          out.chests[#out.chests + 1] = c
         end
       elseif COLLECT[e.k] and tg[COLLECT[e.k].list] then
         local def = COLLECT[e.k]

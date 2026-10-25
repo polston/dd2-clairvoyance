@@ -4837,6 +4837,8 @@ do
     okm = okm and ran == true and #w2:input().chests == 0
   end
   check("focus: malformed collects nothing", okm)
+  local w4, f4 = cworld({ treasure = true, focus = { active = { "x" }, quests = {} } })
+  check("focus: no-number list reads no records", #w4:input().chests == 0 and (f4.reads_n.save_records or 0) == 0)
   local function sworld(tg)
     local f2 = fixture()
     local d = f2.data
@@ -4857,6 +4859,9 @@ do
   check("focus: related seller with Sellers off", #s == 1 and s[1].qids[1] == 90 and s[1].qids[2] == 100)
   check("focus: unrelated seller dropped", #sworld({ treasure = true, focus = FQ({ 55 }) }) == 0)
   check("focus: Sellers on lists all", #sworld({ sellers = true, focus = FQ({ 55 }) }) == 1)
+  local f3 = fixture()
+  f3.new():refresh(0, true, { focus = FQ({ 90 }) })
+  check("focus: focus alone refreshes discovery", (f3.reads_n.discovered_count or 0) >= 1)
 end
 
 -- 35. focus key positions (SPEC 32.7.5)
