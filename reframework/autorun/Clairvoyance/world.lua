@@ -257,6 +257,8 @@ function M.new(a, reads, io)
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
       target_member = nil, members = {}, member_of = {}, route_cache = {},
       route_fail = {}, fail_seq = 0,
+      -- SPEC 32.14: sticky route colour slots, cid -> slot and slot -> cid
+      slot_of = {}, slot_cid = {},
       -- SPEC 32.7.5: focused quests' key locations found so far
       key_pos = {},
       sent = {}, walk_i = 0, walk_n = 0, walk_acc = {},
@@ -1292,6 +1294,11 @@ function M.new(a, reads, io)
   -- a cid that left the route set drops its per-cid state
   local function leave(cid)
     if cid == nil or live(cid) then return end
+    local slot = S.slot_of[cid]
+    if slot ~= nil then
+      S.slot_of[cid] = nil
+      S.slot_cid[slot] = nil
+    end
     S.route_cache[cid] = nil
     S.route_fail[cid] = nil
     if w.rps ~= nil then w.rps[cid] = nil end
@@ -1306,7 +1313,7 @@ function M.new(a, reads, io)
 
   -- the published entry for a member from its cached route (nil cache or no
   -- route: the error entry)
-  local function render(member, c)
+  local function render(member, c, hour)
     local cid, name = member.cid, member.name
     local errt = { cid = cid, name = name, err = ROUTE_ERR }
     if c == nil or c.value == nil then return errt end
@@ -1322,8 +1329,39 @@ function M.new(a, reads, io)
       end
       stops[i] = n
     end
+    -- the stop whose hours hold the game hour (nil when none does)
+    local current = nil
+    if type(hour) == "number" then
+      local npcs = require("Clairvoyance.npcs")
+      for i, st in ipairs(stops) do
+        if type(st.from) == "number" and type(st.to) == "number"
+            and npcs.in_hours(hour, st.from, st.to) then
+          current = i
+          break
+        end
+      end
+    end
     return { cid = cid, name = name, stops = stops, unplaced = c.value.unplaced,
-             off_schedule = c.value.off_schedule }
+             off_schedule = c.value.off_schedule, current = current }
+  end
+
+  -- every entry of the final list gets its sticky colour slot: the entry
+  -- keeps the one it has, else the lowest free (nil past the eighth)
+  local function give_slots(out)
+    for _, e in ipairs(out) do
+      local s = S.slot_of[e.cid]
+      if s == nil then
+        for k = 1, 8 do
+          if S.slot_cid[k] == nil then s = k; break end
+        end
+        if s ~= nil then
+          S.slot_of[e.cid] = s
+          S.slot_cid[s] = e.cid
+        end
+      end
+      e.slot = s
+    end
+    return out
   end
 
   local function routes_round()
@@ -1332,7 +1370,7 @@ function M.new(a, reads, io)
     local function all_err()
       local out = {}
       for i, m in ipairs(list) do out[i] = { cid = m.cid, name = m.name, err = ROUTE_ERR } end
-      return out, false
+      return give_slots(out), false
     end
     if type(reads.schedule_now) ~= "function" then return all_err() end
     local okn, day, hour = pcall(reads.schedule_now)
@@ -1400,11 +1438,11 @@ function M.new(a, reads, io)
       else
         local c = S.route_cache[m.cid]
         if e.stale then again = true end
-        if c ~= nil then out[#out + 1] = render(m, c) end
+        if c ~= nil then out[#out + 1] = render(m, c, hour) end
       end
     end
     if #out == 0 then return nil, again end
-    return out, again
+    return give_slots(out), again
   end
 
   -- The quest focus (SPEC 32.6.1) as sets: the active quest ids (nil unless

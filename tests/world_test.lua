@@ -2716,7 +2716,7 @@ do
     local function sfix()
       local f, d = nfix()
       d.bad = {}
-      for c = 2001, 2008 do
+      for c = 2001, 2009 do
         d.rows[c] = rows_of({ 6, 18, 49 })
         d.cur[c] = { area = 49, location = 0 }
       end
@@ -2941,6 +2941,132 @@ do
       end
       check("set_routes: eight members, one rebuild per round", b0 == 8 and rounds == 8
         and one_each and w:stats().route_builds == 16)
+    end
+
+    -- route colour slots and the current stop (SPEC 32.14)
+    local function slots(w)
+      local t = {}
+      for i, e in ipairs((w:input() or {}).routes or {}) do t[i] = e.cid .. "=" .. tostring(e.slot) end
+      return table.concat(t, ",")
+    end
+    local function mem(...)
+      local t = {}
+      for _, c in ipairs({ ... }) do t[#t + 1] = { cid = c, name = "N" .. c } end
+      return t
+    end
+
+    -- 1: slots are sticky
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002, 2003))
+      settle(w, 0)
+      check("slots sticky: first three take 1,2,3", slots(w) == "2001=1,2002=2,2003=3")
+      w:set_routes(mem(2001, 2003))
+      settle(w, 0)
+      check("slots sticky: a removal keeps the others", slots(w) == "2001=1,2003=3")
+      w:set_routes(mem(2001, 2003, 2004))
+      settle(w, 0)
+      check("slots sticky: a newcomer takes the lowest free slot",
+        slots(w) == "2001=1,2003=3,2004=2")
+    end
+
+    -- 2: the search target takes the lowest free slot, and frees it
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002))
+      settle(w, 0)
+      w:set_route(2005, "Ee")
+      settle(w, 0)
+      check("target slot: the target takes the lowest free slot though listed first",
+        slots(w) == "2005=3,2001=1,2002=2")
+      w:clear_route()
+      w:set_routes(mem(2001, 2002, 2003))
+      settle(w, 0)
+      check("target slot: clear_route frees it for the next member",
+        slots(w) == "2001=1,2002=2,2003=3")
+    end
+
+    -- 3: error entries carry their slots
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002))
+      settle(w, 0)
+      d.bad[2001] = true
+      w:poke()
+      d.hour = 8
+      settle(w, 1)
+      check("slot on error: a failed build keeps the slot",
+        route_in(w, 2001).err ~= nil and slots(w) == "2001=1,2002=2")
+      d.bad[2001] = nil
+      d.hour = 7
+      settle(w, 2)
+      f.fail.current_sig = true
+      w:poke()
+      settle(w, 3)
+      check("slot on error: a bad signature read keeps the slots",
+        route_in(w, 2001).err ~= nil and route_in(w, 2002).err ~= nil
+        and slots(w) == "2001=1,2002=2")
+      f.fail.current_sig = nil
+      settle(w, 4)
+      f.fail.schedule_now = true
+      w:poke()
+      settle(w, 5)
+      check("slot on error: a schedule_now failure keeps the slots",
+        route_in(w, 2001).err ~= nil and slots(w) == "2001=1,2002=2")
+      f.fail.schedule_now = nil
+      local w2 = f.new()
+      w2:set_routes(mem(2001, 2002))
+      f.fail.schedule_now = true
+      settle(w2, 0)
+      check("slot on error: a schedule_now failure from the start still assigns",
+        slots(w2) == "2001=1,2002=2")
+      f.fail.schedule_now = nil
+    end
+
+    -- 4: past eight
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008))
+      settle(w, 0)
+      w:set_route(2009, "Ii")
+      w:refresh(1, true, tg)
+      check("slots past eight: the ninth has none, the eight keep theirs",
+        #w:input().routes == 9 and route_in(w, 2009).slot == nil
+        and slots(w) == "2009=nil,2001=1,2002=2,2003=3,2004=4,2005=5,2006=6,2007=7,2008=8")
+    end
+
+    -- 5: the current stop
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      d.rows[2001] = rows_of({ 0, 8, 49 }, { 8, 18, 49 }, { 18, 24, 49 })
+      d.rows[2002] = rows_of({ 0, 8, 49 }, { 18, 24, 49 })
+      w:set_routes(mem(2001, 2002))
+      d.hour = 10
+      settle(w, 0)
+      check("current: hour 10 is the second stop", route_in(w, 2001).current == 2)
+      check("current: no stop at the hour is nil", route_in(w, 2002).current == nil)
+      d.hour = 23
+      w:poke()
+      settle(w, 1)
+      check("current: hour 23 is the third stop", route_in(w, 2001).current == 3
+        and route_in(w, 2002).current == 2)
+    end
+
+    -- 6: reset clears the slots
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_routes(mem(2001, 2002))
+      settle(w, 0)
+      w:reset()
+      w:set_routes(mem(2002, 2001))
+      settle(w, 1)
+      check("slots: reset starts again from 1", slots(w) == "2002=1,2001=2")
     end
   end
 
