@@ -3175,6 +3175,63 @@ do
   for _, mm in ipairs(r.markers) do if mm.cat == "route_stop" then n3 = n3 + 1 end end
   check("npc 12c: three stops give three markers", n3 == 3)
 
+  -- route colour slots, place routes, route members (SPEC 32.14)
+  local function stopm(slot)
+    local rr = run({}, nil, { routes = { { cid = 5, name = "N", slot = slot,
+      stops = { { from = 1, to = 2, pos = P(4), discovered = true } } } } })
+    local mk
+    for _, mm in ipairs(rr.markers) do if mm.cat == "route_stop" then mk = mm end end
+    return rr, mk
+  end
+  local rsa, mka = stopm(4)
+  local rsb, mkb = stopm(5)
+  check("rc 1: stop slot", mka ~= nil and mka.slot == 4)
+  check("rc 1b: slot changes the signature",
+    core.signature({ mka }, {}) ~= core.signature({ mkb }, {}))
+  r = run({}, nil, { routes = { { cid = -77, place = 77, name = "Q", slot = 1, stops = {
+    { from = 1, to = 2, pos = P(2), discovered = true },
+    { from = 2, to = 3, pos = P(3), discovered = true } } } } })
+  check("rc 2: place routes give no stop markers", has(r.markers, "r:-77:1") == nil and has(r.markers, "r:-77:2") == nil)
+
+  local function nm(cid, place) return place and ("P" .. place) or ("N" .. cid) end
+  local fc = { active = { 1, 2 }, quests = { [1] = { step_npcs = { 1, 2, 3, 4, 5 }, npcs = { 1, 2, 3, 4, 5, 6 } },
+    [2] = { step_npcs = { 6, 7, 8, 9 }, npcs = { 6, 7, 8, 9 } } } }
+  local function cids(l) local t = {} for _, e in ipairs(l) do t[#t + 1] = e.cid end return table.concat(t, ",") end
+  local l, n, tot = core.route_members(fc, {}, {}, nil, { routes = 1, places = false }, nm)
+  check("rc 3: cap eight", cids(l) == "1,2,3,4,5,6,7,8" and n == 8 and tot == 9)
+  l, n, tot = core.route_members(fc, {}, {}, 20, { routes = 1, places = false }, nm)
+  check("rc 3b: target unlisted takes a seat", #l == 7 and n == 8 and tot == 10)
+  l, n, tot = core.route_members(fc, {}, {}, 3, { routes = 1, places = false }, nm)
+  check("rc 3c: target listed", #l == 8 and n == 8 and tot == 9)
+  local fp = { active = { 1, 2 }, quests = { [1] = { step_npcs = { 1, 2 } }, [2] = { step_npcs = { 3 } } } }
+  local rel = { [1] = { dest = { { key = 77 }, { key = 78 } } }, [2] = { dest = { { key = 77 } } } }
+  local plc = { [77] = { x = 1, y = 0, z = 1 } }
+  l, n, tot = core.route_members(fp, rel, plc, nil, { routes = 1, places = true }, nm)
+  local last = l[#l]
+  check("rc 4: one place member after the NPCs", #l == 4 and cids(l) == "1,2,3,-77"
+    and last.place == 77 and last.name == "P77" and tot == 4 and n == 4)
+  l = core.route_members(fp, rel, plc, nil, { routes = 0, places = true }, nm)
+  check("rc 5: routes off gives places only", cids(l) == "-77")
+  local seen = {}
+  core.route_members(fp, rel, plc, nil, { routes = 1, places = true },
+    function(c, p) seen[#seen + 1] = tostring(c) .. "/" .. tostring(p); return "x" end)
+  check("rc 6: name_of args", table.concat(seen, ",") == "1/nil,2/nil,3/nil,nil/77")
+  l, n, tot = core.route_members(nil, {}, {}, 9, { routes = 1, places = true }, nm)
+  check("rc 7: nil focus", #l == 0 and n == 1 and tot == 1)
+  l, n = core.route_members(nil, {}, {}, nil, { routes = 1, places = true }, nm)
+  check("rc 7b: nil focus no target", #l == 0 and n == 0)
+  local rel8 = { [1] = { dest = { { key = 77 } } } }
+  l, n, tot = core.route_members(fc, rel8, plc, nil, { routes = 1, places = true }, nm)
+  check("rc 8: a place never passes the cap", #l == 8 and cids(l) == "1,2,3,4,5,6,7,8"
+    and n == 8 and tot == 10)
+  local f7 = { active = { 1, 2 }, quests = { [1] = { step_npcs = { 1, 2, 3, 4, 5 } },
+    [2] = { step_npcs = { 6, 7 } } } }
+  l, n, tot = core.route_members(f7, rel8, plc, 20, { routes = 1, places = true }, nm)
+  check("rc 8b: an unlisted target takes the last seat", #l == 7 and cids(l) == "1,2,3,4,5,6,7"
+    and n == 8 and tot == 9)
+  l, n = core.route_members(f7, rel8, plc, nil, { routes = 1, places = true }, nm)
+  check("rc 8c: a free seat takes the place", cids(l) == "1,2,3,4,5,6,7,-77" and n == 8)
+
   -- hint pins, with a query active, outside the cap
   r = run({ chests = {} }, Q("zzz"), { world_max_markers = 0,
     hint_pins = { { qid = 30, i = 2, label = "Look here", pos = P(9) } } })
