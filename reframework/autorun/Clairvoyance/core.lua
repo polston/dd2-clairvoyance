@@ -19,6 +19,8 @@ end
 M.quest_display_name = quest_display_name
 
 local MERGE_STOP_M = 150 -- stops this close (metres) merge into one
+M.MERGE_STOP_M = MERGE_STOP_M
+local ROUTE_CAP = 8 -- most published routes (the target counts)
 
 local function pos_key(p)
   return string.format("p:%d:%d:%d",
@@ -1308,28 +1310,23 @@ end
 local function focus_entries(world, fx)
   local list, set = {}, {}
   if fx == nil then return list, set end
+  local function any_in(s, l)
+    if type(l) ~= "table" then return false end
+    for _, v in ipairs(l) do
+      if s[v] then return true end
+    end
+    return false
+  end
   for _, e in ipairs(world.chests or {}) do
     if valid_pos(e.pos) then
-      local hit = false
-      for _, q in ipairs(type(e.gate_qids) == "table" and e.gate_qids or {}) do
-        if fx.qids[q] then hit = true; break end
-      end
-      if not hit and e.item ~= nil and fx.items[e.item] then hit = true end
-      if not hit then
-        for _, id in ipairs(type(e.item_ids) == "table" and e.item_ids or {}) do
-          if fx.items[id] then hit = true; break end
-        end
-      end
+      local hit = any_in(fx.qids, e.gate_qids) or (e.item ~= nil and fx.items[e.item])
+        or any_in(fx.items, e.item_ids)
       if hit then list[#list + 1] = { cat = "chest", e = e }; set[e] = true end
     end
   end
   for _, e in ipairs(world.sellers or {}) do
     if valid_pos(e.pos) then
-      local hit = false
-      for _, q in ipairs(type(e.qids) == "table" and e.qids or {}) do
-        if fx.qids[q] then hit = true; break end
-      end
-      if hit then list[#list + 1] = { cat = "seller", e = e }; set[e] = true end
+      if any_in(fx.qids, e.qids) then list[#list + 1] = { cat = "seller", e = e }; set[e] = true end
     end
   end
   return list, set
@@ -3017,6 +3014,8 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
   local total = target_cid ~= nil and 1 or 0
   local active = focus ~= nil and focus.active or nil
   local mode = opt ~= nil and opt.routes or 0
+  -- slots held back for the target while it is not yet in the list
+  local function reserve() return (target_cid ~= nil and not inlist[target_cid]) and 1 or 0 end
   if active ~= nil and #active > 0 then
     if mode > 0 then
       for _, qid in ipairs(active) do
@@ -3026,8 +3025,7 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
           if not seen[cid] then
             seen[cid] = true
             if cid ~= target_cid then total = total + 1 end
-            local extra = (target_cid ~= nil and not inlist[target_cid]) and 1 or 0
-            if cid == target_cid or #list + extra < 8 then
+            if cid == target_cid or #list + reserve() < ROUTE_CAP then
               list[#list + 1] = { cid = cid, name = name_of(cid, nil) }
               inlist[cid] = true
             end
@@ -3085,15 +3083,13 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
       table.sort(kept, function(a, b) return a.ord < b.ord end)
       for _, c in ipairs(kept) do
         total = total + 1
-        local pextra = (target_cid ~= nil and not inlist[target_cid]) and 1 or 0
-        if #list + pextra < 8 then
+        if #list + reserve() < ROUTE_CAP then
           list[#list + 1] = { cid = -c.key, place = c.key, name = name_of(nil, c.key) }
         end
       end
     end
   end
-  local extra = (target_cid ~= nil and not inlist[target_cid]) and 1 or 0
-  return list, #list + extra, total
+  return list, #list + reserve(), total
 end
 
 -- v3 overhead layer (SPEC §10.2c): pure helpers, no sdk.
