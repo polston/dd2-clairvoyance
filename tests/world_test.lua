@@ -2854,6 +2854,22 @@ do
       w:refresh(1, true, tg)
       check("set_routes: a target that is a member is published once, first",
         cids(w) == "2002,2003")
+      -- the focus list drops the cid that is still the target: no poke, no bump
+      settle(w, 2)
+      local gd = w.route_gen
+      w:set_routes({ L3[3] })
+      check("set_routes: dropping the target's cid is not a removal", w.route_gen == gd
+        and cids(w) == "2002,2003" and w:refresh(3, true, tg) == false)
+      -- the per-tick list carries the target's cid, then the target is cleared
+      w:set_routes({ L3[2], L3[3] })
+      settle(w, 4)
+      local b0 = w:stats().route_builds
+      w:set_routes({ L3[2], L3[3] })
+      w:clear_route()
+      w:poke()
+      w:refresh(5, true, tg)
+      check("set_routes: a per-tick list with the target's cid keeps it after clear_route",
+        cids(w) == "2002,2003" and w:stats().route_builds == b0)
       -- 12: reset empties target and members; the next set_routes brings them back
       w:reset()
       w:refresh(5, true, tg)
@@ -2877,6 +2893,18 @@ do
       w:refresh(1, true, tg)
       check("set_routes: that member keeps its cache, at its member place",
         cids(w) == "2002,2001" and stub.calls.route_stops == b)
+    end
+
+    -- listing the current target's cid as a new member does not poke or bump
+    f, d = sfix()
+    w = f.new()
+    if type(w.set_routes) == "function" then
+      w:set_route(2002, "Bb")
+      settle(w, 0)
+      local ga = w.route_gen
+      w:set_routes({ L3[2] })
+      check("set_routes: the target's cid listed as a member is not an add",
+        w.route_gen == ga and w:refresh(1, true, tg) == false)
     end
 
     -- 13: members alone run a round

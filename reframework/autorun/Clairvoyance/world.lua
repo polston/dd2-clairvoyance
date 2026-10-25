@@ -1353,7 +1353,7 @@ function M.new(a, reads, io)
       if not bad then
         local c = S.route_cache[m.cid]
         e.key = tostring(day) .. "|" .. tostring(hour) .. "|" .. sig
-        e.stale = c == nil or c.cid ~= m.cid or c.hour ~= hour or c.day ~= day or c.sig ~= sig
+        e.stale = c == nil or c.hour ~= hour or c.day ~= day or c.sig ~= sig
         local f = S.route_fail[m.cid]
         e.failed = e.stale and f ~= nil and f.key == e.key
       end
@@ -1884,7 +1884,7 @@ function M.new(a, reads, io)
     end
     for cid in pairs(was_member) do
       if member_of[cid] == nil then
-        changed = true
+        if not (t ~= nil and t.cid == cid) then changed = true end
         leave(cid)
       end
     end
