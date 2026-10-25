@@ -2667,7 +2667,8 @@ function M.overhead_points(markers, cam, radius)
 end
 
 -- v8 (SPEC 15.3a): the item round runs only while BOTH toggles are on;
--- otherwise the tick invalidates (zero managed calls).
+-- otherwise the tick invalidates (zero managed calls). v19 (SPEC 32.6.1): the
+-- round also runs while show.focus_on.
 function M.item_walk_wanted(show)
   return show ~= nil and ((show.in_progress == true and show.quest_items == true)
     or show.world_sellers == true
@@ -2676,7 +2677,8 @@ function M.item_walk_wanted(show)
 end
 
 -- v14 (SPEC 22.10.1): "full" when the round also feeds the quest-item and
--- seller markers, "needs" when only the item menu marks want it.
+-- seller markers, "needs" when only the item menu marks want it. v19 (SPEC
+-- 32.6.1): also "full" while show.focus_on.
 function M.item_walk_mode(show)
   if show ~= nil and ((show.in_progress == true and show.quest_items == true)
     or show.world_sellers == true or show.focus_on == true) then
