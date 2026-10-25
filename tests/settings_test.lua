@@ -138,7 +138,8 @@ check("journal_spoilers stored false kept",
 -- plus 8 v14 keys (SPEC 22.6), plus 83 style and route keys (SPEC 23.4),
 -- plus 2 coordinate readout keys, plus 5 chest kind keys, plus
 -- world_first_token (SPEC 28.9.4), plus 4 focus keys, 2 focus place appearance
--- keys and 4 focus_place style keys (SPEC 32))
+-- keys and 4 focus_place style keys (SPEC 32), plus 8 route colour, gradient
+-- and fade keys minus the 2 retired ones (SPEC 32.14))
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
@@ -854,6 +855,12 @@ do
   check("marker_color dim alpha", su.marker_color(D, { cat = "chest", dim = true }) == 0x3FC8A27A)
   check("marker_color faded halves", su.marker_color(D, { cat = "chest", faded = true }) == 0x7FC8A27A)
   check("marker_color done halves", su.marker_color(D, { cat = "chest", done = true }) == 0x7FC8A27A)
+  do
+    local S80 = su.defaults()
+    S80.focus_dim_alpha = 80
+    check("marker_color dim 80 + done takes done", su.marker_color(S80,
+      { cat = "chest", dim = true, done = true }) == 0x7FC8A27A)
+  end
   check("marker_color dim+done+faded takes the lowest",
     su.marker_color(D, { cat = "chest", dim = true, done = true, faded = true }) == 0x3FC8A27A)
 
@@ -878,6 +885,10 @@ do
   check("route_colors validate returns fresh tables",
     ra ~= rb and rb[2] == want8[2] and su.defaults().route_colors[2] == want8[2]
     and ra ~= su.defaults().route_colors)
+  local raw8 = { 0xFF010101, 0xFF020202, 0xFF030303, 0xFF040404, 0xFF050505,
+    0xFF060606, 0xFF070707, 0xFF080808 }
+  local got8 = su.validate({ route_colors = raw8 }).route_colors
+  check("route_colors validate copies a full list", got8 ~= raw8 and got8[8] == 0xFF080808)
   check("route_line_color migrates",
     su.validate({ route_line_color = 0xFF00FF00 }).route_colors[1] == 0xFF00FF00
     and su.validate({ route_line_color = 0xFF00FF00 }).route_line_color == nil)
@@ -897,6 +908,8 @@ do
     check("set_key route_colors number", su.set_key(SK, "route_colors", 5) == false and SK.route_colors == keep)
     check("set_key route_colors short", su.set_key(SK, "route_colors",
       { 1, 2, 3, 4, 5, 6, 7 }) == false and SK.route_colors == keep)
+    check("set_key route_colors nine", su.set_key(SK, "route_colors",
+      { 1, 2, 3, 4, 5, 6, 7, 8, 9 }) == false and SK.route_colors == keep)
     check("set_key route_colors bad entry", su.set_key(SK, "route_colors",
       { 1, 2, 3, 4, 5, 6, 7, "x" }) == false and SK.route_colors == keep)
   end

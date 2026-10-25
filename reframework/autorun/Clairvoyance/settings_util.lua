@@ -5,6 +5,7 @@ local style = require("Clairvoyance.style")
 -- The eight route colours, slot 1 first (SPEC 32.14.2); a new table each call.
 local ROUTE_COLORS = { 0xFFE91E63, 0xFF00E5FF, 0xFFFFEB3B, 0xFF76FF03,
   0xFFD500F9, 0xFF2979FF, 0xFF1DE9B6, 0xFFB388FF }
+local DIM_ALPHA_DEFAULT = 25
 function M.default_route_colors()
   local t = {}
   for i = 1, #ROUTE_COLORS do t[i] = ROUTE_COLORS[i] end
@@ -47,7 +48,7 @@ function M.defaults()
     route_colors = M.default_route_colors(), route_line_width = 3, route_stop_size = 100,
     route_gradient = true, route_gradient_end = 0xFF101010,
     route_gradient_amount = 50, route_gradient_alpha = 30,
-    route_legend = true, focus_place_routes = true, focus_dim_alpha = 25,
+    route_legend = true, focus_place_routes = true, focus_dim_alpha = DIM_ALPHA_DEFAULT,
     route_number_color = 0xFFFFFFFF, route_number_size = 0,
     route_path = 1, route_world_path = false, names_color = 0xFFFFFFFF,
     -- monster kinds switched off, per class (SPEC 29.2.1)
@@ -154,10 +155,12 @@ local function bool_field(raw, k, d)
   return d[k]
 end
 
+local function is_argb(v)
+  return type(v) == "number" and v == math.floor(v) and v >= 0 and v <= 0xFFFFFFFF
+end
 local function argb_field(raw, k, d)
   local v = raw[k]
-  if type(v) == "number" and v == math.floor(v)
-    and v >= 0 and v <= 0xFFFFFFFF then
+  if is_argb(v) then
     return v
   end
   return d[k]
@@ -406,7 +409,7 @@ local function color_list_field(v, n)
   local dl = M.default_route_colors()
   for i = 1, n do
     local e = type(v) == "table" and v[i] or nil
-    if type(e) == "number" and e == math.floor(e) and e >= 0 and e <= 0xFFFFFFFF then
+    if is_argb(e) then
       out[i] = e
     else
       out[i] = dl[i]
@@ -637,7 +640,7 @@ function M.validate(raw)
   -- route_colors; the retired route_line_color seeds entry 1 when no list
   -- is stored (SPEC 32.14.2.2). route_line_color is never written back.
   if type(raw.route_colors) ~= "table" and type(raw.route_line_color) == "number"
-      and raw.route_line_color ~= 0xFFE91E63 then
+      and raw.route_line_color ~= ROUTE_COLORS[1] then
     out.route_colors = field({ route_colors = { raw.route_line_color } }, "route_colors", d)
   else
     out.route_colors = field(raw, "route_colors", d)
@@ -666,10 +669,7 @@ function M.set_key(settings, key, v)
   if kind == "color_list" then
     if #v ~= r[2] then return false end
     for i = 1, r[2] do
-      local e = v[i]
-      if type(e) ~= "number" or e ~= math.floor(e) or e < 0 or e > 0xFFFFFFFF then
-        return false
-      end
+      if not is_argb(v[i]) then return false end
     end
   end
   local out = field({ [key] = v }, key, DEFAULTS)
@@ -737,14 +737,14 @@ function M.reset_appearance(settings)
   settings.route_colors = d.route_colors
 end
 
--- Marker color: the category color, alpha byte halved when the marker
--- is done (opened / looted), faded (SPEC 27.6) or dim (SPEC 32.6.4); once when
--- several apply.
+-- Marker color: the category color (the route colour for a route stop), alpha
+-- byte halved when the marker is done (opened / looted) or faded (SPEC 27.6),
+-- scaled by focus_dim_alpha when dim (SPEC 32.14.6); the lowest when several apply.
 function M.marker_color(settings, m)
   local c
   if m.cat == "route_stop" then
     local rc = settings.route_colors
-    c = rc and (rc[m.slot] or rc[1]) or 0xFFE91E63
+    c = rc and (rc[m.slot] or rc[1]) or ROUTE_COLORS[1]
   else
     c = M.color_of(settings, m.cat)
   end
@@ -753,7 +753,7 @@ function M.marker_color(settings, m)
   local a = a0
   if m.done or m.faded then a = a0 // 2 end
   if m.dim then
-    local da = a0 * (settings.focus_dim_alpha or 25) // 100
+    local da = a0 * (settings.focus_dim_alpha or DIM_ALPHA_DEFAULT) // 100
     if da < a then a = da end
   end
   return (a << 24) | (c & 0x00FFFFFF)
