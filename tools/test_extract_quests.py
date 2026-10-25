@@ -163,6 +163,7 @@ def dest_inst(cid, key):
 class FakePak:
     files = {}
     reads = []
+    closed = 0
     total = 7
     fingerprint = 9
 
@@ -174,7 +175,7 @@ class FakePak:
         return FakePak.files.get(path)
 
     def close(self):
-        pass
+        FakePak.closed += 1
 
 
 def e2e_files():
@@ -212,6 +213,7 @@ class ExtractTests(unittest.TestCase):
         open(os.path.join(self.game, "re_chunk_000.pak"), "wb").close()
         FakePak.files = e2e_files()
         FakePak.reads = []
+        FakePak.closed = 0
         for p in (mock.patch.object(qnml_pak, "Pak", FakePak),
                   mock.patch.object(eq, "MIN_SCENES", 1),
                   mock.patch.object(eq, "MIN_DECODED", 1)):
@@ -226,6 +228,7 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(lines[1], "entries: cast 2, npcs 1, items 2, dest 1")
         self.assertTrue(lines[2].startswith("undecoded 10040: "))
         self.assertEqual(len(lines), 3)
+        self.assertEqual(FakePak.closed, 1)
         for p in (eq.scene_path(10000), eq.scene_path(39999), eq.journal_path(39999)):
             self.assertIn(p, FakePak.reads)
         for p in (eq.scene_path(9999), eq.scene_path(40000)):
@@ -236,6 +239,7 @@ class ExtractTests(unittest.TestCase):
         with self.assertRaises(ew.ExtractError) as cm:
             eq.extract(self.game, "00", QLAYOUTS)
         self.assertEqual(str(cm.exception), "quest context file missing from the archive")
+        self.assertEqual(FakePak.closed, 1)
 
         FakePak.files = e2e_files()
         del FakePak.files[eq.scene_path(10040)]
