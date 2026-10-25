@@ -146,10 +146,4 @@ function M.outline_range(draw, pts, from, to, w, on, outline_argb, o, a)
   end
 end
 
-function M.polyline(draw, pts, w, color_abgr, on, outline_argb, o, a)
-  local n = #pts // 2
-  M.outline_range(draw, pts, 1, n, w, on, outline_argb, o, a)
-  segments_range(draw, pts, 1, n, w, color_abgr)
-end
-
 return M

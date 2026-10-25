@@ -121,25 +121,30 @@ do -- line
   check("zero-length line draws nothing", #calls == 0)
 end
 
-do -- polyline
+do -- outline_range then segments_range over a whole point list
+  local function pl(draw, pts, w, color_abgr, on, outline_argb, o, a)
+    local n = #pts // 2
+    S.outline_range(draw, pts, 1, n, w, on, outline_argb, o, a)
+    S.segments_range(draw, pts, 1, n, w, color_abgr)
+  end
   local d, calls = rec()
-  S.polyline(d, { 0, 0, 10, 0 }, 2, 0xFF00FF00, true, 0x80000000, 1, 0.5)
+  pl(d, { 0, 0, 10, 0 }, 2, 0xFF00FF00, true, 0x80000000, 1, 0.5)
   check("polyline outline alpha", abyte(calls[1][9]) == 64)
   d, calls = rec()
-  S.polyline(d, { 0, 0, 10, 0, 20, 0 }, 2, 0xFF00FF00, true, 0xFF000000, 1, 1)
+  pl(d, { 0, 0, 10, 0, 20, 0 }, 2, 0xFF00FF00, true, 0xFF000000, 1, 1)
   check("polyline 3 pts", #calls == 4 and calls[2][9] == 0xFF000000
     and calls[3][9] == 0xFF00FF00)
   check("polyline outline width w + 2o",
     near(math.abs(calls[1][8] - calls[1][2]), 4, 1e-9)
     and near(math.abs(calls[3][8] - calls[3][2]), 2, 1e-9))
   d, calls = rec()
-  S.polyline(d, { 0, 0, 10, 0, false, 0, 20, 0, 30, 0 }, 2, 0xFF00FF00, true,
+  pl(d, { 0, 0, 10, 0, false, 0, 20, 0, 30, 0 }, 2, 0xFF00FF00, true,
     0xFF000000, 1, 1)
   check("polyline break", #calls == 4 and calls[1][9] == 0xFF000000
     and calls[2][9] == 0xFF000000 and calls[3][9] == 0xFF00FF00
     and calls[4][9] == 0xFF00FF00)
   d, calls = rec()
-  S.polyline(d, { 0, 0, 10, 0 }, 2, 1, false, 0, 1, 1)
+  pl(d, { 0, 0, 10, 0 }, 2, 1, false, 0, 1, 1)
   check("polyline off", #calls == 1)
 end
 
