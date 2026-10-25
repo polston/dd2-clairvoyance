@@ -3003,9 +3003,9 @@ function M.signature(markers, committed)
 end
 
 -- Route members (SPEC 32.7.1, 32.14): the focus NPCs the world walks
--- schedules for (unique cids in active-quest order, the target counted once,
--- at most 8 with the target), then the destination places present in
--- `places`. Returns list, n (published), total (all candidates + target).
+-- schedules for (unique cids in active-quest order, the target counted once),
+-- then the destination places present in `places`; at most 8 published
+-- routes with the target, places last. Returns list, n (published), total (all candidates + target).
 function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
   local list, seen, inlist = {}, {}, {}
   local total = target_cid ~= nil and 1 or 0
@@ -3038,7 +3038,10 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
           if key ~= nil and not pseen[key] and places[key] ~= nil then
             pseen[key] = true
             total = total + 1
-            list[#list + 1] = { cid = -key, place = key, name = name_of(nil, key) }
+            local pextra = (target_cid ~= nil and not inlist[target_cid]) and 1 or 0
+            if #list + pextra < 8 then
+              list[#list + 1] = { cid = -key, place = key, name = name_of(nil, key) }
+            end
           end
         end
       end

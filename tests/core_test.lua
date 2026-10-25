@@ -3220,6 +3220,17 @@ do
   check("rc 7: nil focus", #l == 0 and n == 1 and tot == 1)
   l, n = core.route_members(nil, {}, {}, nil, { routes = 1, places = true }, nm)
   check("rc 7b: nil focus no target", #l == 0 and n == 0)
+  local rel8 = { [1] = { dest = { { key = 77 } } } }
+  l, n, tot = core.route_members(fc, rel8, plc, nil, { routes = 1, places = true }, nm)
+  check("rc 8: a place never passes the cap", #l == 8 and cids(l) == "1,2,3,4,5,6,7,8"
+    and n == 8 and tot == 10)
+  local f7 = { active = { 1, 2 }, quests = { [1] = { step_npcs = { 1, 2, 3, 4, 5 } },
+    [2] = { step_npcs = { 6, 7 } } } }
+  l, n, tot = core.route_members(f7, rel8, plc, 20, { routes = 1, places = true }, nm)
+  check("rc 8b: an unlisted target takes the last seat", #l == 7 and cids(l) == "1,2,3,4,5,6,7"
+    and n == 8 and tot == 9)
+  l, n = core.route_members(f7, rel8, plc, nil, { routes = 1, places = true }, nm)
+  check("rc 8c: a free seat takes the place", cids(l) == "1,2,3,4,5,6,7,-77" and n == 8)
 
   -- hint pins, with a query active, outside the cap
   r = run({ chests = {} }, Q("zzz"), { world_max_markers = 0,
