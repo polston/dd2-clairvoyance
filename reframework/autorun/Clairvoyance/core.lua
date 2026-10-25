@@ -2802,7 +2802,7 @@ function M.compute(adapter, show)
   local undisc = show.world_undiscovered == true
   for _, route in ipairs(type(show.routes) == "table" and show.routes or {}) do
     if type(route) == "table" and type(route.stops) == "table"
-      and type(route.cid) == "number" then
+      and type(route.cid) == "number" and route.place == nil then
       for n, s in ipairs(route.stops) do
         if type(s) == "table" and valid_pos(s.pos)
           and (s.discovered ~= false or undisc) then
@@ -2811,7 +2811,7 @@ function M.compute(adapter, show)
             cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
             label = string.format("%s %02d-%02d", tostring(route.name),
               math.floor(tonumber(s.from) or 0), math.floor(tonumber(s.to) or 0)),
-            cid = route.cid, stop = n }
+            cid = route.cid, stop = n, slot = route.slot }
         end
       end
     end
@@ -2995,10 +2995,57 @@ function M.signature(markers, committed)
     parts[#parts + 1] = string.format("%s=%d:%d:%d[%s]{%s}{%s}<%s>",
       m.key, math.floor(c.x), math.floor(c.y), math.floor(c.z),
       table.concat(m.qids, ","), m.label or "", m.hover or "",
-      (m.cat or "") .. (m.done and "|d" or "") .. (m.faded and "|f" or "") .. (m.dim and "|m" or "") .. (m.step and ("|s" .. m.step) or ""))
+      (m.cat or "") .. (m.done and "|d" or "") .. (m.faded and "|f" or "") .. (m.dim and "|m" or "") .. (m.step and ("|s" .. m.step) or "")
+        .. (m.slot and ("|k" .. m.slot) or ""))
   end
   table.sort(parts)
   return table.concat(parts, "|"), new_committed
+end
+
+-- Route members (SPEC 32.7.1, 32.14): the focus NPCs the world walks
+-- schedules for (unique cids in active-quest order, the target counted once,
+-- at most 8 with the target), then the destination places present in
+-- `places`. Returns list, n (published), total (all candidates + target).
+function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
+  local list, seen, inlist = {}, {}, {}
+  local total = target_cid ~= nil and 1 or 0
+  local active = focus ~= nil and focus.active or nil
+  local mode = opt ~= nil and opt.routes or 0
+  if active ~= nil and #active > 0 then
+    if mode > 0 then
+      for _, qid in ipairs(active) do
+        local q = focus.quests ~= nil and focus.quests[qid] or nil
+        local src = q ~= nil and (mode == 1 and q.step_npcs or q.npcs) or nil
+        for _, cid in ipairs(src or {}) do
+          if not seen[cid] then
+            seen[cid] = true
+            if cid ~= target_cid then total = total + 1 end
+            local extra = (target_cid ~= nil and not inlist[target_cid]) and 1 or 0
+            if cid == target_cid or #list + extra < 8 then
+              list[#list + 1] = { cid = cid, name = name_of(cid, nil) }
+              inlist[cid] = true
+            end
+          end
+        end
+      end
+    end
+    if opt ~= nil and opt.places == true and places ~= nil then
+      local pseen = {}
+      for _, qid in ipairs(active) do
+        local rel = quest_rel ~= nil and quest_rel[qid] or nil
+        for _, d in ipairs(rel ~= nil and rel.dest or {}) do
+          local key = d.key
+          if key ~= nil and not pseen[key] and places[key] ~= nil then
+            pseen[key] = true
+            total = total + 1
+            list[#list + 1] = { cid = -key, place = key, name = name_of(nil, key) }
+          end
+        end
+      end
+    end
+  end
+  local extra = (target_cid ~= nil and not inlist[target_cid]) and 1 or 0
+  return list, #list + extra, total
 end
 
 -- v3 overhead layer (SPEC §10.2c): pure helpers, no sdk.
