@@ -2023,7 +2023,26 @@ install_debug()
 local JUMP_TIP = "Opens the map here"
 -- Opens the node itself; returns whether it was open. The detail model is
 -- built once per snapshot (its inputs only change when the snapshot does).
-local function draw_detail(label, rec, qid, j, ja, spoilers)
+-- Quest focus (SPEC 32): whether a quest is focused (listed, or the tracked
+-- one while Focus tracked is on), and the list toggle behind the row box.
+wt.is_focused = function(qid)
+  for _, q in ipairs(settings.focus_qids) do
+    if q == qid then return true end
+  end
+  return settings.focus_tracked and qid == wt.focus_tracked_qid or false
+end
+wt.focus_toggle = function(qid, on, rec)
+  local list = {}
+  for _, q in ipairs(settings.focus_qids) do
+    if q ~= qid then list[#list + 1] = q end
+  end
+  if on then list[#list + 1] = qid end
+  su.set_key(settings, "focus_qids", list)
+  if rec ~= nil then rec.row_label = nil end
+  want_update = true; last_tick = 0.0; save_settings()
+end
+
+local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
   if not imgui.tree_node(label) then return false end
   local ok, err = pcall(function()
     local cache = snapshot.detail
@@ -2043,6 +2062,26 @@ local function draw_detail(label, rec, qid, j, ja, spoilers)
     if d.jump ~= nil then
       if imgui.button(d.jump_id) then jump_pending = d.jump end
       if imgui.is_item_hovered() then imgui.set_tooltip(JUMP_TIP) end
+    end
+    if focus_kind == "row" and rec ~= nil and rec.cat ~= "completed"
+        and rec.cat ~= "failed" and rec.cat ~= "canceled" then
+      d.focus_id = d.focus_id or ("Focus##qf_" .. qid)
+      local listed = false
+      for _, q in ipairs(settings.focus_qids) do
+        if q == qid then listed = true; break end
+      end
+      local c, v = imgui.checkbox(d.focus_id, listed)
+      if c and (listed or #settings.focus_qids < 16) then wt.focus_toggle(qid, v, rec) end
+      if not listed and #settings.focus_qids >= 16 and imgui.is_item_hovered() then
+        imgui.set_tooltip("At most 16 quests in focus")
+      end
+    elseif focus_kind == "tracked" then
+      local c, v = imgui.checkbox("Focus tracked##qf_tracked", settings.focus_tracked)
+      if c then
+        su.set_key(settings, "focus_tracked", v)
+        if rec ~= nil then rec.row_label = nil end
+        want_update = true; last_tick = 0.0; save_settings()
+      end
     end
     -- v14 (SPEC 22.11.2): the Hints node. Opening it is the spoiler gate;
     -- the step in its id starts a new step's node closed.
@@ -2080,6 +2119,8 @@ do
   local sec = {}
   local groups = wt.style.GROUPS
   local route_labels = { "Straight lines", "Walking path" }
+  local unrelated_labels = { "Hide", "Dim" }
+  local focus_route_labels = { "None", "Current step's NPCs", "Every related NPC" }
   local cat_rows = {
     { "startable", "Startable" }, { "in_progress", "In progress" },
     { "completed", "Completed" }, { "unavailable", "Unavailable" },
@@ -2090,6 +2131,7 @@ do
     { "npc_search", su.WORLD_LABEL.npc_search },
     { "route_stop", su.WORLD_LABEL.route_stop },
     { "hint_pin", su.WORLD_LABEL.hint_pin },
+    { "focus_place", "Quest focus places" },
   }
   -- the override sub-tree names: the category's name, then the three extras
   local gname = { route_line = "Route line", names = "Names", items = "Item menu" }
@@ -2519,7 +2561,33 @@ do
           local jt, jat = snapshot.journal or {}, snapshot.journal_all or {}
           snapshot.summary = snapshot.summary or core.summary_nodes(snapshot)
           for _, s in ipairs(snapshot.summary) do
-            draw_detail(s.label, s.rec, s.qid, jt, jat, spoilers)
+            draw_detail(s.label, s.rec, s.qid, jt, jat, spoilers,
+              s.qid == snapshot.tracked_qid and "tracked" or nil)
+          end
+          if snapshot.focus ~= nil and #snapshot.focus.active > 0 then
+            snapshot.focus_clear_label = snapshot.focus_clear_label
+              or ("Clear focus (" .. #snapshot.focus.active .. ")##qf_clear")
+            if imgui.button(snapshot.focus_clear_label) then
+              su.set_key(settings, "focus_qids", {})
+              su.set_key(settings, "focus_tracked", false)
+              want_update = true; last_tick = 0.0; save_settings()
+            end
+            local c, idx = imgui.combo("Unrelated markers##focus_unrelated",
+              settings.focus_unrelated + 1, unrelated_labels)
+            if c then
+              su.set_key(settings, "focus_unrelated", idx - 1)
+              want_update = true; last_tick = 0.0; save_settings()
+            end
+            c, idx = imgui.combo("Routes##focus_routes",
+              settings.focus_routes + 1, focus_route_labels)
+            if c then
+              su.set_key(settings, "focus_routes", idx - 1)
+              want_update = true; last_tick = 0.0; save_settings()
+            end
+            if settings.focus_routes > 0 then
+              imgui.text(string.format("Routes: %d of %d",
+                wt.routes_n or 0, wt.routes_total or 0))
+            end
           end
           local order = { "Melve", "Vernworth", "Checkpoint Rest Town",
             "Harve", "Bakbattahl", "Sacred Arbor", "Volcanic Island",
@@ -2546,8 +2614,9 @@ do
                   imgui.text_colored("*", A.argb_to_abgr(
                     su.color_of(settings, r.grp)))
                   imgui.same_line()
-                  r.row_label = r.row_label or core.row_label(r, snapshot.nearest_qid)
-                  if draw_detail(r.row_label, r, r.qid, jt, jat, spoilers) then
+                  r.row_label = r.row_label or core.row_label(r, snapshot.nearest_qid,
+                    wt.is_focused(r.qid))
+                  if draw_detail(r.row_label, r, r.qid, jt, jat, spoilers, "row") then
                     exp[r.qid] = true
                   end
                 end
