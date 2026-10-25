@@ -2,21 +2,22 @@
 -- the game's reframework/autorun/ and press Reset Scripts. See the
 -- clairvoyance-workflow skill, Part 1.
 -- Every 5 s logs QNML_DEBUG.state() as CHK lines, each prefixed "~ " so run.py
--- can tell them from a chunk's own output; every 30 frames runs any
+-- can tell them from a chunk's own output (a chunk's dump() has no prefix); every 30 frames runs any
 -- Lua chunk written to reframework/data/qnml_cmd.txt with D = QNML_DEBUG.
 local function L(s) log.info("CHK " .. s) end
 local f, last_dump = 0, 0
 local announced = false
 local boot_done = false
-local function dump()
+local function dump(pre)
+  pre = pre or ""
   local D = _G.QNML_DEBUG
   if D == nil then L("QNML_DEBUG nil true"); return end
   local ok, st = pcall(D.state)
   if not ok then L("state error " .. tostring(st)); return end
-  L(string.format("~ setup_icon_n %s map_ctor_n %s tracked %s",
+  L(string.format(pre .. "setup_icon_n %s map_ctor_n %s tracked %s",
     tostring(st.setup_icon_n), tostring(st.map_ctor_n), tostring(st.tracked_qid)))
-  for _, l in ipairs(st.lines or {}) do L("~ | " .. l) end
-  for _, j in ipairs(st.jumps or {}) do L("~ jump " .. j) end
+  for _, l in ipairs(st.lines or {}) do L(pre .. "| " .. l) end
+  for _, j in ipairs(st.jumps or {}) do L(pre .. "jump " .. j) end
 end
 re.on_frame(function()
   f = f + 1
@@ -28,12 +29,12 @@ re.on_frame(function()
     local ok, v = pcall(fs.read, name)
     if ok and v ~= nil and v ~= "" then
       pcall(fs.write, name, "")
-      local env = setmetatable({ D = _G.QNML_DEBUG, L = L, dump = dump }, { __index = _G })
+      local env = setmetatable({ D = _G.QNML_DEBUG, L = L, dump = function() dump("") end }, { __index = _G })
       local fn, err = load(v, "qnml_cmd", "t", env)
       local ok2, e2 = false, err
       if fn ~= nil then ok2, e2 = pcall(fn) end
       L("cmd ok=" .. tostring(ok2) .. " " .. tostring(e2))
     end
   end
-  if os.clock() - last_dump >= 5.0 then last_dump = os.clock(); dump() end
+  if os.clock() - last_dump >= 5.0 then last_dump = os.clock(); dump("~ ") end
 end)

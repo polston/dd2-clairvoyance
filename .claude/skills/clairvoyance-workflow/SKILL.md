@@ -57,8 +57,10 @@ Reach internals with `debug.getupvalue` on those functions (the framework's
 Lua exposes the `debug` library; checked in game 2026-10-25), for example
 the world tracker as the `wt` upvalue of `D.state`.
 
-1. Install the dev harness once: copy `tools/probe/qnml_check.lua` into the
-   game's `reframework/autorun/`. The operator then presses Reset Scripts. It
+1. Install the dev harness: copy `tools/probe/qnml_check.lua` into the
+   game's `reframework/autorun/`, again whenever that file changes (run.py
+   warns when the installed copy is older). The operator then presses Reset
+   Scripts. It
    is never in the release zip.
    1. `QNML_DEBUG` exists only while the mod's Debug setting is on. If the log
       shows `CHK QNML_DEBUG nil true`, Debug is off. Turn it on in the mod's
@@ -84,10 +86,13 @@ the world tracker as the `wt` upvalue of `D.state`.
 5. A probe that changes settings restores them before it ends, including on
    failure. Leave the game as you found it. Never edit the save file.
    `D.set(key, v)` writes the settings file `reframework/data/Clairvoyance.json`
-   at once, so a change persists across restarts. Keys: enabled,
-   journal_spoilers, debug, search_text, matching_icons, step_icons,
-   overhead_names, inventory_quest_marks, world_max_markers and the
-   world-tracker toggles in `settings_util.WORLD_BOOLS`. Read the old value
+   at once, so a change persists across restarts. Keys: the named cases in
+   the `set = function(key, v)` block (enabled, journal_spoilers, debug,
+   search_text, matching_icons, step_icons, overhead_names,
+   inventory_quest_marks, world_max_markers), the toggles in
+   `settings_util.WORLD_BOOLS` and `settings_util.WORLD_KIND_BOOLS`, and any
+   other key `settings_util.set_key` accepts (focus, route, style, colour
+   and icon keys). Read the old value
    from the settings first and restore it inside a pcall-guarded finally.
 6. One probe runs every variant and logs each result. Never ask the operator
    to repeat a test.

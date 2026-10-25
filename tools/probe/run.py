@@ -51,9 +51,14 @@ def main():
         print("TIMEOUT")
         with open(cmd, "w", encoding="utf-8") as f:
             f.write("")
+    warned = False
     for line in text.splitlines():
         if "CHK " in line:
             s = line.split("CHK ", 1)[1]
+            if s.startswith("setup_icon_n") and not warned:
+                warned = True
+                print("WARN: the installed harness is older than tools/probe/qnml_check.lua;"
+                      " copy it into the game's reframework/autorun/ and press Reset Scripts")
             if not s.startswith(NOISE):
                 print(s)
         elif is_mod_error(line):

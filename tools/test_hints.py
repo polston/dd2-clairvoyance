@@ -105,8 +105,9 @@ class MainCheckout(unittest.TestCase):
             old = os.getcwd()
             os.chdir(cwd)
             try:
-                with mock.patch.object(hints_check, "common_dir",
-                                       return_value=os.path.join(main, ".git")),                         contextlib.redirect_stdout(out):
+                with (mock.patch.object(hints_check, "common_dir",
+                                        return_value=os.path.join(main, ".git")),
+                      contextlib.redirect_stdout(out)):
                     code = hints_check.main(["--hints", hf])
             finally:
                 os.chdir(old)
