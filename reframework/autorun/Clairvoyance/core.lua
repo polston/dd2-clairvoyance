@@ -2213,6 +2213,103 @@ local function giver_position(adapter, qid, cands, static, world_in, givers)
   return nil
 end
 
+-- v19 (SPEC 32.5): the related NPCs, items and places of each focused quest.
+-- Pure; the caller resolves each giver and the in-progress set into `live`.
+-- The previous result table itself is returned while every input matches.
+local related_memo = nil
+
+local function related_same(m, adapter, active, rel, places, needs, live, objs)
+  if m == nil or m.adapter ~= adapter or m.rel ~= rel or m.places ~= places
+    or m.needs ~= needs or #m.active ~= #active then
+    return false
+  end
+  for i, qid in ipairs(active) do
+    if m.active[i] ~= qid or m.givers[i] ~= live.givers[qid]
+      or m.prog[i] ~= (live.prog[qid] == true) or m.objs[i] ~= objs[i] then
+      return false
+    end
+  end
+  return true
+end
+
+function M.related_sets(adapter, active, rel, places, live)
+  live = live or {}
+  local givers, prog = live.givers or {}, live.prog or {}
+  live = { givers = givers, prog = prog }
+  local needs = adapter.item_needs and adapter.item_needs() or nil
+  local objs = {}
+  for i, qid in ipairs(active) do
+    objs[i] = adapter.objective_cids and adapter.objective_cids(qid) or false
+  end
+  local m = related_memo
+  if related_same(m, adapter, active, rel, places, needs, live, objs) then
+    return m.result
+  end
+
+  local function good(c)
+    return type(c) == "number" and c > 0 and not adapter.is_generic(c)
+  end
+  local result = {}
+  for i, qid in ipairs(active) do
+    local entry = type(rel) == "table" and rel[qid] or nil
+    local npcs, nseen, step, sseen = {}, {}, {}, {}
+    local function add(list, seen, c)
+      if good(c) and not seen[c] then seen[c] = true; list[#list + 1] = c end
+    end
+    local function add_all(list, seen, src)
+      for _, c in ipairs(type(src) == "table" and src or {}) do add(list, seen, c) end
+    end
+    local giver = givers[qid]
+    local oc = objs[i] or nil
+    add(npcs, nseen, giver)
+    add_all(npcs, nseen, oc)
+    add_all(npcs, nseen, adapter.cast_ids(qid))
+    add_all(step, sseen, oc)
+    if entry ~= nil then
+      add_all(npcs, nseen, entry.cast)
+      add_all(npcs, nseen, entry.npcs)
+      for _, d in ipairs(type(entry.dest) == "table" and entry.dest or {}) do
+        if type(d) == "table" then add(npcs, nseen, d.cid) end
+      end
+    end
+    if not prog[qid] then add(step, sseen, giver) end
+
+    local items, iseen = {}, {}
+    local function add_item(id)
+      if type(id) == "number" and not iseen[id] then iseen[id] = true; items[#items + 1] = id end
+    end
+    if entry ~= nil and type(entry.items) == "table" then
+      for _, id in ipairs(entry.items) do add_item(id) end
+    end
+    if type(needs) == "table" and type(needs[qid]) == "table" then
+      for _, n in ipairs(needs[qid]) do
+        if type(n) == "table" then add_item(n.id) end
+      end
+    end
+
+    local pl, pseen = {}, {}
+    if entry ~= nil and type(places) == "table" and type(entry.dest) == "table" then
+      for _, d in ipairs(entry.dest) do
+        if type(d) == "table" and d.key ~= nil and places[d.key] ~= nil and not pseen[d.key] then
+          pseen[d.key] = true; pl[#pl + 1] = d.key
+        end
+      end
+      table.sort(pl)
+    end
+    result[qid] = { npcs = npcs, step_npcs = step, items = items, places = pl }
+  end
+
+  local keep_active, keep_givers, keep_prog = {}, {}, {}
+  for i, qid in ipairs(active) do
+    keep_active[i] = qid
+    keep_givers[i] = givers[qid]
+    keep_prog[i] = (prog[qid] == true)
+  end
+  related_memo = { adapter = adapter, active = keep_active, givers = keep_givers,
+    prog = keep_prog, rel = rel, places = places, needs = needs, objs = objs, result = result }
+  return result
+end
+
 -- v13 (SPEC 21.8.2): step reads for in-progress quests, newest data carried
 -- through prev. Never-read first, then oldest; at most STEP_CAP reads per
 -- tick and one per qid per STEP_MIN_AGE seconds.

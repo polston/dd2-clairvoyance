@@ -4137,6 +4137,37 @@ do
     and has(r.markers, "r:13:1").label == "Bo 01-02")
   r = run({}, nil, { route = r2 })
   check("fo 8b: the single route field is not read", has(r.markers, "r:13:1") == nil)
+
+  local calls = 0
+  local ra = fake_adapter({ objectives = { [20] = { 7, 8, 0 } }, casts = { [20] = { 7, 9 }, [30] = { 4 } },
+    item_needs = { [20] = { { id = 300 }, { id = 301 } } } })
+  ra.is_generic = function(c) return c == 9 end
+  local base_cast = ra.cast_ids
+  ra.cast_ids = function(q) calls = calls + 1; return base_cast(q) end
+  local rel = { [20] = { cast = { 9, 11 }, npcs = { 12, 7 }, items = { 302, 300 },
+      dest = { { cid = 13 }, { key = 44 }, { key = 45 } } },
+    [30] = { cast = {}, npcs = { 15 }, items = {}, dest = { { key = 44 } } } }
+  local places = { [44] = P(1), [46] = P(2) }
+  local live = { givers = { [20] = 5, [30] = 6 }, prog = { [20] = true } }
+  local function j(t) return table.concat(t, ",") end
+  local rs = core.related_sets(ra, { 20, 30 }, rel, places, live)
+  check("rs 1: npcs order", j(rs[20].npcs) == "5,7,8,11,12,13")
+  check("rs 2: step npcs in progress = objectives", j(rs[20].step_npcs) == "7,8")
+  check("rs 3: items file then live", j(rs[20].items) == "302,300,301")
+  check("rs 4: places with a position", j(rs[20].places) == "44")
+  check("rs 5: not in progress: step npc is the giver", j(rs[30].npcs) == "6,4,15"
+    and j(rs[30].step_npcs) == "6" and #rs[30].items == 0 and j(rs[30].places) == "44")
+  local n0 = calls
+  check("rs 6: memo returns the same table", core.related_sets(ra, { 20, 30 }, rel, places, live) == rs
+    and calls == n0)
+  check("rs 7: new places recompute", core.related_sets(ra, { 20, 30 }, rel, { [44] = P(1) }, live) ~= rs)
+  check("rs 8: a new giver recomputes", core.related_sets(ra, { 20, 30 }, rel, places,
+    { givers = { [20] = 99, [30] = 6 }, prog = live.prog })[20].npcs[1] == 99)
+  local rn = core.related_sets(ra, { 20 }, nil, places, live)
+  check("rs 9: no file: live parts only", j(rn[20].npcs) == "5,7,8" and j(rn[20].items) == "300,301"
+    and #rn[20].places == 0)
+  local rm = core.related_sets(ra, { 40 }, rel, places, { givers = {}, prog = {} })
+  check("rs 10: quest with nothing", rm[40] ~= nil and #rm[40].npcs == 0 and #rm[40].step_npcs == 0)
 end
 
 if failures > 0 then os.exit(1) end
