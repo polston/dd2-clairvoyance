@@ -2048,7 +2048,8 @@ function M.new(a, reads, io)
       for _, e in ipairs(list) do
         if type(e) == "table" and type(e.cid) == "number" and member_of[e.cid] == nil
             and (e.place == nil
-              or (type(e.place) == "number" and e.place > 0 and e.place % 1 == 0)) then
+              or (type(e.place) == "number" and e.place > 0 and e.place % 1 == 0
+                and e.cid == -e.place)) then
           local m = { cid = e.cid, name = e.name, place = e.place }
           members[#members + 1] = m
           member_of[e.cid] = m

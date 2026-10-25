@@ -3150,16 +3150,27 @@ do
       w:refresh(3, true, t0)
       check("place waits: the player gone frees the slot",
         route_in(w, -77) == nil and slots(w) == "2001=1")
+      w:set_routes({ { cid = -77, place = 77, name = "Q" }, { cid = 2001, name = "A" },
+        { cid = 2002, name = "B" } })
+      local n2 = 0
+      repeat n2 = n2 + 1 until not w:refresh(4, true, t0) or n2 > 20
+      check("place waits: a member joining takes the slot the place freed",
+        slots(w) == "2001=1,2002=2")
     end
 
     -- 4: guards
     f, d = sfix()
     w = f.new()
     if type(w.set_routes) == "function" then
-      w:set_routes({ { cid = -5, place = 0, name = "Z" }, { cid = -6, place = 1.5, name = "Y" },
-        { cid = 2001, name = "A" } })
+      w:set_routes({ { cid = 2001, name = "A" } })
       settle(w, 0)
-      check("place guards: place 0 and 1.5 are dropped", cids(w) == "2001")
+      local g0 = w.route_gen
+      -- a kept member would be an add: it bumps route_gen
+      w:set_routes({ { cid = 2001, name = "A" }, { cid = 0, place = 0, name = "Z" },
+        { cid = -1.5, place = 1.5, name = "Y" }, { cid = -9, place = 77, name = "X" },
+        { cid = 2001, place = 77, name = "W" } })
+      check("place guards: place 0, 1.5 and a cid other than -place are dropped",
+        w.route_gen == g0 and cids(w) == "2001")
       local g = w.route_gen
       w:set_route(-5, "Z")
       w:set_route(0, "Z")
