@@ -900,8 +900,7 @@ do
   end
 end
 local hover_labels = {}   -- icon address -> label
-local hover_stats = { fires = 0, hits = 0, misses = 0, sel_nil = 0,
-  same_fallback_n = 0 }
+local hover_stats = { fires = 0, hits = 0, misses = 0, sel_nil = 0 }
 local hover_last_miss = nil
 local saved_styles = {}   -- { {ref, scale, prio, color_ptr_value} }
 local dropped_count = 0
@@ -1904,14 +1903,7 @@ do
 
   -- SPEC 5.13.4.3 to 5.13.4.6
   local function same(a, b)
-    if a == nil or b == nil then return false end
-    if a == b then return true end
-    local ok, eq = pcall(function() return a:get_address() == b:get_address() end)
-    -- debug-only: calls where == was false but the addresses matched
-    if ok and eq and settings.debug then
-      hover_stats.same_fallback_n = hover_stats.same_fallback_n + 1
-    end
-    return ok and eq
+    return a ~= nil and b ~= nil and a == b
   end
   A.hook_method("app.ui040205", "setupMapIcon", function(args)
     hooked_this = sdk.to_managed_object(args[2])
@@ -2208,7 +2200,6 @@ local function install_debug()
             expanded_union(), settings.journal_spoilers) or {}, jumps = jumps,
           tracked_qid = snapshot and snapshot.tracked_qid or nil,
           map_ctor_n = map_ctor_n, setup_icon_n = setup_icon_n,
-          same_fallback_n = hover_stats.same_fallback_n,
           tick_median = su.median(wt.tick_ring or {}),
           draw = icons:stats_line(),
           legend_n = wt.legend_n, leg_calls = wt.leg_calls, world_path_ms = wt.world_path_ms,
