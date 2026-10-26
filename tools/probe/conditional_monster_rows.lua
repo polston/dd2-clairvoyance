@@ -11,6 +11,7 @@ end
 assert(type(wt) == "table" and type(wt.q) == "function", "world tracker upvalue unavailable")
 
 -- Pass temporary toggles directly; no setting is changed or saved.
+wt.q("poke", false)
 local ok = wt.q("refresh", false, os.clock(), true,
   { monsters = true, small_monsters = true }, false)
 assert(ok == true, "world round did not run")

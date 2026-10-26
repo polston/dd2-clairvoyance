@@ -254,7 +254,7 @@ function M.new(a, reads, io)
       nodes = nil, node_chest = nil, shops = nil, sched_ids = nil, shop_of = {}, shop_cids = nil,
       settle = nil, msgs = {}, disc_set = nil, disc_count = nil,
       disc_cache = {}, need_sort = true, file_monsters = {}, held = {}, live = {},
-      drop_ids = nil, eligible_file_monsters = {},
+      drop_ids = nil, eligible_file_monsters = {}, file_giver_rows = {}, file_givers = {},
       -- SPEC 28.5.3.3: item lists kept per chest uid / treasure name
       chest_lists = {}, treasure_lists = {},
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
@@ -456,8 +456,10 @@ function M.new(a, reads, io)
         local nm = type(e.name) == "string" and e.name or nil
         local pruned = false
         if places.state == "ok" then
-          if e.k == "monster" then
-            pruned = conditional_uids[uidl] or not kept_chara[uidl]
+          if conditional_uids[uidl] then
+            pruned = true
+          elseif e.k == "monster" then
+            pruned = not kept_chara[uidl]
           elseif e.k == "chest" or e.k == "token" or e.k == "beetle" then
             pruned = places_uids[uidl] == true and static[uidl] == nil
           end
@@ -523,18 +525,25 @@ function M.new(a, reads, io)
     return "drop"
   end
 
-  local function classify(id, name, src, phase, file_monster)
-    if not file_monster and S.cast ~= nil and S.cast[id] then return "giver" end
+  local function classify(id, name)
+    if S.cast ~= nil and S.cast[id] then return "giver" end
     return family_class(fam_of(name or names[id]))
   end
 
   local function sort_places()
     S.need_sort = false
     S.file_monsters = {}
+    S.file_giver_rows = {}
+    S.file_givers = {}
+    givers_cache, givers_rev = nil, -1
     for _, r in ipairs(chara_rows) do
-      local c = classify(r.id, r.name, r.src, r.phase, conditional_uids[r.uid] == true)
+      local c = classify(r.id, r.name)
       if c == "giver" then
-        learn(r.uid, "giver", r.id, r.x, r.y, r.z, nil, r.name)
+        if conditional_uids[r.uid] then
+          S.file_giver_rows[r.uid] = { uid = r.uid, id = r.id, x = r.x, y = r.y, z = r.z }
+        else
+          learn(r.uid, "giver", r.id, r.x, r.y, r.z, nil, r.name)
+        end
       elseif c == "large" or c == "small" then
         S.file_monsters[r.uid] = { k = "monster", id = r.id, x = r.x, y = r.y,
           z = r.z, src = "file", name = r.name }
@@ -673,8 +682,9 @@ function M.new(a, reads, io)
     gate_round = { quests = {}, variables = {}, season_read = false, season = nil }
     gate_stats = { season4 = nil, normal = { eligible = 0, total = 0 },
       quest = { eligible = 0, total = 0 }, read_failures = { season4 = 0, quest = 0, variable = 0 } }
-    local eligible = {}
-    if enabled then
+    local eligible, file_givers = {}, {}
+    local gate_work = enabled or next(S.file_giver_rows) ~= nil
+    if gate_work then
       for _, r in ipairs(chara_rows) do
         local group = (r.src == "subquest" or r.src == "mainquest") and "quest" or "normal"
         local counts = gate_stats[group]
@@ -682,6 +692,13 @@ function M.new(a, reads, io)
         local yes = row_eligible(r)
         if yes then counts.eligible = counts.eligible + 1 end
         if yes and S.file_monsters[r.uid] ~= nil then eligible[r.uid] = S.file_monsters[r.uid] end
+        -- Quest-cast rows are giver anchors, not monster spawns. Keep their
+        -- file positions available even before the source quest activates.
+        local fg = S.file_giver_rows[r.uid]
+        if fg ~= nil then
+          local current_giver = file_givers[fg.id]
+          if current_giver == nil or fg.uid < current_giver.uid then file_givers[fg.id] = fg end
+        end
       end
     end
     local current, changed = S.eligible_file_monsters, false
@@ -690,6 +707,25 @@ function M.new(a, reads, io)
       for uid in pairs(eligible) do if current[uid] == nil then changed = true; break end end
     end
     if changed then S.eligible_file_monsters = eligible end
+    local giver_changed = false
+    for id, current_giver in pairs(S.file_givers) do
+      local next_giver = file_givers[id]
+      if next_giver == nil or next_giver.uid ~= current_giver.uid then
+        giver_changed = true; break
+      end
+    end
+    if not giver_changed then
+      for id, next_giver in pairs(file_givers) do
+        local current_giver = S.file_givers[id]
+        if current_giver == nil or current_giver.uid ~= next_giver.uid then
+          giver_changed = true; break
+        end
+      end
+    end
+    if giver_changed then
+      S.file_givers = file_givers
+      givers_cache, givers_rev = nil, -1
+    end
   end
 
   -- ----- cast set (SPEC 17.10.9: first built each session) -----
@@ -774,13 +810,13 @@ function M.new(a, reads, io)
             names[cid] = r.cid_name
           end
           local c = classify(cid, r.cid_name, r.src, r.phase)
-          if file_ok and conditional_uids[uid] and (c == "large" or c == "small" or c == "giver") then
-            live_only(uid, "monster", cid, r.pos.x, r.pos.y, r.pos.z, names[cid])
-          elseif c == "giver" then
-            learn(uid, "giver", cid, r.pos.x, r.pos.y, r.pos.z,
-              to_int(r.table_ix), names[cid])
+          if c == "giver" then
+            if not conditional_uids[uid] then
+              learn(uid, "giver", cid, r.pos.x, r.pos.y, r.pos.z,
+                to_int(r.table_ix), names[cid])
+            end
           elseif c == "large" or c == "small" then
-            if file_ok and S.file_monsters[uid] == nil then
+            if file_ok and (conditional_uids[uid] or S.file_monsters[uid] == nil) then
               live_only(uid, "monster", cid, r.pos.x, r.pos.y, r.pos.z, names[cid])
             else
               learn(uid, "monster", cid, r.pos.x, r.pos.y, r.pos.z,
@@ -2395,6 +2431,13 @@ function M.new(a, reads, io)
         end
       end
     end
+    for id, e in pairs(S.file_givers) do
+      local cur = ids[id]
+      if cur == nil or e.uid < cur then
+        ids[id] = e.uid
+        out[id] = { x = e.x, y = e.y, z = e.z }
+      end
+    end
     givers_cache, givers_rev = out, rev
     return out
   end
@@ -2405,6 +2448,7 @@ function M.new(a, reads, io)
 
   function w:reset()
     S = new_session()
+    givers_cache, givers_rev = nil, -1
     w.path_job = nil
     if type(reads.reset) == "function" then pcall(reads.reset) end
     gate_round = { quests = {}, variables = {}, season_read = false, season = nil }
@@ -3008,14 +3052,25 @@ function M.game_reads()
       c.bool_value and 1 or 0, c.int_value }, ":")
     local wrapper = variable_objects[key]
     if wrapper == nil then
+      local condition, info, condition_ref, info_ref
       local ok, result = pcall(function()
         variable_info_type = variable_info_type or sdk.find_type_definition(
           "app.GenerateManager.QuestFlagInfos.QuestVariableInfo")
         variable_condition_type = variable_condition_type or sdk.find_type_definition(
           "app.QuestVariableCondition")
         if variable_info_type == nil or variable_condition_type == nil then error("condition type missing") end
-        local condition = variable_condition_type:create_instance():add_ref()
-        local info = variable_info_type:create_instance():add_ref()
+        condition = variable_condition_type:create_instance()
+        if condition == nil then error("condition construction failed") end
+        local condition_added = condition:add_ref()
+        condition_ref = true
+        if condition_added == nil then error("condition retention failed") end
+        condition = condition_added
+        info = variable_info_type:create_instance()
+        if info == nil then error("variable info construction failed") end
+        local info_added = info:add_ref()
+        info_ref = true
+        if info_added == nil then error("variable info retention failed") end
+        info = info_added
         condition:set_field("_QuestID", c.qid)
         condition:set_field("_NameHash", c.name_hash)
         condition:set_field("_ValueType", c.value_type)
@@ -3025,7 +3080,11 @@ function M.game_reads()
         info:set_field("_Condition", condition)
         return { info = info, condition = condition }
       end)
-      if not ok or result == nil then error("variable condition construction failed") end
+      if not ok or result == nil then
+        if info_ref and info ~= nil then pcall(function() info:release() end) end
+        if condition_ref and condition ~= nil then pcall(function() condition:release() end) end
+        error("variable condition construction failed")
+      end
       variable_objects[key] = result
       wrapper = result
     end

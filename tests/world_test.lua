@@ -1093,6 +1093,36 @@ do
   scenario(true)
 end
 
+-- 22e. conditional quest-cast rows remain session-only file givers
+do
+  local uid = "60887e70-7bd1-0227-2a67-f385cc4c6a28"
+  local sphinx = prow("chara", uid, 3369196004, 40, 50, {
+    name = "ch253001_00", src = "subquest", table_qid = 20200 })
+  local function scenario(active, label)
+    local f = fixture({ files = {
+      [K.PLACES] = places({ sphinx }),
+      [K.ATLAS] = { version = 1, pak = "1:1", entries = {
+        [uid] = { k = "giver", id = 3369196004, x = 900, y = 0, z = 900 } } } } })
+    f.data.catalog, f.data.cast = { 20200 }, { [20200] = { 3369196004 } }
+    f.data.gate_quests[20200] = { active = active, ended = false }
+    f.data.boss = { ch253 = true }
+    local w = f.new()
+    w:refresh(0, true, on("monsters", "small_monsters"))
+    local giver = w:givers()[3369196004]
+    check("conditional cast row: Sphinx stays in the giver map " .. label,
+      giver ~= nil and giver.x == 40 and giver.y == 0 and giver.z == 50)
+    check("conditional cast row: absent from monster markers " .. label,
+      find(w:input().monsters, uid) == nil)
+    check("conditional cast row: legacy giver entry is pruned and session-only " .. label,
+      w:stats().atlas.learned == 0 and w:stats().gates.conditional_learned == 0)
+    w:save("test")
+    check("conditional cast row: giver is not saved " .. label,
+      f.files[K.ATLAS].entries[uid] == nil)
+  end
+  scenario(true, "while active")
+  scenario(false, "before activation")
+end
+
 -- 22b. live rows the places file drops are session-only (SPEC 17.10.6, 17.10.9.2)
 do
   local function session_only(label, prows, reserved, kind, uid, x)
@@ -1986,10 +2016,17 @@ do
   do
     local old_find = sdk.find_type_definition
     local made, released, ended, result = {}, 0, { [11040] = false }, true
+    local fail_condition_set = false
     local function managed(fields, methods)
       local o = obj(fields, methods)
       function o:add_ref() made[#made + 1] = self; return self end
-      function o:set_field(k, v) fields[k] = v end
+      function o:set_field(k, v)
+        if k == "_Condition" and fail_condition_set then
+          fail_condition_set = false
+          error("injected condition assignment failure")
+        end
+        fields[k] = v
+      end
       function o:release() released = released + 1 end
       return o
     end
@@ -2005,10 +2042,7 @@ do
         end }
       elseif n == "app.GenerateManager.QuestFlagInfos.QuestVariableInfo" then
         return { create_instance = function()
-          return managed({}, { evaluate = function()
-            local condition = made[1]
-            return result and condition:get_field("_NameHash") == 110914987
-          end })
+          return managed({}, { evaluate = function() return result end })
         end }
       end
       return old_find(n)
@@ -2030,9 +2064,17 @@ do
       and #made == 2)
     result = false
     check("conditional reads: evaluator result comes from the game", RR.quest_variable(c) == false)
+    local c2 = { qid = 51010, name_hash = 479827071, value_type = 1,
+      compare_type = 0, bool_value = false, int_value = 0 }
+    fail_condition_set, result = true, true
+    local failed = pcall(RR.quest_variable, c2)
+    check("conditional reads: failed construction releases partial refs", not failed
+      and released == 2 and #made == 4)
+    check("conditional reads: failed construction can retry", RR.quest_variable(c2) == true
+      and #made == 6)
     RR.reset()
-    check("conditional reads: reset releases and drops retained objects", released == 2
-      and RR.quest_variable(c) == false and #made == 4)
+    check("conditional reads: reset releases and drops retained objects", released == 6
+      and RR.quest_variable(c) == true and #made == 8)
     sdk.find_type_definition = old_find
     singletons["app.GameSystem"], singletons["app.QuestManager"],
       singletons["app.QuestLogManager"] = nil, nil, nil
@@ -2146,6 +2188,12 @@ do
   -- poke
   local f3 = fixture()
   local w3 = f3.new()
+  local probe_file = assert(io.open("tools/probe/conditional_monster_rows.lua", "rb"))
+  local probe_source = probe_file:read("*a"); probe_file:close()
+  local probe_poke = probe_source:find('wt.q("poke"', 1, true)
+  local probe_refresh = probe_source:find('wt.q("refresh"', 1, true)
+  check("probe: poke clears the refresh throttle", probe_poke ~= nil and probe_refresh ~= nil
+    and probe_poke < probe_refresh)
   w3:refresh(0, true, { search = true })
   local r1 = w3:stats().rounds
   w3:refresh(3, true, { search = true })
