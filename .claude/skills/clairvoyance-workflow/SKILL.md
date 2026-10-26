@@ -183,7 +183,9 @@ lane worktree.
 4. The gate is `powershell -NoProfile -File scripts/check.ps1` (add
    `-Lua <path> -Luac <path>` only when they are not on PATH). It must end `check.ps1: all OK`. Its `locals:` lines give the chunk-level
    local budget of `Clairvoyance.lua` and `adapter.lua`. New state goes in
-   fields (`wt`, `icons`), not new chunk-level locals.
+   fields (`wt`, `icons`), not new chunk-level locals. `scripts/deploy.ps1`
+   runs this gate before touching the installed mod and refuses deployment on
+   failure; pass it the same `-Lua` and `-Luac` paths.
 5. The repo stores Lua files with LF. This machine's `core.autocrlf=true`
    checks them out as CRLF. Whatever tool edits a file, run `git diff --stat`
    afterwards: it must show only the lines you meant to change, never a

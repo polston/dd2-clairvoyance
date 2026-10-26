@@ -126,6 +126,9 @@ if ($bad.Count -gt 0) { Write-Host "TRACKED FORBIDDEN: $($bad -join ', ')"; $fai
 # Build script tests (skip with a printed reason when Python is missing).
 & powershell -NoProfile -File (Join-Path $root "scripts/test_build.ps1")
 if ($LASTEXITCODE -ne 0) { Write-Host "BUILD TESTS FAIL"; $fail = $true }
+# Deployment must run this gate before touching the installed mod.
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "scripts/test_deploy.ps1")
+if ($LASTEXITCODE -ne 0) { Write-Host "DEPLOY TESTS FAIL"; $fail = $true }
 # Python tests: need Python and tools/test_extract.py.
 $pyOk = $false
 try { & python --version | Out-Null; $pyOk = ($LASTEXITCODE -eq 0) } catch { $pyOk = $false }

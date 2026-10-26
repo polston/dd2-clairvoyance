@@ -3140,15 +3140,43 @@ function M.overhead_points(markers, cam, radius)
   return out
 end
 
--- v14: route stops are the only fixed map-space points drawn in-world.
--- Hint pins remain map/minimap guidance: an in-world label becomes stale as
--- soon as the player performs the hinted interaction.
+-- v14 (SPEC 22.11.3): the one shared hint-pin list feeds every surface.
+-- Unknown door state is visible; only a confirmed open passage drops its pin.
+function M.filter_hint_pins(pins, masquerade_closed)
+  local out = {}
+  for _, p in ipairs(type(pins) == "table" and pins or {}) do
+    if not (p.qid == 30040 and p.i == 1 and masquerade_closed == false) then
+      out[#out + 1] = p
+    end
+  end
+  return out
+end
+
+-- v14: route stops and hint pins are the fixed map-space points drawn in-world.
 function M.route_overhead_points(markers)
   local out = {}
   for _, m in ipairs(markers or {}) do
-    if m.cat == "route_stop" then out[#out + 1] = m end
+    if m.cat == "route_stop" or m.cat == "hint_pin" then out[#out + 1] = m end
   end
   return out
+end
+
+-- A failed compute retains the complete committed point-layer state. A
+-- successful compute derives the route gate from the published routes and the
+-- overhead points from the same marker list consumed by map and minimap.
+function M.route_point_state(result, routes, prior_route_on, prior_has_pts, prior_pts)
+  if type(result) ~= "table" then
+    return prior_route_on == true, prior_has_pts == true, prior_pts or {}
+  end
+  local pts = M.route_overhead_points(result.markers)
+  local route_on = false
+  for _, route in ipairs(type(routes) == "table" and routes or {}) do
+    if type(route.stops) == "table" and #route.stops > 0 then
+      route_on = true
+      break
+    end
+  end
+  return route_on, route_on or #pts > 0, pts
 end
 
 -- v8 (SPEC 15.3a): the item round runs only while BOTH toggles are on;

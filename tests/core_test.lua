@@ -3332,8 +3332,29 @@ do
   check("npc 15: minimap quest < route/hint < world",
     table.concat(sk, ",") == "c:5,h:1:1,r:1:1,w:chest:a,w:npc:9")
   local overhead = core.route_overhead_points(mk)
-  check("npc 15b: hint pins stay off the in-world layer",
-    #overhead == 1 and overhead[1].key == "r:1:1")
+  check("npc 15b: route stops and hint pins stay on the in-world layer",
+    #overhead == 2 and overhead[1].key == "h:1:1" and overhead[2].key == "r:1:1")
+  local ro, hp, pts = core.route_point_state({ markers = { mk[2] } }, {})
+  check("npc 15c: a hint without a route activates the point layer",
+    ro == false and hp == true and #pts == 1 and pts[1].key == "h:1:1")
+  local fro, fhp, fpts = core.route_point_state(nil, {}, true, true, { mk[1] })
+  check("npc 15d: failed compute retains the committed point state",
+    fro == true and fhp == true and #fpts == 1 and fpts[1] == mk[1])
+  local pro, php, ppts = core.route_point_state({ markers = {} },
+    { { cid = -77, place = 77, stops = { { pos = P(8) } } } })
+  check("npc 15d2: a place route keeps route drawing active without stop markers",
+    pro == true and php == true and #ppts == 0)
+  local pins = {
+    { qid = 20090, i = 1, label = "Ordinary" },
+    { qid = 30040, i = 1, label = "Hidden door" },
+    { qid = 30040, i = 2, label = "Other" },
+  }
+  local pc = core.filter_hint_pins(pins, true)
+  local po = core.filter_hint_pins(pins, false)
+  local pu = core.filter_hint_pins(pins, nil)
+  check("npc 15e: only the open target door pin is filtered",
+    #pc == 3 and #pu == 3 and #po == 2
+      and po[1].label == "Ordinary" and po[2].label == "Other")
 
   -- hint step reads, step_icons off
   local reads = {}
