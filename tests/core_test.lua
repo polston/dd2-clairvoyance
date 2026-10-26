@@ -5439,6 +5439,27 @@ do
   check("position-keyed unresolved fallback giver obeys related hard-hide",
     has_key(position_result, "p:1:0:0") == nil)
 
+  local startable_static = fake_adapter({ acceptable = { 42 }, hints = { [42] = 5 },
+    names = { [42] = "Starter", [43] = "Precursor" }, statics = { [42] = pos(1) },
+    gates = { [42] = { 43 } }, seen = { [43] = "Precursor" } })
+  local startable_static_result = core.compute(startable_static, { focus_qids = { 42 },
+    focus_related_qids = { 42 }, reveal_gate_names = true, now = 0 })
+  local startable_marker, startable_count = nil, 0
+  for _, m in ipairs(startable_static_result.markers) do
+    if m.key == "p:1:0:0" or m.key == "n:5" then
+      startable_count = startable_count + 1
+      if m.key == "p:1:0:0" then startable_marker = m end
+    end
+  end
+  local startable_anchors = core.overhead_anchors(startable_static_result.markers, {},
+    { x = 0, y = 0, z = 0 }, 50)
+  check("static-resolved startable giver is one semantic objective marker and an overhead anchor",
+    startable_count == 1 and startable_marker ~= nil and startable_marker.objective == true
+      and startable_marker.objective_qids[1] == 42 and core.marker_cid(startable_marker) == 5
+      and #startable_anchors == 1 and startable_anchors[1].cid == 5
+      and startable_marker.label == "Starter - startable"
+      and startable_marker.hover == "Starter - startable (waiting on: Precursor)")
+
   local schedule_adapter = fake_adapter({ acceptable = { 20 }, hints = { [20] = 9 },
     names = { [20] = "Twenty" } })
   local schedule_result = core.compute(schedule_adapter, { focus_qids = { 20 },
@@ -5462,6 +5483,25 @@ do
       and main_result.focus.quests[300].objective.place.caption == "Main target"
       and main_result.catalog_side_count == 0 and #main_result.quests == 0
       and main_result.counts.in_progress == 0)
+
+  local render_filter_adapter = base_adapter({ progressing_ids = function() return { 60, 61 } end,
+    npc_alive = function(cid) return cid ~= 89 end,
+    npc_pos = function(cid)
+      if cid == 88 then return 8, 0, 0 end
+      if cid == 91 then return 9, 0, 0 end
+    end,
+    quest_name = function(qid) return "Q" .. qid end })
+  local render_filter_result = core.compute(render_filter_adapter, { focus_qids = { 60, 61 },
+    focus_related_qids = { 60 }, quest_rel = { [60] = { npcs = { 88, 89, 90, 91 } },
+      [61] = { npcs = { 88 } } }, now = 0 })
+  local rendered_routes = core.route_members(render_filter_result.focus, {}, {}, nil,
+    { routes = 2, places = false }, rname)
+  local rendered_cids = {}
+  for _, member in ipairs(rendered_routes) do rendered_cids[#rendered_cids + 1] = tostring(member.cid) end
+  check("mode-two routes include only shown live positioned ancillary NPCs in owner order",
+    table.concat(rendered_cids, ",") == "88,91"
+      and table.concat(render_filter_result.focus.quests[60].route_related_npcs or {}, ",") == "88,91"
+      and #((render_filter_result.focus.quests[61].route_related_npcs) or {}) == 0)
 
   local journal_reads, focused_ids = 0, {}
   for qid = 1, 17 do focused_ids[#focused_ids + 1] = qid end

@@ -2326,8 +2326,9 @@ local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
         if rec ~= nil then rec.row_label = nil end
       end
     end
-    if rec ~= nil and rec.cat ~= "completed" and rec.cat ~= "failed"
-        and rec.cat ~= "canceled" and wt.is_focused(qid) then
+    local related_live = rec == nil or (rec.cat ~= "completed" and rec.cat ~= "failed"
+      and rec.cat ~= "canceled")
+    if related_live and wt.is_focused(qid) then
       local related = false
       for _, q in ipairs(settings.focus_related_qids or {}) do
         if q == qid then related = true; break end

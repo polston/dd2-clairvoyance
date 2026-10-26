@@ -3,6 +3,7 @@
 -- (SPEC 17.3, 17.10). Pure Lua; no sdk.
 package.path = "./reframework/autorun/?.lua;" .. package.path
 local world = require("Clairvoyance.world")
+local core = require("Clairvoyance.core")
 
 local failures = 0
 local function check(name, cond)
@@ -3563,7 +3564,15 @@ do
         pos = P(410.5, 73.5, -821.2) }
       local tg = ptg(P(5, 1, 5), nil)
       local original = P(direct.pos.x, direct.pos.y, direct.pos.z)
+      local route_id_calls, old_route_id = 0, core.objective_route_id
+      core.objective_route_id = function(qid, kind)
+        route_id_calls = route_id_calls + 1
+        return old_route_id(qid, kind)
+      end
       w:set_routes({ direct })
+      core.objective_route_id = old_route_id
+      check("direct route: validation uses the shared objective route id helper",
+        route_id_calls == 1)
       local gen = w.route_gen
       w:set_routes({ { cid = direct.cid, place = 0, direct = true,
         objective = true, qid = 30040, kind = "place", name = "Objective: Hall",

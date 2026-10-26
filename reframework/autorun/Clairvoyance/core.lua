@@ -3064,6 +3064,35 @@ function M.compute(adapter, show)
         end
       end
     end
+    -- A startable quest resolved only to a static/catalog map point still
+    -- represents its giver. Promote that existing point in place so it keeps
+    -- its label/hover and becomes one cid-addressable objective marker.
+    for _, qid in ipairs(active) do
+      local fq = rs[qid]
+      local f = focus_rec[qid]
+      local objective = fq and fq.objective or nil
+      if focus_cat[qid] == "startable" and f ~= nil
+        and type(f.key) == "string" and f.key:sub(1, 2) == "p:"
+        and objective ~= nil then
+        for _, cid in ipairs(objective.npcs or {}) do
+          if valid_pos(objective.npc_positions and objective.npc_positions[cid]) then
+            for _, m in ipairs(markers) do
+              if m.key == f.key then
+                m.cid = m.cid or cid
+                m.objective = true
+                local owners, found = m.objective_qids or {}, false
+                for _, owner in ipairs(owners) do if owner == qid then found = true; break end end
+                if not found then owners[#owners + 1] = qid end
+                table.sort(owners)
+                m.objective_qids = owners
+                break
+              end
+            end
+            break
+          end
+        end
+      end
+    end
     for _, qid in ipairs(active) do
       local fq = rs[qid]
       local objective = fq and fq.objective or nil
@@ -3302,13 +3331,18 @@ function M.compute(adapter, show)
     for _, qid in ipairs(active) do
       local fq = rs[qid]
       local shown, hidden = 0, 0
+      local route_related_npcs = {}
       for _, cid in ipairs(fq and fq.related_npcs or {}) do
         if related_status[cid] == true then shown = shown + 1
         elseif related_status[cid] == false then hidden = hidden + 1 end
+        if fq ~= nil and fq.show_related == true and related_status[cid] == true then
+          route_related_npcs[#route_related_npcs + 1] = cid
+        end
       end
       if fq ~= nil then
         fq.related_shown, fq.related_hidden = shown, hidden
         fq.related_shown_count, fq.related_hidden_count = shown, hidden
+        fq.route_related_npcs = route_related_npcs
       end
       per_quest_counts[qid] = { related_shown = shown, related_hidden = hidden }
     end
@@ -3444,10 +3478,10 @@ function M.signature(markers, committed)
   return table.concat(parts, "|"), new_committed
 end
 
--- Route members (SPEC 32.7.1, 32.14): the focus NPCs the world walks
--- schedules for (unique cids in active-quest order, the target counted once),
--- then the destination places present in `places`; at most 8 published
--- routes with the target, places last. Returns list, n (published), total (kept candidates + target).
+-- Route members (SPEC 39.8): for each active quest, emit its positioned
+-- objective NPCs, direct destination/item, then shown positioned ancillary
+-- NPCs, preserving order and uniqueness. The search target reserves one of
+-- the eight slots until included. Returns list, n (published), total.
 function M.objective_route_id(qid, kind)
   if type(qid) ~= "number" or not finite(qid) or qid <= 0
     or qid ~= math.floor(qid) or qid > 0x7FFFFFFF then return nil end
@@ -3538,7 +3572,9 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
           end
         end
         if mode == 2 and q ~= nil and q.show_related == true then
-          for _, cid in ipairs(q.related_npcs or q.npcs or {}) do
+          local related = type(q.route_related_npcs) == "table"
+            and q.route_related_npcs or (q.related_npcs or q.npcs or {})
+          for _, cid in ipairs(related) do
             if not primary_seen[cid] then ancillary[#ancillary + 1] = { cid = cid, name = name_of(cid, nil) } end
           end
         end
@@ -3714,6 +3750,7 @@ end
 function M.marker_cid(m)
   if type(m) ~= "table" or type(m.key) ~= "string" then return nil end
   if m.cat == "focus_npc" then return m.cid end
+  if m.objective == true and type(m.cid) == "number" then return m.cid end
   if m.objective == true and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller") then
     return m.cid
   end

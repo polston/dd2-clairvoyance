@@ -155,6 +155,9 @@ check("related NPC controls and pruning are wired",
     and src:find("wt.related_toggle = function(qid, on, rec)", 1, true) ~= nil
     and src:find('imgui.checkbox("Show related NPCs##qfr_" .. qid', 1, true) ~= nil
     and src:find('wt.focus_set("focus_related_qids", {})', 1, true) ~= nil)
+check("tracked main quest can show the related NPC control without a side-tree record",
+  src:find("local related_live = rec == nil or", 1, true) ~= nil
+    and src:find("if related_live and wt.is_focused(qid) then", 1, true) ~= nil)
 
 check("objective appearance reaches every drawn surface",
   src:find("wt.style.group_of_marker(m)", 1, true) ~= nil

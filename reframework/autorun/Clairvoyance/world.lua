@@ -1641,10 +1641,8 @@ function M.new(a, reads, io)
   end
 
   local function direct_member(e)
-    local code = e.kind == "place" and 1 or (e.kind == "item" and 2 or nil)
-    return code ~= nil and type(e.qid) == "number" and math.tointeger(e.qid) ~= nil
-      and e.qid > 0 and e.qid <= 0x7FFFFFFF
-      and e.cid == -(0x10000000000 + e.qid * 4 + code)
+    local route_id = core.objective_route_id(e.qid, e.kind)
+    return route_id ~= nil and e.cid == route_id
       and e.place == 0 and e.objective == true and type(e.name) == "string"
       and valid_pos(e.pos)
   end
