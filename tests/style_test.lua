@@ -28,9 +28,13 @@ local function with(extra)
 end
 
 do -- groups and group_of
-  check("19 groups", #S.GROUPS == 19)
+  check("20 groups", #S.GROUPS == 20)
   check("group_of focus_npc", S.group_of("focus_npc") == "npc_search")
   check("group_of focus_place", S.group_of("focus_place") == "focus_place")
+  check("objective marker gets objective style group", type(S.group_of_marker) == "function"
+    and S.group_of_marker({ cat = "seller", objective = true }) == "focus_objective")
+  check("non-objective marker keeps semantic style group", type(S.group_of_marker) == "function"
+    and S.group_of_marker({ cat = "seller" }) == S.group_of("seller"))
   check("group_of shop", S.group_of("shop") == "seller")
   check("group_of chest", S.group_of("chest") == "chest")
   check("group_of unknown", S.group_of("zzz") == nil)
@@ -47,6 +51,20 @@ do -- resolve
   check("seller override", on == true and c == 0xFFFF0000 and w == 2)
   on, c, w = S.resolve(s, S.group_of("shop"))
   check("shop uses seller override", on == true and c == 0xFFFF0000 and w == 2)
+  local objective_style = with({
+    style_seller_override = true, style_seller_outline_on = true,
+    style_seller_outline_color = 0xFFFF0000, style_seller_outline_width = 2,
+    style_focus_objective_override = true, style_focus_objective_outline_on = false,
+    style_focus_objective_outline_color = 0xFF00FF00,
+    style_focus_objective_outline_width = 4 })
+  local objective_group = S.group_of_marker({ cat = "seller", objective = true })
+  on, c, w = S.resolve(objective_style, objective_group)
+  check("objective marker resolves focus_objective overrides",
+    objective_group == "focus_objective" and on == false and c == 0xFF00FF00 and w == 4)
+  local semantic_group = S.group_of_marker({ cat = "seller", objective = false })
+  on, c, w = S.resolve(objective_style, semantic_group)
+  check("non-objective marker resolves semantic category override",
+    semantic_group == "seller" and on == true and c == 0xFFFF0000 and w == 2)
   on, c, w = S.resolve(with({ style_items_override = true,
     style_items_outline_width = 3 }), "items")
   check("partial override falls back", on == true and c == 0xFF000000 and w == 3)
