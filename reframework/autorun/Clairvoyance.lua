@@ -333,11 +333,11 @@ wt.route_name_of = function(cid, place)
   end
   return nm
 end
-wt.route_members = function(snap, input)
+wt.route_members = function(snap, input, origin)
   wt.route_in, wt.route_nmap, wt.route_snap = input, nil, snap
   local opt = wt.route_opt
   opt.routes, opt.places = settings.focus_routes or 0, settings.focus_place_routes == true
-  opt.player = wt.world_origin
+  opt.player = origin
   for k in pairs(opt.prev) do opt.prev[k] = nil end
   for _, r in ipairs((input or {}).routes or {}) do
     if r.place ~= nil then opt.prev[r.place] = true end
@@ -1342,7 +1342,7 @@ re.on_frame(function()
     wt.route_on, wt.has_pts = route_on, has_pts
     if result == nil then return end   -- game state unavailable: keep last snapshot
     wt.focus_prune_related(result.focus ~= nil and result.focus.active or {})
-    wt.q("set_routes", nil, (wt.route_members(result, show.world)))
+    wt.q("set_routes", nil, (wt.route_members(result, show.world, show.origin)))
     result.route_pts = route_pts
     -- SPEC 20.12.2: one signature over the markers then the full-map world
     -- markers, so committed positions are kept for both

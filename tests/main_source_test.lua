@@ -132,7 +132,7 @@ local tick_body = slice("objective tick wiring",
   "local ok, err = pcall(function()",
   "-- SPEC 20.12.2: one signature over the markers then the full-map world")
 local compute_at = tick_body:find("local result = core.compute(adapter, show)", 1, true)
-local route_at = tick_body:find('wt.q("set_routes", nil, (wt.route_members(result, show.world)))', 1, true)
+local route_at = tick_body:find('wt.q("set_routes", nil, (wt.route_members(result, show.world, show.origin)))', 1, true)
 local success_at = tick_body:find("if result == nil then return end", 1, true)
 check("routes come from the exact post-compute objective snapshot",
   compute_at ~= nil and success_at ~= nil and route_at ~= nil
@@ -141,6 +141,10 @@ check("routes come from the exact post-compute objective snapshot",
 local set_routes_n = 0
 for _ in src:gmatch('wt%.q%("set_routes"') do set_routes_n = set_routes_n + 1 end
 check("main has exactly one set_routes handoff", set_routes_n == 1)
+check("item objective routes use the same current player origin as compute",
+  src:find("wt.route_members = function(snap, input, origin)", 1, true) ~= nil
+    and src:find("opt.player = origin", 1, true) ~= nil
+    and src:find("opt.player = wt.world_origin", 1, true) == nil)
 
 check("objective route labels are explicit",
   src:find('"Current objective NPCs"', 1, true) ~= nil

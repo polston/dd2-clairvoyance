@@ -3819,7 +3819,10 @@ end
 function M.route_overhead_points(markers)
   local out = {}
   for _, m in ipairs(markers or {}) do
-    if m.cat == "route_stop" or m.cat == "hint_pin" then out[#out + 1] = m end
+    if m.cat == "route_stop" or m.cat == "hint_pin"
+        or (m.cat == "focus_place" and m.objective == true) then
+      out[#out + 1] = m
+    end
   end
   return out
 end

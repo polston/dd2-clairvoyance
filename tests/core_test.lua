@@ -3618,6 +3618,16 @@ do
   local overhead = core.route_overhead_points(mk)
   check("npc 15b: route stops and hint pins stay on the in-world layer",
     #overhead == 2 and overhead[1].key == "h:1:1" and overhead[2].key == "r:1:1")
+  local objective_place = { key = "o:p:30040", cat = "focus_place", objective = true,
+    qid = 30040, pos = P(8), label = "Objective: Vernworth Hall" }
+  local ancillary_place = { key = "f:3004", cat = "focus_place", pos = P(9) }
+  overhead = core.route_overhead_points({ mk[2], mk[3], objective_place, ancillary_place })
+  check("npc 15b2: objective destination joins the in-world point layer alone",
+    #overhead == 3 and overhead[1].key == "h:1:1" and overhead[2].key == "r:1:1"
+      and overhead[3].key == "o:p:30040")
+  local opo, oph, opp = core.route_point_state({ markers = { objective_place } }, {})
+  check("npc 15b3: objective destination activates the point layer without routes",
+    opo == false and oph == true and #opp == 1 and opp[1].key == "o:p:30040")
   local ro, hp, pts = core.route_point_state({ markers = { mk[2] } }, {})
   check("npc 15c: a hint without a route activates the point layer",
     ro == false and hp == true and #pts == 1 and pts[1].key == "h:1:1")
