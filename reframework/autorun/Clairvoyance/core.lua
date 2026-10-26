@@ -1937,6 +1937,7 @@ end
 -- Is a marker a search result? v14: route and hint pins are not; the First
 -- Seeker's Token spot is kept as a marker but listed nowhere (SPEC 28.9.3).
 function M.is_result(m)
+  if type(m) == "table" and m.objective == true then return false end
   return m.cat ~= "route_stop" and m.cat ~= "hint_pin" and not m.first_seeker
     and m.cat ~= "focus_npc" and m.cat ~= "focus_place" and not m.focus_kept
 end
@@ -2516,7 +2517,7 @@ function M.focus_journal_reads(read, active, prev, now, tree)
       reads = reads + 1
       local ok, value = pcall(read, qid)
       local rec = {}
-      if type(value) == "table" then
+      if ok and type(value) == "table" then
         for k, v in pairs(value) do rec[k] = v end
       else
         rec.missing = true
@@ -2579,7 +2580,7 @@ function M.compute(adapter, show)
 
   for _, qid in ipairs(qids) do
     repeat
-      if not adapter.is_side(qid) then break end
+      if not adapter.is_side(qid) and not fset[qid] then break end
       if catalog_set[qid] then catalog_side_count = catalog_side_count + 1 end
 
       local hint, cands
@@ -2728,7 +2729,11 @@ function M.compute(adapter, show)
         rec.pos = { x = pos.x, y = pos.y, z = pos.z }
         rec.giver = M.marker_cid(g) or hint
       end
-      if focus_rec[qid] ~= nil then focus_rec[qid].cid = M.marker_cid(g) end
+      if focus_rec[qid] ~= nil then
+        focus_rec[qid].cid = M.marker_cid(g)
+        focus_rec[qid].key = key
+        focus_rec[qid].pos = pos_copy(pos)
+      end
       g.qids[#g.qids + 1] = qid
       g.raw_cats[qid] = cat
       if cat == "in_progress" then g.inprog[#g.inprog + 1] = qid end
@@ -2870,7 +2875,8 @@ function M.compute(adapter, show)
             seen_npcs[cid] = true; objective.npcs[#objective.npcs + 1] = cid
           end
         end
-        table.sort(objective.npcs)
+        -- The adapter's issued list is already deterministic and sticky.
+        -- Preserve its order for marker and route priority.
         local seen_items = {}
         for _, n in ipairs(type(needs) == "table" and needs[qid] or {}) do
           if type(n) == "table" and type(n.id) == "number" then
@@ -2882,8 +2888,8 @@ function M.compute(adapter, show)
         end
         table.sort(objective.items)
       elseif cat == "startable" then
-        local giver = focus_rec[qid] and (focus_rec[qid].hint
-          or focus_rec[qid].cid or focus_rec[qid].first) or nil
+        local giver = focus_rec[qid] and (focus_rec[qid].cid
+          or focus_rec[qid].hint or focus_rec[qid].first) or nil
         if type(giver) == "number" and giver > 0 and not adapter.is_generic(giver) then
           objective.npcs[1] = giver
         end
@@ -2892,7 +2898,11 @@ function M.compute(adapter, show)
       for _, cid in ipairs(objective.npcs) do
         if adapter.npc_alive(cid) ~= false then
           local x, y, z
-          if cat == "in_progress" and adapter.objective_pos ~= nil then
+          local resolved_pos = cat == "startable" and focus_rec[qid]
+            and focus_rec[qid].pos or nil
+          if resolved_pos ~= nil then
+            x, y, z = resolved_pos.x, resolved_pos.y, resolved_pos.z
+          elseif cat == "in_progress" and adapter.objective_pos ~= nil then
             x, y, z = adapter.objective_pos(cid)
           else
             x, y, z = adapter.npc_pos(cid)
@@ -2906,8 +2916,7 @@ function M.compute(adapter, show)
       if objective.place ~= nil then objective.resolved = true end
       rec.objective = objective
       rec.show_related = not related_controlled or related_on[qid] == true
-      rec.related_shown = rec.show_related
-      rec.related_hidden = not rec.show_related
+      rec.related_shown, rec.related_hidden = 0, 0
     end
   end
   local tracked_qid, nearest_qid, journal, journal_all
@@ -2951,16 +2960,13 @@ function M.compute(adapter, show)
     for _, qid in ipairs(active) do
       local objective = focus_result.quests[qid].objective
       for _, id in ipairs(objective.items or {}) do
-        local src = objective.item_sources[id]
-        if src ~= nil then
-          local owners = owners_by_item[src.key] or {}
-          owners[#owners + 1] = qid
-          owners_by_item[src.key] = owners
-        end
+        local owners = owners_by_item[id] or {}
+        owners[#owners + 1] = qid
+        owners_by_item[id] = owners
       end
     end
     for _, m in ipairs(markers) do
-      local owners = owners_by_item[m.key]
+      local owners = owners_by_item[m.item_id]
       if m.cat == "quest_item" and owners ~= nil then
         table.sort(owners)
         m.objective, m.objective_qids = true, owners
@@ -3072,35 +3078,8 @@ function M.compute(adapter, show)
       end
       if fq ~= nil then fq.related_npcs = rel_npcs end
     end
-    local ancillary_shown_n, ancillary_hidden_n, per_quest_counts = 0, 0, {}
-    for cid, owners in pairs(ancillary_owners) do
-      local shown = type(show.focus_related_qids) ~= "table"
-      for _, owner in ipairs(owners) do
-        if rs[owner] and rs[owner].show_related == true then shown = true end
-      end
-      if shown then ancillary_shown_n = ancillary_shown_n + 1
-      else ancillary_hidden_n = ancillary_hidden_n + 1 end
-    end
-    for _, qid in ipairs(active) do
-      local fq = rs[qid]
-      local counts = { related = 0, shown = 0, hidden = 0 }
-      for _, cid in ipairs(fq and fq.related_npcs or {}) do
-        counts.related = counts.related + 1
-        local shown = type(show.focus_related_qids) ~= "table"
-        for _, owner in ipairs(ancillary_owners[cid] or {}) do
-          if rs[owner] and rs[owner].show_related == true then shown = true end
-        end
-        if shown then counts.shown = counts.shown + 1 else counts.hidden = counts.hidden + 1 end
-      end
-      per_quest_counts[qid] = counts
-      if fq ~= nil then
-        fq.related_count, fq.related_shown_count, fq.related_hidden_count =
-          counts.related, counts.shown, counts.hidden
-      end
-    end
-    focus_result.related_counts = { shown = ancillary_shown_n, hidden = ancillary_hidden_n,
-      per_quest = per_quest_counts }
     local hidden_ancillary = {}
+    local renderable_cids, hidden_fallback_keys = {}, {}
     for cid, owners in pairs(ancillary_owners) do
       local shown = type(show.focus_related_qids) ~= "table"
       for _, owner in ipairs(owners) do
@@ -3108,15 +3087,37 @@ function M.compute(adapter, show)
       end
       if not shown and not objective_cids[cid] then hidden_ancillary[cid] = true end
     end
+    local fallback_owners = {}
+    for _, qid in ipairs(active) do
+      local f = focus_rec[qid]
+      if focus_cat[qid] == "in_progress" and f ~= nil and f.key ~= nil then
+        local owners = fallback_owners[f.key] or {}
+        owners[#owners + 1] = qid
+        fallback_owners[f.key] = owners
+      end
+    end
+    for key, owners in pairs(fallback_owners) do
+      local shown = false
+      for _, owner in ipairs(owners) do
+        if rs[owner] and rs[owner].show_related == true then shown = true end
+      end
+      local cid = tonumber(tostring(key):match("^c:(%d+)$"))
+      if not shown and not (cid ~= nil and objective_cids[cid]) then
+        hidden_fallback_keys[key] = true
+      end
+    end
     local function hidden_pass(list)
       if list == nil then return end
       local n = 0
       for _, m in ipairs(list) do
         local cid = M.marker_cid(m)
         if cid == nil and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller") then cid = m.cid end
+        if type(cid) == "number" and valid_pos(m.pos)
+          and adapter.npc_alive(cid) ~= false then renderable_cids[cid] = true end
         local explicit_result = q ~= nil and m.focus_kept ~= true and M.is_result(m)
-        if cid == nil or not hidden_ancillary[cid] or explicit_result then
-          if explicit_result and hidden_ancillary[cid] then m.related_search = true end
+        local hide = (cid ~= nil and hidden_ancillary[cid]) or hidden_fallback_keys[m.key]
+        if not hide or explicit_result then
+          if explicit_result and hide then m.related_search = true end
           n = n + 1; list[n] = m
         end
       end
@@ -3283,6 +3284,35 @@ function M.compute(adapter, show)
         added = added + 1
       end
     end
+    local related_status, shown_n, hidden_n, per_quest_counts = {}, 0, 0, {}
+    for cid, owners in pairs(ancillary_owners) do
+      local x, y, z = adapter.npc_pos(cid)
+      local positioned = (x ~= nil and finite(x) and finite(y) and finite(z))
+        or renderable_cids[cid] == true
+      if adapter.npc_alive(cid) ~= false and positioned then
+        local shown = type(show.focus_related_qids) ~= "table"
+        for _, owner in ipairs(owners) do
+          if rs[owner] and rs[owner].show_related == true then shown = true end
+        end
+        related_status[cid] = shown
+        if shown then shown_n = shown_n + 1 else hidden_n = hidden_n + 1 end
+      end
+    end
+    for _, qid in ipairs(active) do
+      local fq = rs[qid]
+      local shown, hidden = 0, 0
+      for _, cid in ipairs(fq and fq.related_npcs or {}) do
+        if related_status[cid] == true then shown = shown + 1
+        elseif related_status[cid] == false then hidden = hidden + 1 end
+      end
+      if fq ~= nil then
+        fq.related_shown, fq.related_hidden = shown, hidden
+        fq.related_shown_count, fq.related_hidden_count = shown, hidden
+      end
+      per_quest_counts[qid] = { related_shown = shown, related_hidden = hidden }
+    end
+    focus_result.related_counts = { shown = shown_n, hidden = hidden_n,
+      per_quest = per_quest_counts }
     -- 4. the hide / dim pass
     local dim = show.focus_unrelated == 1
     local function related(m)
@@ -3319,9 +3349,13 @@ function M.compute(adapter, show)
     focus_counts = { related = 0, added = added, dimmed = 0, hidden = 0, no_pos = no_pos,
       ancillary_shown = focus_result.related_counts and focus_result.related_counts.shown or 0,
       ancillary_hidden = focus_result.related_counts and focus_result.related_counts.hidden or 0,
-      per_quest = focus_result.related_counts and focus_result.related_counts.per_quest or {} }
+      per_quest = focus_result.related_counts and focus_result.related_counts.per_quest or {},
+      objective = 0 }
     pass(markers, focus_counts)
     if fullmap_world ~= nil then pass(fullmap_world) end
+    for _, m in ipairs(markers) do
+      if m.objective == true and valid_pos(m.pos) then focus_counts.objective = focus_counts.objective + 1 end
+    end
   end
 
   return {
@@ -3413,6 +3447,14 @@ end
 -- schedules for (unique cids in active-quest order, the target counted once),
 -- then the destination places present in `places`; at most 8 published
 -- routes with the target, places last. Returns list, n (published), total (kept candidates + target).
+function M.objective_route_id(qid, kind)
+  if type(qid) ~= "number" or not finite(qid) or qid <= 0
+    or qid ~= math.floor(qid) or qid > 0x7FFFFFFF then return nil end
+  local code = kind == "place" and 1 or kind == "item" and 2 or nil
+  if code == nil then return nil end
+  return -(0x10000000000 + qid * 4 + code)
+end
+
 function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
   local list, seen, inlist = {}, {}, {}
   local total = target_cid ~= nil and 1 or 0
@@ -3421,6 +3463,109 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
   -- slots held back for the target while it is not yet in the list
   local function reserve() return (target_cid ~= nil and not inlist[target_cid]) and 1 or 0 end
   if active ~= nil and #active > 0 then
+    local has_objective = false
+    for _, qid in ipairs(active) do
+      local q = focus.quests ~= nil and focus.quests[qid] or nil
+      if q ~= nil and q.objective ~= nil then has_objective = true; break end
+    end
+    if has_objective then
+      local groups, primary_seen = {}, {}
+      for _, qid in ipairs(active) do
+        local q = focus.quests ~= nil and focus.quests[qid] or nil
+        local objective = q ~= nil and q.objective or nil
+        local primary, ancillary = {}, {}
+        local function add_primary(member)
+          if member.cid == nil or not primary_seen[member.cid] then
+            if member.cid ~= nil then primary_seen[member.cid] = true end
+            primary[#primary + 1] = member
+          end
+        end
+        if mode > 0 then
+          local candidates = {}
+          if objective ~= nil then
+            for _, cid in ipairs(objective.npcs or {}) do
+              if valid_pos(objective.npc_positions and objective.npc_positions[cid]) then
+                candidates[#candidates + 1] = cid
+              end
+            end
+          else
+            local src = mode == 1 and q and q.step_npcs or q and q.npcs
+            for _, cid in ipairs(src or {}) do candidates[#candidates + 1] = cid end
+          end
+          for _, cid in ipairs(candidates) do
+            add_primary({ cid = cid, name = name_of(cid, nil) })
+          end
+        end
+        if objective ~= nil and opt ~= nil and opt.places == true then
+          local endpoint, kind, name
+          local p = objective.place
+          if type(p) == "table" and valid_pos(p) then
+            endpoint, kind = pos_copy(p), "place"
+            local caption = p.caption
+            if type(caption) ~= "string" or caption == "" then caption = q.name end
+            if type(caption) ~= "string" or caption == "" then caption = "Quest " .. qid end
+            name = "Objective: " .. caption
+          else
+            local candidates = {}
+            for _, id in ipairs(objective.items or {}) do
+              local source = objective.item_sources and objective.item_sources[id]
+              if type(source) == "table" and valid_pos(source.pos) then
+                local d = valid_pos(opt.player) and dist2(source.pos, opt.player) or 0
+                candidates[#candidates + 1] = { id = id, source = source, d = d }
+              end
+            end
+            table.sort(candidates, function(a, b)
+              if a.d ~= b.d then return a.d < b.d end
+              return tostring(a.source.key) < tostring(b.source.key)
+            end)
+            local best = candidates[1]
+            if best ~= nil then
+              endpoint, kind = pos_copy(best.source.pos), "item"
+              local item = best.source.name
+              if type(item) ~= "string" or item == "" then item = "Item " .. tostring(best.id) end
+              local quest = q.name
+              if type(quest) ~= "string" or quest == "" then quest = "Quest " .. qid end
+              name = "Objective: " .. item .. " (for " .. quest .. ")"
+            end
+          end
+          if endpoint ~= nil then
+            local cid = M.objective_route_id(qid, kind)
+            if cid ~= nil then
+              add_primary({ cid = cid, place = 0, direct = true, objective = true,
+                qid = qid, kind = kind, name = name, pos = endpoint })
+            end
+          end
+        end
+        if mode == 2 and q ~= nil and q.show_related == true then
+          for _, cid in ipairs(q.related_npcs or q.npcs or {}) do
+            if not primary_seen[cid] then ancillary[#ancillary + 1] = { cid = cid, name = name_of(cid, nil) } end
+          end
+        end
+        groups[#groups + 1] = { primary = primary, ancillary = ancillary }
+      end
+      local function append(member, reserve_after)
+        local cid = member.cid
+        if cid == target_cid then
+          total = total + 1
+          if not inlist[cid] then list[#list + 1] = member; inlist[cid] = true end
+        elseif cid == nil or not seen[cid] then
+          total = total + 1
+          if cid ~= nil then seen[cid] = true end
+          if #list + reserve() + (reserve_after or 0) < ROUTE_CAP then list[#list + 1] = member end
+        end
+      end
+      for index, group in ipairs(groups) do
+        local later_primary = 0
+        for later = index + 1, #groups do
+          later_primary = later_primary + #groups[later].primary
+        end
+        for _, member in ipairs(group.primary) do
+          append(member, later_primary)
+        end
+        for _, member in ipairs(group.ancillary) do append(member, later_primary) end
+      end
+      return list, #list + reserve(), total
+    end
     if mode > 0 then
       for _, qid in ipairs(active) do
         local q = focus.quests ~= nil and focus.quests[qid] or nil
@@ -3492,8 +3637,7 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
           end
           if endpoint ~= nil and type(qid) == "number" and qid > 0
             and qid == math.floor(qid) and qid <= 0x7FFFFFFF then
-            local code = kind == "place" and 1 or 2
-            local cid = -(0x10000000000 + qid * 4 + code)
+            local cid = M.objective_route_id(qid, kind)
             direct[#direct + 1] = { cid = cid, place = 0, direct = true,
               objective = true, qid = qid, kind = kind, name = name, pos = endpoint }
           end
@@ -3860,6 +4004,7 @@ function M.objective_table(records, prev, progressing)
     end
     table.sort(issued)
     table.sort(rest)
+    local legacy_top = issued[1]
     local arr = {}
     for _, c in ipairs(issued) do arr[#arr + 1] = c end
     for _, c in ipairs(rest) do arr[#arr + 1] = c end
@@ -3896,7 +4041,7 @@ function M.objective_table(records, prev, progressing)
         end
         table.insert(arr, 1, pf)
       else
-        local top = issued[1]
+        local top = legacy_top
         local ps = prev_streak[qid]
         local n = (ps ~= nil and ps.cid == top) and (ps.n + 1) or 1
         out.issued_streak[qid] = { cid = top, n = n }
