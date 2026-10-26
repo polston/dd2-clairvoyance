@@ -177,9 +177,11 @@ r = core.compute(base_adapter({
   acceptable_ids = function() return {10} end,
   giver_hint = function() return 5 end,
   npc_pos = function() return nil end,
-  catalog_pos = function() return 7, 8, 9 end,
+  catalog_pos = function() return 7.9, -1.1, 9.5 end,
 }), SHOW_ALL)
-check("absent hint -> catalog pos", #r.markers == 1 and r.markers[1].pos.x == 7)
+check("absent hint -> catalog pos", #r.markers == 1
+  and r.markers[1].pos.x == 7.9 and r.markers[1].pos.y == -1.1
+  and r.markers[1].pos.z == 9.5 and r.markers[1].key == "p:7:-2:9")
 r = core.compute(base_adapter({
   acceptable_ids = function() return {10} end,
   giver_hint = function() return 5 end,
