@@ -3486,9 +3486,22 @@ local function clear_state_for(ids)
   return ids
 end
 
+-- SPEC 37.5: singleton fetches are independent so one unavailable manager
+-- does not suppress the other state read. Never cache managed objects.
+function A.overhead_block_reason()
+  local ok_gui, gui = pcall(sdk.get_managed_singleton, "app.GuiManager")
+  if ok_gui and safe_call(gui, "isPausedGUI") == true then return "menu" end
+  local ok_demo, demo = pcall(sdk.get_managed_singleton, "app.DemoMediator")
+  if ok_demo and safe_call(demo, "get_IsPlayingDemo") == true then
+    return "cutscene"
+  end
+  return nil
+end
+
 function A.make()
   local a = {}
   local LOC_KINDS = { "placed", "box", "drop" }   -- item_locations order
+  a.overhead_block_reason = A.overhead_block_reason
   function a.acceptable_ids()
     return clear_state_for(read_quest_id_list("getAcceptableQuestList", "acceptable"))
   end
