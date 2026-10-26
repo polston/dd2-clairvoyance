@@ -4,6 +4,7 @@
 param([string]$Lua = "lua", [string]$Luac = "luac", [switch]$NoTests, [switch]$SkipProvenance)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
+. (Join-Path $PSScriptRoot "check_util.ps1")
 Push-Location $root
 $fail = $false
 # Globals REFramework provides, plus Lua 5.4 standard globals. Anything else
@@ -16,7 +17,8 @@ $allowed = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread",
 $pure = @("core.lua","settings_util.lua","minimap.lua","jump.lua","icons.lua","npcs.lua","style.lua")
 $hostGlobals = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread","draw","_G","d2dx")
 Get-ChildItem -Recurse -Filter *.lua -Path (Join-Path $root "reframework") | ForEach-Object {
-    & $Lua -e "assert(loadfile([[$($_.FullName)]]))"
+    $luaPath = ConvertTo-LuaPathLiteral $_.FullName
+    & $Lua -e "assert(loadfile($luaPath))"
     if ($LASTEXITCODE -ne 0) { Write-Host "SYNTAX FAIL: $($_.FullName)"; $script:fail = $true }
     if (Get-Command $Luac -ErrorAction SilentlyContinue) {
         $listing = & $Luac -p -l $_.FullName
@@ -113,6 +115,8 @@ Get-ChildItem -Filter *_test.lua -Path (Join-Path $root "tests") -ErrorAction Si
         Write-Host "TEST FAIL: $name printed no all OK line"; $script:fail = $true
     }
 }
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test_check.ps1") -Lua $Lua
+if ($LASTEXITCODE -ne 0) { Write-Host "CHECK TESTS FAIL"; $fail = $true }
 }
 # Every script must parse (a parse error would otherwise go unnoticed until it is run).
 Get-ChildItem -Filter *.ps1 -Path (Join-Path $root "scripts") | ForEach-Object {
