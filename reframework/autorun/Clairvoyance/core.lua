@@ -3,6 +3,18 @@ local M = {}
 
 M.HYSTERESIS_UNITS = 5.0
 
+-- Share one overhead-state read across drawing layers within a game frame.
+function M.overhead_block(cache, frame, enabled, reader)
+  if not enabled then
+    cache.frame, cache.reason = frame, nil
+    return nil
+  end
+  if cache.frame ~= frame then
+    cache.frame, cache.reason = frame, reader()
+  end
+  return cache.reason
+end
+
 local function dist(a, b)
   local dx, dy, dz = a.x - b.x, a.y - b.y, a.z - b.z
   return math.sqrt(dx * dx + dy * dy + dz * dz)

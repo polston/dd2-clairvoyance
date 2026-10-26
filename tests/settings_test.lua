@@ -77,6 +77,13 @@ check("show_overhead absent -> default", su.validate({}).show_overhead == true)
 check("overhead_distance default", D.overhead_distance == 50.0)
 check("show_overhead wrong type", su.validate({ show_overhead = "yes" }).show_overhead == true)
 check("show_overhead stored false survives", su.validate({ show_overhead = false }).show_overhead == false)
+check("hide overhead in menus and cutscenes default", D.hide_overhead_in_cutscenes_and_menus == true)
+check("hide overhead in menus and cutscenes absent -> default",
+  su.validate({}).hide_overhead_in_cutscenes_and_menus == true)
+check("hide overhead in menus and cutscenes wrong type -> default",
+  su.validate({ hide_overhead_in_cutscenes_and_menus = "yes" }).hide_overhead_in_cutscenes_and_menus == true)
+check("hide overhead in menus and cutscenes stored false survives",
+  su.validate({ hide_overhead_in_cutscenes_and_menus = false }).hide_overhead_in_cutscenes_and_menus == false)
 check("overhead_distance string", su.validate({ overhead_distance = "far" }).overhead_distance == 50.0)
 check("overhead_distance below range", su.validate({ overhead_distance = 9.9 }).overhead_distance == 50.0)
 check("overhead_distance above range", su.validate({ overhead_distance = 200.1 }).overhead_distance == 50.0)
@@ -143,7 +150,7 @@ check("journal_spoilers stored false kept",
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 168", n == 168)
+  check("defaults key count is 169", n == 169)
   check("first token default on", D.world_first_token == true)
 end
 
@@ -527,6 +534,11 @@ do
       seen[k] = true
     end
   end
+  local npcs
+  for _, p in ipairs(su.PANEL_ORDER) do if p.id == "npcs" then npcs = p end end
+  check("overhead state setting follows show_overhead in NPC panel",
+    npcs ~= nil and npcs.keys[1] == "show_overhead"
+    and npcs.keys[2] == "hide_overhead_in_cutscenes_and_menus")
   check("panel keys unique", not dup)
   local skip = {}
   for _, k in ipairs(su.NO_CONTROL_KEYS) do skip[k] = true end

@@ -400,6 +400,11 @@ local jump_pending = nil      -- v9: { x, y, z } queued by a button (SPEC 16.3g)
 local map_ctor_n = 0          -- v9: ui040205 .ctor count only (never setupMapIcon)
 local setup_icon_n = 0        -- v9: setupMapIcon fires (6b: counted after each jump)
 local jump_frame = 0
+wt.overhead_state = { frame = -1, reason = nil }
+wt.overhead_block_reason = function()
+  return core.overhead_block(wt.overhead_state, jump_frame,
+    settings.hide_overhead_in_cutscenes_and_menus, adapter.overhead_block_reason)
+end
 local jump_log = {}           -- v9: last 8 jump results
 local jump_last_err = nil
 local last_add_sig = nil  -- see the setupMapIcon hook below
@@ -1795,6 +1800,8 @@ local function overhead_frame()
     return overhead_idle("no snapshot")
   end
   if ui_map ~= nil then return overhead_idle("map open") end
+  local reason = wt.overhead_block_reason()
+  if reason ~= nil then return overhead_idle(reason) end
   local cx, cy, cz = camera_pos()
   if cx == nil then return overhead_idle("no camera") end
   overhead_gate = "drawing"
@@ -2189,6 +2196,8 @@ local function install_debug()
       state = function()
         local jumps = {}
         for i, r in ipairs(jump_log) do jumps[i] = jump_line(r) end
+        local overhead_reason = wt.overhead_state.frame == jump_frame
+          and wt.overhead_state.reason or nil
         return { lines = snapshot ~= nil and core.state_lines(snapshot,
             expanded_union(), settings.journal_spoilers) or {}, jumps = jumps,
           tracked_qid = snapshot and snapshot.tracked_qid or nil,
@@ -2197,6 +2206,8 @@ local function install_debug()
           draw = icons:stats_line(),
           legend_n = wt.legend_n, leg_calls = wt.leg_calls, world_path_ms = wt.world_path_ms,
           item_menu = icons.itemmenu ~= nil and icons.itemmenu:stats_line() or nil,
+          overhead_state = overhead_reason,
+          overhead_gate = overhead_gate, overhead_drawn = overhead_drawn,
           names = string.format("Names: spawned %d, drawn %d, skipped %d",
             wt.names_stats.spawned, wt.names_stats.drawn, wt.names_stats.skipped) }
       end,
@@ -2620,6 +2631,10 @@ do
     if not imgui.tree_node("NPCs") then return end
     changed, settings.show_overhead =
       imgui.checkbox("Overhead NPC indicators", settings.show_overhead)
+    if changed then save_settings() end
+    changed, settings.hide_overhead_in_cutscenes_and_menus =
+      imgui.checkbox("Hide overhead overlays in cutscenes and menus",
+        settings.hide_overhead_in_cutscenes_and_menus)
     if changed then save_settings() end
     local sc, sv = imgui.slider_float("Overhead distance",
       settings.overhead_distance, 10, 200)
@@ -3336,6 +3351,8 @@ end
 wt.route_frame = function()
   if not settings.enabled or not settings.show_overhead or not wt.has_pts
     or snapshot == nil or ui_map ~= nil then return end
+  local reason = wt.overhead_block_reason()
+  if reason ~= nil then return end
   local pts = snapshot.route_pts
   if pts == nil then
     pts = core.route_overhead_points(snapshot.markers)
@@ -3394,6 +3411,11 @@ wt.names_frame = function()
   local mode = settings.overhead_names
   if not settings.enabled or mode == 0 or ui_map ~= nil
     or (mode == 1 and snapshot == nil) then return end
+  local reason = wt.overhead_block_reason()
+  if reason ~= nil then
+    wt.names_stats.spawned, wt.names_stats.drawn, wt.names_stats.skipped = 0, 0, 0
+    return
+  end
   local cx, cy, cz = camera_pos()
   if cx == nil then return end
   wt.q("spawned_step", nil, 200)
