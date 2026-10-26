@@ -91,6 +91,41 @@ local function check(name, cond)
 end
 check("path: real modules first", package.path:sub(1, 28) == "./reframework/autorun/?.lua;")
 
+-- SPEC 37.5: one cached overhead state read per frame, with disabled reads
+-- clearing the cached reason without calling the reader.
+do
+  local block = core.overhead_block
+  check("overhead_block export", type(block) == "function")
+  if type(block) == "function" then
+    local cache = { frame = -1, reason = nil }
+    local calls, next_reason = 0, "menu"
+    local function reader()
+      calls = calls + 1
+      return next_reason
+    end
+    check("overhead block disabled stamps frame without read",
+      block(cache, 1, false, reader) == nil and cache.frame == 1
+      and cache.reason == nil and calls == 0)
+    check("overhead block caches same frame reason",
+      block(cache, 2, true, reader) == "menu"
+      and block(cache, 2, true, reader) == "menu" and calls == 1)
+    next_reason = "cutscene"
+    check("overhead block rereads on next frame",
+      block(cache, 3, true, reader) == "cutscene" and calls == 2)
+    check("overhead block disabled clears same-frame reason",
+      block(cache, 3, false, reader) == nil and cache.frame == 3
+      and cache.reason == nil and calls == 2)
+    check("overhead block disabled stamps next frame without read",
+      block(cache, 4, false, reader) == nil and cache.frame == 4
+      and cache.reason == nil and calls == 2)
+    next_reason = nil
+    check("overhead block caches nil for a frame",
+      block(cache, 5, true, reader) == nil
+      and block(cache, 5, true, reader) == nil and calls == 3
+      and cache.frame == 5 and cache.reason == nil)
+  end
+end
+
 -- 1. unavailable game state
 check("nil acceptable -> nil result",
   core.compute(base_adapter({ acceptable_ids = function() return nil end }), SHOW_ALL) == nil)
