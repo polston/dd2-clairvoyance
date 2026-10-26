@@ -128,7 +128,7 @@ M.HAS_FULLMAP = {
   [12] = true, [13] = true, [14] = true, [15] = true, [16] = true,
   [17] = true, [18] = true, [19] = true, [20] = true, [21] = true,
   [22] = true, [23] = true, [24] = true, [25] = true, [26] = true,
-  [27] = true, [28] = true, [29] = true, [31] = true, [32] = true, [34] = true,
+  [27] = true, [28] = true, [29] = true, [31] = true, [32] = true,
   [37] = true, [38] = true, [39] = true, [40] = true, [41] = true,
   [42] = true, [43] = true, [44] = true, [46] = true, [47] = true,
   [48] = true, [49] = true, [50] = true, [51] = true, [52] = true,
@@ -145,7 +145,7 @@ M.V12_ICON = { icon_startable = 52, icon_in_progress = 0, icon_completed = 42,
   icon_chest = 31, icon_treasure = 58, icon_monster = 29, icon_seller = 13,
   icon_token = 57, icon_beetle = 73,
   icon_npc_search = 31, icon_route_stop = 25, icon_hint_pin = 58,
-  icon_focus_place = 26, icon_focus_objective = 34 }
+  icon_focus_place = 26, icon_focus_objective = 52 }
 M.V12_COLOR = { icon_color = 0xFF960707, color_in_progress = 0xFFD7A500,
   color_completed = 0xFF2E8B57, color_unavailable = 0xFF787878,
   color_locked = 0xFF46468C, color_quest_item = 0xFF00C8FF,

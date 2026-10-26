@@ -936,9 +936,14 @@ do
     su.icon_for(D, { cat = "in_progress", objective = true }, "head", 7) == 34)
   check("objective color wins before dim/done/faded alpha", su.marker_color(D,
     { cat = "chest", objective = true, done = true, faded = true, dim = true }) == 0x3FFFD54F)
-  check("objective icon v12 fallback is complete", su.V12_ICON.icon_focus_objective == 34
+  check("objective icon v12 fallback is complete", su.V12_ICON.icon_focus_objective == 52
     and su.icon_for(D, { cat = "in_progress", objective = true }, "mini", nil,
       function(id) return id == 34 end) == 34)
+  check("objective icon uses a valid full-map native fallback",
+    su.HAS_FULLMAP[34] ~= true and su.V12_ICON.icon_focus_objective == 52
+    and su.HAS_FULLMAP[su.V12_ICON.icon_focus_objective] == true
+    and su.icon_for(D, { cat = "in_progress", objective = true }, "map", nil,
+      function() return false end) == 52)
   check("non-objective marker icon preserves step/category behavior",
     su.icon_for(D, { cat = "in_progress" }, "head", 7) == 7
     and su.icon_for(D, { cat = "in_progress" }, "mini", nil, function() return true end) == 52)
