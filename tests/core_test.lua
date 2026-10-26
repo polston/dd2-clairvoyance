@@ -3356,6 +3356,36 @@ do
     #pc == 3 and #pu == 3 and #po == 2
       and po[1].label == "Ordinary" and po[2].label == "Other")
 
+  local wl = core.wrap_text("one two three four", 7, function(s) return #s end)
+  check("npc 15f: hint prose wraps at measured word boundaries",
+    table.concat(wl, "|") == "one two|three|four")
+  local ww = core.wrap_text("encyclopedia next", 4, function(s) return #s end)
+  check("npc 15g: an overlong word stays intact",
+    #ww == 2 and ww[1] == "encyclopedia" and ww[2] == "next")
+  check("npc 15h: empty hint prose draws no lines",
+    #core.wrap_text("", 40, function(s) return #s end) == 0
+      and #core.wrap_text("   ", 40, function(s) return #s end) == 0)
+  local wf = core.wrap_text("aa bb", 3, function() error("measure") end)
+  local wn = core.wrap_text("aa bb", 3, function() return "wide" end)
+  check("npc 15i: failed hint measurement falls back safely",
+    table.concat(wf, "|") == "aa|bb" and table.concat(wn, "|") == "aa|bb")
+  local cache, calls = {}, 0
+  local function counted(s) calls = calls + 1; return #s end
+  local ca = core.wrap_text_cached(cache, "one two three", "7:100", 7, counted)
+  local first_calls = calls
+  local cb = core.wrap_text_cached(cache, "one two three", "7:100", 7, counted)
+  local same_calls = calls
+  local cc = core.wrap_text_cached(cache, "one two three", "3:100", 3, counted)
+  check("npc 15j: repeated frames reuse wrapping and width changes invalidate it",
+    ca == cb and first_calls == same_calls and calls > same_calls
+      and table.concat(ca, "|") == "one two|three"
+      and table.concat(cc, "|") == "one|two|three")
+  check("npc 15k: nested and narrow panels never exceed remaining width",
+    core.hint_wrap_width(300, 180, 16, 160) == 104
+      and core.hint_wrap_width(300.6, 180, 16, 160) == 104
+      and core.hint_wrap_width(200, 195, 16, 160) == 1
+      and core.hint_wrap_width(nil, nil, nil, 160) == 160)
+
   -- hint step reads, step_icons off
   local reads = {}
   r = run({}, nil, { hint_qids = { 77 }, now = 10, step_icons = false },
