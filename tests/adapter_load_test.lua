@@ -91,6 +91,7 @@ local exports = {
   "learn_names", "npc_live_pos", "probe_lookup", "refresh_objectives",
   "refresh_gates", "refresh_tree_gates", "refresh_items",
   "read_masquerade_door_closed",
+  "overhead_block_reason",
 }
 for _, name in ipairs(exports) do
   assert(A[name] ~= nil, "missing export: " .. name)
@@ -153,8 +154,9 @@ local contract = {
   "tracked_qid", "journal_now", "journal_all", "npc_name", "journal_stats",
   "map_open", "map_jump_apply", "journal_note_jump", "map_cursor",
   "quest_step", "masquerade_door_closed",
+  "overhead_block_reason",
 }
-assert(#contract == 49)
+assert(#contract == 50)
 for _, name in ipairs(contract) do
   assert(type(a[name]) == "function", "contract function missing: " .. name)
 end
@@ -166,6 +168,109 @@ assert(type(A.debug_probe()) == "string")
 
 assert(type(A.catalog_ids) == "function", "catalog_ids exported")
 assert(type(A.quest_state) == "function", "quest_state exported")
+
+-- SPEC 37.5: each singleton fetch is independently protected; method reads
+-- use the adapter's existing safe-call seam and accept exact true only.
+do
+  local old_get = sdk.get_managed_singleton
+  local function singleton(result, calls, raising)
+    return { call = function(_, name)
+      calls[#calls + 1] = name
+      if raising then error("call failed") end
+      return result
+    end }
+  end
+  local function scenario(fetch, expected, want_fetches, want_calls)
+    local fetched, calls = {}, {}
+    sdk.get_managed_singleton = function(name)
+      fetched[#fetched + 1] = name
+      return fetch(name, calls)
+    end
+    local result = a.overhead_block_reason()
+    assert(result == expected, "overhead reason: expected " .. tostring(expected)
+      .. ", got " .. tostring(result))
+    assert(table.concat(fetched, ",") == want_fetches,
+      "overhead singleton fetch order: " .. table.concat(fetched, ","))
+    assert(table.concat(calls, ",") == want_calls,
+      "overhead call order: " .. table.concat(calls, ","))
+  end
+  local ok, err = xpcall(function()
+    scenario(function(name, calls)
+      if name == "app.GuiManager" then return singleton(true, calls) end
+    end, "menu", "app.GuiManager", "isPausedGUI")
+    scenario(function(name, calls)
+      if name == "app.GuiManager" then return singleton(false, calls) end
+      return singleton(true, calls)
+    end, "cutscene", "app.GuiManager,app.DemoMediator",
+      "isPausedGUI,get_IsPlayingDemo")
+    scenario(function(name, calls)
+      if name == "app.GuiManager" then return singleton(nil, calls) end
+      return singleton(false, calls)
+    end, nil, "app.GuiManager,app.DemoMediator",
+      "isPausedGUI,get_IsPlayingDemo")
+    scenario(function(name, calls)
+      if name == "app.GuiManager" then return singleton(false, calls) end
+      return singleton(nil, calls)
+    end, nil, "app.GuiManager,app.DemoMediator",
+      "isPausedGUI,get_IsPlayingDemo")
+    scenario(function(name, calls)
+      if name == "app.GuiManager" then return singleton(false, calls) end
+      return singleton(7, calls)
+    end, nil, "app.GuiManager,app.DemoMediator",
+      "isPausedGUI,get_IsPlayingDemo")
+    for _, truthy in ipairs({ 1, "yes" }) do
+      scenario(function(name, calls)
+        if name == "app.GuiManager" then return singleton(truthy, calls) end
+        return singleton("true", calls)
+      end, nil, "app.GuiManager,app.DemoMediator",
+        "isPausedGUI,get_IsPlayingDemo")
+    end
+    for _, nontrue in ipairs({ false, 1 }) do
+      scenario(function(name, calls)
+        if name == "app.GuiManager" then return singleton(nontrue, calls) end
+        return singleton(true, calls)
+      end, "cutscene", "app.GuiManager,app.DemoMediator",
+        "isPausedGUI,get_IsPlayingDemo")
+    end
+    scenario(function(name, calls)
+      if name == "app.GuiManager" then return singleton("yes", calls) end
+      return singleton(true, calls)
+    end, "cutscene", "app.GuiManager,app.DemoMediator",
+      "isPausedGUI,get_IsPlayingDemo")
+    for _, broken in ipairs({ "missing", "raising" }) do
+      scenario(function(name, calls)
+        if name == "app.GuiManager" then
+          if broken == "missing" then return nil end
+          error("GuiManager fetch failed")
+        end
+        return singleton(true, calls)
+      end, "cutscene", "app.GuiManager,app.DemoMediator",
+        "get_IsPlayingDemo")
+      scenario(function(name, calls)
+        if name == "app.GuiManager" then
+          if broken == "missing" then return nil end
+          return singleton(nil, calls, true)
+        end
+        return singleton(true, calls)
+      end, "cutscene",
+        "app.GuiManager,app.DemoMediator",
+        broken == "missing" and "get_IsPlayingDemo"
+          or "isPausedGUI,get_IsPlayingDemo")
+      scenario(function(name, calls)
+        if name == "app.GuiManager" then return singleton(false, calls) end
+        if broken == "missing" then return nil end
+        error("DemoMediator fetch failed")
+      end, nil, "app.GuiManager,app.DemoMediator", "isPausedGUI")
+    end
+    scenario(function(name, calls)
+      if name == "app.GuiManager" then return singleton(false, calls) end
+      return singleton(nil, calls, true)
+    end, nil, "app.GuiManager,app.DemoMediator",
+      "isPausedGUI,get_IsPlayingDemo")
+  end, debug.traceback)
+  sdk.get_managed_singleton = old_get
+  if not ok then error(err) end
+end
 assert(type(A.quest_log_is_end) == "function", "quest_log_is_end exported")
 assert(type(A.catalog_stats) == "function", "catalog_stats exported")
 local st = A.catalog_stats()
