@@ -1647,6 +1647,14 @@ function M.new(a, reads, io)
       and valid_pos(e.pos)
   end
 
+  local function same_direct_payload(a, b)
+    return type(a) == "table" and type(b) == "table"
+      and a.direct == true and b.direct == true and a.name == b.name
+      and a.qid == b.qid and a.kind == b.kind and a.objective == b.objective
+      and valid_pos(a.pos) and valid_pos(b.pos) and a.pos.x == b.pos.x
+      and a.pos.y == b.pos.y and a.pos.z == b.pos.z
+  end
+
   -- every member of the published list as an error entry (places still resolve)
   local function all_err(list, tg)
     local out = {}
@@ -2380,12 +2388,10 @@ function M.new(a, reads, io)
       local same = true
       for i, e in ipairs(list) do
         local m = S.members[i]
-        local direct_same = type(e) == "table" and e.direct == true and m.direct == true
-          and e.qid == m.qid and e.kind == m.kind and e.objective == m.objective
-          and valid_pos(e.pos) and e.pos.x == m.pos.x and e.pos.y == m.pos.y
-          and e.pos.z == m.pos.z
-        if type(e) ~= "table" or e.cid ~= m.cid or e.place ~= m.place or e.name ~= m.name
-            or (e.direct == true or m.direct == true) and not direct_same then
+        local any_direct = type(e) == "table" and (e.direct == true or m.direct == true)
+        if type(e) ~= "table" or e.cid ~= m.cid or e.place ~= m.place
+            or (any_direct and not same_direct_payload(e, m))
+            or (not any_direct and e.name ~= m.name) then
           same = false
           break
         end
@@ -2429,9 +2435,7 @@ function M.new(a, reads, io)
     for _, m in ipairs(members) do
       local old = was_member[m.cid]
       if old ~= nil and m.direct and old.direct
-          and (m.name ~= old.name or m.qid ~= old.qid or m.kind ~= old.kind
-            or m.objective ~= old.objective or m.pos.x ~= old.pos.x
-            or m.pos.y ~= old.pos.y or m.pos.z ~= old.pos.z) then
+          and not same_direct_payload(m, old) then
         changed = true
         S.route_cache[m.cid], S.route_fail[m.cid] = nil, nil
         if w.path_job ~= nil and w.path_job.cid == m.cid then w.path_job = nil end

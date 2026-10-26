@@ -3607,28 +3607,7 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
     if mode > 0 then
       for _, qid in ipairs(active) do
         local q = focus.quests ~= nil and focus.quests[qid] or nil
-        local objective = q ~= nil and q.objective or nil
-        local src
-        if objective ~= nil then
-          src = {}
-          for _, cid in ipairs(objective.npcs or {}) do
-            if valid_pos(objective.npc_positions and objective.npc_positions[cid]) then
-              src[#src + 1] = cid
-            end
-          end
-          if mode == 2 and q.related_shown == true then
-            local combined, has = {}, {}
-            for _, cid in ipairs(src) do
-              if not has[cid] then has[cid] = true; combined[#combined + 1] = cid end
-            end
-            for _, cid in ipairs(q.npcs or {}) do
-              if not has[cid] then has[cid] = true; combined[#combined + 1] = cid end
-            end
-            src = combined
-          end
-        else
-          src = q ~= nil and (mode == 1 and q.step_npcs or q.npcs) or nil
-        end
+        local src = q ~= nil and (mode == 1 and q.step_npcs or q.npcs) or nil
         for _, cid in ipairs(src or {}) do
           if not seen[cid] then
             seen[cid] = true
@@ -3641,51 +3620,6 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
         end
       end
     end
-    if opt ~= nil and opt.places == true then
-      local direct = {}
-      for _, qid in ipairs(active) do
-        local q = focus.quests ~= nil and focus.quests[qid] or nil
-        local obj = q ~= nil and q.objective or nil
-        if obj ~= nil then
-          local endpoint, kind, name
-          local p = obj.place
-          if type(p) == "table" and valid_pos(p) then
-            endpoint, kind = pos_copy(p), "place"
-            name = p.caption
-            if name == nil or name == "" then name = q.name or ("Quest " .. qid) end
-          else
-            local candidates = {}
-            for _, id in ipairs(obj.items or {}) do
-              local source = obj.item_sources and obj.item_sources[id]
-              if type(source) == "table" and valid_pos(source.pos) then
-                local d = 0
-                if valid_pos(opt.player) then d = dist2(source.pos, opt.player) end
-                candidates[#candidates + 1] = { id = id, source = source, d = d }
-              end
-            end
-            table.sort(candidates, function(a, b)
-              if a.d ~= b.d then return a.d < b.d end
-              return tostring(a.source.key) < tostring(b.source.key)
-            end)
-            local best = candidates[1]
-            if best ~= nil then
-              endpoint, kind = pos_copy(best.source.pos), "item"
-              name = best.source.name or (q.name or ("Quest " .. qid))
-            end
-          end
-          if endpoint ~= nil and type(qid) == "number" and qid > 0
-            and qid == math.floor(qid) and qid <= 0x7FFFFFFF then
-            local cid = M.objective_route_id(qid, kind)
-            direct[#direct + 1] = { cid = cid, place = 0, direct = true,
-              objective = true, qid = qid, kind = kind, name = name, pos = endpoint }
-          end
-        end
-      end
-      for _, member in ipairs(direct) do
-        total = total + 1
-        if #list + reserve() < ROUTE_CAP then list[#list + 1] = member end
-      end
-    end
     if opt ~= nil and opt.places == true and places ~= nil then
       -- SPEC 32.14.11.1: gather the candidates, order them (prev first, then
       -- nearest the player, then candidate order), keep one place per 150 m
@@ -3693,8 +3627,7 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
       local pseen, cand = {}, {}
       for _, qid in ipairs(active) do
         local rel = quest_rel ~= nil and quest_rel[qid] or nil
-        local q = focus.quests ~= nil and focus.quests[qid] or nil
-        for _, d in ipairs((q ~= nil and q.objective ~= nil) and {} or (rel ~= nil and rel.dest or {})) do
+        for _, d in ipairs(rel ~= nil and rel.dest or {}) do
           local key = d.key
           if key ~= nil and not pseen[key] and places[key] ~= nil then
             pseen[key] = true
