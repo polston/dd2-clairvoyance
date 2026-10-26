@@ -2285,7 +2285,8 @@ local function objective_walk_failed()
     OBJECTIVE_FAILED_STREAK = OBJECTIVE_FAILED_STREAK + 1
     OBJECTIVE_STATS.failed_total = OBJECTIVE_STATS.failed_total + 1
     if OBJECTIVE_FAILED_STREAK >= 3 then
-        OBJECTIVE_TABLE = { cids = {}, miss = {}, issued_streak = {} }
+        OBJECTIVE_TABLE = { cids = {}, issued = {}, miss = {},
+            issued_miss = {}, issued_streak = {} }
     end
 end
 
@@ -2430,7 +2431,8 @@ local function refresh_objectives_body()
         -- No side quest in progress: skip the walk, but still commit so
         -- retention/stickiness state ages out correctly.
         local t = qnml_core.objective_table({}, OBJECTIVE_TABLE, progressing)
-        if type(t) ~= "table" or type(t.cids) ~= "table" then
+        if type(t) ~= "table" or type(t.cids) ~= "table"
+            or type(t.issued) ~= "table" then
             error("objective_table: bad result")
         end
         OBJECTIVE_TABLE = t
@@ -2466,7 +2468,8 @@ local function refresh_objectives_body()
     local records, skipped = with_index_retry(list, n, pass, objective_walk_failed)
     if records == nil then return end
     local t = qnml_core.objective_table(records, OBJECTIVE_TABLE, progressing)
-    if type(t) ~= "table" or type(t.cids) ~= "table" then
+    if type(t) ~= "table" or type(t.cids) ~= "table"
+        or type(t.issued) ~= "table" then
         error("objective_table: bad result")
     end
     OBJECTIVE_TABLE = t
@@ -3424,6 +3427,10 @@ do
         m.cid % 0x1000000000000))
     end
     if c == "focus_place" then
+      if type(m.key) == "string" and m.key:sub(1, 4) == "o:p:" then
+        return A.guid_parse("51a1c0de-0000-4007-8000-"
+          .. string.format("%012x", m.qid % 0x1000000000000))
+      end
       return A.guid_parse(FOCUS_PLACE_GUID_PREFIX .. string.format("%012x",
         m.place % 0x1000000000000))
     end
@@ -3670,6 +3677,9 @@ function A.make()
   function a.objective_cids(qid)
     local t = OBJECTIVE_TABLE
     return t ~= nil and t.cids[qid] or nil
+  end
+  function a.objective_issued_cids(qid)
+    return qnml_core.objective_issued_cids(OBJECTIVE_TABLE, qid)
   end
   function a.objective_pos(cid) return objective_pos(cid) end
   function a.refresh_objectives() return refresh_objectives() end
