@@ -41,6 +41,7 @@ local function fixture(o)
       sched_ids = {}, shop = {}, shops = {}, respawn = {}, boss = {},
       loaded_boss = {}, badge = {}, badge_default = "Griffin",
       catalog = {}, cast = {}, needs = {}, locs = {}, qstate = {},
+      gate_quests = {}, gate_vars = {}, season4 = false,
       alive = true, npcpos = {}, iname = {}, npcname = {}, qname = {},
       drops = { [5] = { 230, 231 }, [9] = { 241 } },
     } }
@@ -78,6 +79,13 @@ local function fixture(o)
     local b = d.badge[id]
     if b == nil then return d.badge_default end
     return b
+  end)
+  def("game_season4", function() return d.season4 end)
+  def("quest_state", function(qid) return d.gate_quests[qid] end)
+  def("quest_variable", function(c)
+    local key = table.concat({ c.qid, c.name_hash, c.value_type, c.compare_type,
+      c.bool_value and 1 or 0, c.int_value }, ":")
+    return d.gate_vars[key]
   end)
 
   f.adapter = {}
@@ -144,7 +152,82 @@ local function route_in(w, cid)
 end
 
 local function places(rows, pak)
-  return { version = 1, pak = pak or "1:1", rows = rows }
+  return { version = 2, pak = pak or "1:1", rows = rows }
+end
+
+-- Minimal decoder for the shared JSON fixture only; production JSON decoding
+-- remains REFramework's json.load_file path.
+local function decode_fixture_json(source)
+  local at, null = 1, {}
+  local function ws()
+    while source:sub(at, at):match("%s") do at = at + 1 end
+  end
+  local function str()
+    assert(source:sub(at, at) == '"'); at = at + 1
+    local out = {}
+    while at <= #source do
+      local c = source:sub(at, at); at = at + 1
+      if c == '"' then return table.concat(out) end
+      if c == "\\" then
+        local e = source:sub(at, at); at = at + 1
+        local escapes = { ['"'] = '"', ["\\"] = "\\", ["/"] = "/",
+          b = "\b", f = "\f", n = "\n", r = "\r", t = "\t" }
+        if e == "u" then
+          local hex = source:sub(at, at + 3)
+          assert(hex:match("^%x%x%x%x$"), "bad fixture unicode escape")
+          local cp = tonumber(hex, 16); at = at + 4
+          assert(cp < 128, "fixture decoder supports ASCII escapes only")
+          out[#out + 1] = string.char(cp)
+        else
+          assert(escapes[e] ~= nil, "bad fixture escape")
+          out[#out + 1] = escapes[e]
+        end
+      else
+        out[#out + 1] = c
+      end
+    end
+    error("unterminated fixture string")
+  end
+  local value
+  value = function()
+    ws()
+    local c = source:sub(at, at)
+    if c == '"' then return str() end
+    if c == "{" then
+      at = at + 1; ws()
+      local out = {}
+      if source:sub(at, at) == "}" then at = at + 1; return out end
+      while true do
+        ws(); local k = str(); ws()
+        assert(source:sub(at, at) == ":", "expected fixture colon"); at = at + 1
+        out[k] = value(); ws()
+        local sep = source:sub(at, at); at = at + 1
+        if sep == "}" then return out end
+        assert(sep == ",", "expected fixture object separator")
+      end
+    end
+    if c == "[" then
+      at = at + 1; ws()
+      local out = {}
+      if source:sub(at, at) == "]" then at = at + 1; return out end
+      while true do
+        out[#out + 1] = value(); ws()
+        local sep = source:sub(at, at); at = at + 1
+        if sep == "]" then return out end
+        assert(sep == ",", "expected fixture array separator")
+      end
+    end
+    for literal, v in pairs({ ["true"] = true, ["false"] = false, ["null"] = null }) do
+      if source:sub(at, at + #literal - 1) == literal then at = at + #literal; return v end
+    end
+    local token = source:sub(at):match("^%-?%d+%.?%d*[eE]?[+-]?%d*")
+    assert(token ~= nil and token ~= "", "bad fixture value")
+    at = at + #token
+    return assert(tonumber(token), "bad fixture number")
+  end
+  local out = value(); ws()
+  assert(at > #source, "trailing fixture JSON")
+  return out
 end
 
 local function prow(k, uid, id, x, z, extra)
@@ -630,10 +713,10 @@ do
   check("places: nil load is missing", w:places_state().state == "missing" and ok)
   w, ok = case(function(f) f.files[K.PLACES] = "junk" end)
   check("places: string is bad", w:places_state().state == "bad" and ok)
-  w, ok = case(function(f) f.files[K.PLACES] = { version = 2,
-    rows = { prow("chest", "v2", 10, 1, 1) } } end)
-  check("places: version 2 is bad", w:places_state().state == "bad" and ok)
-  check("places: version 2 rows are not used", w:stats().places.rows == 0)
+  w, ok = case(function(f) f.files[K.PLACES] = { version = 1,
+    rows = { prow("chest", "v1", 10, 1, 1) } } end)
+  check("places: version 1 is bad", w:places_state().state == "bad" and ok)
+  check("places: version 1 rows are not used", w:stats().places.rows == 0)
   w, ok = case(function(f) f.load_raises[K.PLACES] = true end)
   check("places: raising load is bad", w:places_state().state == "bad" and ok)
 
@@ -648,6 +731,117 @@ do
   check("places: 3.0 kept as integer", c ~= nil and math.type(c.gimmick) == "integer"
     and c.gimmick == 3)
   check("places: state ok", w2:places_state().state == "ok")
+end
+
+-- 16b. places_v2_atomic_schema
+do
+  local function bad_row(row)
+    local f = fixture({ files = { [K.PLACES] = places({
+      prow("chara", "valid-first", 1, 10, 0, { name = "ch253000_00" }), row }) } })
+    local w = f.new()
+    check("v2 atomic: malformed row rejects file", w:places_state().state == "bad")
+    check("v2 atomic: malformed row publishes no rows", w:stats().places.rows == 0)
+    check("v2 atomic: malformed row publishes no partial atlas", w:stats().atlas.file == 0)
+    w:refresh(0, true, on("monsters", "chests"))
+    check("v2 atomic: earlier name/row does not draw", #w:input().monsters == 0)
+  end
+  local function row(extra)
+    local r = prow("chara", "bad", 2, 20, 0, { name = "ch253001_00" })
+    for k, v in pairs(extra) do r[k] = v end
+    return r
+  end
+  bad_row(row({ src = "mystery" }))
+  local missing_src = row({}); missing_src.src = nil; bad_row(missing_src)
+  bad_row(row({ src = "subquest", table_qid = nil }))
+  bad_row(row({ src = "subquest", table_qid = "12000" }))
+  bad_row(row({ table_qid = 12000 }))
+  bad_row(row({ phase = "season5" }))
+  bad_row(row({ phase = 4 }))
+  bad_row(row({ gate = { conditions = { { kind = "quest", qid = 12000, finish = true } } } }))
+  bad_row(row({ gate = { check = 0, conditions = {} } }))
+  bad_row(row({ gate = { check = "0", conditions = {} } }))
+  bad_row(row({ gate = { check = 0.5, conditions = {} } }))
+  bad_row(row({ gate = { check = 2, conditions = {} } }))
+  bad_row(row({ gate = { check = 0, conditions = "bad" } }))
+  bad_row(row({ gate = { check = 0, conditions = { [1] = { kind = "quest", qid = 12000, finish = true },
+    [3] = { kind = "quest", qid = 12001, finish = true } } } }))
+  bad_row(row({ gate = { check = 0, conditions = { { kind = "unknown" } } } }))
+  bad_row(row({ gate = { check = 0, conditions = { { kind = "quest", qid = 0, finish = true } } } }))
+  bad_row(row({ gate = { check = 0, conditions = { { kind = "quest", qid = 12000.5, finish = true } } } }))
+  bad_row(row({ gate = { check = 0, conditions = { { kind = "quest", qid = 12000 } } } }))
+  bad_row(row({ gate = { check = 0, conditions = { { kind = "quest", qid = 12000, finish = 1 } } } }))
+  bad_row(row({ gate = { check = 0, conditions = { { kind = "variable", qid = 51010,
+    name_hash = 1, value_type = 0, compare_type = 0, bool_value = true,
+    int_value = 0, unexpected = true } } } }))
+  local variable_fields = { kind = "variable", qid = 51010, name_hash = 1,
+    value_type = 0, compare_type = 0, bool_value = true, int_value = 0 }
+  for _, field in ipairs({ "qid", "name_hash", "value_type", "compare_type", "bool_value", "int_value" }) do
+    local c = {}
+    for k, v in pairs(variable_fields) do c[k] = v end
+    c[field] = nil
+    bad_row(row({ gate = { check = 0, conditions = { c } } }))
+  end
+  local wrong_types = { qid = "51010", name_hash = "1", value_type = "0",
+    compare_type = "0", bool_value = 1, int_value = "0" }
+  for field, value in pairs(wrong_types) do
+    local c = {}
+    for k, v in pairs(variable_fields) do c[k] = v end
+    c[field] = value
+    bad_row(row({ gate = { check = 0, conditions = { c } } }))
+  end
+  local f = fixture({ files = { [K.PLACES] = places({
+    prow("chara", "late-name", 3, 30, 0, { name = "ch253003_00" }),
+    row({ src = "subquest" }) }) } })
+  f.files[K.ATLAS] = { version = 1, pak = "1:1", entries = {
+    conditional = { k = "monster", id = 4, x = 88, y = 0, z = 88 },
+    unconditional = { k = "monster", id = 5, x = 99, y = 0, z = 99 } } }
+  local w = f.new()
+  check("v2 atomic: late invalid row rejects prior name", w:stats().places.state == "bad"
+    and w:stats().places.rows == 0 and w:stats().atlas.learned == 2)
+end
+
+-- 16c. shared extractor/runtime format-2 contract
+do
+  local fh = assert(io.open("tests/fixtures/conditional_places_v2.json", "rb"))
+  local shared = decode_fixture_json(fh:read("*a")); fh:close()
+  check("shared v2 fixture: exact expected rows", shared.version == 2 and #shared.rows == 3)
+  local by_id = {}
+  for _, r in ipairs(shared.rows) do by_id[r.id] = r end
+  check("shared v2 fixture: source and condition schema", by_id[5].src == "normal"
+    and by_id[6].table_qid == 20082 and by_id[6].phase == "beforeseason4"
+    and by_id[6].gate.check == 0 and by_id[6].gate.conditions[2].kind == "variable"
+    and by_id[10].gate.check == 1)
+  local f = fixture({ files = { [K.PLACES] = shared } })
+  f.data.boss = { ch253 = true }
+  f.data.season4 = false
+  f.data.gate_quests[20082] = { active = true, ended = false }
+  f.data.gate_quests[11040] = { active = true, ended = false }
+  f.data.gate_vars["51010:110914987:1:1:1:0"] = true
+  f.data.qstate[11040] = true
+  -- The file has compact display names to stay tiny; give its two monster
+  -- records real family names for the class renderer while preserving gates.
+  by_id[5].name, by_id[6].name = "ch253000_00", "ch220000_00"
+  local w = f.new()
+  w:refresh(0, true, on("monsters", "small_monsters", "chests"))
+  local monsters, gates = w:input().monsters, w:stats().gates
+  check("shared v2: both eligible monster rows draw", find(monsters, by_id[5].uid) ~= nil
+    and find(monsters, by_id[6].uid) ~= nil)
+  check("shared v2: normal and conditional eligibility stats", gates.normal_source.eligible == 1
+    and gates.normal_source.total == 1 and gates.quest_source.eligible == 1
+    and gates.quest_source.total == 1 and gates.season4 == false)
+  local chest_uid = by_id[10].uid
+  local chest = find(w:input().chests, chest_uid)
+  check("shared v2: chest gate projects to existing quest fields",
+    chest ~= nil and #chest.gate_qids == 1 and chest.gate_qids[1] == 11040
+    and chest.kinds[1] == "quest")
+  local focus = { active = { 11040 }, quests = { [11040] = { items = {}, places = {} } } }
+  w:refresh(10, true, { treasure = true, focus = focus })
+  check("shared v2: chest gate still projects into quest focus",
+    find(w:input().chests, chest_uid) ~= nil)
+  f.data.gate_vars["51010:110914987:1:1:1:0"] = false
+  w:refresh(20, true, on("monsters", "small_monsters"))
+  check("shared v2: failed mixed gate hides only its quest monster",
+    find(w:input().monsters, by_id[5].uid) ~= nil and find(w:input().monsters, by_id[6].uid) == nil)
 end
 
 -- 17. places_seed_and_override
@@ -748,7 +942,7 @@ do
     prow("chara", "r2", 2, 200, 0, { name = "ch256000_00" }),
     prow("chara", "r3", 3, 300, 0, { name = "ch220000_00" }),
     prow("chara", "r4", 4, 400, 0, { name = "ch299001_A_00" }),
-    prow("chara", "r5", 5, 500, 0, { name = "ch253000_00", src = "subquest" }),
+    prow("chara", "r5", 5, 500, 0, { name = "ch253000_00", src = "subquest", table_qid = 12000 }),
     prow("chara", "r6", 6, 600, 0, { name = "ch253000_00", phase = "season4" }),
     prow("chest", "r7", 10, 700, 0, { src = "subquest" }) }
   local f = fixture({ files = { [K.PLACES] = places(rows) } })
@@ -782,6 +976,123 @@ do
   check("sort: monsters turned on later, large without a reset", #m2 == 1 and m2[1].small == false)
 end
 
+-- 22c. conditional_monster_eligibility
+do
+  local function quest(qid, finish)
+    return { kind = "quest", qid = qid, finish = finish }
+  end
+  local variable = { kind = "variable", qid = 51010, name_hash = 110914987,
+    value_type = 1, compare_type = 0, bool_value = true, int_value = 0 }
+  local function var_key(c)
+    return table.concat({ c.qid, c.name_hash, c.value_type, c.compare_type,
+      c.bool_value and 1 or 0, c.int_value }, ":")
+  end
+  local function gate(check, conditions) return { check = check, conditions = conditions } end
+  local rows = {
+    prow("chara", "always", 1001, 100, 0, { name = "ch253000_00" }),
+    prow("chara", "before4", 1002, 200, 0, { name = "ch253000_00", phase = "beforeseason4" }),
+    prow("chara", "season4", 1003, 300, 0, { name = "ch253000_00", phase = "season4" }),
+    prow("chara", "before5", 1004, 400, 0, { name = "ch253000_00", src = "subquest",
+      table_qid = 11040, gate = gate(0, { quest(11040, false) }) }),
+    prow("chara", "and-fail", 1005, 500, 0, { name = "ch253000_00",
+      gate = gate(0, { quest(11040, true), variable }) }),
+    prow("chara", "or-pass", 1006, 600, 0, { name = "ch253000_00",
+      gate = gate(1, { quest(11040, true), variable }) }),
+    prow("chara", "table-ended", 1007, 700, 0, { name = "ch253000_00", src = "mainquest",
+      table_qid = 11041 }),
+    prow("chara", "table-inactive", 1008, 800, 0, { name = "ch253000_00", src = "subquest",
+      table_qid = 11042 }),
+  }
+  local f = fixture({ files = { [K.PLACES] = places(rows) } })
+  f.data.boss = { ch253 = true }
+  f.data.season4 = false
+  f.data.gate_quests = { [11040] = { active = true, ended = false },
+    [11041] = { active = true, ended = true }, [11042] = { active = false, ended = false } }
+  f.data.gate_vars[var_key(variable)] = true
+  local w = f.new()
+  w:refresh(0, true, on("monsters"))
+  local m = w:input().monsters
+  check("gates: unconditional and matching phases", find(m, "always") ~= nil
+    and find(m, "before4") ~= nil and find(m, "season4") == nil)
+  check("gates: BeforeSeason5 has no phase gate", find(m, "before5") ~= nil)
+  check("gates: AND, OR and quest table", find(m, "and-fail") == nil
+    and find(m, "or-pass") ~= nil and find(m, "table-ended") == nil
+    and find(m, "table-inactive") == nil)
+  check("gates: qid read once across table and both finish polarities",
+    f.reads_n.quest_state == 3)
+  check("gates: variable evaluator once per condition", f.reads_n.quest_variable == 1)
+  local gs = w:stats().gates
+  check("gates: counts and season stat", gs.season4 == false
+    and gs.normal_source.total == 5 and gs.quest_source.total == 3
+    and gs.normal_source.eligible == 3 and gs.quest_source.eligible == 1)
+  w:refresh(10, true, on("monsters"))
+  check("gates: round memo clears", f.reads_n.quest_state == 6
+    and f.reads_n.quest_variable == 2 and f.reads_n.game_season4 == 2)
+  f.data.season4 = true
+  w:refresh(20, true, on("monsters"))
+  check("gates: both season4 branches and BeforeSeason5", find(w:input().monsters, "before4") == nil
+    and find(w:input().monsters, "season4") ~= nil and find(w:input().monsters, "before5") ~= nil)
+  w:reset()
+  w:refresh(30, true, on("monsters"))
+  check("gates: owner reset clears round memo", f.reads_n.quest_state == 12
+    and f.reads_n.quest_variable == 4)
+
+  local f2 = fixture({ files = { [K.PLACES] = places({
+    prow("chara", "plain", 2001, 100, 0, { name = "ch253000_00" }),
+    prow("chara", "gated", 2002, 200, 0, { name = "ch253000_00",
+      gate = gate(0, { quest(11999, true) }) }),
+    prow("chara", "phase", 2003, 300, 0, { name = "ch253000_00", phase = "season4" }),
+    prow("chara", "var-fail", 2004, 400, 0, { name = "ch253000_00",
+      gate = gate(0, { variable }) }) }) } })
+  f2.data.boss = { ch253 = true }
+  f2.fail.quest_state = true
+  f2.fail.game_season4 = true
+  f2.fail.quest_variable = true
+  local w2 = f2.new()
+  w2:refresh(0, true, on("monsters"))
+  check("gates: conditional read failures isolate", #w2:input().monsters == 1
+    and find(w2:input().monsters, "plain") ~= nil)
+  check("gates: failure counts", w2:stats().gates.read_failures.quest == 1
+    and w2:stats().gates.read_failures.season4 == 1
+    and w2:stats().gates.read_failures.variable == 1)
+end
+
+-- 22d. conditional rows stay reserved-only and learned corrections are safe
+do
+  local row = prow("chara", "conditional", 3001, 100, 0, { name = "ch253000_00",
+    gate = { check = 0, conditions = { { kind = "quest", qid = 12040, finish = false } } } })
+  local plain = prow("chara", "plain-correction", 3002, 200, 0, { name = "ch253000_00" })
+  local function scenario(active)
+    local files = { [K.PLACES] = places({ row, plain }),
+      [K.ATLAS] = { version = 1, pak = "1:1", entries = {
+        conditional = { k = "monster", id = 3001, x = 900, y = 0, z = 900 },
+        ["plain-correction"] = { k = "monster", id = 3002, x = 800, y = 0, z = 800 } } } }
+    local f = fixture({ files = files })
+    f.data.boss = { ch253 = true }
+    f.data.gate_quests[12040] = { active = true, ended = not active }
+    f.data.reserved = { mrow("conditional", 3001, "ch253000_00", 500, 0) }
+    local w = f.new()
+    w:refresh(0, true, on("monsters"))
+    check("reserved gate: live row draws regardless of file gate " .. tostring(active),
+      find(w:input().monsters, "conditional") ~= nil)
+    check("reserved gate: old conditional atlas entry pruned", w:stats().atlas.learned == 1
+      and w:stats().gates.conditional_learned == 0)
+    w:save("test")
+    f.data.gate_quests[12040].ended = true
+    f.data.reserved = {}
+    w:refresh(20, true, on("monsters"))
+    check("reserved gate: row disappears when gate fails and reservation ends",
+      find(w:input().monsters, "conditional") == nil)
+    w:save("test")
+    check("reserved gate: conditional uid is never saved",
+      f.files[K.ATLAS].entries.conditional == nil)
+    check("reserved gate: unconditional learned correction stays",
+      f.files[K.ATLAS].entries["plain-correction"] ~= nil)
+  end
+  scenario(false)
+  scenario(true)
+end
+
 -- 22b. live rows the places file drops are session-only (SPEC 17.10.6, 17.10.9.2)
 do
   local function session_only(label, prows, reserved, kind, uid, x)
@@ -811,7 +1122,7 @@ do
     check(label .. ": gone next session", find(l2, uid) == nil and (kind ~= "monsters" or #l2 == 0))
   end
   session_only("live subquest chara",
-    { prow("chara", "sq1", 5, 500, 0, { name = "ch253000_00", src = "subquest" }),
+    { prow("chara", "sq1", 5, 500, 0, { name = "ch253000_00", src = "subquest", table_qid = 12000 }),
       prow("chest", "other", 10, 9, 9) },
     { mrow("sq1", 5, "ch253000_00", 500, 0) }, "monsters", "sq1", 500)
   session_only("live not-in-file chara",
@@ -838,7 +1149,7 @@ end
 do
   local rows = {
     prow("chara", "mkeep", 1, 100, 0, { name = "ch253000_00" }),
-    prow("chara", "msq", 5, 500, 0, { name = "ch253000_00", src = "subquest" }),
+    prow("chara", "msq", 5, 500, 0, { name = "ch253000_00", src = "subquest", table_qid = 12000 }),
     prow("chara", "mph", 7, 1500, 0, { name = "ch253000_00", phase = "beforeseason4" }),
     prow("chest", "csq", 10, 700, 0, { src = "subquest" }) }
   local function atlas()
@@ -1671,6 +1982,60 @@ do
       check("quest ov: unreadable NpcOverrideDict gives nil", R.quest_overrides(1) == nil)
     end
     singletons["app.QuestManager"] = nil
+  end
+  do
+    local old_find = sdk.find_type_definition
+    local made, released, ended, result = {}, 0, { [11040] = false }, true
+    local function managed(fields, methods)
+      local o = obj(fields, methods)
+      function o:add_ref() made[#made + 1] = self; return self end
+      function o:set_field(k, v) fields[k] = v end
+      function o:release() released = released + 1 end
+      return o
+    end
+    sdk.find_type_definition = function(n)
+      if n == "app.QuestLogManager" then
+        return { get_method = function(_, signature)
+          if signature ~= "isQuestLogEnd(app.QuestDefine.ID)" then error("bad signature") end
+          return { call = function(_, qlm, qid) return ended[qid] end }
+        end }
+      elseif n == "app.QuestVariableCondition" then
+        return { create_instance = function()
+          return managed({}, {})
+        end }
+      elseif n == "app.GenerateManager.QuestFlagInfos.QuestVariableInfo" then
+        return { create_instance = function()
+          return managed({}, { evaluate = function()
+            local condition = made[1]
+            return result and condition:get_field("_NameHash") == 110914987
+          end })
+        end }
+      end
+      return old_find(n)
+    end
+    singletons["app.GameSystem"] = obj({ ["<GameSeason4>k__BackingField"] = false },
+      { get_GameSeason4 = function() return true end })
+    singletons["app.QuestManager"] = obj(nil, { checkActivated = function(qid) return qid == 11040 end })
+    singletons["app.QuestLogManager"] = obj({})
+    local RR = world.game_reads()
+    check("conditional reads: GameSeason4 method", RR.game_season4() == true)
+    singletons["app.GameSystem"] = obj({ ["<GameSeason4>k__BackingField"] = false },
+      { get_GameSeason4 = function() error("method unavailable") end })
+    check("conditional reads: GameSeason4 backing-field fallback", RR.game_season4() == false)
+    local q = RR.quest_state(11040)
+    check("conditional reads: quest activation and end", q.active == true and q.ended == false)
+    local c = { qid = 51010, name_hash = 110914987, value_type = 1,
+      compare_type = 0, bool_value = true, int_value = 0 }
+    check("conditional reads: evaluator uses retained game objects", RR.quest_variable(c) == true
+      and #made == 2)
+    result = false
+    check("conditional reads: evaluator result comes from the game", RR.quest_variable(c) == false)
+    RR.reset()
+    check("conditional reads: reset releases and drops retained objects", released == 2
+      and RR.quest_variable(c) == false and #made == 4)
+    sdk.find_type_definition = old_find
+    singletons["app.GameSystem"], singletons["app.QuestManager"],
+      singletons["app.QuestLogManager"] = nil, nil, nil
   end
   sdk = saved_sdk
 end
@@ -5293,7 +5658,7 @@ do
     check("reserved: reuse round still draws a live-only chest",
       f.reads_n.reserved_rows == 1 and find(w:input().chests, "lv1") ~= nil)
     local f2 = fixture({ files = { [K.PLACES] = places({
-      prow("chara", "sq1", 5, 500, 0, { name = "ch253000_00", src = "subquest" }),
+      prow("chara", "sq1", 5, 500, 0, { name = "ch253000_00", src = "subquest", table_qid = 12000 }),
       prow("chest", "other", 10, 9, 9) }) } })
     f2.data.boss = { ch253 = true }
     f2.data.reserved = { mrow("sq1", 5, "ch253000_00", 500, 0), chest_row("keep1", 1, 1) }
