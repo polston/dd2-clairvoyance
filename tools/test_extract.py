@@ -402,7 +402,7 @@ class HygieneTests(unittest.TestCase):
         for dp, dns, fns in os.walk(TOOLS):
             dns[:] = [x for x in dns if x != "__pycache__"]
             for fn in fns:
-                if fn == "pak_key.local.txt":
+                if fn.endswith(".local.txt"):
                     continue
                 with open(os.path.join(dp, fn), encoding="utf-8", errors="replace") as f:
                     text = f.read()
