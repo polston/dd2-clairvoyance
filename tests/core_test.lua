@@ -5055,8 +5055,34 @@ do
     { routes = 2, places = true }, rname)
   check("objective routes group NPC, destination and shown related per quest",
     #direct == 6 and direct[1].cid == 1 and direct[2].kind == "place"
-      and direct[3].cid == 11 and direct[4].cid == 2
-      and direct[5].kind == "place" and direct[6].cid == 12)
+      and direct[3].cid == 2 and direct[4].kind == "place"
+      and direct[5].cid == 11 and direct[6].cid == 12)
+  local nine_primary = { active = {}, quests = {} }
+  for qid = 1, 9 do
+    nine_primary.active[#nine_primary.active + 1] = qid
+    nine_primary.quests[qid] = { objective = { npcs = { qid },
+      npc_positions = { [qid] = pos(qid) } } }
+  end
+  direct = core.route_members(nine_primary, {}, {}, nil, { routes = 1 }, rname)
+  local primary_cids = {}
+  for _, member in ipairs(direct) do primary_cids[#primary_cids + 1] = tostring(member.cid) end
+  check("objective route cap keeps first eight primary cids in active order",
+    #direct == 8 and table.concat(primary_cids, ",") == "1,2,3,4,5,6,7,8")
+  local duplicate_target = { active = { 1, 2 }, quests = {
+    [1] = { objective = { npcs = { 99 }, npc_positions = { [99] = pos(1) } } },
+    [2] = { objective = { npcs = { 99 }, npc_positions = { [99] = pos(1) } } },
+  } }
+  local duplicate_routes, _, duplicate_total = core.route_members(duplicate_target, {}, {}, 99,
+    { routes = 1 }, rname)
+  check("objective route target total counts a repeated target once",
+    #duplicate_routes == 1 and duplicate_routes[1].cid == 99 and duplicate_total == 1)
+  local late_target_routes, late_target_count, late_target_total = core.route_members(nine_primary,
+    {}, {}, 9, { routes = 1 }, rname)
+  local late_target_cids = {}
+  for _, member in ipairs(late_target_routes) do late_target_cids[#late_target_cids + 1] = tostring(member.cid) end
+  check("objective routes reserve one capped slot for a late search target",
+    table.concat(late_target_cids, ",") == "1,2,3,4,5,6,7,9"
+      and late_target_count == 8 and late_target_total == 9)
   local later_routes = { active = { 1, 2 }, quests = {
     [1] = { show_related = true, related_npcs = { 101, 102, 103, 104, 105, 106, 107, 108 },
       objective = { npcs = { 1 }, npc_positions = { [1] = pos(1) } } },
@@ -5080,6 +5106,7 @@ do
       and route_id_fn(0x7FFFFFFF, "place") ~= nil
       and route_id_fn(0x7FFFFFFF, "item") ~= nil
       and route_id_fn(0, "place") == nil and route_id_fn(1.5, "place") == nil
+      and route_id_fn(math.huge, "place") == nil and route_id_fn(0 / 0, "item") == nil
       and route_id_fn(0x80000000, "place") == nil
       and route_id_fn(1, "npc") == nil)
   if type(route_id_fn) == "function" then
@@ -5090,7 +5117,11 @@ do
         if id == nil or route_ids[id] then route_ids.failed = true else route_ids[id] = true end
       end
     end
-    check("objective route id boundary samples are injective and disjoint", not route_ids.failed)
+    check("objective route ids fit 48-bit GUIDs and avoid NPC/legacy IDs",
+      not route_ids.failed and math.abs(route_id_fn(0x7FFFFFFF, "item")) < 0x1000000000000
+        and math.abs(route_id_fn(1, "place")) > 0xFFFFFFFFFF
+        and route_id_fn(7, "place") < 0 and route_id_fn(7, "place") ~= 77
+        and route_id_fn(7, "place") ~= -77)
   end
   local route_ids = {}
   for _, qid in ipairs({ 1, 2, 3, 127, 65535, 0x7FFFFFFF }) do
@@ -5204,7 +5235,9 @@ do
   local map_shop, full_shop = marker_in(cover_result.markers, "w:shop:8"),
     marker_in(cover_result.fullmap_world, "w:shop:8")
   check("objective covers shop in player and full-map lists", map_shop and map_shop.objective == true
-    and full_shop and full_shop.objective == true and core.marker_cid(map_shop) == 77)
+    and full_shop and full_shop.objective == true and core.marker_cid(map_shop) == 77
+    and map_shop.label == "Shopkeeper (shop)" and full_shop.label == map_shop.label
+    and map_shop.hover == nil and full_shop.hover == map_shop.hover)
   local seller_world = { focus_places = {}, world_max_markers = 300,
     sellers = { { shop = 9, item = 2, item_name = "Salt", npc = "Vendor", cid = 77,
       pos = pos(2), discovered = true, qids = {} } } }
@@ -5215,7 +5248,9 @@ do
   local map_seller, full_seller = marker_in(seller_result.markers, "w:sell:9:2"),
     marker_in(seller_result.fullmap_world, "w:sell:9:2")
   check("objective covers seller in player and full-map lists", map_seller and map_seller.objective == true
-    and full_seller and full_seller.objective == true and core.marker_cid(map_seller) == 77)
+    and full_seller and full_seller.objective == true and core.marker_cid(map_seller) == 77
+    and map_seller.label == "Salt - sold by Vendor" and full_seller.label == map_seller.label
+    and map_seller.hover == nil and full_seller.hover == map_seller.hover)
   local search_world = { focus_places = {}, npcs = { { cid = 77, name = "Target", pos = pos(2),
     alive = true, discovered = true } } }
   local search_cover = core.compute(covering_adapter, { focus_qids = { 10 },
@@ -5225,7 +5260,9 @@ do
   local search_full_marker = marker_in(search_cover.fullmap_world, "w:npc:77")
   check("objective covers searched NPC marker in player and full-map lists",
     search_marker and search_marker.objective == true and search_full_marker
-      and search_full_marker.objective == true and core.marker_cid(search_marker) == 77)
+      and search_full_marker.objective == true and core.marker_cid(search_marker) == 77
+      and search_marker.label == "Target" and search_full_marker.label == search_marker.label
+      and search_marker.hover == nil and search_full_marker.hover == search_marker.hover)
   local multiple_locs_adapter = fake_adapter({ progressing = { 10 }, hints = { [10] = 5 },
     npc_pos = { [5] = pos(1), [77] = pos(2) }, objective_pos = { [77] = pos(2) },
     objectives = { [10] = {} }, item_needs = { [10] = { { id = 99, num = 1 } } },
@@ -5326,6 +5363,20 @@ do
       and multi_result.focus.quests[10].related_shown == 1
       and multi_result.focus.quests[10].related_hidden == 0
       and type(multi_result.focus_counts.objective) == "number")
+  local state_adapter = base_adapter({ progressing_ids = function() return { 60 } end,
+    npc_alive = function(cid) return cid ~= 89 end,
+    npc_pos = function(cid) if cid == 88 then return 8, 0, 0 end end,
+    quest_name = function() return "Visibility" end })
+  local state_rel = { [60] = { npcs = { 88, 89, 90 } } }
+  local state_off = core.compute(state_adapter, { focus_qids = { 60 }, focus_related_qids = {},
+    quest_rel = state_rel, now = 0 })
+  local state_on = core.compute(state_adapter, { focus_qids = { 60 }, focus_related_qids = { 60 },
+    quest_rel = state_rel, now = 0 })
+  check("related counts include only positioned live NPCs while no_pos ignores toggle",
+    state_off.focus.related_counts.shown == 0 and state_off.focus.related_counts.hidden == 1
+      and state_on.focus.related_counts.shown == 1 and state_on.focus.related_counts.hidden == 0
+      and table.concat(state_off.focus_counts.no_pos, ",") == "90"
+      and table.concat(state_on.focus_counts.no_pos, ",") == "90")
   local unresolved_adapter = base_adapter({ acceptable_ids = function() return { 20 } end,
     is_side = function() return true end, giver_hint = function() return 9 end,
     progressing_ids = function() return { 30 } end, quest_state = function(qid) return qid == 30 and "locked" end,
@@ -5388,14 +5439,17 @@ do
     npc_pos = { [77] = pos(2) }, objective_pos = { [77] = pos(2) },
     objectives = { [300] = {} } })
   main_adapter.is_side = function() return false end
+  main_adapter.quest_region = function() return "Vermund" end
   main_adapter.objective_issued_cids = function() return { 77 } end
   main_adapter.journal_now = function() return { step_index = 0,
     dest = { x = 10, y = 0, z = 0, caption = "Main target" } } end
   local main_result = core.compute(main_adapter, { focus_qids = { 300 },
-    focus_related_qids = {}, now = 0 })
+    focus_related_qids = {}, tree_open = true, now = 0 })
   check("focused main quest resolves current objective signals",
     main_result.focus.quests[300].objective.npcs[1] == 77
-      and main_result.focus.quests[300].objective.place.caption == "Main target")
+      and main_result.focus.quests[300].objective.place.caption == "Main target"
+      and main_result.catalog_side_count == 0 and #main_result.quests == 0
+      and main_result.counts.in_progress == 0)
 
   local journal_reads, focused_ids = 0, {}
   for qid = 1, 17 do focused_ids[#focused_ids + 1] = qid end

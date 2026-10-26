@@ -2580,8 +2580,9 @@ function M.compute(adapter, show)
 
   for _, qid in ipairs(qids) do
     repeat
-      if not adapter.is_side(qid) and not fset[qid] then break end
-      if catalog_set[qid] then catalog_side_count = catalog_side_count + 1 end
+      local side_quest = adapter.is_side(qid)
+      if not side_quest and not fset[qid] then break end
+      if side_quest and catalog_set[qid] then catalog_side_count = catalog_side_count + 1 end
 
       local hint, cands
       local function get_candidates()
@@ -2615,12 +2616,12 @@ function M.compute(adapter, show)
         end
       end
 
-      counts[cat] = counts[cat] + 1
+      if side_quest then counts[cat] = counts[cat] + 1 end
       -- v7 (SPEC 14.3b): tree records, built only while the panel is open,
       -- BEFORE the visibility break and any position work. Hidden
       -- categories still get a record; ascending qid order is inherited.
       local nm
-      if quests ~= nil then
+      if quests ~= nil and side_quest then
         nm = adapter.quest_name(qid)
         local nameless = (nm == nil or nm == "")
         if not (cat == "locked" and nameless) then
@@ -2650,7 +2651,7 @@ function M.compute(adapter, show)
       -- Visibility BEFORE resolution: hidden quests never reach groups,
       -- labels, unresolved, or unnamed (SPEC §9.3).
       if not show[GROUP[cat]] and not fset[qid] then break end
-      if cat == "in_progress" and show[GROUP[cat]] then shown_inprog[qid] = true end
+      if side_quest and cat == "in_progress" and show[GROUP[cat]] then shown_inprog[qid] = true end
       if fset[qid] then
         get_candidates()
         focus_rec[qid] = { hint = hint, first = cands[1] }
@@ -3176,7 +3177,7 @@ function M.compute(adapter, show)
           end
           local visible = objective_target or visible_related
           if covered ~= nil and visible then rel_keys[covered] = true end
-          if visible and adapter.npc_alive(cid) ~= false then
+          if adapter.npc_alive(cid) ~= false then
             local target_pos
             if objective_target then
               for _, owner in ipairs(active) do
@@ -3189,8 +3190,8 @@ function M.compute(adapter, show)
             if target_pos ~= nil then x, y, z = target_pos.x, target_pos.y, target_pos.z
             else x, y, z = adapter.npc_pos(cid) end
             if x == nil then
-              if objective_target or visible_related then no_pos[#no_pos + 1] = cid end
-            elseif covered == nil then
+              if objective_target or #owners > 0 then no_pos[#no_pos + 1] = cid end
+            elseif visible and covered == nil then
               local label = names and names[cid]
               if label == nil or label == "" then
                 label = adapter.npc_name and adapter.npc_name(cid) or nil
@@ -3543,26 +3544,29 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
         end
         groups[#groups + 1] = { primary = primary, ancillary = ancillary }
       end
-      local function append(member, reserve_after)
+      local target_counted = target_cid ~= nil
+      local function append(member)
         local cid = member.cid
         if cid == target_cid then
-          total = total + 1
-          if not inlist[cid] then list[#list + 1] = member; inlist[cid] = true end
+          if not target_counted then total = total + 1; target_counted = true end
+          if not inlist[cid] and #list < ROUTE_CAP then
+            list[#list + 1] = member; inlist[cid] = true
+          end
         elseif cid == nil or not seen[cid] then
           total = total + 1
           if cid ~= nil then seen[cid] = true end
-          if #list + reserve() + (reserve_after or 0) < ROUTE_CAP then list[#list + 1] = member end
+          if #list + reserve() < ROUTE_CAP then list[#list + 1] = member end
         end
       end
-      for index, group in ipairs(groups) do
-        local later_primary = 0
-        for later = index + 1, #groups do
-          later_primary = later_primary + #groups[later].primary
-        end
+      -- Keep primary routes in active-quest order, then use remaining slots
+      -- for ancillary candidates.
+      for _, group in ipairs(groups) do
         for _, member in ipairs(group.primary) do
-          append(member, later_primary)
+          append(member)
         end
-        for _, member in ipairs(group.ancillary) do append(member, later_primary) end
+      end
+      for _, group in ipairs(groups) do
+        for _, member in ipairs(group.ancillary) do append(member) end
       end
       return list, #list + reserve(), total
     end
