@@ -41,7 +41,7 @@ function New-Case([string]$name, [string]$stub, [switch]$NoIcons, [switch]$NoHin
     return @{ Root = $root; Game = $game; Key = $key; Out = (Join-Path $d "out") }
 }
 function Invoke-Build($c, [string[]]$extra) {
-    $args2 = @("-NoProfile", "-File", (Join-Path $repo "scripts/build-zip.ps1"),
+    $args2 = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $repo "scripts/build-zip.ps1"),
         "-Root", $c.Root, "-OutDir", $c.Out, "-Python", $Python) + $extra
     $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     $text = & powershell @args2 2>&1 | Out-String
@@ -113,6 +113,57 @@ $r = Invoke-Build $c @("-NoPlaces")
 $zip = Join-Path $c.Out "Clairvoyance-noplaces.zip"
 $e = @(); if (Test-Path $zip) { $e = Get-Entries $zip }
 Assert-True "noplaces_name" (($r.Code -eq 0) -and ($e.Count -gt 0) -and ($e -contains "reframework/data/Clairvoyance_hints.json") -and ($e -contains "reframework/data/Clairvoyance_quests.json") -and -not ($e | Where-Object { $_ -match $toolsRe })) "code $($r.Code)"
+# tar returning nonzero must preserve its existing error and restore the caller's location.
+$c = New-Case "tar-nonzero" "import sys`nsys.exit(1)"
+$tarRoot = Join-Path $base "nonzero-system"
+$tarSystem32 = Join-Path $tarRoot "System32"
+New-Item -ItemType Directory -Force $tarSystem32 | Out-Null
+Copy-Item (Join-Path $env:WINDIR "System32/findstr.exe") (Join-Path $tarSystem32 "tar.exe")
+$wrapper = Join-Path $base "invoke-nonzero.ps1"
+$buildScript = Join-Path $repo "scripts/build-zip.ps1"
+$wrapperText = @"
+`$ErrorActionPreference = 'Continue'
+`$start = (Get-Location).Path
+`$oldSystemRoot = `$env:SystemRoot
+try {
+    `$env:SystemRoot = '$tarRoot'
+    & '$buildScript' -Root '$($c.Root)' -OutDir '$($c.Out)' -NoPlaces
+} finally {
+    `$env:SystemRoot = `$oldSystemRoot
+    Write-Output "FINAL_LOCATION=`$((Get-Location).Path)"
+    Write-Output "START_LOCATION=`$start"
+    Write-Output "BUILD_STATUS=`$global:LASTEXITCODE"
+    exit `$global:LASTEXITCODE
+}
+"@
+[System.IO.File]::WriteAllText($wrapper, $wrapperText)
+$old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+$nonzeroText = & powershell -NoProfile -ExecutionPolicy Bypass -File $wrapper 2>&1 | Out-String
+$nonzeroCode = $LASTEXITCODE
+$ErrorActionPreference = $old
+$expectedLocation = (Get-Location).Path
+$finalLocation = [regex]::Match($nonzeroText, '(?m)^FINAL_LOCATION=([^\r\n]*)').Groups[1].Value
+$startLocation = [regex]::Match($nonzeroText, '(?m)^START_LOCATION=([^\r\n]*)').Groups[1].Value
+Assert-True "tar_nonzero_fails_and_restores_location" (($nonzeroCode -ne 0) -and ($nonzeroText -match "tar failed") -and ($finalLocation -ceq $expectedLocation) -and ($startLocation -ceq $expectedLocation)) "code $nonzeroCode final '$finalLocation' start '$startLocation' expected '$expectedLocation' text $nonzeroText"
+# A thrown tar command in this process must restore the location too.
+$c = New-Case "tar-thrown" "import sys`nsys.exit(1)"
+$start = (Get-Location).Path
+$oldSystemRoot = $env:SystemRoot
+$env:SystemRoot = Join-Path $base "missing-system"
+$errorText = ""
+try {
+    try {
+        & (Join-Path $repo "scripts/build-zip.ps1") -Root $c.Root -OutDir $c.Out -NoPlaces
+        $thrown = $false
+    } catch {
+        $errorText = $_.Exception.Message
+        $thrown = ($errorText -match "tar\.exe")
+    }
+    Assert-True "tar_thrown_restores_location" ($thrown -and ((Get-Location).Path -eq $start)) "thrown $thrown error $errorText location $((Get-Location).Path) expected $start"
+} finally {
+    $env:SystemRoot = $oldSystemRoot
+    Set-Location $start
+}
 # 8 -PlacesFile: no Python, game or key needed; the file is staged verbatim
 $c = New-Case "t8" "import sys`nsys.exit(1)"
 $pf = Join-Path $base "t8_places.json"
@@ -165,10 +216,10 @@ Push-Location $p
 & git add x.py scripts/provenance.ps1 | Out-Null
 & git -c user.name=t -c user.email=t@t.invalid commit -q -m t | Out-Null
 $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-$out = & powershell -NoProfile -File (Join-Path $p "scripts/provenance.ps1") 2>&1 | Out-String
+$out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $p "scripts/provenance.ps1") 2>&1 | Out-String
 $code1 = $LASTEXITCODE
 Set-Content -Path (Join-Path $p "x.py") -Value @("x = 1") -Encoding ASCII
-$null = & powershell -NoProfile -File (Join-Path $p "scripts/provenance.ps1") 2>&1 | Out-String
+$null = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $p "scripts/provenance.ps1") 2>&1 | Out-String
 $code2 = $LASTEXITCODE
 $ErrorActionPreference = $old
 Pop-Location

@@ -102,8 +102,11 @@ if (Test-Path $zip) { Remove-Item $zip }
 # System32 tar writes forward-slash entry names; PS 5.1 Compress-Archive
 # writes backslashes, which mod managers may not handle.
 Push-Location $stage
-& "$env:SystemRoot\System32\tar.exe" -a -c -f $zip modinfo.ini reframework
-$tarCode = $LASTEXITCODE
-Pop-Location
+try {
+    & "$env:SystemRoot\System32\tar.exe" -a -c -f $zip modinfo.ini reframework
+    $tarCode = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
 if ($tarCode -ne 0) { Stop-Build "tar failed" }
 Write-Host "built $zip"
