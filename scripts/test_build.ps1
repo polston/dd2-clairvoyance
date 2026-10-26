@@ -1,11 +1,11 @@
-# Tests for build-zip.ps1 and provenance.ps1 (python scan). Uses temp roots and
-# a stub extractor; never touches the repo's tools/ key or dist/.
+# Tests for build-zip.ps1 and provenance.ps1 (python scan). Uses an ignored,
+# project-local scratch root and a stub extractor; never touches the tools/ key.
 param([string]$Python = "python")
 $ErrorActionPreference = "Stop"
 $repo = Split-Path $PSScriptRoot -Parent
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $script:failed = 0
-$base = Join-Path ([System.IO.Path]::GetTempPath()) "qnml_build_test_$PID"
+$base = Join-Path $repo "dist/test-tmp/qnml_build_test_$PID"
 New-Item -ItemType Directory -Force $base | Out-Null
 
 $havePython = $false

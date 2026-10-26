@@ -82,6 +82,7 @@ local exports = {
   "save_learned_names", "catalog_stats", "quest_log_is_end", "catalog_ids",
   "learn_names", "npc_live_pos", "probe_lookup", "refresh_objectives",
   "refresh_gates", "refresh_tree_gates", "refresh_items",
+  "read_masquerade_door_closed",
 }
 for _, name in ipairs(exports) do
   assert(A[name] ~= nil, "missing export: " .. name)
@@ -131,9 +132,9 @@ local contract = {
   "refresh_items", "item_related", "reset_item_throttle", "quest_steps_text",
   "tracked_qid", "journal_now", "journal_all", "npc_name", "journal_stats",
   "map_open", "map_jump_apply", "journal_note_jump", "map_cursor",
-  "quest_step",
+  "quest_step", "masquerade_door_closed",
 }
-assert(#contract == 48)
+assert(#contract == 49)
 for _, name in ipairs(contract) do
   assert(type(a[name]) == "function", "contract function missing: " .. name)
 end
@@ -3343,6 +3344,91 @@ do
   assert(a.focus_set() == nil, "QF3 nil clears")
 
   sdk.get_managed_singleton, sdk.find_type_definition, Vector3f = prev_gms, prev_ftd, prev_v3
+end
+
+-- v14: the masquerade passage leaf is selected by the full fingerprint.
+do
+  local function obj(fields, calls, tn)
+    return {
+      get_field = function(_, n)
+        local v = fields and fields[n]
+        if v == "RAISE" then error("field") end
+        return v
+      end,
+      call = function(_, n, ...)
+        local f = calls and calls[n]
+        if f == "RAISE" then error("call") end
+        return type(f) == "function" and f(...) or f
+      end,
+      get_type_definition = function()
+        return { get_full_name = function() return tn end }
+      end,
+    }
+  end
+  local function arr(values)
+    return { get_elements = function() return values end }
+  end
+  local function manager(x, closed, opt)
+    opt = opt or {}
+    local leaf = obj({ IsClose = closed })
+    local list = obj(nil, {
+      get_Count = function() return opt.leaf_count or 1 end,
+      get_Item = function() return leaf end,
+    })
+    local pos = opt.pos or { x = x, y = 73.5, z = -819.250 }
+    local tr = obj(nil, { get_UniversalPosition = function() return pos end })
+    local go = obj(nil, {
+      get_Name = function() return opt.name or "gm80_026" end,
+      get_Transform = function() return tr end,
+    })
+    local g = obj({ CompDoorList = list }, { get_GameObject = function() return go end },
+      opt.type_name or "app.gm05_046")
+    local inner = { obj({ Value = g }) }
+    if opt.duplicate then inner[2] = obj({ Value = g }) end
+    local hs = obj({ _entries = arr(inner) })
+    local outer = { obj({ key = opt.gid or 85, value = hs }) }
+    return obj({ ["<ManagedGimmicksByIDs>k__BackingField"] = obj({ _entries = arr(outer) }) })
+  end
+
+  assert(A.read_masquerade_door_closed(manager(396.075, true)) == true,
+    "DR1 closed fingerprint")
+  assert(A.read_masquerade_door_closed(manager(396.075, false)) == false,
+    "DR2 opening/open fingerprint")
+  assert(A.read_masquerade_door_closed(manager(396.325, true)) == true,
+    "DR3 inclusive 0.25 boundary")
+  assert(A.read_masquerade_door_closed(manager(396.3251, true)) == nil,
+    "DR4 outside tolerance")
+  assert(A.read_masquerade_door_closed(manager(396.075, true, { gid = 86 })) == nil,
+    "DR5 gid mismatch")
+  assert(A.read_masquerade_door_closed(manager(396.075, true, { name = "other" })) == nil,
+    "DR6 name mismatch")
+  assert(A.read_masquerade_door_closed(manager(396.075, true,
+      { type_name = "app.OtherDoor" })) == nil, "DR7 type mismatch")
+  assert(A.read_masquerade_door_closed(manager(396.075, true, { leaf_count = 0 })) == nil,
+    "DR8 empty leaf list")
+  assert(A.read_masquerade_door_closed(manager(396.075, true, { leaf_count = 2 })) == nil,
+    "DR9 multiple leaves")
+  assert(A.read_masquerade_door_closed(manager(396.075, true, { duplicate = true })) == nil,
+    "DR10 duplicate match is unknown")
+  assert(A.read_masquerade_door_closed(manager(396.075, true,
+      { pos = { x = 0 / 0, y = 73.5, z = -819.250 } })) == nil, "DR11 malformed position")
+
+  local old_gms = sdk.get_managed_singleton
+  local qowner, gm = {}, manager(396.075, false)
+  sdk.get_managed_singleton = function(n)
+    if n == "app.QuestLogManager" then return qowner end
+    if n == "app.GimmickManager" then return gm end
+  end
+  a.reset_session_caches()
+  assert(a.masquerade_door_closed() == false, "DR12 open commits last-known")
+  gm = nil
+  assert(a.masquerade_door_closed() == false, "DR13 unreadable keeps last-known")
+  qowner = {}
+  assert(a.reset_session_caches() == true, "DR14 owner reset")
+  assert(a.masquerade_door_closed() == nil, "DR15 reset returns unknown")
+  gm = manager(396.075, true)
+  assert(a.masquerade_door_closed() == true, "DR16 confirmed close restores")
+  sdk.get_managed_singleton = old_gms
 end
 
 print("adapter_load_test: OK")

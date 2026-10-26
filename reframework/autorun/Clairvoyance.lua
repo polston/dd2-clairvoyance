@@ -236,7 +236,7 @@ end
 wt.hints, wt.hints_open = {}, {}   -- hints by qid (npcs.parse_hints); qid -> step idx
 wt.quest_rel, wt.quest_pak, wt.focus_tracked_qid = nil, nil, nil   -- quest focus (SPEC 32)
 wt.hint_inputs = function()
-  local qids, pins = {}, {}
+  local qids, pins, needs_door = {}, {}, false
   local rb = snapshot ~= nil and snapshot.rec_by or nil
   for qid in pairs(wt.hints_open) do
     local rec = rb ~= nil and rb[qid] or nil
@@ -254,9 +254,14 @@ wt.hint_inputs = function()
         for i, p in ipairs(st.pins) do
           pins[#pins + 1] = { qid = qid, i = i, label = p.label,
             pos = { x = p.x, y = p.y, z = p.z } }
+          if qid == 30040 and i == 1 then needs_door = true end
         end
       end
     end
+  end
+  if needs_door and adapter.masquerade_door_closed ~= nil then
+    local ok, closed = pcall(adapter.masquerade_door_closed)
+    pins = core.filter_hint_pins(pins, ok and closed or nil)
   end
   return qids, pins
 end
@@ -1131,6 +1136,7 @@ re.on_frame(function()
       if wt.route_cid ~= nil then logmsg("route cleared: save or session changed") end
       wt.hints_open, wt.route_cid = {}, nil   -- SPEC 22.6.6
       wt.route_names = nil
+      wt.route_on, wt.has_pts = false, false
     end
     -- v9: a debug-expanded qid keeps the tree live (QNML_DEBUG, SPEC 16.10)
     local tree_live = core.tree_wanted(now, tree_open_at)
@@ -1253,15 +1259,6 @@ re.on_frame(function()
     show.world_givers = wt.q("givers", {})
     show.world = wt.q("input", nil)
     show.routes = (show.world or {}).routes   -- SPEC 22.8.4, 32.13
-    -- the in-world route layer does no work while there is no route
-    wt.route_on = false
-    if type(show.routes) == "table" then
-      for ri = 1, #show.routes do
-        local rs = show.routes[ri].stops
-        if type(rs) == "table" and #rs > 0 then wt.route_on = true; break end
-      end
-    end
-    wt.has_pts = wt.route_on
     -- v5 (SPEC 12.3a): own pcall so a raised walk never skips compute;
     -- inside the timed window so Tick ms includes it; skipped when the
     -- category is hidden (SPEC 9.9).
@@ -1319,7 +1316,11 @@ re.on_frame(function()
       wt.tick_n = ((wt.tick_n or 0) % 20) + 1
       wt.tick_ring[wt.tick_n] = last_tick_ms
     end
+    local route_on, has_pts, route_pts = core.route_point_state(result, show.routes,
+      wt.route_on, wt.has_pts, snapshot ~= nil and snapshot.route_pts or nil)
+    wt.route_on, wt.has_pts = route_on, has_pts
     if result == nil then return end   -- game state unavailable: keep last snapshot
+    result.route_pts = route_pts
     -- SPEC 20.12.2: one signature over the markers then the full-map world
     -- markers, so committed positions are kept for both
     local all = result.markers

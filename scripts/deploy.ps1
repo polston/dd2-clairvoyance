@@ -1,7 +1,15 @@
 # Copies the mod into the game's reframework/autorun for direct testing.
-param([string]$GameDir = "C:\Program Files (x86)\Steam\steamapps\common\Dragons Dogma 2")
+param(
+    [string]$GameDir = "C:\Program Files (x86)\Steam\steamapps\common\Dragons Dogma 2",
+    [string]$Lua = "lua",
+    [string]$Luac = "luac"
+)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
+$checkArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+    (Join-Path $PSScriptRoot "check.ps1"), "-Lua", $Lua, "-Luac", $Luac)
+& powershell @checkArgs
+if ($LASTEXITCODE -ne 0) { throw "checks failed; deployment refused" }
 $dest = Join-Path $GameDir "reframework\autorun"
 if (-not (Test-Path $dest)) { throw "autorun not found: $dest" }
 # Remove the pre-rename copy (these two exact names only) so two copies never load.

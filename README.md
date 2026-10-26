@@ -47,7 +47,8 @@ map and in your view.
 17. In the item menu, quest-related items get a small dot on their slot, and
     the selected one is labelled with its quest above the item panel.
 18. Quest hints: a Hints node in the Quest tree, closed until you open it,
-    with reviewed text and step-specific pins on the full map and minimap.
+    with reviewed text and step-specific pins on the full map, minimap and in
+    the world. The masquerade's hidden-door pin disappears once the passage opens.
 
 ## Requirements
 
@@ -177,7 +178,9 @@ Offline tests run with Lua 5.4:
 
 The check script syntax-checks every Lua file, runs the offline tests, and runs
 the packaging tests. `scripts/build-zip.ps1` builds the release zips and
-`scripts/deploy.ps1` copies the mod into a game install for testing.
+`scripts/deploy.ps1` runs that full check before it copies the mod into a game
+install for testing; pass the same `-Lua` and `-Luac` paths when they are not on
+`PATH`.
 
 The optional pak reader in `tools/` regenerates the places file from the game's
 archives. It needs your own key file, `tools/pak_key.local.txt`, which is not

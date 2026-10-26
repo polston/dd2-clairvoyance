@@ -2184,6 +2184,7 @@ local function reset_runtime_caches()
     CATALOG_RETRY_AT = 0
     CATALOG_BUILT_AT = 0
     QUEST_STATE_CACHE = {}
+    A.MASQUERADE_DOOR_LAST = nil
     NPC_HOLDER_CACHE = {}
     OBJECTIVE_TABLE = nil
     OBJECTIVE_FAILED_STREAK = 0
@@ -3046,6 +3047,48 @@ local function gimmick_pos(g)
     return { x = x, y = y, z = z }, live
 end
 
+-- v14 (SPEC 22.11.3): read the masquerade passage leaf. The full fingerprint
+-- prevents another nearby saloon door from deciding this one hint pin.
+function A.read_masquerade_door_closed(gm)
+    local dict = safe_field(gm, "<ManagedGimmicksByIDs>k__BackingField")
+    local outer = items.elements(safe_field(dict, "_entries"))
+    if outer == nil then return nil end
+    local matched, matches = nil, 0
+    for i = 1, #outer do
+        if int_value(safe_field(outer[i], "key")) == 85 then
+            local hs = safe_field(outer[i], "value")
+            local inner = items.elements(safe_field(hs, "_entries"))
+            if inner == nil then return nil end
+            for k = 1, #inner do
+                local g = safe_field(inner[k], "Value")
+                if g == nil then g = safe_field(inner[k], "value") end
+                if g ~= nil then
+                    local ok = pcall(function()
+                        local gt = g:get_type_definition()
+                        if gt == nil or gt:get_full_name() ~= "app.gm05_046" then return end
+                        local go = safe_call(g, "get_GameObject")
+                        if safe_call(go, "get_Name") ~= "gm80_026" then return end
+                        local tr = safe_call(go, "get_Transform")
+                        local x, y, z = vec_xyz(safe_call(tr, "get_UniversalPosition"))
+                        if x == nil then return end
+                        local dx, dy, dz = x - 396.075, y - 73.5, z + 819.250
+                        if dx * dx + dy * dy + dz * dz > 0.0625 then return end
+                        local rok, leaves, n = read_collection_items(safe_field(g, "CompDoorList"))
+                        if not rok or n ~= 1 then error("door leaf unreadable") end
+                        local closed = safe_field(leaves[1], "IsClose")
+                        if type(closed) ~= "boolean" then error("door state unreadable") end
+                        matches = matches + 1
+                        matched = closed
+                    end)
+                    if not ok then return nil end
+                end
+            end
+        end
+    end
+    if matches ~= 1 then return nil end
+    return matched
+end
+
 -- Each scan returns records, skipped, capped - or nil when its
 -- top-level read fails. One pcall per gimmick; a nil pos is a skip.
 local function scan_placed(gm)
@@ -3590,6 +3633,12 @@ function A.make()
   a.journal_now = journal.now
   a.journal_all = journal.all
   a.quest_step = journal.quest_step
+  function a.masquerade_door_closed()
+    local v = A.read_masquerade_door_closed(
+      sdk.get_managed_singleton("app.GimmickManager"))
+    if type(v) == "boolean" then A.MASQUERADE_DOOR_LAST = v end
+    return A.MASQUERADE_DOOR_LAST
+  end
   a.npc_name = journal.npc_name
   a.journal_stats = journal.stats_copy
   a.map_open = journal.map_open
