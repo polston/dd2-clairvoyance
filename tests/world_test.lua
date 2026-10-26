@@ -3147,7 +3147,10 @@ do
       end
       d.area_nodes[49] = { P(1, 0, 1) }
       d.keypos = {}
-      f.reads.key_pos = function(k) return d.keypos[k] end
+      f.reads.key_pos = function(k)
+        d.key_reads = (d.key_reads or 0) + 1
+        return d.keypos[k]
+      end
       f.reads.schedule_rows = function(cid)
         f.reads_n.schedule_rows = (f.reads_n.schedule_rows or 0) + 1
         if d.bad[cid] then error("fake bad cid") end
@@ -3583,13 +3586,16 @@ do
       check("direct route: bypasses NPC schedule and key reads",
         (f.reads_n.schedule_now or 0) == 0 and (f.reads_n.current_sig or 0) == 0
         and (f.reads_n.schedule_rows or 0) == 0
-        and (f.reads_n.key_pos or 0) == 0 and stub.calls.route_stops == 0)
+        and d.key_reads == nil and stub.calls.route_stops == 0)
 
+      local target_state = { x = 410.5, y = 73.5, z = -821.2,
+        kind = "place", name = "Objective: Hall" }
       local function replace(fields)
-        local cid = fields.kind == "item" and -1099511747938 or direct.cid
+        for key, value in pairs(fields) do target_state[key] = value end
+        local cid = target_state.kind == "item" and -1099511747938 or direct.cid
         local m = { cid = cid, place = 0, direct = true, objective = true,
-          qid = 30040, kind = fields.kind or "place", name = fields.name or "Objective: Hall",
-          pos = P(fields.x or 410.5, fields.y or 73.5, fields.z or -821.2) }
+          qid = 30040, kind = target_state.kind, name = target_state.name,
+          pos = P(target_state.x, target_state.y, target_state.z) }
         w:set_routes({ m })
         local changed = w:refresh(1, true, tg) == true
         local got = route_in(w, cid)
@@ -3610,6 +3616,34 @@ do
       changed, got = replace({ name = "Objective: New Hall" })
       check("direct route: name change pokes and replaces published metadata",
         changed and got ~= nil and got.name == "Objective: New Hall")
+
+      -- Pending NPC routes retain their slots before a direct objective takes one.
+      do
+        local n2, d2 = nfix()
+        for cid = 2001, 2004 do
+          d2.rows[cid] = rows_of({ 6, 18, 49 })
+          d2.cur[cid] = { area = 49, location = 0 }
+        end
+        d2.area_nodes[49] = { P(1, 0, 1) }
+        local w2 = n2.new()
+        w2:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" },
+          { cid = -1099511747937, place = 0, direct = true, objective = true,
+            qid = 30040, kind = "place", name = "Objective: Hall", pos = original } })
+        local tg2 = ptg(P(5, 1, 5), nil)
+        for tick = 0, 5 do
+          w2:refresh(tick, true, tg2)
+        end
+        local a, b, de = route_in(w2, 2001), route_in(w2, 2002), route_in(w2, -1099511747937)
+        check("direct route: pending NPC readiness keeps objective in slot three",
+          a ~= nil and b ~= nil and de ~= nil and a.slot == 1 and b.slot == 2 and de.slot == 3)
+        w2:set_routes({ { cid = 2003, name = "Cc" }, { cid = 2004, name = "Dd" },
+          { cid = -1099511747937, place = 0, direct = true, objective = true,
+            qid = 30040, kind = "place", name = "Objective: Hall", pos = original } })
+        w2:refresh(10, true, tg2)
+        de = route_in(w2, -1099511747937)
+        check("direct route: an assigned objective slot survives pending NPCs",
+          de ~= nil and de.slot == 3)
+      end
 
       local place = { cid = -77, place = 77, name = "Legacy place" }
       w:set_routes({ place, { cid = -1099511747937, place = 0, direct = true,

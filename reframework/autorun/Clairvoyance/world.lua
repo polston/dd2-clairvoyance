@@ -1743,9 +1743,7 @@ function M.new(a, reads, io)
     local pl = valid_pos(tg.player) and tg.player or nil
     for i, e in ipairs(info) do
       local m = e.m
-      if e.direct then
-        ents[i] = direct_entry(m, tg)
-      elseif not e.place then
+      if not e.direct and not e.place then
         if e.bad or e.failed then
           ents[i] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
           S.place_from[m.cid] = nil
@@ -1783,6 +1781,8 @@ function M.new(a, reads, io)
     for i, e in ipairs(info) do
       local m = e.m
       if e.direct then
+        local held = S.slot_of[m.cid] == nil and not npc_ready
+        if held then free_slot(m.cid) else ents[i] = direct_entry(m, tg) end
         if ents[i] ~= nil then out[#out + 1] = ents[i] end
       elseif e.place then
         local held = S.slot_of[m.cid] == nil and not npc_ready
