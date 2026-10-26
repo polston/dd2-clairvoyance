@@ -15,10 +15,14 @@ function New-Case([string]$name, [int]$checkExit) {
     $scripts = Join-Path $root "scripts"
     $autorun = Join-Path $root "reframework/autorun"
     $module = Join-Path $autorun "Clairvoyance"
-    $images = Join-Path $root "reframework/images/Clairvoyance/icons"
+    $images = Join-Path $root "reframework/images/Clairvoyance"
+    $icons = Join-Path $images "icons"
     $game = Join-Path $root "game"
     $dest = Join-Path $game "reframework/autorun"
-    New-Item -ItemType Directory -Force $scripts, $module, $images, $dest | Out-Null
+    $installedModule = Join-Path $dest "Clairvoyance"
+    $installedIcons = Join-Path $game "reframework/images/Clairvoyance/icons"
+    New-Item -ItemType Directory -Force $scripts, $module, $icons, $dest, `
+        $installedModule, $installedIcons | Out-Null
     Copy-Item (Join-Path $repo "scripts/deploy.ps1") $scripts
     Set-Content -Path (Join-Path $scripts "check.ps1") -Encoding ASCII -Value @(
         'param([string]$Lua, [string]$Luac)',
@@ -29,14 +33,26 @@ function New-Case([string]$name, [int]$checkExit) {
     Set-Content -Path (Join-Path $autorun "Clairvoyance.lua") -Value "new" -Encoding ASCII
     Set-Content -Path (Join-Path $module "core.lua") -Value "new module" -Encoding ASCII
     Set-Content -Path (Join-Path $images "1.png") -Value "new icon" -Encoding ASCII
-    Set-Content -Path (Join-Path $dest "Clairvoyance.lua") -Value "old" -Encoding ASCII
-    return @{ Root = $root; Game = $game; Installed = (Join-Path $dest "Clairvoyance.lua") }
+    Set-Content -Path (Join-Path $dest "Clairvoyance.lua") -Value "old main" -Encoding ASCII
+    Set-Content -Path (Join-Path $installedModule "core.lua") -Value "old module" -Encoding ASCII
+    Set-Content -Path (Join-Path $installedIcons "1.png") -Value "old icon" -Encoding ASCII
+    Set-Content -Path (Join-Path $dest "QuestNPCMapLabels.lua") -Value "old legacy" -Encoding ASCII
+    return @{
+        Root = $root
+        Game = $game
+        Installed = @(
+            (Join-Path $dest "Clairvoyance.lua"),
+            (Join-Path $installedModule "core.lua"),
+            (Join-Path $installedIcons "1.png"),
+            (Join-Path $dest "QuestNPCMapLabels.lua")
+        )
+    }
 }
 
 function Invoke-Deploy($case) {
     $old = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $text = & powershell -NoProfile -File (Join-Path $case.Root "scripts/deploy.ps1") `
+    $text = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $case.Root "scripts/deploy.ps1") `
         -GameDir $case.Game 2>&1 | Out-String
     $code = $LASTEXITCODE
     $ErrorActionPreference = $old
@@ -48,19 +64,70 @@ try {
 
     $blocked = New-Case "blocked" 1
     $result = Invoke-Deploy $blocked
-    $installed = Get-Content -Raw $blocked.Installed
+    $installed = Get-Content -Raw $blocked.Installed[0]
     Assert-True "failed_check_blocks_deploy" `
-        (($result.Code -ne 0) -and ($installed.Trim() -eq "old") -and
+        (($result.Code -ne 0) -and ($installed.Trim() -eq "old main") -and
          (Test-Path (Join-Path $blocked.Root "check-ran.txt"))) `
         "code $($result.Code), installed '$($installed.Trim())', output $($result.Text)"
 
     $allowed = New-Case "allowed" 0
     $result = Invoke-Deploy $allowed
-    $installed = Get-Content -Raw $allowed.Installed
+    $installed = Get-Content -Raw $allowed.Installed[0]
     Assert-True "successful_check_allows_deploy" `
         (($result.Code -eq 0) -and ($installed.Trim() -eq "new") -and
          (Test-Path (Join-Path $allowed.Root "check-ran.txt"))) `
         "code $($result.Code), installed '$($installed.Trim())', output $($result.Text)"
+
+    $requiredSources = @(
+        @{
+            Name = "main_file"
+            RelativePath = "reframework/autorun/Clairvoyance.lua"
+            Path = "reframework/autorun/Clairvoyance.lua"
+            Type = "Leaf"
+        },
+        @{
+            Name = "module_directory"
+            RelativePath = "reframework/autorun/Clairvoyance"
+            Path = "reframework/autorun/Clairvoyance"
+            Type = "Container"
+        },
+        @{
+            Name = "image_directory"
+            RelativePath = "reframework/images/Clairvoyance"
+            Path = "reframework/images/Clairvoyance"
+            Type = "Container"
+        }
+    )
+    foreach ($source in $requiredSources) {
+        foreach ($mode in @("missing", "wrong_type")) {
+            $caseName = "source_$($source.Name)_$mode"
+            $case = New-Case $caseName 0
+            $sourcePath = Join-Path $case.Root $source.Path
+            if (Test-Path -LiteralPath $sourcePath) {
+                Remove-Item -LiteralPath $sourcePath -Recurse -Force
+            }
+            if ($mode -eq "wrong_type") {
+                if ($source.Type -eq "Leaf") {
+                    New-Item -ItemType Directory -Force $sourcePath | Out-Null
+                } else {
+                    Set-Content -Path $sourcePath -Value "wrong type" -Encoding ASCII
+                }
+            }
+            $result = Invoke-Deploy $case
+            $sentinels = @($case.Installed | ForEach-Object {
+                if (Test-Path -LiteralPath $_) { Get-Content -Raw -LiteralPath $_ }
+                else { "<missing>" }
+            })
+            $sentinelText = ($sentinels | ForEach-Object { $_.Trim() }) -join "|"
+            $sentinelsUnchanged = $sentinelText -eq "old main|old module|old icon|old legacy"
+            $gateSkipped = -not (Test-Path -LiteralPath (Join-Path $case.Root "check-ran.txt"))
+            Assert-True "${caseName}_fails_before_gate_without_install_changes" `
+                (($result.Code -ne 0) -and
+                 ($result.Text.Contains("deployment source missing: $($source.RelativePath)")) -and
+                 $gateSkipped -and $sentinelsUnchanged) `
+                "code $($result.Code), gateSkipped $gateSkipped, sentinels '$($sentinels -join '|')', output $($result.Text)"
+        }
+    }
 } finally {
     Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
 }

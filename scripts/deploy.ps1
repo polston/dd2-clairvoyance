@@ -6,6 +6,28 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
+$requiredSources = @(
+    @{
+        RelativePath = "reframework/autorun/Clairvoyance.lua"
+        AbsolutePath = Join-Path $root "reframework/autorun/Clairvoyance.lua"
+        PathType = "Leaf"
+    },
+    @{
+        RelativePath = "reframework/autorun/Clairvoyance"
+        AbsolutePath = Join-Path $root "reframework/autorun/Clairvoyance"
+        PathType = "Container"
+    },
+    @{
+        RelativePath = "reframework/images/Clairvoyance"
+        AbsolutePath = Join-Path $root "reframework/images/Clairvoyance"
+        PathType = "Container"
+    }
+)
+foreach ($source in $requiredSources) {
+    if (-not (Test-Path -LiteralPath $source.AbsolutePath -PathType $source.PathType)) {
+        throw "deployment source missing: $($source.RelativePath)"
+    }
+}
 $checkArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
     (Join-Path $PSScriptRoot "check.ps1"), "-Lua", $Lua, "-Luac", $Luac)
 & powershell @checkArgs
