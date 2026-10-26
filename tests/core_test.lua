@@ -279,6 +279,152 @@ do
   local r = core.compute(a, SHOW_ALL)
   assert(#r.markers == 1 and r.markers[1].cat == "startable")
   assert(r.markers[1].label:find("completed"))  -- state text still in label
+  check("core gap: exact shared label",
+    r.markers[1].label == "Quest 501 - startable / Quest 502 - completed")
+end
+
+-- Adapter states are limited to the three terminal states.
+do
+  local invalid = { "weird", "startable", "in_progress", "giver_dead", "locked" }
+  local states, catalog = {}, {}
+  for i, state in ipairs(invalid) do
+    local qid = 510 + i
+    catalog[#catalog + 1] = qid
+    states[qid] = state
+  end
+  states[520] = "locked"
+  local a = fake_adapter({ catalog = catalog, states = states,
+    acceptable = { 520 }, hints = { [520] = 9520 }, dead = { [9520] = true },
+    statics = { [520] = { x=1, y=2, z=3 } },
+    names = { [511]="A", [512]="B", [513]="C", [514]="D", [515]="E", [520]="F" },
+    regions = {} })
+  local r = core.compute(a, { startable=true, in_progress=true, completed=true,
+    unavailable=true, locked=true, tree_open=true })
+  local cats = {}
+  for _, quest in ipairs(r.quests) do cats[quest.qid] = quest.cat end
+  local all_locked = true
+  for i = 1, #invalid do if cats[510 + i] ~= "locked" then all_locked = false end end
+  check("core gap: category-shaped states fall through to locked", all_locked)
+  check("core gap: invalid locked on acceptable quest falls through to giver-dead",
+    cats[520] == "giver_dead")
+end
+
+-- A dead first candidate among multiple candidates is not a dead sole giver.
+do
+  local a = fake_adapter({ acceptable = { 530 }, casts = { [530] = { 9530, 9531 } },
+    dead = { [9530] = true }, npc_pos = { [9531] = { x=3, y=0, z=4 } } })
+  local r = core.compute(a, SHOW_ALL)
+  check("core gap: multiple candidates are not a sole dead giver",
+    r.counts.startable == 1 and r.counts.giver_dead == 0)
+end
+
+-- Omitted visibility uses the settings defaults.
+do
+  local a = fake_adapter({ acceptable = { 540 }, catalog = { 540, 541 },
+    states = { [541] = "completed" }, hints = { [540] = 9540 },
+    npc_pos = { [9540] = { x=4, y=0, z=0 } } })
+  local r = core.compute(a)
+  check("core gap: compute defaults to settings visibility",
+    #r.markers == 1 and r.markers[1].qids[1] == 540 and r.counts.completed == 1)
+end
+
+-- Exact category wording is used in marker labels.
+do
+  local a = fake_adapter({ acceptable = { 550 }, progressing = { 551 },
+    catalog = { 551 }, hints = { [550] = 9550, [551] = 9551 },
+    dead = { [9550] = true }, statics = { [550] = { x=5, y=0, z=0 } },
+    npc_pos = { [9551] = { x=6, y=0, z=0 } }, names = { [550]="Dead", [551]="Active" } })
+  local r = core.compute(a, SHOW_ALL)
+  local labels = {}
+  for _, marker in ipairs(r.markers) do labels[marker.qids[1]] = marker.label end
+  check("core gap: exact giver-dead label", labels[550] == "Dead - giver dead")
+  check("core gap: exact in-progress label", labels[551] == "Active - in progress")
+end
+
+-- With the tree open, hidden terminal and locked quests skip giver reads;
+-- a hidden acceptable quest still needs candidates for giver_dead.
+do
+  local hints, casts = {}, {}
+  local a = base_adapter({ acceptable_ids = function() return { 561 } end,
+    progressing_ids = function() return {} end,
+    catalog_ids = function() return { 560, 561, 562 } end,
+    quest_state = function(qid) if qid == 560 then return "completed" end end,
+    giver_hint = function(qid) hints[#hints + 1] = qid; return nil end,
+    cast_ids = function(qid) casts[#casts + 1] = qid; return { 9561 } end,
+    npc_alive = function() return false end,
+    quest_region = function() return "Vern" end })
+  local r = core.compute(a, { startable=false, in_progress=false, completed=false,
+    unavailable=false, locked=false, tree_open=true })
+  check("core gap: open tree does not trigger hidden terminal/locked giver reads",
+    r.quests ~= nil and #hints == 1 and hints[1] == 561
+    and #casts == 1 and casts[1] == 561)
+end
+
+-- A focused locked quest keeps its giver for related NPC data when Locked is off.
+do
+  local a = fake_adapter({ catalog = { 570 }, hints = { [570] = 9570 },
+    names = { [570] = "Locked" } })
+  local r = core.compute(a, { startable=true, in_progress=true, completed=false,
+    unavailable=false, locked=false, focus_qids={ 570 } })
+  check("core gap: hidden focused locked quest retains giver",
+    r.focus ~= nil and r.focus.quests[570] ~= nil and r.focus.quests[570].npcs[1] == 9570)
+end
+
+-- A focused nameless locked quest still supplies its giver to focus data.
+do
+  local hint_reads = 0
+  local a = base_adapter({ catalog_ids = function() return { 571 } end,
+    quest_name = function() return nil end,
+    giver_hint = function() hint_reads = hint_reads + 1; return 9571 end,
+    npc_pos = function(cid) if cid == 9571 then return 1, 0, 0 end end })
+  local r = core.compute(a, { startable=true, in_progress=true, completed=false,
+    unavailable=false, locked=false, focus_qids={ 571 } })
+  local focus_marker = false
+  for _, marker in ipairs(r.markers) do
+    if marker.key == "n:9571" and marker.cat == "focus_npc" then focus_marker = true end
+  end
+  local quest = r.focus and r.focus.quests[571]
+  check("core gap: focused nameless locked quest keeps giver and focus marker",
+    hint_reads == 1 and quest ~= nil and quest.npcs[1] == 9571
+    and quest.step_npcs[1] == 9571 and focus_marker)
+end
+
+-- A focused objective marker still retains its distinct hinted giver.
+do
+  local hints, casts = 0, 0
+  local a = base_adapter({ progressing_ids = function() return { 580 } end,
+    giver_hint = function() hints = hints + 1; return 9580 end,
+    cast_ids = function() casts = casts + 1; return { 9581 } end,
+    objective_cids = function(qid) if qid == 580 then return { 9582 } end end,
+    objective_pos = function(cid) if cid == 9582 then return 2, 0, 0 end end,
+    npc_pos = function(cid) if cid == 9580 then return 1, 0, 0 end end })
+  local r = core.compute(a, { startable=true, in_progress=false, completed=false,
+    unavailable=false, locked=false, focus_qids={ 580 } })
+  local objective_marker = false
+  for _, marker in ipairs(r.markers) do
+    if marker.key == "c:9582" then objective_marker = true end
+  end
+  check("core gap: focused objective position keeps distinct hinted giver",
+    objective_marker
+    and r.focus.quests[580].npcs[1] == 9580 and hints == 1 and casts == 1)
+end
+
+-- Shown candidates are built once per quest per compute, then refreshed next compute.
+do
+  local candidates, hint_reads, cast_reads = { 9590, 9591 }, 0, 0
+  local a = base_adapter({ acceptable_ids = function() return { 590 } end,
+    giver_hint = function() hint_reads = hint_reads + 1; return nil end,
+    cast_ids = function() cast_reads = cast_reads + 1; return candidates end,
+    npc_pos = function(cid) return cid, 0, 0 end })
+  local first = core.compute(a, SHOW_ALL)
+  check("core gap: shown candidates are built once for category and position",
+    #first.markers == 1 and first.markers[1].key == "c:9590"
+    and hint_reads == 1 and cast_reads == 1)
+  candidates = { 9592, 9593 }
+  local second = core.compute(a, SHOW_ALL)
+  check("core gap: candidate memo refreshes on next compute",
+    #second.markers == 1 and second.markers[1].key == "c:9592"
+    and hint_reads == 2 and cast_reads == 2)
 end
 
 -- label format: "<name> - <state>"
@@ -692,8 +838,8 @@ do
     and q[3].qid == 12 and q[4].qid == 13)
   check("tr R2: startable shape", #q == 4 and q[1].cat == "startable" and q[1].state == "startable"
     and q[1].grp == "startable" and q[1].name == "Ten" and q[1].region == "Vern")
-  check("tr R2: giver dead forms", #q == 4 and q[2].cat == "giver_dead" and q[2].state == "giver dead"
-    and q[2].grp == "unavailable")
+  check("tr R2: invalid giver-dead state falls through to locked", #q == 4
+    and q[2].cat == "locked" and q[2].state == "locked" and q[2].grp == "locked")
   check("tr R2: in progress forms", #q == 4 and q[3].state == "in progress" and q[3].grp == "in_progress")
   check("tr R2: region fallback", #q == 4 and q[3].region == "Elsewhere")
   local okn, rn = pcall(trc, { acceptable={10}, names={[10]="Ten"} })
