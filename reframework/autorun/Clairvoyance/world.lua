@@ -809,7 +809,7 @@ function M.new(a, reads, io)
           if type(r.cid_name) == "string" and r.cid_name ~= "" then
             names[cid] = r.cid_name
           end
-          local c = classify(cid, r.cid_name, r.src, r.phase)
+          local c = classify(cid, r.cid_name)
           if c == "giver" then
             if not conditional_uids[uid] then
               learn(uid, "giver", cid, r.pos.x, r.pos.y, r.pos.z,
@@ -1214,16 +1214,14 @@ function M.new(a, reads, io)
   end
 
   -- ----- effective atlas -----
-  -- The static + file monsters + learned merge and its sorted keys are kept
-  -- until the learned set (rev) or the file monsters table changes (SPEC
-  -- 28.5.3.1: sort_places and w:reset() each replace S.file_monsters). The
-  -- live rows are laid over it (S.live first, the merge behind it). Returns
-  -- that map and the sorted keys, live uids included.
+  -- The static + eligible file monsters + learned merge and its sorted keys
+  -- are kept until the learned set (rev) or eligibility changes. The live rows
+  -- are laid over it (S.live first, the merge behind it). Returns that map and
+  -- the sorted keys, live uids included.
   local eff_cache = nil
   local function effective()
     local c = eff_cache
-    if c == nil or c.rev ~= rev or c.fm ~= S.file_monsters
-      or c.eligible ~= S.eligible_file_monsters then
+    if c == nil or c.rev ~= rev or c.eligible ~= S.eligible_file_monsters then
       stats.eff_builds = stats.eff_builds + 1
       local eff = {}
       for uid, e in pairs(static) do eff[uid] = e end
@@ -1237,7 +1235,7 @@ function M.new(a, reads, io)
         end
         eff[uid] = e
       end
-      c = { rev = rev, fm = S.file_monsters, eligible = S.eligible_file_monsters,
+      c = { rev = rev, eligible = S.eligible_file_monsters,
         map = eff, keys = sorted_keys(eff) }
       eff_cache = c
     end
