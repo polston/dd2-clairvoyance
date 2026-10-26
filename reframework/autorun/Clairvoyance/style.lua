@@ -4,7 +4,8 @@ local M = {}
 
 M.GROUPS = { "startable", "in_progress", "completed", "unavailable", "locked",
   "quest_item", "chest", "treasure", "token", "beetle", "monster", "seller",
-  "npc_search", "route_stop", "hint_pin", "focus_place", "route_line", "names", "items" }
+  "npc_search", "route_stop", "hint_pin", "focus_place", "focus_objective",
+  "route_line", "names", "items" }
 
 local IS_GROUP = {}
 -- per-group key names, built once so resolve concatenates nothing per call
@@ -24,6 +25,13 @@ function M.group_of(cat)
   if cat == "focus_npc" then return "npc_search" end
   if IS_GROUP[cat] then return cat end
   return nil
+end
+
+-- Marker presentation group; objective styling takes precedence over the
+-- semantic category while the marker retains that category for other rules.
+function M.group_of_marker(marker)
+  if type(marker) == "table" and marker.objective == true then return "focus_objective" end
+  return type(marker) == "table" and M.group_of(marker.cat) or nil
 end
 
 function M.resolve(settings, group)

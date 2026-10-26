@@ -58,7 +58,9 @@ function M.defaults()
     world_monster_off = { large = {}, small = {} },
     -- quest focus (SPEC 32)
     focus_qids = {}, focus_tracked = false, focus_unrelated = 0, focus_routes = 1,
+    focus_related_qids = {},
     color_focus_place = 0xFFFFAB40, icon_focus_place = 26,
+    color_focus_objective = 0xFFFFD54F, icon_focus_objective = 34,
   }
   for _, g in ipairs(style.GROUPS) do
     t["style_" .. g .. "_override"] = false
@@ -126,7 +128,7 @@ M.HAS_FULLMAP = {
   [12] = true, [13] = true, [14] = true, [15] = true, [16] = true,
   [17] = true, [18] = true, [19] = true, [20] = true, [21] = true,
   [22] = true, [23] = true, [24] = true, [25] = true, [26] = true,
-  [27] = true, [28] = true, [29] = true, [31] = true, [32] = true,
+  [27] = true, [28] = true, [29] = true, [31] = true, [32] = true, [34] = true,
   [37] = true, [38] = true, [39] = true, [40] = true, [41] = true,
   [42] = true, [43] = true, [44] = true, [46] = true, [47] = true,
   [48] = true, [49] = true, [50] = true, [51] = true, [52] = true,
@@ -143,7 +145,7 @@ M.V12_ICON = { icon_startable = 52, icon_in_progress = 0, icon_completed = 42,
   icon_chest = 31, icon_treasure = 58, icon_monster = 29, icon_seller = 13,
   icon_token = 57, icon_beetle = 73,
   icon_npc_search = 31, icon_route_stop = 25, icon_hint_pin = 58,
-  icon_focus_place = 26 }
+  icon_focus_place = 26, icon_focus_objective = 34 }
 M.V12_COLOR = { icon_color = 0xFF960707, color_in_progress = 0xFFD7A500,
   color_completed = 0xFF2E8B57, color_unavailable = 0xFF787878,
   color_locked = 0xFF46468C, color_quest_item = 0xFF00C8FF,
@@ -273,12 +275,13 @@ local COLOR_KEYS = { "icon_color", "color_in_progress", "color_completed",
   "color_unavailable", "color_locked", "color_quest_item",
   "color_chest", "color_treasure", "color_monster", "color_seller",
   "color_token", "color_beetle",
-  "color_npc_search", "color_hint_pin", "color_focus_place" }
+  "color_npc_search", "color_hint_pin", "color_focus_place", "color_focus_objective" }
 local ICON_KEYS = { "icon_startable", "icon_in_progress", "icon_completed",
   "icon_unavailable", "icon_locked", "icon_quest_item",
   "icon_chest", "icon_treasure", "icon_monster", "icon_seller",
   "icon_token", "icon_beetle",
-  "icon_npc_search", "icon_route_stop", "icon_hint_pin", "icon_focus_place" }
+  "icon_npc_search", "icon_route_stop", "icon_hint_pin", "icon_focus_place",
+  "icon_focus_objective" }
 M.ICON_KEYS, M.COLOR_KEYS = ICON_KEYS, COLOR_KEYS
 
 -- The v14 style keys by field rule (SPEC 23.4). route_number_size and
@@ -343,7 +346,7 @@ M.PANEL_ORDER = {
   { id = "map", keys = { "show_minimap", "matching_icons",
     "coords_map_cursor", "coords_minimap" } },
   { id = "appearance", keys = panel_appearance },
-  { id = "quest_tree", keys = { "focus_qids", "focus_tracked", "focus_unrelated",
+  { id = "quest_tree", keys = { "focus_qids", "focus_related_qids", "focus_tracked", "focus_unrelated",
     "focus_dim_alpha", "focus_routes", "focus_place_routes" } },
   { id = "world", keys = {} },
   { id = "status", keys = { "debug" } },
@@ -383,24 +386,25 @@ RULE.route_number_size = { "size" }
 RULE.search_text = { "text" }
 RULE.focus_unrelated = { "int", 0, 1 }
 RULE.focus_routes = { "int", 0, 2 }
-RULE.focus_qids = { "qid_list" }
+RULE.focus_qids = { "qid_list", 16 }
+RULE.focus_related_qids = { "qid_list", 17 }
 RULE.focus_dim_alpha = { "int", 5, 100 }
 RULE.route_colors = { "color_list", M.ROUTE_SLOTS }
 
 local QID_MAX = 16
 M.QID_MAX = QID_MAX
--- Whole numbers above 0, repeats dropped, first 16; a non-table gives an empty list.
-local function qid_list_field(v)
+-- Whole ids in the signed 32-bit domain, repeats dropped, capped per setting.
+local function qid_list_field(v, cap)
   local out = {}
   if type(v) ~= "table" then return out end
   local seen = {}
   for _, x in ipairs(v) do
     if type(x) == "number" then
       local n = math.tointeger(x)
-      if n and n > 0 and not seen[n] then
+      if n and n > 0 and n <= 0x7FFFFFFF and not seen[n] then
         seen[n] = true
         out[#out + 1] = n
-        if #out >= QID_MAX then break end
+        if #out >= (cap or QID_MAX) then break end
       end
     end
   end
@@ -433,7 +437,7 @@ local function field(raw, k, d)
   elseif kind == "int" then return int_field(raw, k, d, r[2], r[3])
   elseif kind == "float" then return range_field(raw, k, d, r[2], r[3])
   elseif kind == "size" then return number_size_field(raw, k)
-  elseif kind == "qid_list" then return qid_list_field(raw[k])
+  elseif kind == "qid_list" then return qid_list_field(raw[k], r[2])
   elseif kind == "color_list" then return color_list_field(raw[k], r[2])
   end
   return M.cut_search(raw[k])
@@ -638,7 +642,7 @@ function M.validate(raw)
   for _, k in ipairs(STYLE_BOOL_KEYS) do out[k] = field(raw, k, d) end
   for _, k in ipairs(STYLE_COLOR_KEYS) do out[k] = field(raw, k, d) end
   for _, k in ipairs({ "overhead_distance", "world_max_markers", "search_text",
-    "overhead_names", "route_number_size", "route_path", "focus_qids",
+    "overhead_names", "route_number_size", "route_path", "focus_qids", "focus_related_qids",
     "focus_unrelated", "focus_routes", "focus_dim_alpha" }) do
     out[k] = field(raw, k, d)
   end
@@ -695,6 +699,7 @@ M.COLOR_KEY = {
   token = "color_token", beetle = "color_beetle",
   npc_search = "color_npc_search", hint_pin = "color_hint_pin",
   focus_npc = "color_npc_search", focus_place = "color_focus_place",
+  focus_objective = "color_focus_objective",
 }
 M.ICON_KEY = {
   startable = "icon_startable", in_progress = "icon_in_progress",
@@ -706,6 +711,7 @@ M.ICON_KEY = {
   npc_search = "icon_npc_search", route_stop = "icon_route_stop",
   hint_pin = "icon_hint_pin",
   focus_npc = "icon_npc_search", focus_place = "icon_focus_place",
+  focus_objective = "icon_focus_objective",
 }
 function M.color_of(settings, cat)
   return settings[M.COLOR_KEY[cat]] or settings.icon_color
@@ -720,9 +726,11 @@ end
 -- v12 icon is drawable instead, the v12 icon replaces it; "head" never
 -- substitutes (no game glyph there).
 function M.icon_for(settings, m, sheet, step, drawable)
-  local id = step or M.icon_of(settings, m.cat)
+  local objective = m.objective == true
+  local id = objective and (settings.icon_focus_objective or 34)
+    or step or M.icon_of(settings, m.cat)
   if sheet == "head" or drawable(id) then return id end
-  local v12 = M.V12_ICON[M.ICON_KEY[m.cat]]
+  local v12 = M.V12_ICON[objective and "icon_focus_objective" or M.ICON_KEY[m.cat]]
   if not v12 then return id end
   local has = (sheet == "map") and M.HAS_FULLMAP or M.HAS_MINIMAP
   if not has[id] then return v12 end
@@ -747,7 +755,9 @@ end
 -- scaled by focus_dim_alpha when dim (SPEC 32.14.6); the lowest when several apply.
 function M.marker_color(settings, m)
   local c
-  if m.cat == "route_stop" then
+  if m.objective == true then
+    c = settings.color_focus_objective or 0xFFFFD54F
+  elseif m.cat == "route_stop" then
     local rc = settings.route_colors
     c = rc and (rc[m.slot] or rc[1]) or ROUTE_COLORS[1]
   else

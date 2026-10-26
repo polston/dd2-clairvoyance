@@ -28,9 +28,13 @@ local function with(extra)
 end
 
 do -- groups and group_of
-  check("19 groups", #S.GROUPS == 19)
+  check("20 groups", #S.GROUPS == 20)
   check("group_of focus_npc", S.group_of("focus_npc") == "npc_search")
   check("group_of focus_place", S.group_of("focus_place") == "focus_place")
+  check("objective marker gets objective style group", type(S.group_of_marker) == "function"
+    and S.group_of_marker({ cat = "seller", objective = true }) == "focus_objective")
+  check("non-objective marker keeps semantic style group", type(S.group_of_marker) == "function"
+    and S.group_of_marker({ cat = "seller" }) == S.group_of("seller"))
   check("group_of shop", S.group_of("shop") == "seller")
   check("group_of chest", S.group_of("chest") == "chest")
   check("group_of unknown", S.group_of("zzz") == nil)
