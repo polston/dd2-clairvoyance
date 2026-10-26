@@ -5055,8 +5055,8 @@ do
     { routes = 2, places = true }, rname)
   check("objective routes group NPC, destination and shown related per quest",
     #direct == 6 and direct[1].cid == 1 and direct[2].kind == "place"
-      and direct[3].cid == 2 and direct[4].kind == "place"
-      and direct[5].cid == 11 and direct[6].cid == 12)
+      and direct[3].cid == 11 and direct[4].cid == 2
+      and direct[5].kind == "place" and direct[6].cid == 12)
   local nine_primary = { active = {}, quests = {} }
   for qid = 1, 9 do
     nine_primary.active[#nine_primary.active + 1] = qid
@@ -5096,8 +5096,9 @@ do
     if member.cid == 2 then has_later_npc = true end
     if member.qid == 2 and member.kind == "place" then has_later_place = true end
   end
-  check("early ancillary routes preserve later quest objective and destination slots",
-    has_later_npc and has_later_place and #direct == 8)
+  check("per-quest route order emits early ancillary routes before later objectives",
+    direct[1].cid == 1 and direct[2].cid == 101 and direct[7].cid == 106
+      and direct[8].cid == 107 and not has_later_npc and not has_later_place and #direct == 8)
   local route_id_fn = core.objective_route_id
   check("objective route id helper validates qid and kind",
     type(route_id_fn) == "function"
@@ -5119,6 +5120,7 @@ do
     end
     check("objective route ids fit 48-bit GUIDs and avoid NPC/legacy IDs",
       not route_ids.failed and math.abs(route_id_fn(0x7FFFFFFF, "item")) < 0x1000000000000
+        and math.abs(route_id_fn(0x7FFFFFFF, "item")) * 32 < 0x1000000000000
         and math.abs(route_id_fn(1, "place")) > 0xFFFFFFFFFF
         and route_id_fn(7, "place") < 0 and route_id_fn(7, "place") ~= 77
         and route_id_fn(7, "place") ~= -77)
@@ -5224,7 +5226,7 @@ do
   covering_adapter.journal_now = function() return {} end
   local cover_world = { focus_places = {}, world_shops = true, world_sellers = true,
     world_max_markers = 300, world_origin = pos(0), map_origin = pos(0),
-    shops = { { shop = 8, cid = 77, npc = "Shopkeeper", pos = pos(2),
+    shops = { { shop = 8, cid = 77, npc = "Shopkeeper", pos = pos(2), hover = "Stock details",
       items = { { id = 1, name = "Ration" } }, discovered = true } } }
   local cover_show = { focus_qids = { 10 }, focus_related_qids = {}, world = cover_world,
     world_shops = true, world_sellers = false, world_origin = pos(0), map_origin = pos(0), now = 0 }
@@ -5237,9 +5239,9 @@ do
   check("objective covers shop in player and full-map lists", map_shop and map_shop.objective == true
     and full_shop and full_shop.objective == true and core.marker_cid(map_shop) == 77
     and map_shop.label == "Shopkeeper (shop)" and full_shop.label == map_shop.label
-    and map_shop.hover == nil and full_shop.hover == map_shop.hover)
+    and map_shop.hover == "Stock details" and full_shop.hover == map_shop.hover)
   local seller_world = { focus_places = {}, world_max_markers = 300,
-    sellers = { { shop = 9, item = 2, item_name = "Salt", npc = "Vendor", cid = 77,
+    sellers = { { shop = 9, item = 2, item_name = "Salt", npc = "Vendor", cid = 77, hover = "Seller details",
       pos = pos(2), discovered = true, qids = {} } } }
   local seller_show = {}
   for k, v in pairs(cover_show) do seller_show[k] = v end
@@ -5250,8 +5252,8 @@ do
   check("objective covers seller in player and full-map lists", map_seller and map_seller.objective == true
     and full_seller and full_seller.objective == true and core.marker_cid(map_seller) == 77
     and map_seller.label == "Salt - sold by Vendor" and full_seller.label == map_seller.label
-    and map_seller.hover == nil and full_seller.hover == map_seller.hover)
-  local search_world = { focus_places = {}, npcs = { { cid = 77, name = "Target", pos = pos(2),
+    and map_seller.hover == "Seller details" and full_seller.hover == map_seller.hover)
+  local search_world = { focus_places = {}, npcs = { { cid = 77, name = "Target", pos = pos(2), hover = "NPC details",
     alive = true, discovered = true } } }
   local search_cover = core.compute(covering_adapter, { focus_qids = { 10 },
     focus_related_qids = {}, world = search_world, search = core.parse_query("target"),
@@ -5262,7 +5264,7 @@ do
     search_marker and search_marker.objective == true and search_full_marker
       and search_full_marker.objective == true and core.marker_cid(search_marker) == 77
       and search_marker.label == "Target" and search_full_marker.label == search_marker.label
-      and search_marker.hover == nil and search_full_marker.hover == search_marker.hover)
+      and search_marker.hover == "NPC details" and search_full_marker.hover == search_marker.hover)
   local multiple_locs_adapter = fake_adapter({ progressing = { 10 }, hints = { [10] = 5 },
     npc_pos = { [5] = pos(1), [77] = pos(2) }, objective_pos = { [77] = pos(2) },
     objectives = { [10] = {} }, item_needs = { [10] = { { id = 99, num = 1 } } },

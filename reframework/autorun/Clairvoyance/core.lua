@@ -1052,7 +1052,7 @@ end
 
 -- One candidate for an entry, with `hidden` set by the show filters.
 local function make_cand(cat, e, ctx)
-  local c = { cat = cat, qids = {}, pos = e.pos, cid = e.cid }
+  local c = { cat = cat, qids = {}, pos = e.pos, cid = e.cid, hover = e.hover }
   if cat == "chest" then
     c.key = "w:chest:" .. tostring(e.uid)
     local lab = ctx.labels and ctx.labels[e]
@@ -3558,14 +3558,12 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
           if #list + reserve() < ROUTE_CAP then list[#list + 1] = member end
         end
       end
-      -- Keep primary routes in active-quest order, then use remaining slots
-      -- for ancillary candidates.
+      -- SPEC 39.8: emit each quest's objective routes and shown ancillary
+      -- routes together, preserving active-quest order under the cap.
       for _, group in ipairs(groups) do
         for _, member in ipairs(group.primary) do
           append(member)
         end
-      end
-      for _, group in ipairs(groups) do
         for _, member in ipairs(group.ancillary) do append(member) end
       end
       return list, #list + reserve(), total
