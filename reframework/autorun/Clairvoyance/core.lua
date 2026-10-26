@@ -32,6 +32,7 @@ local STATE_TEXT = {
   completed = "completed", failed = "failed", canceled = "canceled",
   giver_dead = "giver dead", locked = "locked",
 }
+local VALID_STATE = { completed = true, failed = true, canceled = true }
 -- category -> color/show group
 local GROUP = {
   startable = "startable", in_progress = "in_progress",
@@ -2257,8 +2258,7 @@ function M.journal_line(stats)
     stats.on_target or 0, stats.off_target or 0, stats.timeout or 0, stats.canceled or 0)
 end
 
--- Matches the settings defaults so a caller that predates the show table
--- (mid-merge state before Task 4 lands) still computes v1-equivalent output.
+-- Matches the settings defaults.
 local DEFAULT_SHOW = { startable = true, in_progress = true,
   completed = false, unavailable = false, locked = false, quest_items = true }
 
@@ -2508,8 +2508,11 @@ function M.compute(adapter, show)
     repeat
       if not adapter.is_side(qid) then break end
 
-      local hint, cands = giver_candidates(adapter, qid)
-      if fset[qid] then focus_rec[qid] = { hint = hint, first = cands[1] } end
+      local hint, cands
+      local function get_candidates()
+        if cands == nil then hint, cands = giver_candidates(adapter, qid) end
+        return hint, cands
+      end
 
       -- Category: specific before generic (SPEC §9.2).
       local cat
@@ -2519,11 +2522,12 @@ function M.compute(adapter, show)
         local st = adapter.quest_state(qid)
         -- An unexpected state string must not crash the tick: treat it as
         -- no state rather than indexing counts/GROUP with an unknown key.
-        if st ~= nil and counts[st] == nil then st = nil end
+        if st ~= nil and not VALID_STATE[st] then st = nil end
         if st ~= nil then
           cat = st
         elseif acc[qid] then
           -- An unknown NPC counts as alive; only a dead giver lands here.
+          get_candidates()
           local sole = (hint ~= nil and hint)
             or (#cands == 1 and cands[1]) or nil
           if sole ~= nil and not adapter.npc_alive(sole) then
@@ -2572,11 +2576,17 @@ function M.compute(adapter, show)
       -- labels, unresolved, or unnamed (SPEC §9.3).
       if not show[GROUP[cat]] and not fset[qid] then break end
       if cat == "in_progress" and show[GROUP[cat]] then shown_inprog[qid] = true end
+      if fset[qid] then
+        get_candidates()
+        focus_rec[qid] = { hint = hint, first = cands[1] }
+      end
       -- A locked quest that no name source can label (no log entry, nothing
       -- learned, nothing in the game's text files) gets no marker rather
       -- than a "Quest <qid>" placeholder. An empty name counts as no name.
       if quests == nil then nm = adapter.quest_name(qid) end
       if cat == "locked" and (nm == nil or nm == "") then break end
+
+      get_candidates()
 
       local static = adapter.static_pos(qid)
 
