@@ -3147,7 +3147,10 @@ do
       end
       d.area_nodes[49] = { P(1, 0, 1) }
       d.keypos = {}
-      f.reads.key_pos = function(k) return d.keypos[k] end
+      f.reads.key_pos = function(k)
+        d.key_reads = (d.key_reads or 0) + 1
+        return d.keypos[k]
+      end
       f.reads.schedule_rows = function(cid)
         f.reads_n.schedule_rows = (f.reads_n.schedule_rows or 0) + 1
         if d.bad[cid] then error("fake bad cid") end
@@ -3549,6 +3552,156 @@ do
         and pe.stops[1].discovered == true and pe.stops[2].discovered == true)
       check("place member: a slot and no current", pe ~= nil and pe.slot == 2
         and pe.current == nil and pe.err == nil)
+    end
+
+    -- 1b: a direct-position objective member shares the place publication path.
+    do
+      local f, d = sfix()
+      local w = f.new()
+      local direct = { cid = -1099511747937, place = 0, direct = true,
+        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
+        pos = P(410.5, 73.5, -821.2) }
+      local tg = ptg(P(5, 1, 5), nil)
+      local original = P(direct.pos.x, direct.pos.y, direct.pos.z)
+      w:set_routes({ direct })
+      local gen = w.route_gen
+      w:set_routes({ { cid = direct.cid, place = 0, direct = true,
+        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
+        pos = P(410.5, 73.5, -821.2) } })
+      check("direct route: unchanged position is idempotent", w.route_gen == gen)
+      direct.pos.x = 999
+      w:refresh(0, true, tg)
+      local e = route_in(w, -1099511747937)
+      check("direct route: publishes two stops from player to copied target",
+        e ~= nil and e.place == 0 and #e.stops == 2
+        and e.stops[1].pos.x == 5 and e.stops[1].pos.y == 1 and e.stops[1].pos.z == 5
+        and e.stops[2].pos.x == 410.5 and e.stops[2].pos.y == 73.5
+        and e.stops[2].pos.z == -821.2)
+      check("direct route: retains objective metadata and has no route-stop endpoint",
+        e ~= nil and e.direct == true and e.objective == true and e.qid == 30040
+        and e.kind == "place" and e.name == "Objective: Hall"
+        and e.pos.x == 410.5 and e.pos.y == 73.5 and e.pos.z == -821.2
+        and e.route_stop == nil and e.stops[1].route_stop == nil
+        and e.stops[2].route_stop == nil)
+      check("direct route: bypasses NPC schedule and key reads",
+        (f.reads_n.schedule_now or 0) == 0 and (f.reads_n.current_sig or 0) == 0
+        and (f.reads_n.schedule_rows or 0) == 0
+        and d.key_reads == nil and stub.calls.route_stops == 0)
+
+      local target_state = { x = 410.5, y = 73.5, z = -821.2,
+        kind = "place", name = "Objective: Hall" }
+      local function replace(fields)
+        for key, value in pairs(fields) do target_state[key] = value end
+        local cid = target_state.kind == "item" and -1099511747938 or direct.cid
+        local m = { cid = cid, place = 0, direct = true, objective = true,
+          qid = 30040, kind = target_state.kind, name = target_state.name,
+          pos = P(target_state.x, target_state.y, target_state.z) }
+        w:set_routes({ m })
+        local changed = w:refresh(1, true, tg) == true
+        local got = route_in(w, cid)
+        return changed, got
+      end
+      local changed, got = replace({ x = 411.5 })
+      check("direct route: x change pokes and replaces published stop",
+        changed and got ~= nil and got.stops[2].pos.x == 411.5)
+      changed, got = replace({ y = 74.5 })
+      check("direct route: y change pokes and replaces published stop",
+        changed and got ~= nil and got.stops[2].pos.y == 74.5)
+      changed, got = replace({ z = -820.2 })
+      check("direct route: z change pokes and replaces published stop",
+        changed and got ~= nil and got.stops[2].pos.z == -820.2)
+      changed, got = replace({ kind = "item" })
+      check("direct route: kind change pokes and replaces published metadata",
+        changed and got ~= nil and got.kind == "item")
+      changed, got = replace({ name = "Objective: New Hall" })
+      check("direct route: name change pokes and replaces published metadata",
+        changed and got ~= nil and got.name == "Objective: New Hall")
+
+      -- Pending NPC routes retain their slots before a direct objective takes one.
+      do
+        local n2, d2 = nfix()
+        for cid = 2001, 2004 do
+          d2.rows[cid] = rows_of({ 6, 18, 49 })
+          d2.cur[cid] = { area = 49, location = 0 }
+        end
+        d2.area_nodes[49] = { P(1, 0, 1) }
+        local w2 = n2.new()
+        w2:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" },
+          { cid = -1099511747937, place = 0, direct = true, objective = true,
+            qid = 30040, kind = "place", name = "Objective: Hall", pos = original } })
+        local tg2 = ptg(P(5, 1, 5), nil)
+        for tick = 0, 5 do
+          w2:refresh(tick, true, tg2)
+        end
+        local a, b, de = route_in(w2, 2001), route_in(w2, 2002), route_in(w2, -1099511747937)
+        check("direct route: pending NPC readiness keeps objective in slot three",
+          a ~= nil and b ~= nil and de ~= nil and a.slot == 1 and b.slot == 2 and de.slot == 3)
+        w2:set_routes({ { cid = 2003, name = "Cc" }, { cid = 2004, name = "Dd" },
+          { cid = -1099511747937, place = 0, direct = true, objective = true,
+            qid = 30040, kind = "place", name = "Objective: Hall", pos = original } })
+        w2:refresh(10, true, tg2)
+        de = route_in(w2, -1099511747937)
+        check("direct route: an assigned objective slot survives pending NPCs",
+          de ~= nil and de.slot == 3)
+      end
+
+      local place = { cid = -77, place = 77, name = "Legacy place" }
+      w:set_routes({ place, { cid = -1099511747937, place = 0, direct = true,
+        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
+        pos = original } })
+      local tboth = ptg(P(5, 1, 5), { 77 })
+      d.keypos[77] = P(200, 0, 200)
+      w:refresh(2, true, tboth)
+      local legacy, objective = route_in(w, -77), route_in(w, -1099511747937)
+      check("direct route: coexists with legacy place member",
+        legacy ~= nil and legacy.place == 77 and objective ~= nil and objective.place == 0
+        and objective.direct == true)
+
+      w.path_job = { cid = -1099511747937 }
+      w.rps[-1099511747937] = true
+      w:set_routes({ place })
+      check("direct route: leaving clears its slot, path job and path cache",
+        w.path_job == nil and w.rps[-1099511747937] == nil
+        and route_in(w, -1099511747937) == nil)
+      w.near["5.0,1.0,5.0"] = 8
+      w:set_routes({ { cid = -1099511747937, place = 0, direct = true,
+        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
+        pos = original } })
+      w:refresh(3, true, ptg(P(6, 1, 6), nil))
+      check("direct route: leaving clears its place_from origin",
+        w.near["5.0,1.0,5.0"] == 8)
+
+      w:set_route(2001, "Aa")
+      w:set_routes({ { cid = -1099511747937, place = 0, direct = true,
+        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
+        pos = original } })
+      local n = 0
+      repeat n = n + 1 until not w:refresh(4, true, tg) or n > 20
+      local routes = (w:input() or {}).routes or {}
+      check("direct route: search target reservation and dedupe stay unchanged",
+        #routes == 2 and routes[1].cid == 2001
+        and route_in(w, -1099511747937) ~= nil)
+    end
+
+    -- 1c: direct routes require both a valid player and a valid copied target.
+    do
+      local f, d = sfix()
+      local w = f.new()
+      local direct = { cid = -1099511747937, place = 0, direct = true,
+        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
+        pos = P(410.5, 73.5, -821.2) }
+      w:set_routes({ direct })
+      w:refresh(0, true, ptg(nil, nil))
+      check("direct route: missing player publishes nothing", route_in(w, direct.cid) == nil)
+      w:poke()
+      w:refresh(1, true, ptg(P(5, 1, 5), nil))
+      check("direct route: valid member publishes after player appears",
+        route_in(w, direct.cid) ~= nil)
+      direct.pos = { x = "invalid", y = 0, z = 0 }
+      w:set_routes({ direct })
+      w:poke()
+      w:refresh(2, true, ptg(P(5, 1, 5), nil))
+      check("direct route: invalid target publishes nothing", route_in(w, direct.cid) == nil)
     end
 
     -- 2: no build, no signature read, no schedule_now failure
