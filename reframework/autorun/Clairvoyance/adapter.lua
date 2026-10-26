@@ -1499,8 +1499,15 @@ local NAME_STORE_PATH = "Clairvoyance_names.json"
 local PERSISTED_NAMES = {}
 local NAMES_DIRTY = false
 do
+    local function data_file_exists(path)
+        local ok, handle = pcall(io.open, path, "r")
+        if not ok or handle == nil then return false end
+        pcall(function() handle:close() end)
+        return true
+    end
     local raw = require("Clairvoyance.settings_util").load_with_legacy(
-        json.load_file, NAME_STORE_PATH, "QuestNPCMapLabels_names.json")
+        json.load_file, NAME_STORE_PATH, "QuestNPCMapLabels_names.json",
+        data_file_exists)
     if type(raw) == "table" then
         for k, v in pairs(raw) do
             local qid = tonumber(k)

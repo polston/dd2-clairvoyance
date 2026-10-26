@@ -409,6 +409,51 @@ do
   local function boom(path) if path == "new.json" then error("bad") end return { a = 3 } end
   check("legacy: erroring load falls back", su.load_with_legacy(boom, "new.json", "old.json").a == 3)
   check("legacy: nil legacy path -> nil", su.load_with_legacy(load, "new.json", nil) == nil)
+  local nil_primary_calls = 0
+  local function nil_primary(path)
+    nil_primary_calls = nil_primary_calls + 1
+    if path == nil then return { a = 6 } end
+  end
+  check("legacy: three-argument nil primary behavior preserved",
+    su.load_with_legacy(nil_primary, nil, "old.json").a == 6
+      and nil_primary_calls == 1)
+  local exists, calls = {}, {}
+  local function recorded_load(path)
+    calls[#calls + 1] = path
+    return files[path]
+  end
+  local function file_exists(path) return exists[path] == true end
+  files, exists = {}, {}
+  check("legacy optional: neither exists skips parsing",
+    su.load_with_legacy(recorded_load, "new.json", "old.json", file_exists) == nil
+      and #calls == 0)
+  files, exists, calls = { ["new.json"] = { a = 1 }, ["old.json"] = { a = 2 } },
+    { ["new.json"] = true, ["old.json"] = true }, {}
+  check("legacy optional: new present wins",
+    su.load_with_legacy(recorded_load, "new.json", "old.json", file_exists).a == 1
+      and #calls == 1 and calls[1] == "new.json")
+  files, exists, calls = { ["old.json"] = { a = 2 } }, { ["old.json"] = true }, {}
+  check("legacy optional: legacy-only loads legacy",
+    su.load_with_legacy(recorded_load, "new.json", "old.json", file_exists).a == 2
+      and #calls == 1 and calls[1] == "old.json")
+  files, exists, calls = { ["old.json"] = { a = 3 } },
+    { ["new.json"] = true, ["old.json"] = true }, {}
+  check("legacy optional: nil new result falls through",
+    su.load_with_legacy(recorded_load, "new.json", "old.json", file_exists).a == 3
+      and #calls == 2 and calls[1] == "new.json" and calls[2] == "old.json")
+  files, exists, calls = { ["old.json"] = { a = 4 } }, { ["old.json"] = true }, {}
+  local function raising_exists(path)
+    if path == "new.json" then error("probe failed") end
+    return exists[path] == true
+  end
+  check("legacy optional: raising existence check falls back",
+    su.load_with_legacy(recorded_load, "new.json", "old.json", raising_exists).a == 4
+      and #calls == 1 and calls[1] == "old.json")
+  files, calls = { ["new.json"] = { a = 5 } }, {}
+  local function truthy_exists() return "yes" end
+  check("legacy optional: only exact true permits parsing",
+    su.load_with_legacy(recorded_load, "new.json", nil, truthy_exists) == nil
+      and #calls == 0)
 end
 
 -- v14 style settings (SPEC 23.4, 23.7)
