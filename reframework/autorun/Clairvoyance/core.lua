@@ -3140,6 +3140,17 @@ function M.overhead_points(markers, cam, radius)
   return out
 end
 
+-- v14: route stops are the only fixed map-space points drawn in-world.
+-- Hint pins remain map/minimap guidance: an in-world label becomes stale as
+-- soon as the player performs the hinted interaction.
+function M.route_overhead_points(markers)
+  local out = {}
+  for _, m in ipairs(markers or {}) do
+    if m.cat == "route_stop" then out[#out + 1] = m end
+  end
+  return out
+end
+
 -- v8 (SPEC 15.3a): the item round runs only while BOTH toggles are on;
 -- otherwise the tick invalidates (zero managed calls). v19 (SPEC 32.6.1): the
 -- round also runs while show.focus_on.
