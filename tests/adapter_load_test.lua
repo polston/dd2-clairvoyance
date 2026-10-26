@@ -67,8 +67,10 @@ ValueType = {
 Vector3f = permissive()
 -- learned-name store: stored file with good and bad entries; dumps captured
 local dumped, dump_count, dump_result = nil, 0, true
+local json_reads, close_attempts = {}, 0
 json = {
-  load_file = function()
+  load_file = function(path)
+    json_reads[#json_reads + 1] = path
     return { ["20001"] = "Alpha", ["x"] = "bad", ["20002"] = "",
       ["20003"] = 7, ["10030"] = "Learned Override" }
   end,
@@ -77,7 +79,28 @@ json = {
   end,
 }
 
-local A = require("adapter")
+local real_io_open = io.open
+local io_open_calls = {}
+io.open = function(path, mode)
+  if path == "Clairvoyance_names.json" then
+    io_open_calls[#io_open_calls + 1] = path
+    return nil, "missing"
+  end
+  if path == "QuestNPCMapLabels_names.json" then
+    io_open_calls[#io_open_calls + 1] = path
+    return { close = function() close_attempts = close_attempts + 1 end }
+  end
+  return real_io_open(path, mode)
+end
+local require_ok, A = pcall(require, "adapter")
+io.open = real_io_open
+assert(require_ok, "adapter require failed: " .. tostring(A))
+assert(#io_open_calls == 2 and io_open_calls[1] == "Clairvoyance_names.json"
+  and io_open_calls[2] == "QuestNPCMapLabels_names.json",
+  "both fixed learned-name paths checked")
+assert(close_attempts == 1, "legacy existence handle close attempted once")
+assert(#json_reads == 1 and json_reads[1] == "QuestNPCMapLabels_names.json",
+  "missing new store skips parsing and legacy store loads")
 
 local exports = {
   "GIVER_HINTS", "GENERIC_NPC_IDS", "QUEST_REGION",

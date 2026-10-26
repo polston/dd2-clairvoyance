@@ -767,13 +767,21 @@ end
 -- One-time migration from the pre-rename data file names: load the new
 -- name; when it is missing (or unreadable) load the old name instead. The old
 -- file is never touched; callers always save under the new name.
-function M.load_with_legacy(load, path, legacy_path)
-  local ok, v = pcall(load, path)
-  if ok and v ~= nil then return v end
+function M.load_with_legacy(load, path, legacy_path, exists)
+  local function attempt(p)
+    if exists ~= nil then
+      if p == nil then return nil end
+      local ok_exists, present = pcall(exists, p)
+      if not ok_exists or present ~= true then return nil end
+    end
+    local ok, v = pcall(load, p)
+    if ok then return v end
+    return nil
+  end
+  local v = attempt(path)
+  if v ~= nil then return v end
   if legacy_path == nil then return nil end
-  local ok2, v2 = pcall(load, legacy_path)
-  if ok2 then return v2 end
-  return nil
+  return attempt(legacy_path)
 end
 
 return M
