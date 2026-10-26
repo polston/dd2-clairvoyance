@@ -47,9 +47,7 @@ map and in your view.
 17. In the item menu, quest-related items get a small dot on their slot, and
     the selected one is labelled with its quest above the item panel.
 18. Quest hints: a Hints node in the Quest tree, closed until you open it,
-    with pins on the map and in the world for the step you are on. The shipped
-    hints file lists quest items only so far; its text and pins are still to
-    come.
+    with reviewed text and step-specific pins on the full map and minimap.
 
 ## Requirements
 
@@ -66,8 +64,8 @@ map and in your view.
    into the game folder by hand, merging with the existing `reframework` folder.
 3. Start the game.
 
-The release zip includes the generated places file the world tracker reads
-(`reframework/data/Clairvoyance_places.json`).
+The release zip includes the generated places, hints and quests files plus the
+matching-icon pictures.
 
 ## Settings
 

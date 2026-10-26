@@ -3331,6 +3331,9 @@ do
   for _, mm in ipairs(sel) do sk[#sk + 1] = mm.key end
   check("npc 15: minimap quest < route/hint < world",
     table.concat(sk, ",") == "c:5,h:1:1,r:1:1,w:chest:a,w:npc:9")
+  local overhead = core.route_overhead_points(mk)
+  check("npc 15b: hint pins stay off the in-world layer",
+    #overhead == 1 and overhead[1].key == "r:1:1")
 
   -- hint step reads, step_icons off
   local reads = {}

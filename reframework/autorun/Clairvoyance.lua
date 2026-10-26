@@ -1253,7 +1253,7 @@ re.on_frame(function()
     show.world_givers = wt.q("givers", {})
     show.world = wt.q("input", nil)
     show.routes = (show.world or {}).routes   -- SPEC 22.8.4, 32.13
-    -- the frame layers do no work while there is no route and no pin
+    -- the in-world route layer does no work while there is no route
     wt.route_on = false
     if type(show.routes) == "table" then
       for ri = 1, #show.routes do
@@ -1261,7 +1261,7 @@ re.on_frame(function()
         if type(rs) == "table" and #rs > 0 then wt.route_on = true; break end
       end
     end
-    wt.has_pts = wt.route_on or #show.hint_pins > 0
+    wt.has_pts = wt.route_on
     -- v5 (SPEC 12.3a): own pcall so a raised walk never skips compute;
     -- inside the timed window so Tick ms includes it; skipped when the
     -- category is hidden (SPEC 9.9).
@@ -3277,7 +3277,8 @@ re.on_frame(function()
   end
 end)
 
--- v14 (SPEC 22.8.4c, 22.11.3): route stops and hint pins as overhead points.
+-- v14 (SPEC 22.8.4c): route stops as overhead points. Hint pins stay on the
+-- map and minimap, where their guidance does not become a stale world label.
 -- Camera space = map space minus the player's offset, read each frame; no
 -- offset means nothing this frame. Own failure counters (10.3b).
 -- v14 (SPEC 23.6.8): the ready walking paths in the world, nodes raised 0.3 m.
@@ -3337,10 +3338,7 @@ wt.route_frame = function()
     or snapshot == nil or ui_map ~= nil then return end
   local pts = snapshot.route_pts
   if pts == nil then
-    pts = {}
-    for _, m in ipairs(snapshot.markers) do
-      if m.cat == "route_stop" or m.cat == "hint_pin" then pts[#pts + 1] = m end
-    end
+    pts = core.route_overhead_points(snapshot.markers)
     snapshot.route_pts = pts
   end
   local cx, cy, cz = camera_pos()
