@@ -141,8 +141,10 @@ $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 $nonzeroText = & powershell -NoProfile -ExecutionPolicy Bypass -File $wrapper 2>&1 | Out-String
 $nonzeroCode = $LASTEXITCODE
 $ErrorActionPreference = $old
-$expectedLocation = [regex]::Escape((Get-Location).Path)
-Assert-True "tar_nonzero_fails_and_restores_location" (($nonzeroCode -ne 0) -and ($nonzeroText -match "tar failed") -and ($nonzeroText -match "FINAL_LOCATION=$expectedLocation") -and ($nonzeroText -match "START_LOCATION=$expectedLocation")) "code $nonzeroCode text $nonzeroText"
+$expectedLocation = (Get-Location).Path
+$finalLocation = [regex]::Match($nonzeroText, '(?m)^FINAL_LOCATION=([^\r\n]*)').Groups[1].Value
+$startLocation = [regex]::Match($nonzeroText, '(?m)^START_LOCATION=([^\r\n]*)').Groups[1].Value
+Assert-True "tar_nonzero_fails_and_restores_location" (($nonzeroCode -ne 0) -and ($nonzeroText -match "tar failed") -and ($finalLocation -ceq $expectedLocation) -and ($startLocation -ceq $expectedLocation)) "code $nonzeroCode final '$finalLocation' start '$startLocation' expected '$expectedLocation' text $nonzeroText"
 # A thrown tar command in this process must restore the location too.
 $c = New-Case "tar-thrown" "import sys`nsys.exit(1)"
 $start = (Get-Location).Path
