@@ -758,6 +758,60 @@ check("ot: non-progressing drops at once", T({}, m0, {}).cids[10] == nil)
 check("ot: non-progressing record ignored",
   T({ {qid=11,cid=7,issued=true} }, nil, P).cids[11] == nil)
 
+-- SPEC 39.4: the issued objective read is distinct from the legacy candidate
+-- list. It contains only exact-true issued candidates and retains them across
+-- clean empty / absent walks for three builds.
+local oi0 = T({ {qid=10,cid=7,issued=false}, {qid=10,cid=9,issued=true},
+  {qid=10,cid=5,issued=true}, {qid=10,cid=9,issued=true} }, nil, P)
+check("ot issued: exact-true set sorted, unique, legacy cids retained",
+  oi0.issued ~= nil and table.concat(oi0.issued[10] or {}, ",") == "5,9"
+  and table.concat(oi0.cids[10] or {}, ",") == "5,9,7")
+local oir = T({ {qid=10,cid=9,issued=true}, {qid=10,cid=5,issued=true} }, oi0, P)
+check("ot issued: previous first remains first when still issued",
+  table.concat(oir.issued[10] or {}, ",") == "5,9")
+local oe1 = T({ {qid=10,cid=7,issued=false} }, oi0, P)
+local oe2 = T({ {qid=10,cid=7,issued=false} }, oe1, P)
+local oe3 = T({ {qid=10,cid=7,issued=false} }, oe2, P)
+check("ot issued: clean empty issued set retained three builds",
+  table.concat(oe1.issued[10] or {}, ",") == "5,9"
+  and table.concat(oe2.issued[10] or {}, ",") == "5,9"
+  and table.concat(oe3.issued[10] or {}, ",") == "5,9")
+local oe4 = T({ {qid=10,cid=7,issued=false} }, oe3, P)
+check("ot issued: clean empty issued set drops on fourth build",
+  oe4.issued[10] == nil)
+local oa1 = T({}, oi0, P)
+local oa2 = T({}, oa1, P)
+local oa3 = T({}, oa2, P)
+check("ot issued: absent qid retention keeps issued targets",
+  table.concat(oa1.issued[10] or {}, ",") == "5,9"
+  and table.concat(oa2.issued[10] or {}, ",") == "5,9"
+  and table.concat(oa3.issued[10] or {}, ",") == "5,9")
+local onew = T({ {qid=10,cid=8,issued=true}, {qid=10,cid=9,issued=true} }, oi0, P)
+check("ot issued: changed nonempty set replaces immediately with sticky first",
+  table.concat(onew.issued[10] or {}, ",") == "8,9")
+check("ot issued: nonprogressing qid drops immediately",
+  T({}, oi0, {}).issued[10] == nil)
+check("ot issued: reader returns nil when unknown",
+  type(core.objective_issued_cids) == "function"
+  and core.objective_issued_cids(oe4, 10) == nil
+  and core.objective_issued_cids(oi0, 10) == oi0.issued[10])
+local legacy_d0 = T({ { qid = 10, cid = 7, issued = false } }, nil, P)
+local legacy_d1 = T({ { qid = 10, cid = 7, issued = false },
+  { qid = 10, cid = 5, issued = true }, { qid = 10, cid = 9, issued = true } }, legacy_d0, P)
+local legacy_d2 = T({ { qid = 10, cid = 7, issued = false },
+  { qid = 10, cid = 5, issued = true }, { qid = 10, cid = 9, issued = true } }, legacy_d1, P)
+check("ot: legacy candidate debounce remains independent of issued-first order",
+  legacy_d1.cids[10][1] == 7 and legacy_d2.cids[10][1] == 5)
+local legacy_custom_prev = { cids = { [10] = { 7 } }, issued = { [10] = { 9 } },
+  miss = {}, issued_miss = {}, issued_streak = { [10] = { cid = 11, n = 1 } } }
+local legacy_custom1 = T({ { qid = 10, cid = 7, issued = false },
+  { qid = 10, cid = 5, issued = true }, { qid = 10, cid = 9, issued = true } }, legacy_custom_prev, P)
+local legacy_custom2 = T({ { qid = 10, cid = 7, issued = false },
+  { qid = 10, cid = 5, issued = true }, { qid = 10, cid = 9, issued = true } }, legacy_custom1, P)
+check("ot: issued sticky order cannot alter legacy debounce winner",
+  legacy_custom1.cids[10][1] == 7 and legacy_custom1.issued_streak[10].cid == 5
+    and legacy_custom2.cids[10][1] == 5)
+
 -- v5: resolution
 local function objadapter(over)
   local base = {
@@ -3564,6 +3618,16 @@ do
   local overhead = core.route_overhead_points(mk)
   check("npc 15b: route stops and hint pins stay on the in-world layer",
     #overhead == 2 and overhead[1].key == "h:1:1" and overhead[2].key == "r:1:1")
+  local objective_place = { key = "o:p:30040", cat = "focus_place", objective = true,
+    qid = 30040, pos = P(8), label = "Objective: Vernworth Hall" }
+  local ancillary_place = { key = "f:3004", cat = "focus_place", pos = P(9) }
+  overhead = core.route_overhead_points({ mk[2], mk[3], objective_place, ancillary_place })
+  check("npc 15b2: objective destination joins the in-world point layer alone",
+    #overhead == 3 and overhead[1].key == "h:1:1" and overhead[2].key == "r:1:1"
+      and overhead[3].key == "o:p:30040")
+  local opo, oph, opp = core.route_point_state({ markers = { objective_place } }, {})
+  check("npc 15b3: objective destination activates the point layer without routes",
+    opo == false and oph == true and #opp == 1 and opp[1].key == "o:p:30040")
   local ro, hp, pts = core.route_point_state({ markers = { mk[2] } }, {})
   check("npc 15c: a hint without a route activates the point layer",
     ro == false and hp == true and #pts == 1 and pts[1].key == "h:1:1")
@@ -4686,8 +4750,8 @@ do
     c5.focus_kept == true and core.is_result(c5) == false)
   r = run({}, Q("twenty"), { focus_qids = { 20 } }, qx)
   c5 = has(r.markers, "c:5")
-  check("fq 2c: a matching focused quest marker stays a result",
-    c5 ~= nil and c5.focus_kept == nil and core.is_result(c5) == true)
+  check("fq 2c: a matching focused startable giver stays objective, not a result",
+    c5 ~= nil and c5.objective == true and core.is_result(c5) == false)
   local qm = { progressing = { 50 }, main = { [50] = true }, item_needs = { [50] = { { id = 500 } } },
     item_locs = { { id = 500, pos = P(40), src = "placed" } }, item_names = { [500] = "Seal" } }
   r = run({}, nil, { focus_tracked_qid = 50 }, qm)
@@ -4890,6 +4954,582 @@ do
   check("ff 18: the first marker per cid covers", has(r.markers, "c:5").focus_kept == true
     and has(r.markers, "w:sell:9:401") ~= nil and r.focus_counts.related == 1
     and has(r.markers, "n:5") == nil)
+end
+
+-- SPEC 39.5: focused current-journal reads are independently capped, aged,
+-- deterministic, and pruned without touching the tree journal cache.
+do
+  local read_focus = core.focus_journal_reads
+  local supported = type(read_focus) == "function"
+  check("focus journal helper exists", supported)
+  if supported then
+    local calls, state = {}, {}
+    local function reader(qid)
+      calls[#calls + 1] = qid
+      return state[qid]
+    end
+    local active = {}
+    for qid = 1, 17 do active[#active + 1] = qid end
+    local cache = read_focus(reader, {}, {}, 0)
+    check("focus journal empty active set", next(cache) == nil)
+    cache = read_focus(reader, { 5 }, {}, 0)
+    check("focus journal one new qid reads first tick", #calls == 1 and calls[1] == 5
+      and cache[5] and cache[5].missing and cache[5].read_at == 0)
+    state[5] = { base = "current" }
+    local prev = cache
+    calls = {}
+    cache = read_focus(reader, { 5 }, prev, 1.99)
+    check("focus journal respects two-second minimum age", #calls == 0
+      and cache[5] == prev[5])
+    calls = {}
+    cache = read_focus(reader, { 5 }, prev, 2)
+    check("focus journal reads at exact age boundary", #calls == 1
+      and cache[5].base == "current" and cache[5].read_at == 2)
+    calls = {}
+    local cold = read_focus(reader, active, {}, 0)
+    check("focus journal reads at most two per tick in qid order",
+      table.concat(calls, ",") == "1,2" and cold[1] and cold[2] and not cold[3])
+    local all_seen = cold[1] ~= nil and cold[2] ~= nil
+    for tick = 1, 8 do
+      cold = read_focus(reader, active, cold, tick * 2)
+    end
+    for qid = 1, 17 do if cold[qid] == nil then all_seen = false end end
+    check("focus journal samples 17 cold qids within nine two-second ticks", all_seen)
+    local ordered_prev = {
+      [2] = { value = { base = "b" }, read_at = 4 },
+      [3] = { missing = true, read_at = 1 },
+      [4] = { value = { base = "d" }, read_at = 1 },
+    }
+    calls = {}
+    read_focus(reader, { 2, 4, 3 }, ordered_prev, 10)
+    check("focus journal ranks oldest then qid within cap", table.concat(calls, ",") == "3,4")
+    calls = {}
+    local retained_tree = { [3] = { name = "tree only" } }
+    local pruned = read_focus(reader, { 2 }, ordered_prev, 10, retained_tree)
+    check("focus journal prunes removed active qids only", pruned[2] ~= nil
+      and pruned[3] == nil and retained_tree[3].name == "tree only")
+    local tree_prev = { [2] = { base = "tree value", read_at = 10 } }
+    local reused = read_focus(reader, { 2 }, {}, 10, tree_prev)
+    check("focus journal reuses exact-now tree value", reused[2].base == "tree value"
+      and reused[2].read_at == 10)
+    local failed_record = read_focus(function() error({ base = "not a journal" }) end, { 9 }, {}, 1)
+    check("focus journal turns pcall failure into missing", failed_record[9].missing == true
+      and failed_record[9].base == nil)
+  end
+
+  local match_key = core.match_destination_key
+  check("objective destination matcher exists", type(match_key) == "function")
+  if type(match_key) == "function" then
+    local function pos(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+    local rel = { [8] = { dest = { { key = 9 }, { key = 4 }, { key = 2 }, { key = 99 } } } }
+    local live = { [9] = pos(1), [4] = pos(-1), [2] = pos(3), [99] = pos(20) }
+    check("destination match is limited to own extracted keys and 2m",
+      match_key(8, pos(0), rel, live) == 4)
+    check("destination match no-match is nil", match_key(8, pos(0), rel, { [99] = pos(30) }) == nil)
+    check("destination match tie chooses smallest key",
+      match_key(8, pos(0), rel, { [9] = pos(1), [4] = pos(-1) }) == 4)
+  end
+
+  local function pos(x, y, z) return { x = x, y = y or 0, z = z or 0 } end
+  local routes_fc = { active = { 7 }, quests = { [7] = {
+    npcs = { 11, 12 }, step_npcs = { 12 }, related_shown = false,
+    objective = { npcs = { 21 }, place = { x = 3, y = 4, z = 5, caption = "Hall" },
+      npc_positions = { [21] = pos(2) },
+      items = { 42 }, item_sources = { [42] = { key = "i:42", pos = pos(9) } },
+    },
+  } } }
+  local function rname(cid, key) return key and "Item" or ("NPC" .. tostring(cid)) end
+  local direct, dn, dt = core.route_members(routes_fc, {}, {}, nil,
+    { routes = 1, places = true }, rname)
+  check("objective route: NPC mode routes current target and direct place",
+    #direct == 2 and direct[1].cid == 21 and direct[2].direct == true
+    and direct[2].kind == "place" and direct[2].qid == 7
+    and direct[2].pos.x == 3 and direct[2].name == "Objective: Hall" and dn == 2 and dt == 2)
+  routes_fc.quests[7].objective.place = nil
+  direct = core.route_members(routes_fc, {}, {}, nil, { routes = 1, places = true }, rname)
+  check("objective route: item fallback uses retained source",
+    #direct == 2 and direct[2].direct == true and direct[2].kind == "item"
+    and direct[2].cid == -(0x10000000000 + 7 * 4 + 2)
+    and direct[2].pos.x == 9 and direct[2].name == "Objective: Item 42 (for Quest 7)")
+  routes_fc.quests[7].show_related = true
+  direct = core.route_members(routes_fc, {}, {}, nil, { routes = 2, places = false }, rname)
+  check("objective route: shown ancillary cids enter mode two only",
+    #direct == 3 and direct[1].cid == 21 and direct[2].cid == 11 and direct[3].cid == 12)
+  local ordered_focus = { active = { 1, 2 }, quests = {
+    [1] = { show_related = true, npcs = { 11 }, objective = { npcs = { 1 },
+      npc_positions = { [1] = pos(1) }, place = { x = 2, y = 0, z = 0, caption = "P1" } } },
+    [2] = { show_related = true, npcs = { 12 }, objective = { npcs = { 2 },
+      npc_positions = { [2] = pos(1) }, place = { x = 3, y = 0, z = 0, caption = "P2" } } },
+  } }
+  direct = core.route_members(ordered_focus, {}, {}, nil,
+    { routes = 2, places = true }, rname)
+  check("objective routes group NPC, destination and shown related per quest",
+    #direct == 6 and direct[1].cid == 1 and direct[2].kind == "place"
+      and direct[3].cid == 11 and direct[4].cid == 2
+      and direct[5].kind == "place" and direct[6].cid == 12)
+  local nine_primary = { active = {}, quests = {} }
+  for qid = 1, 9 do
+    nine_primary.active[#nine_primary.active + 1] = qid
+    nine_primary.quests[qid] = { objective = { npcs = { qid },
+      npc_positions = { [qid] = pos(qid) } } }
+  end
+  direct = core.route_members(nine_primary, {}, {}, nil, { routes = 1 }, rname)
+  local primary_cids = {}
+  for _, member in ipairs(direct) do primary_cids[#primary_cids + 1] = tostring(member.cid) end
+  check("objective route cap keeps first eight primary cids in active order",
+    #direct == 8 and table.concat(primary_cids, ",") == "1,2,3,4,5,6,7,8")
+  local duplicate_target = { active = { 1, 2 }, quests = {
+    [1] = { objective = { npcs = { 99 }, npc_positions = { [99] = pos(1) } } },
+    [2] = { objective = { npcs = { 99 }, npc_positions = { [99] = pos(1) } } },
+  } }
+  local duplicate_routes, _, duplicate_total = core.route_members(duplicate_target, {}, {}, 99,
+    { routes = 1 }, rname)
+  check("objective route target total counts a repeated target once",
+    #duplicate_routes == 1 and duplicate_routes[1].cid == 99 and duplicate_total == 1)
+  local late_target_routes, late_target_count, late_target_total = core.route_members(nine_primary,
+    {}, {}, 9, { routes = 1 }, rname)
+  local late_target_cids = {}
+  for _, member in ipairs(late_target_routes) do late_target_cids[#late_target_cids + 1] = tostring(member.cid) end
+  check("objective routes reserve one capped slot for a late search target",
+    table.concat(late_target_cids, ",") == "1,2,3,4,5,6,7,9"
+      and late_target_count == 8 and late_target_total == 9)
+  local later_routes = { active = { 1, 2 }, quests = {
+    [1] = { show_related = true, related_npcs = { 101, 102, 103, 104, 105, 106, 107, 108 },
+      objective = { npcs = { 1 }, npc_positions = { [1] = pos(1) } } },
+    [2] = { show_related = false, objective = { npcs = { 2 },
+      npc_positions = { [2] = pos(2) }, place = { x = 3, y = 0, z = 0, caption = "Later" } } },
+  } }
+  direct = core.route_members(later_routes, {}, {}, nil,
+    { routes = 2, places = true }, rname)
+  local has_later_npc, has_later_place = false, false
+  for _, member in ipairs(direct) do
+    if member.cid == 2 then has_later_npc = true end
+    if member.qid == 2 and member.kind == "place" then has_later_place = true end
+  end
+  check("per-quest route order emits early ancillary routes before later objectives",
+    direct[1].cid == 1 and direct[2].cid == 101 and direct[7].cid == 106
+      and direct[8].cid == 107 and not has_later_npc and not has_later_place and #direct == 8)
+  local route_id_fn = core.objective_route_id
+  check("objective route id helper validates qid and kind",
+    type(route_id_fn) == "function"
+      and route_id_fn(1, "place") ~= nil and route_id_fn(1, "item") ~= nil
+      and route_id_fn(1, "place") ~= route_id_fn(1, "item")
+      and route_id_fn(0x7FFFFFFF, "place") ~= nil
+      and route_id_fn(0x7FFFFFFF, "item") ~= nil
+      and route_id_fn(0, "place") == nil and route_id_fn(1.5, "place") == nil
+      and route_id_fn(math.huge, "place") == nil and route_id_fn(0 / 0, "item") == nil
+      and route_id_fn(0x80000000, "place") == nil
+      and route_id_fn(1, "npc") == nil)
+  if type(route_id_fn) == "function" then
+    local route_ids = {}
+    for _, qid in ipairs({ 1, 2, 3, 999, 0x7FFFFFFF }) do
+      for _, kind in ipairs({ "place", "item" }) do
+        local id = route_id_fn(qid, kind)
+        if id == nil or route_ids[id] then route_ids.failed = true else route_ids[id] = true end
+      end
+    end
+    check("objective route ids fit 48-bit GUIDs and avoid NPC/legacy IDs",
+      not route_ids.failed and math.abs(route_id_fn(0x7FFFFFFF, "item")) < 0x1000000000000
+        and math.abs(route_id_fn(0x7FFFFFFF, "item")) * 32 < 0x1000000000000
+        and math.abs(route_id_fn(1, "place")) > 0xFFFFFFFFFF
+        and route_id_fn(7, "place") < 0 and route_id_fn(7, "place") ~= 77
+        and route_id_fn(7, "place") ~= -77)
+  end
+  local route_ids = {}
+  for _, qid in ipairs({ 1, 2, 3, 127, 65535, 0x7FFFFFFF }) do
+    local focus = { active = { qid }, quests = { [qid] = { objective = {
+      place = { x = 1, y = 2, z = 3 }, items = { 1 }, npcs = {} } } } }
+    local got = core.route_members(focus, {}, {}, nil, { routes = 0, places = true }, rname)
+    local code = got[1] and got[1].cid
+    if code then route_ids[code] = (route_ids[code] or 0) + 1 end
+  end
+  check("objective route ids are injective across sampled positive qid domain",
+    (function() for _, n in pairs(route_ids) do if n ~= 1 then return false end end return true end)()
+    and next(route_ids) ~= nil)
+  local full_ids, injective = {}, true
+  for qid = 1, 4096 do
+    for _, kind in ipairs({ "place", "item" }) do
+      local objective = { npcs = {}, items = {}, item_sources = {} }
+      if kind == "place" then objective.place = pos(qid)
+      else objective.items = { qid }; objective.item_sources[qid] = {
+        key = "k" .. qid, pos = pos(qid) } end
+      local focus = { active = { qid }, quests = { [qid] = { objective = objective } } }
+      local members = core.route_members(focus, {}, {}, nil,
+        { routes = 0, places = true }, rname)
+      local id = members[1] and members[1].cid
+      if id == nil or full_ids[id] then injective = false else full_ids[id] = true end
+    end
+  end
+  check("objective place and item route ids are injective across 4096 qids", injective)
+  local invalid_focus = { active = { 0, -1, 1.5, 0x80000000 }, quests = {} }
+  for _, qid in ipairs(invalid_focus.active) do
+    invalid_focus.quests[qid] = { objective = { npcs = {}, items = {},
+      place = { x = 1, y = 0, z = 1 } } }
+  end
+  check("objective route rejects invalid qids", #core.route_members(invalid_focus, {}, {}, nil,
+    { routes = 0, places = true }, rname) == 0)
+  local item_routes = { active = { 8 }, quests = { [8] = { name = "Eight", objective = {
+    npcs = {}, items = { 1, 2, 3 }, item_sources = {
+      [1] = { key = "z", pos = pos(5), name = "Zed" },
+      [2] = { key = "b", pos = pos(-5), name = "Bee" },
+      [3] = { key = "a", pos = pos(-5), name = "Ay" },
+    } } } } }
+  direct = core.route_members(item_routes, {}, {}, nil,
+    { routes = 0, places = true, player = pos(0) }, rname)
+  check("objective route chooses nearest retained item source with key tie-break",
+    #direct == 1 and direct[1].kind == "item" and direct[1].name == "Objective: Ay (for Eight)"
+    and direct[1].pos.x == -5)
+  direct = core.route_members(item_routes, {}, {}, nil,
+    { routes = 0, places = true }, rname)
+  check("objective route has deterministic item source without origin",
+    #direct == 1 and direct[1].name == "Objective: Ay (for Eight)")
+  item_routes.quests[8].objective.item_sources = {}
+  check("objective route omits item target without drawable source",
+    #core.route_members(item_routes, {}, {}, nil, { routes = 0, places = true }, rname) == 0)
+  local capped_focus = { active = { 7 }, quests = { [7] = { objective = {
+    npcs = { 1, 2, 3, 4, 5, 6, 7, 8 }, npc_positions = {
+      [1] = pos(1), [2] = pos(2), [3] = pos(3), [4] = pos(4), [5] = pos(5),
+      [6] = pos(6), [7] = pos(7), [8] = pos(8) },
+    place = { x = 1, y = 0, z = 1 } } } } }
+  direct, dn = core.route_members(capped_focus, {}, {}, 99,
+    { routes = 1, places = true }, rname)
+  check("objective direct route respects eight-slot cap and search reservation",
+    #direct == 7 and dn == 8 and direct[7].cid == 7)
+
+  local obj_adapter = fake_adapter({ progressing = { 10 }, hints = { [10] = 5 },
+    names = { [10] = "Ten" }, npc_pos = { [5] = pos(1), [77] = pos(2), [88] = pos(3) },
+    objective_pos = { [77] = pos(2) }, objectives = { [10] = {} },
+    item_needs = { [10] = { { id = 99, num = 1 } } },
+    item_locs = { { id = 99, pos = pos(8), src = "world" } }, item_names = { [99] = "Token" } })
+  obj_adapter.objective_issued_cids = function(qid) return qid == 10 and { 77 } end
+  obj_adapter.journal_now = function() return { step_index = 0,
+    dest = { x = 10, y = 0, z = 0, caption = "Hall" } } end
+  local obj_world = { focus_places = { [44] = pos(10) } }
+  local obj_rel = { [10] = { cast = {}, npcs = { 77, 88 }, items = {},
+    dest = { { key = 44 }, { key = 45 } } } }
+  local obj_show = { focus_qids = { 10 }, quest_rel = obj_rel, world = obj_world,
+    prev_focus_journal = {}, now = 0, in_progress = true, quest_items = true,
+    focus_related_qids = {}, focus_unrelated = 0 }
+  local obj_result = core.compute(obj_adapter, obj_show)
+  local orec = obj_result.focus and obj_result.focus.quests[10]
+    and obj_result.focus.quests[10].objective
+  local function marked(key)
+    for _, m in ipairs(obj_result.markers) do if m.key == key then return m end end
+  end
+  check("objective snapshot unions issued npc, live place, current item and zero-based step",
+    orec ~= nil and orec.step == 0 and table.concat(orec.npcs or {}, ",") == "77"
+    and orec.place and orec.place.caption == "Hall" and orec.place.key == 44
+    and table.concat(orec.items or {}, ",") == "99" and orec.known and orec.resolved)
+  check("objective markers use dedicated place identity and cover npc/item markers",
+    marked("o:p:10") and marked("o:p:10").cat == "focus_place"
+    and marked("o:p:10").objective and marked("o:p:10").place == 44
+    and marked("n:77") and marked("n:77").objective
+    and marked("n:77").objective_qids[1] == 10
+    and marked("i:99:2:0") and marked("i:99:2:0").objective
+    and table.concat(marked("i:99:2:0").objective_qids or {}, ",") == "10")
+  check("objective markers are not search results", core.is_result(marked("o:p:10")) == false
+    and core.is_result(marked("n:77")) == false and core.is_result(marked("i:99:2:0")) == false)
+  local covering_adapter = fake_adapter({ progressing = { 10 }, hints = { [10] = 5 },
+    npc_pos = { [5] = pos(1), [77] = pos(2) }, objective_pos = { [77] = pos(2) },
+    objectives = { [10] = {} } })
+  covering_adapter.objective_issued_cids = function() return { 77 } end
+  covering_adapter.journal_now = function() return {} end
+  local cover_world = { focus_places = {}, world_shops = true, world_sellers = true,
+    world_max_markers = 300, world_origin = pos(0), map_origin = pos(0),
+    shops = { { shop = 8, cid = 77, npc = "Shopkeeper", pos = pos(2), hover = "Stock details",
+      items = { { id = 1, name = "Ration" } }, discovered = true } } }
+  local cover_show = { focus_qids = { 10 }, focus_related_qids = {}, world = cover_world,
+    world_shops = true, world_sellers = false, world_origin = pos(0), map_origin = pos(0), now = 0 }
+  local cover_result = core.compute(covering_adapter, cover_show)
+  local function marker_in(list, key)
+    for _, m in ipairs(list or {}) do if m.key == key then return m end end
+  end
+  local map_shop, full_shop = marker_in(cover_result.markers, "w:shop:8"),
+    marker_in(cover_result.fullmap_world, "w:shop:8")
+  check("objective covers shop in player and full-map lists", map_shop and map_shop.objective == true
+    and full_shop and full_shop.objective == true and core.marker_cid(map_shop) == 77
+    and map_shop.label == "Shopkeeper (shop)" and full_shop.label == map_shop.label
+    and map_shop.hover == "Stock details" and full_shop.hover == map_shop.hover)
+  local seller_world = { focus_places = {}, world_max_markers = 300,
+    sellers = { { shop = 9, item = 2, item_name = "Salt", npc = "Vendor", cid = 77, hover = "Seller details",
+      pos = pos(2), discovered = true, qids = {} } } }
+  local seller_show = {}
+  for k, v in pairs(cover_show) do seller_show[k] = v end
+  seller_show.world, seller_show.world_shops, seller_show.world_sellers = seller_world, false, true
+  local seller_result = core.compute(covering_adapter, seller_show)
+  local map_seller, full_seller = marker_in(seller_result.markers, "w:sell:9:2"),
+    marker_in(seller_result.fullmap_world, "w:sell:9:2")
+  check("objective covers seller in player and full-map lists", map_seller and map_seller.objective == true
+    and full_seller and full_seller.objective == true and core.marker_cid(map_seller) == 77
+    and map_seller.label == "Salt - sold by Vendor" and full_seller.label == map_seller.label
+    and map_seller.hover == "Seller details" and full_seller.hover == map_seller.hover)
+  local search_world = { focus_places = {}, npcs = { { cid = 77, name = "Target", pos = pos(2), hover = "NPC details",
+    alive = true, discovered = true } } }
+  local search_cover = core.compute(covering_adapter, { focus_qids = { 10 },
+    focus_related_qids = {}, world = search_world, search = core.parse_query("target"),
+    world_origin = pos(0), map_origin = pos(0), world_max_markers = 300, now = 0 })
+  local search_marker = marker_in(search_cover.markers, "w:npc:77")
+  local search_full_marker = marker_in(search_cover.fullmap_world, "w:npc:77")
+  check("objective covers searched NPC marker in player and full-map lists",
+    search_marker and search_marker.objective == true and search_full_marker
+      and search_full_marker.objective == true and core.marker_cid(search_marker) == 77
+      and search_marker.label == "Target" and search_full_marker.label == search_marker.label
+      and search_marker.hover == "NPC details" and search_full_marker.hover == search_marker.hover)
+  local multiple_locs_adapter = fake_adapter({ progressing = { 10 }, hints = { [10] = 5 },
+    npc_pos = { [5] = pos(1), [77] = pos(2) }, objective_pos = { [77] = pos(2) },
+    objectives = { [10] = {} }, item_needs = { [10] = { { id = 99, num = 1 } } },
+    item_locs = { { id = 99, pos = pos(8), src = "world" },
+      { id = 99, pos = pos(16), src = "drop" } }, item_names = { [99] = "Token" } })
+  multiple_locs_adapter.objective_issued_cids = function() return { 77 } end
+  multiple_locs_adapter.journal_now = function() return {} end
+  local multiple_locs = core.compute(multiple_locs_adapter, obj_show)
+  local function item_marker(result, key)
+    for _, m in ipairs(result.markers) do if m.key == key then return m end end
+  end
+  check("all retained current-need item markers are objective, with one route source",
+    item_marker(multiple_locs, "i:99:2:0").objective == true
+      and item_marker(multiple_locs, "i:99:4:0").objective == true
+      and multiple_locs.focus.quests[10].objective.item_sources[99].key == "i:99:2:0")
+  check("objective fallback giver is hidden with related NPCs off",
+    marked("c:5") == nil and marked("n:88") == nil)
+  local ordered_adapter = fake_adapter({ progressing = { 10 }, hints = { [10] = 5 },
+    npc_pos = { [5] = pos(1), [9] = pos(2), [7] = pos(3) },
+    objective_pos = { [9] = pos(2), [7] = pos(3) }, objectives = { [10] = {} } })
+  ordered_adapter.objective_issued_cids = function() return { 9, 7 } end
+  local ordered_result = core.compute(ordered_adapter, { focus_qids = { 10 },
+    focus_related_qids = {}, now = 0 })
+  check("objective preserves adapter issued NPC order", table.concat(
+    ordered_result.focus.quests[10].objective.npcs, ",") == "9,7")
+  local dim_show = {}
+  for k, v in pairs(obj_show) do dim_show[k] = v end
+  dim_show.focus_unrelated = 1
+  local dim_result = core.compute(obj_adapter, dim_show)
+  local function has_key(result, key)
+    for _, m in ipairs(result.markers) do if m.key == key then return m end end
+  end
+  check("objective related gate stays hard-hidden in Dim mode",
+    has_key(dim_result, "c:5") == nil and has_key(dim_result, "n:88") == nil)
+  local shown_show = {}
+  for k, v in pairs(obj_show) do shown_show[k] = v end
+  shown_show.focus_related_qids = { 10 }
+  local shown_result = core.compute(obj_adapter, shown_show)
+  check("objective related opt-in restores ancillary NPCs, not their objective status",
+    has_key(shown_result, "c:5") ~= nil and has_key(shown_result, "n:88") ~= nil
+    and has_key(shown_result, "n:88").objective ~= true
+    and has_key(shown_result, "n:77").objective == true)
+  local search_show = {}
+  for k, v in pairs(obj_show) do search_show[k] = v end
+  search_show.search = core.parse_query("NPC 88")
+  search_show.world = { focus_places = obj_world.focus_places,
+    npcs = { { cid = 88, name = "NPC 88", pos = pos(3), alive = true, discovered = true } } }
+  local search_result = core.compute(obj_adapter, search_show)
+  local searched = has_key(search_result, "w:npc:88")
+  check("objective hidden ancillary explicit search stays normal", searched ~= nil
+    and searched.objective ~= true and searched.related ~= true)
+  obj_adapter.npc_name = function(cid) return cid == 5 and "NPC 5" or nil end
+  local quest_search_show = {}
+  for k, v in pairs(obj_show) do quest_search_show[k] = v end
+  quest_search_show.search = core.parse_query("NPC 5")
+  local quest_search_result = core.compute(obj_adapter, quest_search_show)
+  local searched_quest_marker = has_key(quest_search_result, "c:5")
+  check("objective hidden ancillary quest marker search stays normal",
+    searched_quest_marker ~= nil and searched_quest_marker.related_search == true
+      and searched_quest_marker.objective ~= true)
+
+  local multi_adapter = fake_adapter({ progressing = { 10, 11 }, hints = { [10] = 77, [11] = 77 },
+    names = { [10] = "Ten", [11] = "Eleven" }, npc_pos = { [77] = pos(2), [88] = pos(3) },
+    objective_pos = { [77] = pos(2) }, objectives = { [10] = {}, [11] = {} },
+    item_needs = { [10] = { { id = 99, num = 1 } }, [11] = { { id = 99, num = 2 } } },
+    item_locs = { { id = 99, pos = pos(8), src = "world" } }, item_names = { [99] = "Token" } })
+  multi_adapter.objective_issued_cids = function(qid) return { 77 } end
+  multi_adapter.journal_now = function(qid) return { step_index = 0,
+    dest = { x = 10, y = 0, z = 0, caption = "Hall " .. qid } } end
+  local multi_rel = { [10] = { npcs = { 88 }, dest = { { key = 44 } } },
+    [11] = { npcs = { 88 }, dest = { { key = 44 } } } }
+  local multi_result = core.compute(multi_adapter, { focus_qids = { 11, 10 },
+    focus_related_qids = { 11 }, quest_rel = multi_rel,
+    world = { focus_places = { [44] = pos(10) } },
+    now = 0 })
+  local merged_target, places_n = has_key(multi_result, "c:77"), 0
+  for _, m in ipairs(multi_result.markers) do if m.key == "o:p:10" or m.key == "o:p:11" then places_n = places_n + 1 end end
+  check("objective cover unions sorted qids and destinations remain per quest",
+    merged_target ~= nil and merged_target.objective == true
+    and table.concat(merged_target.objective_qids or {}, ",") == "10,11"
+    and places_n == 2 and has_key(multi_result, "o:p:10").label ~= has_key(multi_result, "o:p:11").label)
+  check("item covering marker unions sorted objective qids",
+    has_key(multi_result, "i:99:2:0") ~= nil
+      and table.concat(has_key(multi_result, "i:99:2:0").objective_qids or {}, ",") == "10,11")
+  check("shared ancillary cid is visible when any focused owner opts in",
+    has_key(multi_result, "n:88") ~= nil
+    and multi_result.focus.quests[10].related_shown_count == 1
+    and multi_result.focus.quests[10].related_hidden_count == 0
+    and multi_result.focus.related_counts.shown == 1)
+  local off_result = core.compute(multi_adapter, { focus_qids = { 10, 11 },
+    focus_related_qids = {}, quest_rel = multi_rel,
+    world = { focus_places = { [44] = pos(10) } }, now = 0 })
+  check("shared ancillary cid is hidden only when every owner is off",
+    has_key(off_result, "n:88") == nil and off_result.focus.related_counts.hidden == 1)
+  check("per-quest related visibility counts are integers over live positioned NPCs",
+    type(multi_result.focus.quests[10].related_shown) == "number"
+      and type(multi_result.focus.quests[10].related_hidden) == "number"
+      and multi_result.focus.quests[10].related_shown == 1
+      and multi_result.focus.quests[10].related_hidden == 0
+      and type(multi_result.focus_counts.objective) == "number")
+  local state_adapter = base_adapter({ progressing_ids = function() return { 60 } end,
+    npc_alive = function(cid) return cid ~= 89 end,
+    npc_pos = function(cid) if cid == 88 then return 8, 0, 0 end end,
+    quest_name = function() return "Visibility" end })
+  local state_rel = { [60] = { npcs = { 88, 89, 90 } } }
+  local state_off = core.compute(state_adapter, { focus_qids = { 60 }, focus_related_qids = {},
+    quest_rel = state_rel, now = 0 })
+  local state_on = core.compute(state_adapter, { focus_qids = { 60 }, focus_related_qids = { 60 },
+    quest_rel = state_rel, now = 0 })
+  check("related counts include only positioned live NPCs while no_pos ignores toggle",
+    state_off.focus.related_counts.shown == 0 and state_off.focus.related_counts.hidden == 1
+      and state_on.focus.related_counts.shown == 1 and state_on.focus.related_counts.hidden == 0
+      and table.concat(state_off.focus_counts.no_pos, ",") == "90"
+      and table.concat(state_on.focus_counts.no_pos, ",") == "90")
+  local unresolved_adapter = base_adapter({ acceptable_ids = function() return { 20 } end,
+    is_side = function() return true end, giver_hint = function() return 9 end,
+    progressing_ids = function() return { 30 } end, quest_state = function(qid) return qid == 30 and "locked" end,
+    quest_name = function(qid) return "Q" .. qid end })
+  local unresolved_result = core.compute(unresolved_adapter,
+    { focus_qids = { 20, 30 }, focus_related_qids = {}, now = 0 })
+  check("objective startable and locked unresolved records stay non-drawable",
+    unresolved_result.focus.quests[20].objective.known
+      and not unresolved_result.focus.quests[20].objective.resolved
+      and not unresolved_result.focus.quests[30].objective.known
+      and not unresolved_result.focus.quests[30].objective.resolved)
+  local locked_adapter = base_adapter({ acceptable_ids = function() return {} end,
+    progressing_ids = function() return {} end, catalog_ids = function() return { 30 } end,
+    quest_name = function() return "A locked quest" end, giver_hint = function() return 5 end,
+    npc_pos = function() return 5, 0, 0 end })
+  local locked_result = core.compute(locked_adapter, { focus_qids = { 30 },
+    focus_related_qids = {}, now = 0 })
+  check("real locked quest fixture has no current objective signal",
+    locked_result.focus.quests[30].objective.known == false
+      and locked_result.focus.quests[30].objective.resolved == false)
+  check("known objective NPC without position does not become drawable or routable",
+    unresolved_result.focus.quests[20].objective.npcs[1] == 9
+      and unresolved_result.focus.quests[20].objective.npc_positions[9] == nil
+      and #core.route_members(unresolved_result.focus, {}, {}, nil,
+        { routes = 1, places = false }, rname) == 0)
+  local fallback_adapter = fake_adapter({ progressing = { 40 }, hints = { [40] = 5 },
+    names = { [40] = "Forty" }, npc_pos = { [5] = pos(1) }, objectives = { [40] = {} },
+    item_needs = { [40] = { { id = 99, num = 1 } } }, item_locs = {} })
+  fallback_adapter.objective_issued_cids = function() return { 77 } end
+  fallback_adapter.journal_now = function() return { step_index = 0 } end
+  local fallback_show = { focus_qids = { 40 }, focus_related_qids = {},
+    focus_unrelated = 0, now = 0 }
+  local fallback_result = core.compute(fallback_adapter, fallback_show)
+  local fallback_obj = fallback_result.focus.quests[40].objective
+  check("unresolved in-progress objective keeps fallback giver ancillary and unrouted",
+    fallback_obj.known and not fallback_obj.resolved
+      and has_key(fallback_result, "c:5") == nil
+      and #core.route_members(fallback_result.focus, {}, {}, nil,
+        { routes = 1, places = false }, rname) == 0)
+  fallback_show.focus_unrelated = 1
+  fallback_result = core.compute(fallback_adapter, fallback_show)
+  check("unresolved fallback giver remains hard-hidden under Dim",
+    has_key(fallback_result, "c:5") == nil)
+  local position_fallback = base_adapter({ progressing_ids = function() return { 41 } end,
+    static_pos = function() return pos(1) end, quest_name = function() return "Forty One" end })
+  local position_result = core.compute(position_fallback, { focus_qids = { 41 },
+    focus_related_qids = {}, now = 0 })
+  check("position-keyed unresolved fallback giver obeys related hard-hide",
+    has_key(position_result, "p:1:0:0") == nil)
+
+  local startable_static = fake_adapter({ acceptable = { 42 }, hints = { [42] = 5 },
+    names = { [42] = "Starter", [43] = "Precursor" }, statics = { [42] = pos(1) },
+    gates = { [42] = { 43 } }, seen = { [43] = "Precursor" } })
+  local startable_static_result = core.compute(startable_static, { focus_qids = { 42 },
+    focus_related_qids = { 42 }, reveal_gate_names = true, now = 0 })
+  local startable_marker, startable_count = nil, 0
+  for _, m in ipairs(startable_static_result.markers) do
+    if m.key == "p:1:0:0" or m.key == "n:5" then
+      startable_count = startable_count + 1
+      if m.key == "p:1:0:0" then startable_marker = m end
+    end
+  end
+  local startable_anchors = core.overhead_anchors(startable_static_result.markers, {},
+    { x = 0, y = 0, z = 0 }, 50)
+  check("static-resolved startable giver is one semantic objective marker and an overhead anchor",
+    startable_count == 1 and startable_marker ~= nil and startable_marker.objective == true
+      and startable_marker.objective_qids[1] == 42 and core.marker_cid(startable_marker) == 5
+      and #startable_anchors == 1 and startable_anchors[1].cid == 5
+      and startable_marker.label == "Starter - startable"
+      and startable_marker.hover == "Starter - startable (waiting on: Precursor)")
+
+  local schedule_adapter = fake_adapter({ acceptable = { 20 }, hints = { [20] = 9 },
+    names = { [20] = "Twenty" } })
+  local schedule_result = core.compute(schedule_adapter, { focus_qids = { 20 },
+    focus_related_qids = {}, world = { schedule = { [9] = pos(20) } }, now = 0 })
+  check("startable giver retains schedule-resolved map position", schedule_result.focus.quests[20].objective.resolved
+    and schedule_result.focus.quests[20].objective.npc_positions[9]
+    and schedule_result.focus.quests[20].objective.npc_positions[9].x == 20)
+
+  local main_adapter = fake_adapter({ progressing = { 300 }, hints = { [300] = 5 },
+    npc_pos = { [77] = pos(2) }, objective_pos = { [77] = pos(2) },
+    objectives = { [300] = {} } })
+  main_adapter.is_side = function() return false end
+  main_adapter.quest_region = function() return "Vermund" end
+  main_adapter.objective_issued_cids = function() return { 77 } end
+  main_adapter.journal_now = function() return { step_index = 0,
+    dest = { x = 10, y = 0, z = 0, caption = "Main target" } } end
+  local main_result = core.compute(main_adapter, { focus_qids = { 300 },
+    focus_related_qids = {}, tree_open = true, now = 0 })
+  check("focused main quest resolves current objective signals",
+    main_result.focus.quests[300].objective.npcs[1] == 77
+      and main_result.focus.quests[300].objective.place.caption == "Main target"
+      and main_result.catalog_side_count == 0 and #main_result.quests == 0
+      and main_result.counts.in_progress == 0)
+
+  local render_filter_adapter = base_adapter({ progressing_ids = function() return { 60, 61 } end,
+    npc_alive = function(cid) return cid ~= 89 end,
+    npc_pos = function(cid)
+      if cid == 88 then return 8, 0, 0 end
+      if cid == 91 then return 9, 0, 0 end
+    end,
+    quest_name = function(qid) return "Q" .. qid end })
+  local render_filter_result = core.compute(render_filter_adapter, { focus_qids = { 60, 61 },
+    focus_related_qids = { 60 }, quest_rel = { [60] = { npcs = { 88, 89, 90, 91 } },
+      [61] = { npcs = { 88 } } }, now = 0 })
+  local rendered_routes = core.route_members(render_filter_result.focus, {}, {}, nil,
+    { routes = 2, places = false }, rname)
+  local rendered_cids = {}
+  for _, member in ipairs(rendered_routes) do rendered_cids[#rendered_cids + 1] = tostring(member.cid) end
+  check("mode-two routes include only shown live positioned ancillary NPCs in owner order",
+    table.concat(rendered_cids, ",") == "88,91"
+      and table.concat(render_filter_result.focus.quests[60].route_related_npcs or {}, ",") == "88,91"
+      and #((render_filter_result.focus.quests[61].route_related_npcs) or {}) == 0)
+
+  local journal_reads, focused_ids = 0, {}
+  for qid = 1, 17 do focused_ids[#focused_ids + 1] = qid end
+  local cadence_adapter = base_adapter({ progressing_ids = function() return focused_ids end,
+    journal_now = function(qid) journal_reads = journal_reads + 1; return { base = "Step " .. qid } end })
+  local cadence = core.compute(cadence_adapter, { focus_qids = focused_ids,
+    focus_related_qids = {}, now = 0 })
+  check("compute reads focused journal while tree is closed, max two per tick",
+    journal_reads == 2 and cadence.focus_journal[1] ~= nil
+      and cadence.focus_journal[2] ~= nil and cadence.journal == nil)
+  cadence_adapter.quest_region = function() return "Region" end
+  cadence_adapter.tracked_qid = function() return 1 end
+  local tree_calls = 0
+  cadence_adapter.journal_now = function() tree_calls = tree_calls + 1; return { base = "same tick" } end
+  local tree_focus = core.compute(cadence_adapter, { focus_qids = { 1 }, focus_related_qids = {},
+    tree_open = true, now = 10, prev_journal = {}, prev_focus_journal = {} })
+  check("tree tracked read reuses exact-now focus journal value", tree_calls == 1
+    and tree_focus.focus_journal[1].base == "same tick"
+    and tree_focus.journal[1].base == "same tick")
+  local obj_sign1 = core.signature({ { key = "objective-sig", pos = pos(1), qids = {}, cat = "x" } }, {})
+  local obj_sign2 = core.signature({ { key = "objective-sig", pos = pos(1), qids = {}, cat = "x",
+    objective = true, objective_qids = { 10 } } }, {})
+  check("objective marker changes native signature", obj_sign1 ~= obj_sign2)
+  check("objective ownership alone changes native signature",
+    core.signature({ { key = "ownership", pos = pos(1), qids = {}, cat = "x",
+      objective = true, objective_qids = { 10 } } }, {})
+      ~= core.signature({ { key = "ownership", pos = pos(1), qids = {}, cat = "x",
+        objective = true, objective_qids = { 11 } } }, {}))
 end
 
 if failures > 0 then os.exit(1) end

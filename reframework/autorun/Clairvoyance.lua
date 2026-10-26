@@ -333,11 +333,11 @@ wt.route_name_of = function(cid, place)
   end
   return nm
 end
-wt.route_members = function(snap, input)
+wt.route_members = function(snap, input, origin)
   wt.route_in, wt.route_nmap, wt.route_snap = input, nil, snap
   local opt = wt.route_opt
   opt.routes, opt.places = settings.focus_routes or 0, settings.focus_place_routes == true
-  opt.player = wt.world_origin
+  opt.player = origin
   for k in pairs(opt.prev) do opt.prev[k] = nil end
   for _, r in ipairs((input or {}).routes or {}) do
     if r.place ~= nil then opt.prev[r.place] = true end
@@ -543,7 +543,7 @@ do
     return nil
   end
   icons.mini_push = function(id, x, y, size, argb, fade, m)
-    local st = m ~= nil and wt.styles[wt.style.group_of(m.cat)] or nil
+    local st = m ~= nil and wt.styles[wt.style.group_of_marker(m)] or nil
     if m ~= nil and m.dim then st = wt.styles.none end
     icons:push("mini", id, x, y, size, argb, fade, st)
   end
@@ -1119,6 +1119,14 @@ re.on_frame(function()
         su.median(wt.tick_ring or {}) or 0.0))
       logmsg(string.format("Rebuild: ms=%.1f max=%.1f", wt.rebuild_ms, wt.rebuild_max))
       logmsg(wt.line())
+      if snapshot ~= nil and snapshot.focus ~= nil then
+        local fc = snapshot.focus_counts or {}
+        logmsg(string.format(
+          "Focus: active %d, objective %d, related shown %d, related hidden %d, no position %d, routes %d/%d",
+          #(snapshot.focus.active or {}), fc.objective or 0,
+          fc.ancillary_shown or 0, fc.ancillary_hidden or 0,
+          #(fc.no_pos or {}), wt.routes_n or 0, wt.routes_total or 0))
+      end
       if snapshot ~= nil and adapter.journal_stats ~= nil then
         logmsg(core.journal_line(adapter.journal_stats()))
       end
@@ -1171,6 +1179,7 @@ re.on_frame(function()
       journal_spoilers = settings.journal_spoilers,
       prev_journal = snapshot and snapshot.journal,
       prev_journal_all = snapshot and snapshot.journal_all,
+      prev_focus_journal = snapshot and snapshot.focus_journal,
       step_icons = settings.step_icons,
       prev_quest_steps = snapshot and snapshot.quest_steps,
       now = now,
@@ -1188,6 +1197,7 @@ re.on_frame(function()
       wt.focus_tracked_qid = nil
     end
     show.focus_qids = settings.focus_qids
+    show.focus_related_qids = settings.focus_related_qids
     show.focus_tracked_qid = wt.focus_tracked_qid
     show.quest_rel = wt.quest_rel
     show.focus_unrelated = settings.focus_unrelated
@@ -1249,7 +1259,6 @@ re.on_frame(function()
       -- quest focus (SPEC 32.7): previous snapshot's focus, route members, poke on a set change
       tg.focus, tg.focus_keys = wt.focus_world(snapshot)
       tg.player = wt.world_origin
-      wt.q("set_routes", nil, (wt.route_members(snapshot, wt.q("input", nil))))
       local fa = snapshot ~= nil and snapshot.focus ~= nil and snapshot.focus.active or nil
       local fs = table.concat(fa or {}, ",") .. "|" .. tostring(settings.focus_unrelated)
       if fs ~= wt.focus_sig then
@@ -1332,6 +1341,8 @@ re.on_frame(function()
       wt.route_on, wt.has_pts, snapshot ~= nil and snapshot.route_pts or nil)
     wt.route_on, wt.has_pts = route_on, has_pts
     if result == nil then return end   -- game state unavailable: keep last snapshot
+    wt.focus_prune_related(result.focus ~= nil and result.focus.active or {})
+    wt.q("set_routes", nil, (wt.route_members(result, show.world, show.origin)))
     result.route_pts = route_pts
     -- SPEC 20.12.2: one signature over the markers then the full-map world
     -- markers, so committed positions are kept for both
@@ -1424,8 +1435,9 @@ do
     local sprite = ref.Sprite
     if sprite == nil then return false end
     local recs = icons.recs
+    local group = wt.style.group_of_marker(m) or m.cat
     recs[#recs + 1] = { marker = m, id = pid, ref = ref, sprite = sprite,
-      cat = m.dim and (m.cat .. "~dim") or m.cat, size = icons.map_size(sprite),
+      cat = m.dim and (group .. "~dim") or group, size = icons.map_size(sprite),
       argb = marker_argb(m) }
     return true
   end
@@ -1763,7 +1775,7 @@ local function overhead_draw_one(marker, px, py, pz, d2, name_d2)
   -- SPEC 21.6: the category picture when it can be drawn, else the v12 dots.
   local pid = su.icon_for(settings, marker, "head", marker.step, icons.drawable_fn)
   local pic = icons:drawable(pid)
-  local st = wt.styles[wt.style.group_of(marker.cat)] or wt.styles.none
+    local st = wt.styles[wt.style.group_of_marker(marker)] or wt.styles.none
   if marker.dim then st = wt.styles.none end   -- dim: no outline (SPEC 32.14.6)
   local o = wt.style.offset(st.width, wt.dk)
   local label_dy = 10
@@ -2091,42 +2103,34 @@ local function install_debug()
           walks = wt.obj_walks or 0, focus_pokes = wt.focus_pokes or 0, routes = {},
           routes_total = wt.routes_total }
         for _, r in ipairs((wt.q("input", nil) or {}).routes or {}) do
-          out.routes[#out.routes + 1] = { cid = r.cid, name = r.name, stops = #(r.stops or {}),
-            slot = r.slot, current = r.current, place = r.place, lead = r.lead }
+          local e = { cid = r.cid, name = r.name, stops = #(r.stops or {}),
+            slot = r.slot, current = r.current, place = r.place, lead = r.lead,
+            direct = r.direct, objective = r.objective, qid = r.qid, kind = r.kind }
+          if type(r.pos) == "table" then
+            e.pos = { x = r.pos.x, y = r.pos.y, z = r.pos.z }
+          end
+          out.routes[#out.routes + 1] = e
         end
         local nq = 0
         for _ in pairs(wt.quest_rel or {}) do nq = nq + 1 end
         out.file = { quests = nq, pak = wt.quest_pak }
         if fs == nil then return out end
-        local marked_ids = {}
-        local function note(m)
-          local k = type(m) == "table" and m.key or nil
-          local id = type(k) == "string" and k:match("^[cn]:(%-?%d+)$") or nil
-          if id ~= nil then marked_ids[tonumber(id)] = true end
-          if type(m) == "table" and m.cid ~= nil
-            and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller") then
-            marked_ids[m.cid] = true
-          end
-        end
-        for _, m in ipairs(snapshot.markers or {}) do note(m) end
-        for _, m in ipairs(snapshot.fullmap_world or {}) do note(m) end
         for i, qid in ipairs(fs.active or {}) do
           out.active[i] = qid
           local q = (fs.quests or {})[qid] or {}
           local e = { npcs = #(q.npcs or {}), step_npcs = #(q.step_npcs or {}),
             items = #(q.items or {}), places = #(q.places or {}),
-            no_pos = {}, positioned = 0, marked = 0 }
-          for _, cid in ipairs(q.npcs or {}) do
-            local okp, pos = pcall(adapter.npc_pos, cid)
-            if not okp or pos == nil then
-              e.no_pos[#e.no_pos + 1] = cid
-            else
-              local oka, alive = pcall(adapter.npc_alive, cid)
-              if not (oka and alive == false) then
-                e.positioned = e.positioned + 1
-                if marked_ids[cid] then e.marked = e.marked + 1 end
-              end
-            end
+            show_related = q.show_related == true,
+            related_shown = q.related_shown or 0,
+            related_hidden = q.related_hidden or 0 }
+          local o = q.objective or {}
+          e.objective = { step = o.step, npcs = {}, items = {},
+            known = o.known == true, resolved = o.resolved == true }
+          for n, cid in ipairs(o.npcs or {}) do e.objective.npcs[n] = cid end
+          for n, id in ipairs(o.items or {}) do e.objective.items[n] = id end
+          if type(o.place) == "table" then
+            e.objective.place = { x = o.place.x, y = o.place.y, z = o.place.z,
+              caption = o.place.caption, key = o.place.key }
           end
           out.quests[qid] = e
         end
@@ -2242,6 +2246,24 @@ wt.focus_set = function(key, v)
   end
   return false
 end
+wt.focus_prune_related = function(active)
+  local keep, list, changed = {}, {}, false
+  for _, qid in ipairs(type(active) == "table" and active or {}) do keep[qid] = true end
+  for _, qid in ipairs(settings.focus_related_qids or {}) do
+    if keep[qid] then list[#list + 1] = qid else changed = true end
+  end
+  if changed then wt.focus_set("focus_related_qids", list) end
+  return changed
+end
+wt.related_toggle = function(qid, on, rec)
+  local list = {}
+  for _, q in ipairs(settings.focus_related_qids or {}) do
+    if q ~= qid then list[#list + 1] = q end
+  end
+  if on then list[#list + 1] = qid end
+  wt.focus_set("focus_related_qids", list)
+  if rec ~= nil then rec.row_label = nil end
+end
 wt.focus_toggle = function(qid, on, rec)
   local list = {}
   for _, q in ipairs(settings.focus_qids) do
@@ -2249,6 +2271,9 @@ wt.focus_toggle = function(qid, on, rec)
   end
   if on then list[#list + 1] = qid end
   wt.focus_set("focus_qids", list)
+  if not on and not (settings.focus_tracked and qid == wt.focus_tracked_qid) then
+    wt.related_toggle(qid, false, rec)
+  end
   if rec ~= nil then rec.row_label = nil end
 end
 
@@ -2291,8 +2316,25 @@ local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
       local c, v = imgui.checkbox("Focus tracked##qf_tracked", settings.focus_tracked)
       if c then
         wt.focus_set("focus_tracked", v)
+        if not v then
+          local manual = false
+          for _, q in ipairs(settings.focus_qids) do
+            if q == qid then manual = true; break end
+          end
+          if not manual then wt.related_toggle(qid, false, rec) end
+        end
         if rec ~= nil then rec.row_label = nil end
       end
+    end
+    local related_live = rec == nil or (rec.cat ~= "completed" and rec.cat ~= "failed"
+      and rec.cat ~= "canceled")
+    if related_live and wt.is_focused(qid) then
+      local related = false
+      for _, q in ipairs(settings.focus_related_qids or {}) do
+        if q == qid then related = true; break end
+      end
+      local rc, rv = imgui.checkbox("Show related NPCs##qfr_" .. qid, related)
+      if rc then wt.related_toggle(qid, rv, rec) end
     end
     -- v14 (SPEC 22.11.2): the Hints node. Opening it is the spoiler gate;
     -- the step in its id starts a new step's node closed.
@@ -2330,7 +2372,8 @@ do
   local groups = wt.style.GROUPS
   local route_labels = { "Straight lines", "Walking path" }
   local unrelated_labels = { "Hide", "Dim" }
-  local focus_route_labels = { "None", "Current step's NPCs", "Every related NPC" }
+  local focus_route_labels = { "None", "Current objective NPCs",
+    "Objective + shown related NPCs" }
   local cat_rows = {
     { "startable", "Startable" }, { "in_progress", "In progress" },
     { "completed", "Completed" }, { "unavailable", "Unavailable" },
@@ -2342,6 +2385,7 @@ do
     { "route_stop", su.WORLD_LABEL.route_stop },
     { "hint_pin", su.WORLD_LABEL.hint_pin },
     { "focus_place", "Quest focus places" },
+    { "focus_objective", "Current objective" },
   }
   -- the override sub-tree names: the category's name, then the three extras
   local gname = { route_line = "Route line", names = "Names", items = "Item menu" }
@@ -2801,7 +2845,8 @@ do
             snapshot.focus_clear_label = snapshot.focus_clear_label
               or ("Clear focus (" .. #snapshot.focus.active .. ")##qf_clear")
             if imgui.button(snapshot.focus_clear_label) then
-              su.set_key(settings, "focus_qids", {})
+              wt.focus_set("focus_qids", {})
+              wt.focus_set("focus_related_qids", {})
               wt.focus_set("focus_tracked", false)
             end
             local c, idx = imgui.combo("Unrelated markers##focus_unrelated",
@@ -2815,7 +2860,7 @@ do
             c, idx = imgui.combo("Routes##focus_routes",
               settings.focus_routes + 1, focus_route_labels)
             if c then wt.focus_set("focus_routes", idx - 1) end
-            local pc, pv = imgui.checkbox("Routes to quest places##focus_place_routes",
+            local pc, pv = imgui.checkbox("Routes to objective places/items##focus_place_routes",
               settings.focus_place_routes)
             if pc then wt.focus_set("focus_place_routes", pv) end
             if settings.focus_routes > 0 or settings.focus_place_routes then

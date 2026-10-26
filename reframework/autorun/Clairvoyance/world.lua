@@ -1625,11 +1625,44 @@ function M.new(a, reads, io)
                        { pos = pcopy(kp), discovered = true } } }
   end
 
+  -- A direct objective member shares the place route publication shape, but
+  -- owns its copied position and never enters the key-position cache.
+  local function direct_entry(m, tg)
+    local pl = type(tg) == "table" and tg.player or nil
+    if not valid_pos(pl) or not valid_pos(m.pos) then
+      free_slot(m.cid)
+      return nil
+    end
+    set_from(m.cid, pl)
+    return { cid = m.cid, place = 0, direct = true, objective = m.objective,
+      qid = m.qid, kind = m.kind, name = m.name, pos = pcopy(m.pos),
+      stops = { { pos = pcopy(pl), discovered = true },
+                { pos = pcopy(m.pos), discovered = true } } }
+  end
+
+  local function direct_member(e)
+    local route_id = core.objective_route_id(e.qid, e.kind)
+    return route_id ~= nil and e.cid == route_id
+      and e.place == 0 and e.objective == true and type(e.name) == "string"
+      and valid_pos(e.pos)
+  end
+
+  local function same_direct_payload(a, b)
+    return type(a) == "table" and type(b) == "table"
+      and a.direct == true and b.direct == true and a.name == b.name
+      and a.qid == b.qid and a.kind == b.kind and a.objective == b.objective
+      and valid_pos(a.pos) and valid_pos(b.pos) and a.pos.x == b.pos.x
+      and a.pos.y == b.pos.y and a.pos.z == b.pos.z
+  end
+
   -- every member of the published list as an error entry (places still resolve)
   local function all_err(list, tg)
     local out = {}
     for _, m in ipairs(list) do
-      if m.place ~= nil then
+      if m.direct then
+        local de = direct_entry(m, tg)
+        if de ~= nil then out[#out + 1] = de end
+      elseif m.place ~= nil then
         local pe = place_entry(m, tg)
         if pe ~= nil then out[#out + 1] = pe end
       else
@@ -1644,6 +1677,11 @@ function M.new(a, reads, io)
   local function routes_round(tg)
     local list = published()
     if #list == 0 then return nil, false end
+    local needs_schedule = false
+    for _, m in ipairs(list) do
+      if m.place == nil and not m.direct then needs_schedule = true; break end
+    end
+    if not needs_schedule then return all_err(list, tg) end
     if type(reads.schedule_now) ~= "function" then return all_err(list, tg) end
     local okn, day, hour = pcall(reads.schedule_now)
     if not okn or type(day) ~= "number" or type(hour) ~= "number" then return all_err(list, tg) end
@@ -1653,8 +1691,9 @@ function M.new(a, reads, io)
     local has_sig = type(reads.current_sig) == "function"
     for i, m in ipairs(list) do
       local sig, bad = "", false
-      local is_place = m.place ~= nil
-      if has_sig and not is_place then
+      local is_place = m.place ~= nil and not m.direct
+      local is_direct = m.direct == true
+      if has_sig and not is_place and not is_direct then
         local ts = clock()
         local oks, a, l, k, o = pcall(reads.current_sig, m.cid)
         stats.ms.route_sig = (stats.ms.route_sig or 0) + (clock() - ts) * 1000
@@ -1664,8 +1703,8 @@ function M.new(a, reads, io)
           bad = true
         end
       end
-      local e = { m = m, sig = sig, bad = bad, place = is_place }
-      if not bad and not is_place then
+      local e = { m = m, sig = sig, bad = bad, place = is_place, direct = is_direct }
+      if not bad and not is_place and not is_direct then
         local c = S.route_cache[m.cid]
         e.key = tostring(day) .. "|" .. tostring(hour) .. "|" .. sig
         e.stale = c == nil or c.hour ~= hour or c.day ~= day or c.sig ~= sig
@@ -1710,7 +1749,7 @@ function M.new(a, reads, io)
     local pl = valid_pos(tg.player) and tg.player or nil
     for i, e in ipairs(info) do
       local m = e.m
-      if not e.place then
+      if not e.direct and not e.place then
         if e.bad or e.failed then
           ents[i] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
           S.place_from[m.cid] = nil
@@ -1747,7 +1786,11 @@ function M.new(a, reads, io)
     end
     for i, e in ipairs(info) do
       local m = e.m
-      if e.place then
+      if e.direct then
+        local held = S.slot_of[m.cid] == nil and not npc_ready
+        if held then free_slot(m.cid) else ents[i] = direct_entry(m, tg) end
+        if ents[i] ~= nil then out[#out + 1] = ents[i] end
+      elseif e.place then
         local held = S.slot_of[m.cid] == nil and not npc_ready
         local kp = S.key_pos[m.place]
         if not held and kp ~= nil then
@@ -2345,7 +2388,10 @@ function M.new(a, reads, io)
       local same = true
       for i, e in ipairs(list) do
         local m = S.members[i]
-        if type(e) ~= "table" or e.cid ~= m.cid or e.place ~= m.place or e.name ~= m.name then
+        local any_direct = type(e) == "table" and (e.direct == true or m.direct == true)
+        if type(e) ~= "table" or e.cid ~= m.cid or e.place ~= m.place
+            or (any_direct and not same_direct_payload(e, m))
+            or (not any_direct and e.name ~= m.name) then
           same = false
           break
         end
@@ -2359,11 +2405,16 @@ function M.new(a, reads, io)
     local members, member_of = {}, {}
     if type(list) == "table" then
       for _, e in ipairs(list) do
+        local is_direct = type(e) == "table" and e.direct == true and direct_member(e)
         if type(e) == "table" and type(e.cid) == "number" and member_of[e.cid] == nil
-            and (e.place == nil
+            and (is_direct or (e.direct ~= true and (e.place == nil
               or (type(e.place) == "number" and e.place > 0 and e.place % 1 == 0
-                and e.cid == -e.place)) then
+                and e.cid == -e.place)))) then
           local m = { cid = e.cid, name = e.name, place = e.place }
+          if is_direct then
+            m.direct, m.objective, m.qid, m.kind = true, e.objective, e.qid, e.kind
+            m.pos = pcopy(e.pos)
+          end
           members[#members + 1] = m
           member_of[e.cid] = m
         end
@@ -2379,6 +2430,16 @@ function M.new(a, reads, io)
       if member_of[cid] == nil then
         if not (t ~= nil and t.cid == cid) then changed = true end
         leave(cid)
+      end
+    end
+    for _, m in ipairs(members) do
+      local old = was_member[m.cid]
+      if old ~= nil and m.direct and old.direct
+          and not same_direct_payload(m, old) then
+        changed = true
+        S.route_cache[m.cid], S.route_fail[m.cid] = nil, nil
+        if w.path_job ~= nil and w.path_job.cid == m.cid then w.path_job = nil end
+        if w.rps ~= nil then w.rps[m.cid] = nil end
       end
     end
     if changed then

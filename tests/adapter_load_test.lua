@@ -167,7 +167,8 @@ local contract = {
   "giver_hint", "is_generic", "cast_ids", "catalog_pos", "static_pos",
   "npc_alive", "npc_pos", "quest_name",
   "quest_state", "catalog_ids",
-  "objective_cids", "objective_pos", "refresh_objectives", "objective_stats",
+  "objective_cids", "objective_issued_cids", "objective_pos",
+  "refresh_objectives", "objective_stats",
   "refresh_gates", "gate_qids", "gate_stats", "invalidate_gates",
   "seen_quest_name", "quest_region",
   "refresh_tree_gates", "invalidate_tree_gates", "tree_gate_qids",
@@ -179,12 +180,13 @@ local contract = {
   "quest_step", "masquerade_door_closed",
   "overhead_block_reason",
 }
-assert(#contract == 50)
+assert(#contract == 51)
 for _, name in ipairs(contract) do
   assert(type(a[name]) == "function", "contract function missing: " .. name)
 end
 assert(type(a.reset_session_caches) == "function", "reset_session_caches missing")
 assert(a.objective_cids(1) == nil, "no walk committed yet")
+assert(a.objective_issued_cids(1) == nil, "no issued target before a walk")
 assert(type(A.argb_to_abgr(0xFF112233)) == "number")
 assert(A.argb_to_abgr(0xFF112233) == 0xFF332211)
 assert(type(A.debug_probe()) == "string")
@@ -820,6 +822,34 @@ do
   assert(st.kept == 1 and st.entries == 1 and st.quests == 1, "valid kept")
   local got = aw.objective_cids(side_qid)
   assert(got ~= nil and got[1] == npc_cid, "objective_cids serves the table")
+  local issued = aw.objective_issued_cids(side_qid)
+  assert(issued ~= nil and #issued == 1 and issued[1] == npc_cid,
+    "exact true IsIssuedTask is exposed as an objective target")
+  prog_ids = {}
+  aw.refresh_objectives()
+  assert(aw.objective_issued_cids(side_qid) == nil,
+    "non-progressing qid clears issued targets")
+  prog_ids = { side_qid }
+  procs = { proc({ started = true, fin = false, tn = NPC, issued = false }) }
+  aw.refresh_objectives()
+  assert(aw.objective_cids(side_qid)[1] == npc_cid,
+    "objective_cids still includes non-issued candidates")
+  assert(aw.objective_issued_cids(side_qid) == nil,
+    "false IsIssuedTask is excluded")
+  procs = { proc({ started = true, fin = false, tn = NPC, issued = nil }) }
+  aw.refresh_objectives()
+  assert(aw.objective_issued_cids(side_qid) == nil,
+    "nil IsIssuedTask is excluded")
+  procs = { proc({ started = true, fin = false, tn = NPC, issued = true }) }
+  aw.refresh_objectives()
+  procs = {
+    proc({ started = true, fin = false, tn = NPC, issued = true }),
+    proc({ started = true, fin = false, tn = NPC, issued = true }),
+  }
+  aw.refresh_objectives()
+  issued = aw.objective_issued_cids(side_qid)
+  assert(issued ~= nil and #issued == 1 and issued[1] == npc_cid,
+    "duplicate issued records deduplicate through core")
   -- (X1) finished process dropped uncounted
   procs = { proc({ started = true, fin = true, tn = NPC, issued = true }) }
   aw.refresh_objectives()
@@ -833,13 +863,19 @@ do
   qlm = { call = qlm_saved.call }
   assert(aw.reset_session_caches() == true, "session reset ran (walk)")
   assert(aw.objective_cids(side_qid) == nil, "reset clears objective table")
+  assert(aw.objective_issued_cids(side_qid) == nil,
+    "session reset clears issued targets immediately")
   aw.refresh_objectives()
   -- (4) 3 consecutive missing QuestManager walks empty the table
   use_qm = false
   aw.refresh_objectives(); aw.refresh_objectives()
   assert(aw.objective_cids(side_qid) ~= nil, "two failures keep last table")
+  assert(aw.objective_issued_cids(side_qid) ~= nil,
+    "first two failed walks retain issued targets")
   aw.refresh_objectives()
   assert(aw.objective_cids(side_qid) == nil, "3 failures empty the table")
+  assert(aw.objective_issued_cids(side_qid) == nil,
+    "third failed walk clears issued targets")
   assert(aw.objective_stats().failed_total == 3, "failed_total counts walks")
   -- (5) a new QuestManager instance resets failed_total
   use_qm = true
@@ -2560,6 +2596,14 @@ do
       "MG focus_npc and focus_place differ for one number")
     assert(A.map_marker_guid({ cat = "focus_npc", cid = 0x1000000000005, qids = {} })
       == "51a1c0de-0000-4005-8000-000000000005", "MG focus_npc modulo 2^48")
+    assert(A.map_marker_guid({ cat = "focus_place", key = "o:p:30040", qid = 30040,
+        place = 3004, qids = { 30040 } })
+      == "51a1c0de-0000-4007-8000-" .. string.format("%012x", 30040),
+      "MG objective destination has a qid-keyed 4007 GUID with a matched place")
+    assert(A.map_marker_guid({ cat = "focus_place", key = "o:p:0x1000000000005",
+        qid = 0x1000000000005, place = nil, qids = { 0x1000000000005 } })
+      == "51a1c0de-0000-4007-8000-000000000005",
+      "MG objective destination has the 4007 prefix without a matched place and wraps 48 bits")
   end
   A.guid_parse = real_gp
 
