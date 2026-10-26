@@ -49,6 +49,10 @@ map and in your view.
 18. Quest hints: a Hints node in the Quest tree, closed until you open it,
     with reviewed text and step-specific pins on the full map, minimap and in
     the world. The masquerade's hidden-door pin disappears once the passage opens.
+19. Focusing a quest marks its resolved current objective distinctly: issued
+    NPCs, the current journal destination and still-needed quest items. Related
+    NPCs are hidden by default and can be restored per quest with **Show related
+    NPCs**.
 
 ## Requirements
 
@@ -130,14 +134,24 @@ toward the "Gradient end color" (by "Gradient amount (%)") and get fainter
 (down to "Far end opacity (%)") and thinner the further they are from the
 stop the route stands at. "Route legend" lists every shown route, in its
 color, at the top left of the full map; the stop a route stands at
-shows the route's name after its number. With quest focus on, "Routes to quest
-places" also draws a route to each destination place of the focused quests,
-counted in the same eight, and "Routes: n of N" says how many of the
-candidate routes are shown. Close places of the focused quests share one
-route (the one nearest you), places on an NPC's stop are left to that NPC's
-route, and an NPC with a single stop gets a line from you. "Unrelated
-opacity (%)" sets how faint Dim markers are; Dim markers are drawn without
-an outline.
+shows the route's name after its number. With quest focus on, **Current
+objective NPCs** routes to issued NPC targets. **Objective + shown related
+NPCs** also includes the ancillary NPCs enabled for each quest. **Routes to
+objective places/items** routes to the current journal destination, or to the
+nearest retained source of a still-needed quest item when there is no current
+destination. All are counted in the same eight, and "Routes: n of N" says how
+many candidate routes are shown. An NPC with a single stop gets a line from
+you. "Unrelated opacity (%)" sets how faint Dim markers are; Dim markers are
+drawn without an outline.
+
+### Quest focus
+
+Focus is available on nonterminal quests in the Quest tree and can also follow
+the game's tracked quest. The current objective stays visible with its own icon
+and color. **Show related NPCs** is off when a quest is newly focused; turn it
+on for that quest to restore its ancillary cast markers without changing which
+NPC, place or item is the current objective. Not every quest exposes every
+kind of live objective at every step.
 
 ### Items
 

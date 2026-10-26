@@ -124,5 +124,58 @@ check("toggle handler has no rebuild side effects",
   checkbox_body:find("want_update", 1, true) == nil
     and checkbox_body:find("last_tick", 1, true) == nil)
 
+-- SPEC 39: current-objective integration uses one post-compute snapshot.
+check("focus objective inputs include journal cache and related opt-ins",
+  src:find("prev_focus_journal = snapshot and snapshot.focus_journal", 1, true) ~= nil
+    and src:find("show.focus_related_qids = settings.focus_related_qids", 1, true) ~= nil)
+local tick_body = slice("objective tick wiring",
+  "local ok, err = pcall(function()",
+  "-- SPEC 20.12.2: one signature over the markers then the full-map world")
+local compute_at = tick_body:find("local result = core.compute(adapter, show)", 1, true)
+local route_at = tick_body:find('wt.q("set_routes", nil, (wt.route_members(result, show.world)))', 1, true)
+local success_at = tick_body:find("if result == nil then return end", 1, true)
+check("routes come from the exact post-compute objective snapshot",
+  compute_at ~= nil and success_at ~= nil and route_at ~= nil
+    and route_at > compute_at and route_at > success_at
+    and tick_body:find("wt.route_members(snapshot", 1, true) == nil)
+local set_routes_n = 0
+for _ in src:gmatch('wt%.q%("set_routes"') do set_routes_n = set_routes_n + 1 end
+check("main has exactly one set_routes handoff", set_routes_n == 1)
+
+check("objective route labels are explicit",
+  src:find('"Current objective NPCs"', 1, true) ~= nil
+    and src:find('"Objective + shown related NPCs"', 1, true) ~= nil
+    and src:find('"Routes to objective places/items##focus_place_routes"', 1, true) ~= nil)
+check("related NPC controls and pruning are wired",
+  src:find("wt.focus_prune_related = function(active)", 1, true) ~= nil
+    and src:find("wt.related_toggle = function(qid, on, rec)", 1, true) ~= nil
+    and src:find('imgui.checkbox("Show related NPCs##qfr_" .. qid', 1, true) ~= nil
+    and src:find('wt.focus_set("focus_related_qids", {})', 1, true) ~= nil)
+
+check("objective appearance reaches every drawn surface",
+  src:find("wt.style.group_of_marker(m)", 1, true) ~= nil
+    and src:find("wt.style.group_of_marker(marker)", 1, true) ~= nil
+    and src:find('{ "focus_objective", "Current objective" }', 1, true) ~= nil)
+
+local debug_focus = slice("objective debug copy",
+  "      focus = function()",
+  "      -- stats plus at most 20 rows")
+check("focus debug copies objective and related fields",
+  debug_focus:find("objective = {", 1, true) ~= nil
+    and debug_focus:find("related_shown = q.related_shown", 1, true) ~= nil
+    and debug_focus:find("related_hidden = q.related_hidden", 1, true) ~= nil)
+check("focus debug makes no managed NPC reads",
+  debug_focus:find("adapter.npc_pos", 1, true) == nil
+    and debug_focus:find("adapter.npc_alive", 1, true) == nil)
+
+local rf = assert(io.open("README.md", "rb"))
+local readme = rf:read("*a"):gsub("\r\n", "\n")
+rf:close()
+local readme_words = readme:gsub("%s+", " ")
+check("README describes objective and related-NPC focus behavior",
+  readme_words:find("Show related NPCs", 1, true) ~= nil
+    and readme_words:find("Routes to objective places/items", 1, true) ~= nil
+    and readme_words:find("current objective", 1, true) ~= nil)
+
 if failures > 0 then os.exit(1) end
 print("main_source_test: all OK")
