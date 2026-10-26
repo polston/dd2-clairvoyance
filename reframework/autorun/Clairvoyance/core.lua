@@ -3152,6 +3152,48 @@ function M.filter_hint_pins(pins, masquerade_closed)
   return out
 end
 
+-- Fit prose to a measured width without changing its words. A word wider than
+-- the line remains intact rather than being split into unreadable fragments.
+function M.wrap_text(text, max_width, measure)
+  local out = {}
+  if type(text) ~= "string" or text == "" then return out end
+  if type(max_width) ~= "number" or max_width <= 0 then return { text } end
+  if type(measure) ~= "function" then measure = string.len end
+  local line = nil
+  for word in text:gmatch("%S+") do
+    local candidate = line ~= nil and (line .. " " .. word) or word
+    local ok, width = pcall(measure, candidate)
+    if not ok or type(width) ~= "number" then width = #candidate end
+    if line ~= nil and width > max_width then
+      out[#out + 1] = line
+      line = word
+    else
+      line = candidate
+    end
+  end
+  if line ~= nil then out[#out + 1] = line end
+  return out
+end
+
+-- Keep one measured layout per text. Resizing the window or changing UI scale
+-- replaces that entry; steady frames reuse it without measuring every word.
+function M.wrap_text_cached(cache, text, cache_key, max_width, measure)
+  if type(cache) ~= "table" then return M.wrap_text(text, max_width, measure) end
+  local old = cache[text]
+  if type(old) == "table" and old.key == cache_key then return old.lines end
+  local lines = M.wrap_text(text, max_width, measure)
+  cache[text] = { key = cache_key, lines = lines }
+  return lines
+end
+
+function M.hint_wrap_width(window_x, cursor_x, padding, fallback)
+  local width = finite(fallback) and fallback or 160
+  if finite(window_x) and finite(cursor_x) then
+    width = window_x - cursor_x - (finite(padding) and padding or 0)
+  end
+  return math.max(1, math.floor(width))
+end
+
 -- v14: route stops and hint pins are the fixed map-space points drawn in-world.
 function M.route_overhead_points(markers)
   local out = {}

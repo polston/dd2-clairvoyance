@@ -233,7 +233,7 @@ wt.rows = function(cat, class, kind, fam)
 end
 -- v14 (SPEC 22.11.3): the opened Hints nodes' qids, and the pins of those
 -- whose step is the active one now (pins bypass the search and the cap).
-wt.hints, wt.hints_open = {}, {}   -- hints by qid (npcs.parse_hints); qid -> step idx
+wt.hints, wt.hints_open, wt.hint_wrap = {}, {}, {}   -- hints; open step; text layout cache
 wt.quest_rel, wt.quest_pak, wt.focus_tracked_qid = nil, nil, nil   -- quest focus (SPEC 32)
 wt.hint_inputs = function()
   local qids, pins, needs_door = {}, {}, false
@@ -264,6 +264,21 @@ wt.hint_inputs = function()
     pins = core.filter_hint_pins(pins, ok and closed or nil)
   end
   return qids, pins
+end
+wt.hint_text = function(text)
+  local dk = wt.dk or 1
+  local okw, size = pcall(imgui.get_window_size)
+  local okc, cursor = pcall(imgui.get_cursor_pos)
+  local width = core.hint_wrap_width(okw and size and size.x or nil,
+    okc and cursor and cursor.x or nil, 16 * dk, 160 * dk)
+  local function measure(s)
+    local mok, measured = pcall(imgui.calc_text_size, s)
+    if mok and measured ~= nil and type(measured.x) == "number" then return measured.x end
+    return #s * 8 * dk
+  end
+  local key = tostring(width) .. ":" .. tostring(math.floor(dk * 1000 + 0.5))
+  local lines = core.wrap_text_cached(wt.hint_wrap, text, key, width, measure)
+  for _, line in ipairs(lines) do imgui.text(line) end
 end
 -- Quest focus to the world round (SPEC 32.7, Contract 3): the previous
 -- snapshot's focus table as is, and the sorted unique dest keys of the
@@ -2293,15 +2308,14 @@ local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
       local idx = rec.cat == "in_progress" and jr ~= nil
         and type(jr.step_index) == "number" and jr.step_index or nil
       if imgui.tree_node("Hints###qh_" .. qid .. "_" .. (idx ~= nil and idx or "q")) then
-        local tw = imgui.text_wrapped or imgui.text
-        if hq.quest ~= nil then tw(hq.quest) end
+        if hq.quest ~= nil then wt.hint_text(hq.quest) end
         if idx ~= nil then
           if wt.hints_open[qid] ~= idx then
             wt.hints_open[qid] = idx
             last_tick = 0.0   -- the pins show within a frame or two
           end
           local st = require("Clairvoyance.npcs").hint_step(wt.hints, qid, idx + 1)
-          if st ~= nil then tw(st.text) end
+          if st ~= nil then wt.hint_text(st.text) end
         end
         imgui.tree_pop()
       end
