@@ -971,14 +971,6 @@ local idx_obj = int_t:create_instance():add_ref()
 local color_obj = uint_t:create_instance():add_ref()
 local INT_OFF, UINT_OFF = A.int_value_offset, A.uint_value_offset
 
-local function catalog_side_count()
-  local side = 0
-  for _, q in ipairs(A.catalog_ids() or {}) do
-    if adapter.is_side(q) then side = side + 1 end
-  end
-  return side
-end
-
 -- One-shot giver audit (debug): every catalog side quest with no curated
 -- giver hint is logged with its cast candidates and CharacterID enum labels,
 -- so hints can be curated against the game's own character names.
@@ -1078,7 +1070,8 @@ re.on_frame(function()
       local cs = A.catalog_stats()
       logmsg(string.format(
         "Catalog: %d entries, %d skipped (%d cast), %d distinct side IDs (%d total)",
-        cs.entries, cs.skipped, cs.cast_skipped, catalog_side_count(), cs.distinct))
+        cs.entries, cs.skipped, cs.cast_skipped,
+        (snapshot and snapshot.catalog_side_count) or 0, cs.distinct))
       local os_ = adapter.objective_stats ~= nil and adapter.objective_stats() or nil
       if os_ ~= nil then
         logmsg(string.format(
@@ -3142,7 +3135,8 @@ do
       local cs = A.catalog_stats()
       imgui.text(string.format(
         "Catalog: %d entries, %d skipped (%d cast), %d distinct side IDs (%d total)",
-        cs.entries, cs.skipped, cs.cast_skipped, catalog_side_count(), cs.distinct))
+        cs.entries, cs.skipped, cs.cast_skipped,
+        (snapshot and snapshot.catalog_side_count) or 0, cs.distinct))
       local os_ = adapter.objective_stats ~= nil and adapter.objective_stats() or nil
       if os_ ~= nil then
         imgui.text(string.format(
