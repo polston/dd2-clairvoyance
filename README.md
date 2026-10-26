@@ -114,6 +114,10 @@ kinds is hidden when any one of them is off:
 by name lists it under "NPCs (N)" in the search results; its "Route" checkbox
 draws that NPC's day, one routed NPC at a time.
 
+"Hide overhead overlays in cutscenes and menus" is on by default. It hides
+in-world markers, routes and names while a paused menu or cutscene is active;
+turn it off to keep the previous visibility rules.
+
 "Route path" draws a searched NPC's route as straight lines or along the
 game's walking paths ("Walking path", the default). "Show route path in the
 world" draws the walking path in the world too. The path search needs a copy of
