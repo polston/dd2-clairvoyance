@@ -101,6 +101,53 @@ check("nil progressing -> nil result",
 local r = core.compute(base_adapter(), SHOW_ALL)
 check("empty: no markers", r ~= nil and #r.markers == 0 and r.counts.startable == 0)
 
+-- Catalog debug count is derived during the distinct quest union walk.
+do
+  local side_calls, total_calls = {}, 0
+  local a = base_adapter({
+    acceptable_ids = function() return { 101, 105 } end,
+    progressing_ids = function() return { 102 } end,
+    catalog_ids = function() return { 101, 102, 103, 104 } end,
+    is_side = function(qid)
+      total_calls = total_calls + 1
+      side_calls[qid] = (side_calls[qid] or 0) + 1
+      return qid ~= 104
+    end,
+  })
+  local counted = core.compute(a, SHOW_ALL)
+  check("catalog side count: overlap and live-only matrix", counted.catalog_side_count == 3)
+  check("catalog side count: catalog overlap survives earlier union dedupe",
+    side_calls[101] == 1 and side_calls[102] == 1)
+  check("catalog side count: is_side once per unique union qid",
+    total_calls == 5 and side_calls[101] == 1 and side_calls[102] == 1
+      and side_calls[103] == 1 and side_calls[104] == 1 and side_calls[105] == 1)
+
+  counted = core.compute(base_adapter({
+    acceptable_ids = function() return {} end,
+    progressing_ids = function() return {} end,
+    catalog_ids = function() return nil end,
+  }), SHOW_ALL)
+  check("catalog side count: nil catalog is zero", counted.catalog_side_count == 0)
+  counted = core.compute(base_adapter({
+    acceptable_ids = function() return {} end,
+    progressing_ids = function() return {} end,
+    catalog_ids = function() return {} end,
+  }), SHOW_ALL)
+  check("catalog side count: empty catalog is zero", counted.catalog_side_count == 0)
+
+  local catalog = { 111 }
+  local changing = base_adapter({
+    acceptable_ids = function() return {} end,
+    progressing_ids = function() return {} end,
+    catalog_ids = function() return catalog end,
+  })
+  local first = core.compute(changing, SHOW_ALL)
+  catalog = { 111, 112, 113 }
+  local second = core.compute(changing, SHOW_ALL)
+  check("catalog side count: refreshes on each compute",
+    first.catalog_side_count == 1 and second.catalog_side_count == 3)
+end
+
 -- 3. filters
 r = core.compute(base_adapter({
   acceptable_ids = function() return {10, 20, 30, 40} end,

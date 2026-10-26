@@ -2473,17 +2473,20 @@ function M.compute(adapter, show)
   for _, qid in ipairs(progressing) do prog[qid] = true end
   for _, qid in ipairs(acceptable) do acc[qid] = true end
 
-  local seen, qids = {}, {}
-  local function add(list)
+  local seen, qids, catalog_set = {}, {}, {}
+  local function add(list, is_catalog)
     if list == nil then return end
     for _, qid in ipairs(list) do
-      if type(qid) == "number" and not seen[qid] then
-        seen[qid] = true
-        qids[#qids + 1] = qid
+      if type(qid) == "number" then
+        if is_catalog then catalog_set[qid] = true end
+        if not seen[qid] then
+          seen[qid] = true
+          qids[#qids + 1] = qid
+        end
       end
     end
   end
-  add(acceptable); add(progressing); add(catalog)
+  add(acceptable); add(progressing); add(catalog, true)
   table.sort(qids)
 
   local counts = { startable = 0, in_progress = 0, completed = 0,
@@ -2494,6 +2497,7 @@ function M.compute(adapter, show)
   local quests, rec_by = nil, nil
   if show.tree_open and adapter.quest_region then quests, rec_by = {}, {} end
   local shown_inprog = {}   -- v8: in-progress qids that survive the visibility drop
+  local catalog_side_count = 0
 
   -- v19 (SPEC 32): the focused quests that are live. focus_inprog is set here,
   -- before the loop, whose first statement drops main quests.
@@ -2507,6 +2511,7 @@ function M.compute(adapter, show)
   for _, qid in ipairs(qids) do
     repeat
       if not adapter.is_side(qid) then break end
+      if catalog_set[qid] then catalog_side_count = catalog_side_count + 1 end
 
       local hint, cands
       local function get_candidates()
@@ -2965,6 +2970,7 @@ function M.compute(adapter, show)
     unresolved = unresolved,
     unnamed = unnamed,
     counts = counts,
+    catalog_side_count = catalog_side_count,
     resolved_count = resolved_count,
     quests = quests,
     rec_by = rec_by,
