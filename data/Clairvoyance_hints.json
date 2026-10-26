@@ -1,184 +1,1153 @@
 {
-  "10060": {
-    "items": [
-      310,
-      634
-    ]
-  },
-  "10100": {
-    "items": [
-      376
-    ]
-  },
-  "10110": {
-    "items": [
-      308
-    ]
-  },
-  "10120": {
-    "items": [
-      374
-    ]
-  },
-  "10150": {
-    "items": [
-      321,
-      338,
-      339
-    ]
-  },
-  "10151": {
-    "items": [
-      354,
-      355
-    ]
-  },
-  "10160": {
-    "items": [
-      357
-    ]
-  },
-  "10170": {
-    "items": [
-      397
-    ]
-  },
-  "10180": {
-    "items": [
-      369
-    ]
-  },
-  "10200": {
-    "items": [
-      397
-    ]
-  },
-  "20030": {
-    "items": [
-      395
-    ]
-  },
-  "20060": {
-    "items": [
-      335
-    ]
-  },
-  "20090": {
-    "items": [
-      300
-    ]
-  },
-  "20100": {
-    "items": [
-      370,
-      399
-    ]
-  },
-  "20110": {
-    "items": [
-      329
-    ]
-  },
-  "20130": {
-    "items": [
-      382,
-      383
-    ]
-  },
-  "20190": {
-    "items": [
-      349
-    ]
-  },
-  "20200": {
-    "items": [
-      112
-    ]
-  },
-  "20220": {
-    "items": [
-      394
-    ]
-  },
-  "20250": {
-    "items": [
-      372
-    ]
-  },
-  "20290": {
-    "items": [
-      315,
-      471
-    ]
-  },
-  "20330": {
-    "items": [
-      534
-    ]
-  },
-  "20350": {
-    "items": [
-      365,
-      366
-    ]
-  },
-  "20390": {
-    "items": [
-      301,
-      331,
-      635
-    ]
-  },
-  "20480": {
-    "items": [
-      353
-    ]
-  },
-  "30010": {
-    "items": [
-      319
-    ]
-  },
-  "30040": {
-    "items": [
-      306
-    ]
-  },
-  "30041": {
-    "items": [
-      309
-    ]
-  },
-  "30042": {
-    "items": [
-      324
-    ]
-  },
-  "30050": {
-    "items": [
-      326,
-      327
-    ]
-  },
-  "30080": {
-    "items": [
-      334
-    ]
-  },
-  "30090": {
-    "items": [
-      334
-    ]
-  },
-  "30120": {
-    "items": [
-      332,
-      351
-    ]
-  },
-  "30180": {
-    "items": [
-      316
-    ]
+ "10060": {
+  "items": [
+   310,
+   634
+  ]
+ },
+ "10100": {
+  "items": [
+   376
+  ]
+ },
+ "10110": {
+  "items": [
+   308
+  ]
+ },
+ "10120": {
+  "items": [
+   374
+  ]
+ },
+ "10150": {
+  "items": [
+   321,
+   338,
+   339
+  ]
+ },
+ "10151": {
+  "items": [
+   354,
+   355
+  ]
+ },
+ "10160": {
+  "items": [
+   357
+  ]
+ },
+ "10170": {
+  "items": [
+   397
+  ]
+ },
+ "10180": {
+  "items": [
+   369
+  ]
+ },
+ "10200": {
+  "items": [
+   397
+  ]
+ },
+ "20010": {
+  "quest": "Flora, a young merchant from Vernworth, waits outside Runne's Apothecary in Melve. Walk up to her and agree to help, and she asks you to find a restorative medicine for her.",
+  "steps": {
+   "0": {
+    "text": "Get a Fruit Roborant, then hand it to Flora outside the apothecary in Melve. You can brew one by mixing Greenwarish or Morningtide with any dried fruit, or buy one inside the apothecary for 600 gold."
+   }
   }
+ },
+ "20020": {
+  "quest": "At the very start of the game, Phill catches you by the outpost's southern gate (Borderwatch Outpost) and asks you to rescue a young recruit named Accardo. The quest is time-sensitive, so act on it right away.",
+  "steps": {
+   "0": {
+    "text": "Take the road south out of Borderwatch Outpost until you reach Accardo, who is under attack by harpies. He cannot be hurt, so just kill the harpies. Ranged pawns or spells help when they hover out of reach. Do not dawdle, since leaving the request waiting can fail it."
+   },
+   "1": {
+    "text": "Return to Phill at Borderwatch Outpost and tell him how Accardo fared. That closes the quest."
+   },
+   "2": {
+    "text": "Walk back to the outpost and talk to Phill again to finish the request."
+   }
+  }
+ },
+ "20030": {
+  "items": [
+   395
+  ],
+  "quest": "Geoffrey, the provisioner, stands near a table among the tents in the middle of Borderwatch Outpost. Speak with him once you have reached the outpost and made some progress in the main story.",
+  "steps": {
+   "0": {
+    "text": "Geoffrey hands you a note. Walk north out of camp along the road you arrived on, find Markus gathering supplies, and give him the note."
+   },
+   "1": {
+    "text": "Markus won't gather anything more himself. Collect three harspuds (vine-wrapped plants on the ground in the marked zones) and make two salubrious draughts by combining grapes or apples with greenwarish, the leafy green bush. You can also buy draughts from Kassandra in camp."
+   },
+   "2": {
+    "text": "Take the three harspuds and two draughts back to Markus on his hill. He gives you waking powder and heads off to camp. If you skip this help, the quest ends on a lesser outcome."
+   },
+   "3": {
+    "text": "Go back to Geoffrey in the middle of Borderwatch Outpost and speak with him to finish the quest and collect your pay."
+   },
+   "4": {
+    "text": "If you cannot find Markus, return to Geoffrey at Borderwatch Outpost and report that you were unable to deliver the note. The quest ends with its poorest result."
+   }
+  }
+ },
+ "20040": {
+  "quest": "Lennart, a villager in Melve, asks for help once the dragon's attack on the village is behind you (after the main quest In Dragon's Wake). Find him near the well in the wrecked part of town.",
+  "steps": {
+   "0": {
+    "text": "Leave Melve through the gate and look near the river bank for a pile of explosive casks. Pick one up, aim from your side of the river, and throw it onto the saurian eggs across the water. Throw a second cask if the first leaves anything alive."
+   },
+   "1": {
+    "text": "Go back out the gate and take the jar of poison lying near the entrance. Carry it to the river and throw it at the same nest. Aim carefully, because a missed throw means reloading your last save."
+   },
+   "2": {
+    "text": "Return to Lennart in town, usually by the well, to report that the casks worked. He then asks you to finish the job with poison."
+   },
+   "3": {
+    "text": "Find Lennart again, usually near the town gate, and tell him the poison is thrown. This ends the quest."
+   }
+  }
+ },
+ "20050": {
+  "quest": "In Melve, look for Ian, a man with a green shirt, brown cape and a shield on his back, who often stands near the inn. His brother Norbert has not come back from the northern forest, and Ian offers to lead you there.",
+  "steps": {
+   "0": {
+    "text": "Follow Ian out of Melve along the road to the marker and keep him alive on the way. You may camp at the stone bridge or just push on. At the marker a wolf pack is attacking Norbert, so kill every wolf quickly before they hurt him."
+   },
+   "1": {
+    "text": "Walk both brothers back to Melve the way you came. They move at their own pace and can be hurt, so clear threats ahead of them and do not let either die. The quest ends when they are inside the village."
+   }
+  }
+ },
+ "20060": {
+  "items": [
+   335
+  ],
+  "quest": "A young beastren named Akakios, in the Mercantile Ward on the west edge of Bakbattahl, hands you a letter to carry to Ernesto. Reach Bakbattahl first.",
+  "steps": {
+   "0": {
+    "text": "Carry the letter to Ernesto, who is stationed at the camp on Volcanic Island. Leave Bakbattahl by the southwest path, cross the desert south, and pass through the long, dark Drabnir's Grotto. Past the cave, follow the path east to the camp. Ernesto usually fights monsters outside the north gate. Expect enemies of level 30 or so. If he is dead, find his body at the Battahl Morgue and revive him with a Wakestone, then hurry back and give him the letter."
+   },
+   "1": {
+    "text": "Ernesto asks you to pass a second letter to Barbas. Take the path east of the camp into the Excavation Site, where the game began. Barbas stands just inside the entrance. Hand him the letter to finish and collect gold plus a Ferrystone."
+   }
+  }
+ },
+ "20070": {
+  "quest": "Talk to Oswald, who stands by the fountain at the northwest entrance of Vernworth's Noble Quarter, then to Margit outside the Watchhead's home in the same quarter. Speak to Oswald first, or Margit's dialogue won't offer the quest. This comes after the coronation events of the main story.",
+  "steps": {
+   "0": {
+    "text": "This is a timed quest: if you dawdle, Gregor dies. Head to the Misty Marshes northwest of Vernworth. An oxcart to Checkpoint Rest Town (about 200 gold) shortens the trip. Follow the fire baskets through fog and undead to the lake island where Gregor fights a dullahan, which appears at night. You only need Gregor to survive until the dullahan flees, but killing it is fine. A mage casting Palladium helps a lot."
+   },
+   "1": {
+    "text": "Return to Vernworth's Noble Quarter. Margit and Gregor wait together in front of the Watchhead's home. Talk to them to finish the quest. If Gregor died, carrying his body to town and reviving him there reportedly still works."
+   }
+  }
+ },
+ "20080": {
+  "quest": "After you rescue the soldiers in the Stormwind Cave at Harve Village during Monster Culling, a villager named Fyoran stops you on the way out and asks you to clear his village of saurians.",
+  "steps": {
+   "0": {
+    "text": "Walk into Harve Village and kill the saurians roaming it. Cut off their tails to weaken them quickly. Villagers fight alongside you in this open area."
+   },
+   "1": {
+    "text": "Speak with Fyoran once the village is clear. He asks you to stay away for a while so repairs can happen."
+   },
+   "2": {
+    "text": "Leave Harve and let two or three days pass, travelling well beyond the campfire just north of the village. Then come back and talk to Fyoran, who warns of more saurians. If nothing happens, keep resting away from the village and return again."
+   },
+   "3": {
+    "text": "Kill the second, larger group of saurians in the village. Villagers help again, so work fast to keep them safe."
+   },
+   "4": {
+    "text": "Talk to Fyoran one more time for the closing scene, which finishes the quest."
+   }
+  }
+ },
+ "20082": {
+  "quest": "Visit Harve Village after you have finished Monster Culling and Scaly Invaders, leave for a few days, and come back. A fresh group of saurians has arrived, Jonas and Fyoran argue, and Fyoran begs you to help save his fellow beastren Zoran from Stormwind Cave.",
+  "steps": {
+   "0": {
+    "text": "Make your way south from Harve to Stormwind Cave and meet Fyoran at its entrance. Jump down the ledges to the first chamber and prepare before going deeper."
+   },
+   "1": {
+    "text": "Make your way south from Harve to Stormwind Cave and meet Ulrika and the guards at the entrance. This is the version where Ulrika has moved to Harve through Readvent of Calamity. Prepare before you go in."
+   },
+   "2": {
+    "text": "Go down into the cave with Ulrika and her guards. Take the tunnel west, then south, into the central chamber and kill the saurians there. Then climb the ledges at the southwest edge and head east to the nursery chamber, where Zoran lies in the northeast corner."
+   },
+   "3": {
+    "text": "Go down into the cave with Fyoran. Take the tunnel west, then south, into the central chamber and kill the saurians there. Then climb the ledges at the southwest edge and head east to the nursery chamber, where Zoran lies in the northeast corner."
+   },
+   "4": {
+    "text": "Lead Zoran slowly back out the way you came. He is very frail, so kill the saurians on the route first, avoid fights while he follows, and do not carry him or drop him from ledges. If he dies, reload your last save. Bring him to Harve to end the quest; the outcome with Jonas depends on whether Ulrika had moved to the village."
+   }
+  }
+ },
+ "20090": {
+  "items": [
+   300
+  ],
+  "quest": "Near the central fountain plaza of Vernworth's Merchant Quarter, a beggar named Albert tells tales for coins. A beastren listener named Benton there asks you to find out how the beggar really earns his living.",
+  "steps": {
+   "0": {
+    "text": "Albert's secret is his double life. Enter his house in the Common Quarter, a short way southeast of the home you can buy, while he is away at night, and take the Beggar's Garb from his bedframe. Then choose who gets it. Hilda in front of Baldwin's Estate gives the best story ending, Celina at Walter's Tavern leads to a tragic end, and Albert himself pays you a lot of gold for silence."
+   },
+   "1": {
+    "text": "Optional. Shadow Albert: he begs in the plaza from morning to dusk, then goes to Walter's Tavern in the Slums, then to his house in the Common Quarter, where he changes into fine clothes and visits Baldwin's Estate. Skipping this and robbing the empty house at night works fine."
+   },
+   "2": {
+    "text": "If you gave the garb to Celina, wait a few days, then visit her and Albert's home. The outcome is a grim one for the pair."
+   },
+   "3": {
+    "text": "If you gave the garb to Hilda, wait a few days, then visit her in front of Baldwin's Estate. She reports that Albert has given up begging for honest work, and pays you."
+   }
+  }
+ },
+ "20100": {
+  "items": [
+   370,
+   399
+  ],
+  "quest": "Walk the main road toward the Ancient Battleground from its east side. You hear Oskar shouting for help; when you reach him, monsters are attacking. Saving him and talking afterwards starts the quest.",
+  "steps": {
+   "0": {
+    "text": "Enter the Ancient Battleground from the east and follow the road through the ruins, dealing with the restless spirits and monsters as you cross."
+   },
+   "1": {
+    "text": "Defeat the monsters attacking Oskar on the road by the east entrance, then speak with him."
+   },
+   "2": {
+    "text": "Oskar asks you to guard him on the way to the cenotaph. Stay close, since he is slow. Head up into the ruined castle to the north, defeat the skeletons inside, climb to the rampart, drop down a ladder, and hit the gate to open a shortcut. The bell room is just beyond. If Oskar vanishes, reload or return to where you met him."
+   },
+   "3": {
+    "text": "Do not take the grimoire under the bell before Oskar rings it. If you grab it early, you have to bring \"Nation's Death Knell\" back and put it on its spot. Players report bugs with this, so avoid selling or using the book."
+   },
+   "4": {
+    "text": "Return to the merchant who asked about the unrest and tell him the spirits in the Ancient Battleground have been dealt with."
+   }
+  }
+ },
+ "20110": {
+  "items": [
+   329
+  ],
+  "quest": "Start after finishing Nation of the Lambent Flame. Back in Vernworth, listen to townsfolk near the west oxcart station complaining about a cart that runs after dark.",
+  "steps": {
+   "0": {
+    "text": "Go to the marked spot outside Vernworth and wait until night. Stay at a distance and watch the cutscene of a soldier named Navil handing goods to the cart's driver, Mansenn."
+   },
+   "1": {
+    "text": "Chase down Navil after the cart leaves. He offers money to be let go, or you can take him to prison; the quest continues either way. Either way he gives you a merchant's document."
+   },
+   "2": {
+    "text": "Show the document to Captain Brant at the Stardrop Inn, where he appears at night. He offers two approaches: follow the cart from a distance or pose as a pawn. For the disguise route, remove all weapons, armor, and accessories, command your pawns to remain beyond the marked cart area, then approach Mansenn on foot."
+   },
+   "3": {
+    "text": "Ride the cart, and keep your gear off the whole way. Fight goblin attackers bare-handed, and stay still when guards at the Checkpoint Rest Town hit you or the disguise fails. At the destination in Bakbattahl, the disguise drops; re-equip and fight the guards. If the cart does not show, wait for night again at the same spot."
+   },
+   "4": {
+    "text": "Search the defeated guards for the Labor Requisition Orders and do not leave without them. Carry them back to Captain Brant at the Stardrop Inn at night."
+   }
+  }
+ },
+ "20120": {
+  "quest": "Find Kendrick beside the Gracious Hand in Vernworth's slums. Give him both 1,000 gold and one food item; he then explains that Malcolm has gone missing.",
+  "steps": {
+   "0": {
+    "text": "Find three children near the Gracious Hand and talk to each once. One kneels by rubble across from the building, one stands on the lookout platform by the sea to the east, and one girl is in the lobby inside. She may only show up after you have spoken with the other two."
+   },
+   "1": {
+    "text": "Return to Kendrick and tell him what the children said. After a short talk he starts walking to a ruined tower close by."
+   },
+   "2": {
+    "text": "Follow Kendrick to the ruined tower, where he clears the rubble from the entrance. Go down into the vaults. The straight route is blocked by a locked door, so keep to the right wall and circle round to find a way past it. Fight the rats and bats on the way until you reach the room where Malcolm is."
+   },
+   "3": {
+    "text": "Follow Malcolm and Kendrick onward through the vaults, climbing the stairs to the large hidden library of old books. Reaching it ends the quest. Finish it before The Caged Magistrate if you want to send Waldhar to this archive."
+   }
+  }
+ },
+ "20130": {
+  "items": [
+   382,
+   383
+  ],
+  "quest": "Reach the Slums of Vernworth and go to the Gracious Hand, a convent in the southeast. Outside you overhear Abbess Elena and a worried father, Vlasiy. Talk to Elena afterward and she asks for medicinal ingredients.",
+  "steps": {
+   "0": {
+    "text": "Bring Elena three miasmite. Miasmite drops from the pale floating phantoms that appear in the wilds at night, so a bow or spells work best. If you do not want to hunt, buy it from Folkes in the Ancient Battleground between Vernworth and Checkpoint Rest Town for about 300 gold each."
+   },
+   "1": {
+    "text": "After you hand over the miasmite, follow Elena on her tour of the Gracious Hand. At the end Vlasiy's son Lubomir, a patient, asks you to pass on any odd rumors."
+   },
+   "2": {
+    "text": "Talk to Lottie outside the Gracious Hand. She mentions screams coming from a basement sickroom that only Elena enters."
+   },
+   "3": {
+    "text": "Report the basement findings to Lubomir. He wants proof strong enough to bring the abbess down."
+   },
+   "4": {
+    "text": "Enter the basement at night and take the Unlabeled Medicine and Records of Treatment from the room beyond the curtain. Show them to Lubomir, question Bruno and Jehan at Walter's Tavern, observe Elena meeting Alois in the Common Quarter at night, and have Radcliff in Checkpoint Rest Town analyze the medicine. After Radcliff reports back, return to the Gracious Hand and grab Elena so the guards can arrest her."
+   },
+   "5": {
+    "text": "This step repeats the first one: bring Elena three miasmite, which you can farm from night phantoms or buy from Folkes."
+   }
+  }
+ },
+ "20140": {
+  "quest": "Visit the slums of Vernworth at night near the Gracious Hand orphanage and look for Daphne, a girl wandering there. Talk to her and agree to help.",
+  "steps": {
+   "0": {
+    "text": "Make a bunch of flowers by combining two different flower types, such as sunbloom with noonbloom or moonglow. Marked spots outside Vernworth have flowers. The bunch wilts after about a day, so do this right before delivering."
+   },
+   "1": {
+    "text": "Return to the slums quickly and hand the flowers to Daphne. She then asks for another favor. If they wilt, you must make new ones."
+   },
+   "2": {
+    "text": "Daphne wants a piece of silver ore. Mine it at a marked spot, buy it from a wandering vendor, or use some from your stash."
+   },
+   "3": {
+    "text": "Bring the silver ore to Daphne in the slums and hand it over."
+   },
+   "4": {
+    "text": "Rest for a day or more, then find Daphne in the slums again."
+   },
+   "5": {
+    "text": "Gather two pieces of gold ore, which you can mine near the silver spots, buy, or take from your stash. They go to the priests for holy water."
+   },
+   "6": {
+    "text": "Take both gold ores to Daphne in the slums."
+   },
+   "7": {
+    "text": "Get five detoxifying decoctions, the purple potion that cures blight. Buy them at the sundries shop in the Merchant Quarter for about 500 gold each, or craft them from pitywort and syrupwort leaf."
+   },
+   "8": {
+    "text": "Give the five decoctions to Daphne in the slums to finish the quest."
+   }
+  }
+ },
+ "20150": {
+  "quest": "Diana, a housemaid, hails you in Vernworth's Common Quarter near the stairs down to the slums once you have finished The Gift of Giving. She wants you to visit the family house where she works, up in the Noble Quarter.",
+  "steps": {
+   "0": {
+    "text": "Climb to Townsend's Estate in the Noble Quarter and speak with Diana and her master Sebastian. They need a stand-in who looks like him."
+   },
+   "1": {
+    "text": "Go down to the slums and find Daphne, the girl from The Gift of Giving, who stands outside The Gracious Hand during the day. Ask her to help."
+   },
+   "2": {
+    "text": "Walk Daphne back to Townsend's Estate so she can dress up as Sebastian."
+   },
+   "3": {
+    "text": "Talk to Daphne and Diana for hints about what Sebastian needs for his trip to Melve. He wants something that smells of cyclops, which is a Misshapen Eye dropped by a cyclops, plus Waking Powder and Detoxifying Decoction. The two remedies are sold at the sundries shop in the Merchant Quarter. Give him all three to skip the rescue later."
+   },
+   "4": {
+    "text": "Wait about a day, by resting or doing other things, then return to the manor. If he had every supply, Sebastian is back home and you can skip ahead. Otherwise he has not returned."
+   },
+   "5": {
+    "text": "If the supplies were wrong or missing, travel the road toward Melve, near the riftstone, and find Sebastian hiding in bushes under attack. Defend him. Do this within roughly two days; if he dies, revive him with a wakestone."
+   },
+   "6": {
+    "text": "Go back to Townsend's Estate and tell the family what happened to finish the quest."
+   },
+   "7": {
+    "text": "Collect the three items for Sebastian: a Misshapen Eye (cyclops drop; look along the roads or the forest east of Vernworth), Waking Powder, and Detoxifying Decoction. Hand them over at the manor."
+   }
+  }
+ },
+ "20170": {
+  "quest": "This quest unlocks after A Place to Call Home, once you own the house in Vernworth's Common Quarter. A few days later a warning notice from the Vernworth guard is left in your home.",
+  "steps": {
+   "0": {
+    "text": "Take the north oxcart from Vernworth and get off at the river bridge in eastern Vernworth, then walk southeast to the ruins. The beasts only appear at night, so rest at the camp near the ruins first. A corrupted chimera and corrupted hobgoblins attack, and they are tougher and harder to stagger than normal ones. A level around 50 and a mage pawn are advised."
+   },
+   "1": {
+    "text": "Once the corrupted beasts are dead, go back to your home in Vernworth and wait. A new notice arrives after the guard has noticed what you did."
+   },
+   "2": {
+    "text": "Go home to the Common Quarter and read the warning notice on the table near the bed. It points you to the area southeast of Vernworth where the corrupted beasts were seen."
+   }
+  }
+ },
+ "20190": {
+  "items": [
+   349
+  ],
+  "quest": "After you finish Masked Correspondence, go to the masquerade in Vernworth Hall at the castle. It is held at night, every second night, and you must dress in the Eventide Mask plus the Courtly Tunic and Breeches. A masked man at the entrance starts a gift exchange and slips you a gift.",
+  "steps": {
+   "0": {
+    "text": "Wander around the round hall and approach each guest. They give you gifts automatically, and you need not give any back. Keep going until the guard Olven announces that a staff called the Paragon Staff was stolen and everyone will be searched."
+   },
+   "1": {
+    "text": "The staff you were given is the stolen item, and the man who gave it to you, in a black and gold mask, is the thief. Your choice decides the result. Grabbing him and carrying him confesses the crime, with the highest gold reward, but you lose the staff. Alternatively, discard the staff in the changing room behind the privacy screen in the back right corner and hurry back to the hall. You get less gold but can buy the staff for 60,000 gold from Ibrahim's shop (Scrap Store) in Checkpoint Rest Town some days later. Discarding the staff and also grabbing the thief gets the thief caught and keeps the staff purchase open."
+   }
+  }
+ },
+ "20200": {
+  "items": [
+   112
+  ],
+  "quest": "Reach the Mountain Shrine north of Checkpoint Rest Town, past the Ancient Battleground and Worldsend Cavern. The sphinx waiting there starts the quest as soon as you arrive. The route has tough enemies, so come well prepared.",
+  "steps": {
+   "0": {
+    "text": "At the Mountain Shrine, solve Eyes by retrieving the Sealing Phial above the doorway, Madness by presenting your main pawn or a high-affinity NPC, Wisdom by bringing an official pawn named SphinxParent, SphinxMother, or SphinxFather, Conviction by surrendering any item, and Rumination by finding the Finder's Token where you picked up your first Seeker's Token within seven days. Find her next at Frontier Shrine; there, solve Reunion by arriving, Recollection by placing one statue per riddle you have answered correctly, Contest by throwing the summoned fighter off the cliff while the weakening ring is equipped, Differentiation by fetching the pictured twin (straight-haired Dante on the Vermund side of Checkpoint Rest Town or curly-haired Vergil on the Battahl side), and Futility by carrying Maurits from Bakbattahl to the vase instead of moving the fragile vase. After all riddles, attack and defeat the sphinx as she prepares to depart, then use her key on the large chest."
+   }
+  }
+ },
+ "20220": {
+  "items": [
+   394
+  ],
+  "quest": "Captain Brant at the Stardrop Inn in Vernworth sends you to look into where the false Sovran came from. He only appears there at night.",
+  "steps": {
+   "0": {
+    "text": "Head northeast of Vernworth along the main road to the Nameless Village. A landslide blocks the road, so detour south through the Eastern Forest, where a minotaur roams (fight or run past it). In the village, climb to the old manor at the top and talk with Flaude. Behind the manor, a ladder leads into the depths, a platforming trial with timed dashes and jumps and no time limit. At the end, Srail explains the false Sovran's origins. Return to Brant in Vernworth at night to report."
+   }
+  }
+ },
+ "20230": {
+  "quest": "Look for Mildred on the street just south of the Stardrop Inn in Vernworth's Common Quarter. She stops you as you walk by and offers you her house to look after. If she is not there, rest on a bench to pass time until she shows up.",
+  "steps": {
+   "0": {
+    "text": "Use Mildred's house or continue adventuring until a full week has passed; sleeping in its bed seven or eight times is the quickest option. The objective updates automatically at the week's end."
+   },
+   "1": {
+    "text": "Go back outside the house and talk to Mildred, who has returned from her travels. She now wants to sell the place to you."
+   },
+   "2": {
+    "text": "Pay Mildred the asking price of 20,000 gold to buy the house. It gives you a free bed that saves and a storage chest."
+   },
+   "3": {
+    "text": "Go to Mildred's dwelling in the Common Quarter and meet her there. Agree to look after the house while she travels."
+   }
+  }
+ },
+ "20240": {
+  "quest": "Klaus, who runs the Vocation Guild in Vernworth just below Shakir's Inn, offers this once you finish the Seat of the Sovran main quest. Warrior and Sorcerer need weapons you must provide.",
+  "steps": {
+   "0": {
+    "text": "Ask Roderick at his smithy about the missing weapon shipment. He sends you to Trevo Cave, the goblin lair west of Vernworth (the same cave as the Monster Culling main quest). Follow the passage to the fork and take the east branch to a large room with a black chest holding the greatsword. Go through the door left of that chest into a big room with bridges, drop to the bottom, and take the dark path east to a dead end with the chest holding the archistaff. Clear goblins on the way."
+   },
+   "1": {
+    "text": "Return to Klaus at the Vernworth Vocation Guild and hand over both weapons. He keeps them, so do not turn in a copy you want to retain. Warrior and Sorcerer then unlock."
+   }
+  }
+ },
+ "20250": {
+  "items": [
+   372
+  ],
+  "quest": "Morris the apothecary stands in his shop near the middle of Checkpoint Rest Town. Walk in and he starts talking to you about his missing grandson Rodge.",
+  "steps": {
+   "0": {
+    "text": "This quest is timed, so move quickly. Ask townsfolk, especially an older woman named Jacint who walks near the shop and east houses, plus Timothy and Alsa near the entrance. The marker leads to a graveyard, but go farther along the main road to the Putrid Cave to the east, where wolves roam."
+   },
+   "1": {
+    "text": "Walk Rodge back to Checkpoint Rest Town. Keep to the main road, don't sprint ahead, and watch that he keeps following. If he disappears, go back to the cave and he should be there."
+   },
+   "2": {
+    "text": "Take Rodge to Morris at the apothecary, which finishes the quest with the good outcome."
+   },
+   "3": {
+    "text": "Rodge was hurt on the way back; return to Morris and tell him what happened."
+   },
+   "4": {
+    "text": "Rodge is dead, either because you took too long or he fell on the road. Tell Morris; if you were late, bring him the scrap of cloth left in the cave. The reward is smaller."
+   }
+  }
+ },
+ "20270": {
+  "quest": "Lamond lounges at the camp on Agamen Volcanic Island, up the wooden ramps and a ladder near the hot spring. He talks to you automatically when you come near.",
+  "steps": {
+   "0": {
+    "text": "He wants three bottles of Newt Liqueur. At Higg's Tavern Stand in Bakbattahl, put on a Beastren mask before moving a sack into the fenced area left of the entrance; you will be taken inside without a fight. Go upstairs and buy three bottles, or craft them from saurian tails and fruit wine."
+   },
+   "1": {
+    "text": "If the first bottles do not satisfy him, bring more Newt Liqueur until he has three in total. Handing them over unlocks the Warfarer vocation and ends the quest."
+   }
+  }
+ },
+ "20280": {
+  "quest": "Visit Jarle, a researcher whose house stands across from the Rockmouse's Burrow on the northwest edge of Bakbattahl. Go in and he proposes that you let monsters poison you for his studies. You need to have reached Battahl through the Nation of Lambent Flame main quest.",
+  "steps": {
+   "0": {
+    "text": "Find the asps (the purple saurians) at the marked spot just outside Bakbattahl. Provoke them without killing them and let one hit you with its poisoned weapon until the poison icon shows. Do not wear poison-resistant gear."
+   },
+   "1": {
+    "text": "Run back to Jarle at once while the poison is still on you. If it wears off first, he sends you out again. Avoid Panaceas, and tell your pawns not to cure you. Healing items for plain damage are fine."
+   },
+   "2": {
+    "text": "Go to the marked spots near the edge of the city and get hit by a venin harpy, the kind without a mane. Clear other monsters first, and tell pawns to stay back so they do not kill the harpy before it spits on you."
+   },
+   "3": {
+    "text": "Return to Jarle while the harpy poison is still active. Keep curative items and healer pawns away from you, or he makes you do it again."
+   },
+   "4": {
+    "text": "Meet Jarle at the marked point north of Bakbattahl, past the Flamebearer Palace. The game saves just outside the cave where the chimera waits, so you can reload there if things go wrong."
+   },
+   "5": {
+    "text": "Enter the cave and fight the chimera, but keep it from killing Jarle. He usually sits behind it, so the snake tail has to poison him. Do not cut off the tail, and avoid killing the chimera before he is hit. If he dies, reload the save from before the cave. Hitting the goat head makes it use fewer spells."
+   },
+   "6": {
+    "text": "Walk back to Jarle's house in Bakbattahl and speak with him. That ends the quest."
+   }
+  }
+ },
+ "20290": {
+  "items": [
+   315,
+   471
+  ],
+  "quest": "Buy any item at Isaac's Wares in Bakbattahl. His family then scolds him about his failing eyesight, and he asks you for help. Reaching Bakbattahl is all that is required.",
+  "steps": {
+   "0": {
+    "text": "Isaac wants a ripened quince for his eyes. Quinces grow on fruit bushes in the Battahl wilds, and goblins and breakable objects in caves sometimes drop them. Carry one until it ripens as days pass."
+   },
+   "1": {
+    "text": "Bring the ripened quince to Isaac at his shop in Bakbattahl. Pass some time afterward, for example resting at the inn."
+   },
+   "2": {
+    "text": "Isaac wants volume 2 of On the Transference of Souls. His wife and daughter beg you not to hand it over. The choice matters: give him the forgery from Ibrahim's Scrap Store to spare his family and earn the gold reward, or give him the genuine book for the tragic outcome that closes his shop. Hand over your chosen copy, then follow Isaac home."
+   },
+   "3": {
+    "text": "Go to Ibrahim's Scrap Store in Checkpoint Rest Town and buy On the Transference of Souls 2 for about 2,000 gold. Also order a forgery for about 2,400 gold, ready after a day or so, if you want the better ending."
+   },
+   "4": {
+    "text": "Follow Isaac to his home after handing over either copy. The forgery makes the ritual fail and leaves his family unharmed; the genuine book turns his wife and daughter to ash and causes his shop to close. After the genuine-book outcome, take the Ring of Disfavor from the ash pile."
+   },
+   "5": {
+    "text": "Isaac's studies need a few days. Leave Bakbattahl, rest at the inn once or twice, and return to his shop to hear the progress. He then asks for the second volume."
+   }
+  }
+ },
+ "20310": {
+  "quest": "Talk to Klark, who stands outside his estate in Vernworth's Noble Quarter, near the southwest. He wants a sculptor named Fulvio to finish a work. You need to be well into the story first.",
+  "steps": {
+   "0": {
+    "text": "Travel to Bakbattahl and find Fulvio's workshop, south of the residential area. Talk to him about the commission, then rest at least a day."
+   },
+   "1": {
+    "text": "Meet Fulvio at the spot north of the shrine in northern Battahl, then walk with him east toward the Wasteland Griffin's Nest. Bringing a Medusa head to petrify the griffin gives the best result."
+   },
+   "2": {
+    "text": "Follow Fulvio to the griffin's nest. Keep the griffin's attention away from him, since he dies easily."
+   },
+   "3": {
+    "text": "Keep the griffin busy until Fulvio calls out that he's finished his sketch. Petrifying it with a Medusa head ends the step instantly. If it flees or you cut the fight short, the sketch and rewards are worse."
+   },
+   "4": {
+    "text": "Let several days pass, then stop by Fulvio's workshop again in Bakbattahl. He tells you about the unveiling."
+   },
+   "5": {
+    "text": "Go to Klark's estate in Vernworth, up to the second floor, and through the left door. A cutscene reveals the sculpture; its quality depends on your sketching."
+   }
+  }
+ },
+ "20330": {
+  "items": [
+   534
+  ],
+  "quest": "Ser Menella gives you this at the Flamebearer Palace in Bakbattahl after Nation of the Lambent Flame. An assassin plots against the Empress during her morning prayers.",
+  "steps": {
+   "0": {
+    "text": "The assassin has his hair tied back and an injured right arm. Many decoys share the hair, so look for the man on the right with the darker band on the arm. Rest at an inn to make a save, then grab him with the grab button before the prayers end. Grabbing the wrong person or waiting too long fails the quest, so reload that inn save."
+   },
+   "1": {
+    "text": "Sleep until morning and return to the inner palace, where Menella and the Empress wait. Talk to Menella to begin the prayers, and once started, finish it right away, since leaving it fails the quest."
+   }
+  }
+ },
+ "20340": {
+  "quest": "After A Candle in the Storm, and once you own the Vernworth house, go home and wait for nightfall. Vera, an attendant of Empress Nadinia, knocks and asks you to guard the empress on a secret walk through the city.",
+  "steps": {
+   "0": {
+    "text": "Leave your pawns behind and follow Vera and Nadinia through Vernworth toward the Rose Chateau in the south, keeping the empress's identity hidden. Two street encounters decide the outcome. At the sundries shop, pay the shopkeeper 1,000 gold so the beastren can buy medicine. Later in the noble quarter a thief begs for help, and you must refuse him. Helping the thief gets you jailed and fails the quest. Walk rather than run so everyone spawns properly."
+   },
+   "1": {
+    "text": "When the walk ends, Nadinia goes into the chateau alone. Take her back to her oxcart by the Arisen statue to finish the quest."
+   }
+  }
+ },
+ "20350": {
+  "items": [
+   365,
+   366
+  ],
+  "quest": "As you enter Checkpoint Rest Town, Offulve asks you to find the Jadeite Orb. Another man, Everard, also offers to pay well for it. Talk to both.",
+  "steps": {
+   "0": {
+    "text": "Ibrahim's Scrap Store in the town sells the Jadeite Orb for 7,500 gold. A prisoner in Vernworth's gaol can tell you this, but you do not need to ask. To get paid by both, also pay Ibrahim 2,000 gold for a forgery and wait a few days."
+   },
+   "1": {
+    "text": "Give the real orb to Everard for the biggest payout and the Ring of Skullduggery. Give the forgery to Offulve for a smaller reward and a camping kit. Handing the forgery to Everard risks jail unless you bribe Ibrahim in time."
+   }
+  }
+ },
+ "20360": {
+  "quest": "This post-game quest begins by itself when you arrive in the Unmoored World after the true ending, with no giver.",
+  "steps": {
+   "0": {
+    "text": "Head to the Forbidden Magick Research Laboratory in Bakbattahl. Go up the stairs above the workshop (behind the dragon statue) to find Phaesus, and you are reunited with your pawn. Avoid fights on the way; monsters here are stronger."
+   }
+  }
+ },
+ "20370": {
+  "quest": "This starts on its own after you take the true ending route through the Legacy quest and arrive in the unmoored world.",
+  "steps": {
+   "0": {
+    "text": "Cross the drained seabed, fighting skeletons (smash the skull so they stay down), to the seafloor shrine and the exposed castle. Talk to Rothais."
+   },
+   "1": {
+    "text": "Visit the main settlements and persuade their leaders to move to the shrine: Vernworth, Bakbattahl, the Volcanic Island Camp, the excavation site and the Sacred Arbor. Do the nearest-to-the-map-edge places first because they fall to the red fog first. Do not sleep, since time passing speeds up the destruction, and once a place is evacuated you can no longer talk to its people."
+   }
+  }
+ },
+ "20380": {
+  "quest": "This quest is available in the Unmoored World after Dreams Apart, once your main pawn has returned, but it will not appear if you petrified Talos during The Guardian Gigantus. Otherwise, approach fallen Talos on Agamen Volcanic Island with your main pawn.",
+  "steps": {
+   "0": {
+    "text": "Stay near Talos and let the scenes play; despite the objective wording, you do not need to follow Phaesus or move. Talos fights two creatures and the quest completes after the cutscenes. Do not rest three times in the Unmoored World before acquiring and completing this quest, or the fog advances and the quest is lost."
+   }
+  }
+ },
+ "20390": {
+  "items": [
+   301,
+   331,
+   635
+  ],
+  "quest": "This is a follow-up in the Unmoored World, available after you start Halls of the First Dawn. Captain Brant waits inside Vernworth's Stardrop Inn; speak to him.",
+  "steps": {
+   "0": {
+    "text": "Go to Sven's chambers on the upper floor of Vernworth Castle and hear his evacuation plan. Then go to Disa's room on the same floor, grab her after she speaks, and carry her to Sven. Finally go to Allard by the oxcarts in the Merchant Quarter on the west side, and draw your weapon or tackle him so he runs off. Report back to Sven to finish."
+   }
+  }
+ },
+ "20420": {
+  "quest": "After starting Halls of the First Dawn, speak with Menella on the road near the Flamebearer Palace in Bakbattahl about the disputes delaying the evacuation.",
+  "steps": {
+   "0": {
+    "text": "Settle all three disputes. In the residential ward near Fulvio's Workshop, intervene and evade or defend without striking back until the pair tire themselves out for the peaceful outcome; near Pilgrim's Inn, choose \"Neither of you are wrong\" and give the children fresh food; outside the Vocation Guild, agree to witness the duel. Report to Menella and then Nadinia, or to Menella alone if Nadinia was not saved."
+   }
+  }
+ },
+ "20440": {
+  "quest": "In the unmoored world, go to the red beacon at the Flamebearer Palace entrance in the centre of Bakbattahl and use your Godsbane Blade on it. A dragon statue falls, and Phaesus speaks to you.",
+  "steps": {
+   "0": {
+    "text": "First enter the sphere around the fallen dragon statue; it repels you and triggers another conversation with Phaesus. Follow him around the back of the palace and through the Forbidden Magick Research Lab, defending him and avoiding the marked falling boulders in the dye fields. Approach the statue from behind and enter its purple sphere to destroy it."
+   }
+  }
+ },
+ "20450": {
+  "quest": "After starting Halls of the First Dawn, visit the Sacred Arbor, the elf city northwest of Vernworth. Glyndwr, the archer elf on the round platform at the entrance, asks you to help persuade the arborist Taliesin to evacuate. Bring a pawn who speaks Elvish, or hire one at the nearby riftstone.",
+  "steps": {
+   "0": {
+    "text": "Glyndwr leads you to Taliesin. He will not leave until he is convinced the Arborheart can live elsewhere, so you have two options: wait out his stubbornness, or plant a cutting at the seafloor shrine."
+   },
+   "1": {
+    "text": "Talk to Taliesin with an Elvish-speaking pawn. If you skipped the planting route, keep returning. Sleep at the nearby inn, then talk to him again after each night. His words change each time and after about three nights he gives in."
+   },
+   "2": {
+    "text": "This route needs the two Arborheart quests (The Ailing Arborheart, then the forge one) done first. Carry the cutting to the seafloor shrine, follow the marker and plant it in the soil."
+   },
+   "3": {
+    "text": "Return to Taliesin in the Sacred Arbor and tell him the cutting has taken root. He then agrees to move his people, which ends the quest."
+   }
+  }
+ },
+ "20460": {
+  "quest": "This is a follow-up in the Unmoored World, available after you start Halls of the First Dawn. Go to the Volcanic Island Camp and speak with Ernesto near the north gate.",
+  "steps": {
+   "0": {
+    "text": "Ernesto asks you to rescue Cliodhna and Gautstafr. Head west to their home, speak with them, and escort them back to the camp; carrying Gautstafr through a Ferrystone trip to a Portcrystal at camp also brings Cliodhna. Convince Lamond near the hot springs to evacuate, then return to Ernesto."
+   }
+  }
+ },
+ "20470": {
+  "quest": "Go to the Excavation Site (Agamen Ruins) southeast of the Volcanic Island Camp in the Unmoored World, after Halls of the First Dawn. Help Henrique defeat the golem there to begin.",
+  "steps": {
+   "0": {
+    "text": "Beat the golem by hitting its glowing weak spots, then follow Henrique west across the settlement to the gaol. He gives you the Overseers' Lodge Key. Use it on the house across from the inn, take the Diminished Godsway from beside the Overseer's body, and give it to Henrique at the gaol. The pawns are then free to leave."
+   }
+  }
+ },
+ "20480": {
+  "items": [
+   353
+  ],
+  "quest": "Donovan in Vernworth asks you to carry a letter by oxcart to Lennart in Melve, after In Dragon's Wake. Interact with the sign at the north oxcart station and wait for a cart.",
+  "steps": {
+   "0": {
+    "text": "Pay the fare, ride to Melve, and fend off any ambush on the road. In Melve, look for Lennart near the well, by the northwest archway, or around the inn and his house; rest on a bench and look again if he is missing. Give him the letter."
+   },
+   "1": {
+    "text": "Ride back to Vernworth and tell Donovan the letter was delivered."
+   }
+  }
+ },
+ "30010": {
+  "items": [
+   319
+  ],
+  "quest": "Reach Vernworth's market area and wait for a scene of a young man arguing with a shop owner. If it does not appear, leave the area for a while and come back. Speak with the young man, Sven.",
+  "steps": {
+   "0": {
+    "text": "Talk to Sven after the argument. He wants an ornate box from the merchant but lacks the gold. Either hand him the money, or buy the 1,000 gold box yourself and give it to him. Both choices lead to the same result."
+   },
+   "1": {
+    "text": "Let a day pass, then look for Sven on the fountain in the market square's center and speak with him. He repays you in small installments, so repeat the rest-and-talk routine on following days until the third and last payment. If he does not appear at once, rest another day. The quest finishes after the final visit."
+   }
+  }
+ },
+ "30020": {
+  "quest": "Beren, a beastren trainer, camps at Moonglow Garden west of Borderwatch Outpost after In Dragon's Wake. He appears at night. If he is not there, find him at the Borderwatch training area, then return to his tent after dark.",
+  "steps": {
+   "0": {
+    "text": "Beren needs three swords of any kind. Buy them at Borderwatch Outpost or Vernworth, or use looted ones. He also wants a motivated soldier. Find the boy Humphrey near Clovis's Barberie in Vernworth's Merchant Quarter and pick the option to tell him about Beren. Then return to Beren with the swords."
+   },
+   "1": {
+    "text": "Beren challenges you to a sparring bout in the ring. Win by knocking him out of it, easiest with a Fighter's shield bash. You can lose or step out and the quest still moves on."
+   },
+   "2": {
+    "text": "A soldier reports a goblin attack. Follow Beren west toward the rope bridge, defeating goblins along the route. At the destination, a wounded soldier explains that a Cyclops attacked the recruits."
+   },
+   "3": {
+    "text": "After the scene with the wounded soldier, return to Borderwatch encampment and speak with Beren to finish."
+   }
+  }
+ },
+ "30030": {
+  "quest": "Once you have finished the earlier Claw Them Into Shape quest and the story quest named Seat of the Sovran, wait a few days and return to Beren near his tent at Moonglow Grove (Moonglow Garden), where a scene starts.",
+  "steps": {
+   "0": {
+    "text": "A cyclops attacks the recruits. Fight beside Beren and the guards; hit its head or climb it, and aim at the eye when it falls."
+   },
+   "1": {
+    "text": "Leave and rest through the night at the nearby campfire, then speak with Beren the next morning, before he departs for Checkpoint Rest Town, to finish."
+   }
+  }
+ },
+ "30040": {
+  "items": [
+   306
+  ],
+  "quest": "Captain Brant at the Stardrop Inn in Vernworth sends you to a masquerade to get close to the false Sovran. Meet him at night; he gives you an Eventide Mask.",
+  "steps": {
+   "0": {
+    "pins": [
+     {
+      "label": "Hidden door",
+      "x": 397.95300483703613,
+      "y": 73.50188446044922,
+      "z": -821.0272216796875
+     }
+    ],
+    "text": "First get courtly attire: the tunic and breeches, found in the Comptroller's home in the Noble Quarter, the castle guest chambers, or bought. Wear both with the mask. Go to the hall in Vernworth Castle at night; the party runs every second night, so wait on a bench if none. Inside, follow the false Sovran by going to the back wall and through the hidden passage to the balcony, where Wilhelmina covers for you. Do not linger, since the passage closes at sunrise and you must retry in two days."
+   },
+   "1": {
+    "text": "Return to Captain Brant at the Stardrop Inn at night and ask about the masquerade."
+   }
+  }
+ },
+ "30041": {
+  "items": [
+   309
+  ],
+  "quest": "Speak with Sven in his chambers on the second floor of Vernworth Castle, in the northwest corner. The quest usually appears once Disa's plot has moved Sven there, and you need to finish it before the Feast of Deception ends the masquerade chance.",
+  "steps": {
+   "0": {
+    "text": "Wear the courtly tunic, courtly breeches and eventide mask, then enter the masquerade at night in Vernworth Hall. A spare set is in a chest in Sven's room, and Ibrahim's shop in Checkpoint Rest Town also sells them. Find Lord Patrick near the back of the hall on the right, wearing a bright blue cape and a black and gold mask that covers only the eyes, with no mane. You have one letter, so do not give it to anyone else, and do not lose it."
+   },
+   "1": {
+    "text": "Return to Sven's chambers in the castle and tell him the letter was delivered. Slip past the guards on the way, which is easier by day. He pays you and the quest ends."
+   }
+  }
+ },
+ "30042": {
+  "items": [
+   324
+  ],
+  "quest": "After you rescue Waldhar in The Caged Magistrate, find him in the vault beneath the Gracious Hand in the Vernworth Slums. Talk to him repeatedly until he asks you to fetch his confiscated spectacles.",
+  "steps": {
+   "0": {
+    "text": "Go to the Masquerade Hall at Vernworth Castle and enter the small storage room at the back (southwest corner). Take the Exquisite Spectacles from the shelf. Daytime is easier, because at night guards object unless you wear the Courtly Tunic and Breeches."
+   },
+   "1": {
+    "text": "Take the spectacles back to Waldhar in the vault under the Gracious Hand and hand them over."
+   }
+  }
+ },
+ "30050": {
+  "items": [
+   326,
+   327
+  ],
+  "quest": "Wilhelmina, at the Rose Chateau Bordelrie in Vernworth's Noble Quarter, starts this. After Feast of Deception, max out her affinity with gifts like the bunch of flowers from the chest nearby, leave Vernworth and rest about three days, then return at night. When Rolf guards a door and she is gone, peek through the painting in her room and offer help. Missable if you wait too long.",
+  "steps": {
+   "0": {
+    "text": "You have three days. Visit Sven at night in the castle's northwest room, then Patrick at his estate; accept his offer to lure Allard away. Search Allard's manor upstairs, first room, behind the painting for the murder report. Don't kill Allard. The bribery findings are in a house in the north, and Captain Brant at the Stardrop Inn wants both."
+   },
+   "1": {
+    "text": "After handing Wilhelmina the report and choosing to keep helping, wait for her signal and grab Allard in the next room. Afterward, follow her out of the window and run to the Merchant Square inn, avoiding the guards."
+   },
+   "2": {
+    "text": "Take the evidence to Wilhelmina upstairs in the Rose Chateau, give it to her, and choose to continue offering your aid. If the three days run out, you fail."
+   },
+   "3": {
+    "text": "Sleep at the inn until morning, then go to Wilhelmina in her chamber. The romance scene ends the quest and you receive a ring."
+   }
+  }
+ },
+ "30060": {
+  "quest": "Glyndwr, an elf, stands near Roderick's Smithy in Vernworth's Merchant Quarter. Give him any bow, which you can buy at the smithy, then agree to train with him.",
+  "steps": {
+   "0": {
+    "text": "Change to the Archer vocation before leaving Vernworth, since the next objective requires a bow. Then travel northwest past Trevo Mine to the mountain ruins where Glyndwr waits."
+   },
+   "1": {
+    "text": "Shoot one of the hanging wooden targets in the ruins. Glyndwr thanks you and the quest ends."
+   }
+  }
+ },
+ "30070": {
+  "quest": "This follows Gift of the Bow. A couple of days after finishing it, find Glyndwr, an elf, in Vernworth outside Roderick's smithy. He invites you to see his trial at his village. A pawn with the Woodland Wordsmith specialization helps with Elvish.",
+  "steps": {
+   "0": {
+    "text": "Walk to the marked camp in the forest and meet Glyndwr there. He then leads the way toward the Sacred Arbor. A chimera roams west of the camp, so go prepared."
+   },
+   "1": {
+    "text": "Stay close behind Glyndwr as he winds through the northern forest. Fight what attacks you. If you lose him, follow the path and you find him again at the village."
+   },
+   "2": {
+    "text": "After the scene in the village, go back out along the path to the marked ancestral chamber near the Arbor Bridge, where an ogre has taken his sister Doireann."
+   },
+   "3": {
+    "text": "Fight through the wolves and goblins until the scene in the large cavern. Glyndwr shoots the ogre so it drops Doireann; rush to the platform, grab her, and move her out of danger before the ogre can kill her."
+   },
+   "4": {
+    "text": "Carry Doireann out. Killing the ogre first makes Glyndwr open a shortcut. Otherwise you must carry her all the way back to the entrance. Keep walking until a scene ends the carry."
+   },
+   "5": {
+    "text": "Talk to Taliesin outside the chamber, who is Doireann's father and the Archer maister. Doing so ends the quest and gives your reward."
+   }
+  }
+ },
+ "30080": {
+  "items": [
+   334
+  ],
+  "quest": "After A Trial of Archery, speak with the elf Doireann near the Arborheart in the Sacred Arbor. She speaks first, then talk to her again at the railing by the tree. She worries about the tree's health.",
+  "steps": {
+   "0": {
+    "text": "Doireann needs gwyfencha. Go to the Mountain Ruins southeast of the Sacred Arbor and ask Glyndwr; he says it is called scalecinder in the common tongue. A pawn with Woodland Wordsmith knowledge also tells you."
+   },
+   "1": {
+    "text": "Travel to Bakbattahl and find Sara at Brokkr's Smithy. Talking to her finishes this quest and starts Out of the Forest, Into the Forge."
+   },
+   "2": {
+    "text": "Sara is occupied with the smithy troubles covered by Dulled Steel, Cold Forge and Steeled Resolve, Blazing Forge. Finish that chain, then speak with her again about scalecinder."
+   },
+   "3": {
+    "text": "Go to Brokkr's Smithy in Bakbattahl and ask Sara, the blacksmith, about scalecinder."
+   }
+  }
+ },
+ "30090": {
+  "items": [
+   334
+  ],
+  "quest": "This quest starts automatically at Brokkr's Smithy in Bakbattahl when The Ailing Arborheart ends and Sara explains that gwyfencha is scalecinder.",
+  "steps": {
+   "0": {
+    "text": "Go back to Doireann in the Sacred Arbor and explain that Brokkr wants an elven dish called nutriabh in exchange for scalecinder."
+   },
+   "1": {
+    "text": "Get one apple and one fish (apples grow on bushes southeast of the Arbor, fish near its shore) and let them rot by resting on a bench."
+   },
+   "2": {
+    "text": "Give the rotten apple and fish to Doireann so she can prepare the nutriabh."
+   },
+   "3": {
+    "text": "Doireann insists on coming; escort her to Bakbattahl, ideally by portcrystal and ferrystone, and give the dish to Sara at Brokkr's forge."
+   },
+   "4": {
+    "text": "Follow Sara west out of Bakbattahl to Stragglers' Cave, where the nutriabh is handed to Brokkr."
+   },
+   "5": {
+    "text": "You have about four minutes while Brokkr eats. Search Stragglers' Cave for white-yellow scalecinder piles; there are six deposits. Doireann competes, so grab as many as you can, then return to Doireann."
+   },
+   "6": {
+    "text": "Sara is occupied with another problem. Complete her current quest, then return to Brokkr's Smithy and speak with her again."
+   },
+   "7": {
+    "text": "Escort Doireann to Bakbattahl to give the nutriabh to Sara at the forge."
+   },
+   "8": {
+    "text": "Follow Doireann while she finishes making the nutriabh in the Sacred Arbor."
+   }
+  }
+ },
+ "30100": {
+  "quest": "Return to Melve after completing at least one of Captain Brant's Vernworth quests, but before finishing Feast of Deception. The dragon attack begins when you enter the village.",
+  "steps": {
+   "0": {
+    "text": "Fight the dragon over Melve, aiming at the blisters on its body and avoiding its fire breath and body slam. You only need to take it to about half health for it to retreat. Some villagers can die, including ones needed in later quests."
+   },
+   "1": {
+    "text": "Leave Melve and let a day pass, then go to Ulrika's house and enter the room in the right corner. Agree to stay the night. In the morning she is gone."
+   },
+   "2": {
+    "text": "Travel to Harve Village and talk to Ulrika, who stands in the middle of the village. She asks you to tell Lennart she is safe."
+   },
+   "3": {
+    "text": "Return to Ulrika's old house in Melve and tell Lennart she is well."
+   }
+  }
+ },
+ "30110": {
+  "quest": "Complete Readvent of Calamity, then return to Melve after An Unsettling Encounter directs you there. Bribe the gate guard or climb over the broken wall and speak with Lennart in Ulrika's house.",
+  "steps": {
+   "0": {
+    "text": "Bring four swords to Lennart so the villagers can defend themselves. You can use your own, buy some in Vernworth, or take back the confiscated ones from the storeroom in the building just west of the entrance wall. A soldier guards the storeroom, but the two brothers from Brothers Brave and Timid will distract him if you finished that quest."
+   },
+   "1": {
+    "text": "Return to Lennart inside Ulrika's home and tell him the soldiers are gone and the villagers are free to flee."
+   },
+   "2": {
+    "text": "Step outside with Lennart and fight the soldiers who attack, with help from the villagers. Your pawns are not there. Avoid tight groups of enemies so they cannot chain hits on you, and hold out until the soldiers back off after about a minute."
+   },
+   "3": {
+    "text": "Travel to Harve Village and look for Ulrika on the docks. If she is not available there, finish Trouble on the Cape first; then speak with her about Melve. She asks you to return after dark."
+   },
+   "4": {
+    "text": "Rest on a bench until night, then meet Ulrika on the Harve docks again. A scene plays and finishes the quest."
+   },
+   "5": {
+    "text": "Talk to Lennart, who explains what has changed in Melve and what the village needs from you."
+   }
+  }
+ },
+ "30120": {
+  "items": [
+   332,
+   351
+  ],
+  "quest": "After Seat of the Sovran, a knight named Roman approaches you in the courtyard of Vernworth Castle. Follow him to the fountain garden, where he gives you a dulled regalia sword to restore.",
+  "steps": {
+   "0": {
+    "text": "Roderick at his smithy in Vernworth says it cannot be repaired by him and points you to a dwarf smith in Battahl. Go to Brokkr's Smithy in Bakbattahl and speak to Brokkr in the back room. He is retired and refuses. When you leave, Sara stops you. Wait until Brokkr leaves, then speak with her in the inner room."
+   },
+   "1": {
+    "text": "Go to Digger's Ruins southwest of Bakbattahl and mine at least fifteen glimmercoal. The right deposits glow green in the dark when you switch off the lantern. Watch for slimes and goblins dropping from above. The non-glowing ores are a different material."
+   },
+   "2": {
+    "text": "Return to Sara in Bakbattahl and give her the glimmercoal. Brokkr still refuses, but Sara offers to try the repair herself. Give her the sword to finish. Refusing keeps the quest open."
+   },
+   "3": {
+    "text": "If you refuse Sara's offer, you must find someone else for the repair. Giving the sword to Sara is the usual way to finish."
+   }
+  }
+ },
+ "30130": {
+  "quest": "Right after Dulled Steel, Cold Forge, speak with Brokkr at his smithy in Bakbattahl. Sara is repairing the regalia sword.",
+  "steps": {
+   "0": {
+    "text": "Leave the smithy and rest about two days, then speak with Sara; pass two more days and talk to Brokkr, who says she has gone missing."
+   },
+   "1": {
+    "text": "Travel to the Mountain Base Cave on the volcanic island, southwest of the Volcanic Island Camp. Clear out the enemies, including fire sludges, and find Sara in the large southeast chamber."
+   },
+   "2": {
+    "text": "Guide Sara out of the cave to its entrance within roughly two minutes, before the blazehammer cools. Clearing enemies beforehand helps. If it cools, you must try again."
+   },
+   "3": {
+    "text": "Head back to Brokkr's forge in Bakbattahl for a scene; afterward you are handed the repaired Regalia Sword."
+   },
+   "4": {
+    "text": "Wait a few days for Sara and Brokkr to finish repairing the sword, then return to the smithy."
+   },
+   "5": {
+    "text": "Take the restored sword to Roman in the Vernworth Castle courtyard garden to complete the quest."
+   },
+   "6": {
+    "text": "Because the hammer cooled, Sara is worn out. Rest a day or so, then visit her at the smithy."
+   },
+   "7": {
+    "text": "Sara gave up on the repair. Take the sword back to Roman in Vernworth Castle's garden and tell him; the quest ends unfavorably."
+   }
+  }
+ },
+ "30140": {
+  "quest": "This begins when you first walk past the Wanderer's Haven tavern in Bakbattahl, after Nation of the Lambent Flame. A ruffian named Roger approaches you.",
+  "steps": {
+   "0": {
+    "text": "Walk toward the Wanderer's Haven to trigger the encounter with Roger and his men."
+   },
+   "1": {
+    "text": "Fight Roger's three ruffians. Beat all three before a sellsword named Raghnall steps in and you get a much larger gold reward."
+   },
+   "2": {
+    "text": "Beat the ruffian Taleef one-on-one. He is slow, so dodge his sword swings and strike after them. Losing costs you gold and the fruit wine reward, which you need for The Sotted Sage, but the quest still ends."
+   }
+  }
+ },
+ "30150": {
+  "quest": "Follow the path north of Moonglow Garden to Eini's house, in the forest north of Melve. Her granddaughter Trysha dreams of learning magick. Once Eini leaves the room, talk to Trysha and she hands you a list of five grimoires. If Eini will not leave, carry her out the door.",
+  "steps": {
+   "0": {
+    "text": "Bring Trysha the genuine copies of the five requested grimoires. Let There Be Light is in Myrddin's house in Checkpoint Rest Town; Fulminous Shield is sold by Dudley at Melve's north entrance; Nation's Death Knell is in Ancient Battleground and also shares a Waterfall Cave chest with Howling Blizzard; Towering Earth comes from Waldhar in the Gracious Hand vaults after The Caged Magistrate. Opening the Waterfall Cave chest starts an undead boss fight; deliver all five for full rewards, and give Myrddin forgeries if you also pursue his quest."
+   },
+   "1": {
+    "text": "Wait a few days, then return to Eini's house. Trysha is outside practicing magick and cannot control it."
+   },
+   "2": {
+    "text": "You cannot attack her. Dodge her spells and keep away until she runs out of magick and stops casting. Then walk up and grab her to trigger a scene."
+   },
+   "3": {
+    "text": "Let one day pass, resting at the camp near the house or on a bench, so Trysha can recover."
+   },
+   "4": {
+    "text": "After that day, visit Eini's house again to see how Trysha is doing. A scene plays."
+   },
+   "5": {
+    "text": "If this objective appears, wait a few days, then return to Eini's house and speak with Eini about the aftermath of the battle."
+   }
+  }
+ },
+ "30160": {
+  "quest": "Myrddin lives in Checkpoint Rest Town and only opens up if you come dressed in the Courtly Tunic and Breeches. He asks you for five grimoires.",
+  "steps": {
+   "0": {
+    "text": "Collect: Let There Be Light (upstairs in Myrddin's house), Fulminous Shield (Dudley in Melve, for about 5,000 gold), Towering Earth (Waldhar in the vault under the Gracious Hand), and Nation's Death Knell plus Howling Blizzard (a red chest upstairs in the Waterfall Cave, which also spawns a wight). Three books are enough for Myrddin. Make forgeries at Ibrahim's Scrap Store and give those to him, so the real ones can go to Trysha for the quest Spellbound."
+   },
+   "1": {
+    "text": "Myrddin doubts you until he knows you have befriended his daughter Trysha. Finish the Spellbound quest with Trysha, or show that bond, so he changes his mind. Wear the ring she gave you when you speak to him."
+   },
+   "2": {
+    "text": "Wait a few days (rest at the inn), then return to Myrddin's house to hear his decision and collect your reward."
+   }
+  }
+ },
+ "30170": {
+  "quest": "On the south road into Agamen Volcanic Island, west of the Volcanic Island Camp and through Drabnir's Grotto, an old dwarf named Gautstafr sits by the road with a sore back. Talk to him.",
+  "steps": {
+   "0": {
+    "text": "Find three wildflowers or herbs, such as pitywort, syrupwort leaf, or goldthistle. Any growing near the road works."
+   },
+   "1": {
+    "text": "Give the three plants to Gautstafr on the roadside."
+   },
+   "2": {
+    "text": "Follow him to his house on a small island just north, wading through shallows. Go inside, where his wife Cliodhna lives, and offer to take him to the hot spring."
+   },
+   "3": {
+    "text": "Escort him to Geyser Hamlet, about halfway into the island. Protect him from monsters since he doesn't fight, or carry him. The spring is on a hill reached through the Volcanic Island Camp."
+   },
+   "4": {
+    "text": "Cliodhna follows you to the spring. Talk to her to tell her Gautstafr arrived safely; she teaches you the Magick Archer vocation."
+   }
+  }
+ },
+ "30180": {
+  "items": [
+   316
+  ],
+  "quest": "Sven gives you this in his chambers in Vernworth Castle after Feast of Deception, once you have the Beastren border permit from Captain Brant. He hands you an unfinished letter.",
+  "steps": {
+   "0": {
+    "text": "Go to Bakbattahl, via Checkpoint Rest Town (wear a Beastren mask if human, and hand the permit to the border guard). Enter the Forbidden Magick Research Lab at the palace, using the entrance past the dye stores, and go to the room where two people discuss a missive. Pick up the letter addressed to Phaesus that lies on the table, and bring it to Sven in Vernworth Castle."
+   }
+  }
+ },
+ "30200": {
+  "quest": "Finish Shadowed Prayers and save Nadinia, then go to the Volcanic Island Camp on Agamen Volcanic Island. Ser Menella comes up to you in the camp or near its hot springs and asks you to find who ordered the empress's murder.",
+  "steps": {
+   "0": {
+    "text": "Go to the gaol in Bakbattahl, reached through the dye stores, and talk to the brigand Herman. He brushes you off at first. Talk again and pay him 5,000 gold to make him talk. Do not free him from his cell before the quest, or he will be gone."
+   },
+   "1": {
+    "text": "Press on to learn who is behind the attack. The brigand says he took orders from the Coral Snakes."
+   },
+   "2": {
+    "text": "Take the news to Ser Menella at the Volcanic Island Camp. She asks you to feed the Coral Snakes false information."
+   },
+   "3": {
+    "text": "Return to the gaol and look for Ashe, a Coral Snake held deeper inside. Tell him the empress is in your custody. He arranges a meeting at an empty house on the Pilgrims' Path."
+   },
+   "4": {
+    "text": "Go back to Menella and report on what Ashe said."
+   },
+   "5": {
+    "text": "Menella waits on Bakbattahl's western side, so meet her there. She runs ahead, so follow the new marker out of the city to the west and enter the building."
+   },
+   "6": {
+    "text": "Back Nadinia's plan when asked, then wait for the villain to come to the house. When they tell you to kill the empress, draw your weapon beside her and simply wait for the best reward. Attacking her double also finishes the quest, and opposing the empress gives a worse ending."
+   }
+  }
+ },
+ "30210": {
+  "quest": "After Feast of Deception, pass the Vermund-Battahl border gate at Checkpoint Rest Town. Feed the boy Toumi by the white tent beyond the inn, then talk to the two men opposite the oxcart station. They send you to Lyssandro in white robes.",
+  "steps": {
+   "0": {
+    "text": "Speak with Lyssandro, the white-robed man near the pair who sent you over. He explains the Coral Snakes' oxcart raids and asks you to help locate their hideout."
+   },
+   "1": {
+    "text": "Follow the main road south on foot, because oxcarts are unavailable. People on the road, such as Seferinno, tell you where the gang's hideout is and where an oxcart was raided."
+   },
+   "2": {
+    "text": "Go to the marked oxcart raid on the main road. When the bandits flee, keep them in sight so their route leads into the pursuit."
+   },
+   "3": {
+    "text": "Chase the fleeing bandit Hugo through the cave. If a rope bridge breaks, take another bridge farther along or climb the ladders. Fight bandits in small groups."
+   },
+   "4": {
+    "text": "Push deeper with the soldiers who join you and defeat the Coral Snakes. At the end the leader escapes and leaves Hugo behind to be arrested, which ends the quest."
+   }
+  }
+ },
+ "30220": {
+  "quest": "Follows Mercy Among Thieves. Hugo is locked in the gaol in northeast Bakbattahl, above the palace; a guard also asks you to talk to him.",
+  "steps": {
+   "0": {
+    "text": "Speak to Hugo until his dialogue repeats, then question Brefft and tell Hugo that Lanzo killed his parents and is at Ancient Battleground. Return the next day; once Hugo escapes, do not rest—take the oxcart to Checkpoint Rest Town, climb the northern fortress, kill Lanzo before Hugo arrives, then advise Hugo to live honestly and offer him work. Job choices require either helping Wilhelmina complete the assassination in Every Rose Has Its Thorn or taking the bad ending in Short-Sighted Ambition; alternatively, free Hugo by bribing Ekratt twice with a few days between payments, or unlock Hugo's cell and carry him out through the rear exit."
+   }
+  }
+ },
+ "30230": {
+  "quest": "Simon, a soldier, approaches you near the north oxcart station in Vernworth after you have finished Welcome to Battahl.",
+  "steps": {
+   "0": {
+    "text": "Meet the oxcart near Checkpoint Rest Town at the road junction and walk with it. A cutscene shows Raghnall stopping it."
+   },
+   "1": {
+    "text": "Choose to side with Simon's soldiers or Raghnall. Most guides favour Raghnall, who then treats you better, though the quest proceeds either way."
+   },
+   "2": {
+    "text": "Follow Raghnall and Ser Augustin south into Guerco Cavern. You fall through the floor and lose your pawns, then catch up to Raghnall."
+   },
+   "3": {
+    "text": "Help Raghnall beat the saurians, listen to what he tells you at camp, then follow the path out of the cave to finish."
+   },
+   "4": {
+    "text": "When Raghnall stops the oxcart, choose either his side or Simon's soldiers. Siding with Raghnall gives the warmer later outcome, but both choices continue the quest."
+   }
+  }
+ },
+ "30240": {
+  "quest": "This starts by itself while you climb the Moonglint Tower in The Guardian Gigantus, as long as you finished Tensions on the Highroad first. Raghnall, who is guarding Phaesus, blocks the way. Take it before you start Legacy, or the quest is lost.",
+  "steps": {
+   "0": {
+    "text": "Face Raghnall alone in the tower corridor. Killing him completes the duel for 15,000 gold; to spare him, repeatedly grapple, carry, or pin him until he yields and leaves the Exalted, 20,000 gold, and the Moonglint Key. Avoid knocking him from the platform if you want the nonlethal outcome."
+   }
+  }
+ }
 }
