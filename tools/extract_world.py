@@ -36,8 +36,9 @@ FIRST_GIMMICK = {}
 for _gid in sorted(KIND_OF_GIMMICK):
     FIRST_GIMMICK.setdefault(KIND_OF_GIMMICK[_gid], _gid)
 CHEST_GIMMICKS = sorted(g for g, k in KIND_OF_GIMMICK.items() if k == "chest")
-PHASES = ("beforeseason4", "season4", "season5")
+PHASES = ("beforeseason4", "season4")
 _STR = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
+_TABLE_QID = re.compile(r"/qu([0-9]{6})(?![0-9])")
 
 
 class ExtractError(Exception):
@@ -51,6 +52,14 @@ def phase_of(path):
         if tag in p:
             return tag
     return None
+
+
+def table_qid_of(path):
+    """Owning quest id for a quest-table path, or fail closed if it is malformed."""
+    match = _TABLE_QID.search(path.lower())
+    if not match:
+        raise ExtractError("a quest-source table path has no six-digit quest owner")
+    return int(match.group(1))
 
 
 def check_patches(paths):
@@ -169,27 +178,56 @@ QUEST_FLAG = "app.GenerateManager.QuestFlagInfos.QuestFlagInfo"
 QUEST_VAR = "app.GenerateManager.QuestFlagInfos.QuestVariableInfo"
 
 
-def quest_of(insts, cont):
-    """The quest-gate dict for a container, or None when it has no flag elements."""
+def gate_of(insts, cont):
+    """The lossless version-2 gate for a container, or None when it is unconditional."""
     sf = qnml_rsz.deref(insts, cont.fields.get("_SetFlagSetting")) if cont else None
+    if sf is not None and (not isinstance(sf, qnml_rsz.Inst) or
+                           sf.type != "app.GenerateSetting.SetFlagSettingData"):
+        raise ExtractError("a container has a malformed set-flag setting")
     qi = qnml_rsz.deref(insts, sf.fields.get("_QuestFlagInfos")) if sf else None
     if qi is None:
         return None
-    q, var = [], False
-    for r in qi.fields.get("_Infos", []):
-        el = qnml_rsz.deref(insts, r)
-        if el is None:
-            continue
-        if el.type == QUEST_FLAG:
-            q.append([el.fields["_QuestID"], bool(el.fields["_IsFinishCheck"])])
-        else:
-            var = True  # QuestVariableInfo or an unknown type: gated, no quest named
-    if not q and not var:
+    if not isinstance(qi, qnml_rsz.Inst) or qi.type != "app.GenerateManager.QuestFlagInfos":
+        raise ExtractError("a set-flag setting has a malformed quest info list")
+    fields = qi.fields
+    infos = fields.get("_Infos")
+    check = fields.get("_CheckType")
+    if type(check) is not int or check not in (0, 1):
+        raise ExtractError("a quest gate has an invalid check type")
+    if not isinstance(infos, list):
+        raise ExtractError("a quest gate has a missing or invalid info list")
+    if not infos:
         return None
-    out = {"any": qi.fields.get("_CheckType") == 1, "q": q}
-    if var:
-        out["var"] = True
-    return out
+    conditions = []
+    for r in infos:
+        el = qnml_rsz.deref(insts, r)
+        if not isinstance(el, qnml_rsz.Inst):
+            raise ExtractError("a quest gate contains a null condition")
+        if el.type == QUEST_FLAG:
+            qid = el.fields.get("_QuestID")
+            finish = el.fields.get("_IsFinishCheck")
+            if type(qid) is not int or type(finish) is not bool:
+                raise ExtractError("a quest gate has a malformed quest condition")
+            conditions.append({"kind": "quest", "qid": qid, "finish": finish})
+        elif el.type == QUEST_VAR:
+            condition = qnml_rsz.deref(insts, el.fields.get("_Condition"))
+            if not isinstance(condition, qnml_rsz.Inst) or condition.type != "app.QuestVariableCondition":
+                raise ExtractError("a quest gate has a missing variable condition")
+            values = {
+                "qid": condition.fields.get("_QuestID"),
+                "name_hash": condition.fields.get("_NameHash"),
+                "value_type": condition.fields.get("_ValueType"),
+                "compare_type": condition.fields.get("_CompareType"),
+                "bool_value": condition.fields.get("_BoolValue"),
+                "int_value": condition.fields.get("_IntValue"),
+            }
+            if any(type(value) is not int for key, value in values.items() if key != "bool_value") or \
+                    type(values["bool_value"]) is not bool:
+                raise ExtractError("a quest gate has a malformed variable condition")
+            conditions.append({"kind": "variable", **values})
+        else:
+            raise ExtractError("a quest gate contains an unknown condition type")
+    return {"check": check, "conditions": conditions}
 
 
 def _round1(pos):
@@ -250,16 +288,22 @@ def collect_rows(decoded, params, conflicts, chara_names):
                 else:
                     row["items"] = []
                     unjoined += 1
-                quest = quest_of(insts, cont)
-                if quest:
-                    row["quest"] = quest
+                gate = gate_of(insts, cont)
+                if gate:
+                    row["gate"] = gate
             if k == "chara":
+                if src in ("subquest", "mainquest"):
+                    row["table_qid"] = table_qid_of(rel)
                 name = chara_names.get(str(rid))
                 if name:
                     row["name"] = name
                 ph = phase_of(rel)
                 if ph:
                     row["phase"] = ph
+                cont = qnml_rsz.deref(insts, f.get("_Container"))
+                gate = gate_of(insts, cont)
+                if gate:
+                    row["gate"] = gate
             ident = json.dumps(row, sort_keys=True)
             key = (k, row["uid"])
             if key in seen:
@@ -269,7 +313,7 @@ def collect_rows(decoded, params, conflicts, chara_names):
             seen[key] = ident
             rows.append(row)
             if k == "chest":
-                for name in ("quest", "trap", "pawn"):
+                for name in ("gate", "trap", "pawn"):
                     if name in row:
                         kinds[name] += 1
                 if keyloc:
@@ -315,7 +359,7 @@ def extract(game, key_hex, layouts):
             raise ExtractError("no %s rows (gimmick %d) found" % (k, gid))
     order = {"chest": 0, "token": 1, "beetle": 2, "chara": 3}
     rows.sort(key=lambda r: (order[r["k"]], r["uid"]))
-    out = {"version": 1, "pak": "%d:%d" % (pak.total, pak.fingerprint), "rows": rows}
+    out = {"version": 2, "pak": "%d:%d" % (pak.total, pak.fingerprint), "rows": rows}
 
     chara = [r for r in rows if r["k"] == "chara"]
     chests = collections.Counter(r["id"] for r in rows if r["k"] == "chest")
@@ -326,8 +370,8 @@ def extract(game, key_hex, layouts):
         "chests %d (%s), without item list %d" % (
             by_k["chest"], ", ".join("%d: %d" % (g, chests[g]) for g in CHEST_GIMMICKS),
             unjoined),
-        "kinds: quest %d, trap %d, pawn %d, key locations %d" % (
-            kinds["quest"], kinds["trap"], kinds["pawn"], kinds["key locations"]),
+        "kinds: gated %d, trap %d, pawn %d, key locations %d" % (
+            kinds["gate"], kinds["trap"], kinds["pawn"], kinds["key locations"]),
         "chara rows %d, ids %d" % (len(chara), len({r["id"] for r in chara})),
         "chara src: " + ", ".join("%s %d" % (s, sum(1 for r in chara if r["src"] == s))
                                   for s in ("normal", "subquest", "mainquest", "random")),

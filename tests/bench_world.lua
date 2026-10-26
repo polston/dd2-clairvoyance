@@ -18,7 +18,7 @@ local function fixture(files)
     nodes = {}, checked = {}, icons_found = {}, sched_ids = {}, shop = {},
     shops = {}, respawn = {}, boss = {}, loaded_boss = {}, catalog = {},
     cast = {}, needs = {}, locs = {}, qstate = {}, iname = {}, npcname = {},
-    drops = {} } }
+    drops = {}, gate_quests = {}, gate_vars = {}, season4 = false } }
   local d = f.data
   f.reads = {
     -- 3,009 throwaway rows per call stand for the real row read's cost
@@ -49,6 +49,9 @@ local function fixture(files)
     boss_families = function() return d.boss end,
     loaded_boss_families = function() return d.loaded_boss end,
     badge_name = function() return "Griffin" end,
+    game_season4 = function() return d.season4 end,
+    quest_state = function(qid) return d.gate_quests[qid] end,
+    quest_variable = function() return false end,
   }
   f.adapter = {
     quest_state = function(q) return d.qstate[q] end,
@@ -91,7 +94,8 @@ end
 for i = 1, N_CHEST do
   add("chest", string.format("chest-%05d", i), 10 + (i % 3), (i * 53) % 3000,
     (i * 17) % 3000, { items = { { id = 100 + (i % 40), n = 1 }, { id = 200 + (i % 40), n = 2 } },
-      quest = (i % 25 == 0) and { any = false, q = { { 11000 + (i % 5), true } } } or nil })
+      gate = (i % 25 == 0) and { check = 0, conditions = {
+        { kind = "quest", qid = 11000 + (i % 5), finish = true } } } or nil })
 end
 for i = 1, N_TOKEN do
   add("token", string.format("token-%05d", i), K.TOKEN_ID, (i * 71) % 3000, (i * 29) % 3000)
@@ -101,7 +105,7 @@ for i = 1, N_BEETLE do
 end
 
 add("chest", "live-00001", 10, 1234, 1234, { src = "subquest" })   -- listed, never in the atlas: live-only
-local f = fixture({ [K.PLACES] = { version = 1, pak = "1:1", rows = rows } })
+local f = fixture({ [K.PLACES] = { version = 2, pak = "1:1", rows = rows } })
 local d = f.data
 d.boss = { ch253 = true }
 d.catalog = { 1 }
@@ -163,6 +167,8 @@ local TG = { chests = true, treasure = true, tokens = true, beetles = true,
   first_token = true }
 
 local w = world.new(f.adapter, f.reads, f.io)
+assert(w:stats().places.state == "ok" and w:stats().places.rows == N_CHARA + N_CHEST + N_TOKEN + N_BEETLE + 1,
+  "format-2 benchmark places failed to load the 4,488-row workload")
 local t = 0
 local function round(new_sig)
   t = t + 10

@@ -20,7 +20,7 @@ M.K = {
   ATLAS = "Clairvoyance_world.json",
   OLD_ATLAS = "Clairvoyance_world.old.json",
   PLACES = "Clairvoyance_places.json",
-  PLACES_VERSION = 1,
+  PLACES_VERSION = 2,
   TOKEN_ID = 167,
   BEETLE_ID = 161,
   TOKEN_BIT = 16,
@@ -39,6 +39,8 @@ M.K = {
 
 local ATLAS_KINDS = { chest = true, token = true, beetle = true, monster = true, giver = true }
 local PLACES_KINDS = { chest = true, token = true, beetle = true, chara = true }
+local PLACE_SOURCES = { normal = true, random = true, subquest = true, mainquest = true }
+local PLACE_PHASES = { beforeseason4 = true, season4 = true }
 
 -- ===== small helpers =====
 local function finite(n)
@@ -53,7 +55,8 @@ end
 -- position rules shared with core (an origin-adjacent position is unknown)
 local dist, near_zero, valid_pos = core.dist, core.near_zero, core.valid_pos
 
--- A places or live row with no src, or src "normal", is a normal placement.
+-- Live rows may omit src; validated format-2 file rows may not. Missing live
+-- src and explicit "normal" are both normal placements.
 local function normal_src(s) return s == nil or s == "normal" end
 
 -- The 5-character family prefix of a character name, or nil.
@@ -225,6 +228,7 @@ function M.new(a, reads, io)
   local static = {}        -- uid -> file entry (chest, token, beetle)
   local chara_rows = {}    -- raw places chara rows
   local places_uids = {}   -- every valid places row uid
+  local conditional_uids = {} -- conditional file chara UIDs, including givers
   local learned = {}       -- uid -> learned entry
   local atlas_dropped = 0
   local atlas_pruned = 0
@@ -251,7 +255,8 @@ function M.new(a, reads, io)
       nodes = nil, node_chest = nil, shops = nil, sched_ids = nil, shop_of = {}, shop_cids = nil,
       settle = nil, msgs = {}, disc_set = nil, disc_count = nil,
       disc_cache = {}, need_sort = true, file_monsters = {}, held = {}, live = {},
-      drop_ids = nil,
+      drop_ids = nil, eligible_file_monsters = {}, file_giver_rows = {}, file_givers = {},
+      live_givers = {},
       -- SPEC 28.5.3.3: item lists kept per chest uid / treasure name
       chest_lists = {}, treasure_lists = {},
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
@@ -275,7 +280,72 @@ function M.new(a, reads, io)
   -- ----- places file -----
   local function parse_places(v)
     local rows, dropped = 0, 0
+    local new_static, new_chara, new_uids, new_names, new_conditional = {}, {}, {}, {}, {}
+    local function dense_array(t)
+      local n, max = 0, 0
+      for k in pairs(t) do
+        if type(k) ~= "number" or math.tointeger(k) ~= k or k < 1 then return false end
+        n = n + 1
+        if k > max then max = k end
+      end
+      return n == max and #t == max
+    end
+    local function exact_fields(t, allowed)
+      for k in pairs(t) do if not allowed[k] then return false end end
+      return true
+    end
+    local function valid_gate(g)
+      if type(g) ~= "table" or not exact_fields(g, { check = true, conditions = true })
+        or (g.check ~= 0 and g.check ~= 1) or math.tointeger(g.check) == nil
+        or type(g.conditions) ~= "table" or #g.conditions == 0
+        or not dense_array(g.conditions) then return false end
+      for _, c in ipairs(g.conditions) do
+        if type(c) ~= "table" then return false end
+        if c.kind == "quest" then
+          if not exact_fields(c, { kind = true, qid = true, finish = true })
+            or type(c.qid) ~= "number" or math.tointeger(c.qid) == nil or c.qid <= 0
+            or type(c.finish) ~= "boolean" then return false end
+        elseif c.kind == "variable" then
+          if not exact_fields(c, { kind = true, qid = true, name_hash = true,
+            value_type = true, compare_type = true, bool_value = true, int_value = true })
+            or type(c.qid) ~= "number" or math.tointeger(c.qid) == nil or c.qid <= 0
+            or type(c.name_hash) ~= "number" or math.tointeger(c.name_hash) == nil
+            or type(c.value_type) ~= "number" or math.tointeger(c.value_type) == nil
+            or type(c.compare_type) ~= "number" or math.tointeger(c.compare_type) == nil
+            or type(c.bool_value) ~= "boolean"
+            or type(c.int_value) ~= "number" or math.tointeger(c.int_value) == nil then
+            return false
+          end
+        else
+          return false
+        end
+      end
+      return true
+    end
+    local function chest_quest(g)
+      if g == nil then return nil end
+      local q, var = {}, false
+      for _, c in ipairs(g.conditions) do
+        if c.kind == "quest" then q[#q + 1] = { c.qid, c.finish }
+        else var = true end
+      end
+      return { any = g.check == 1, q = q, var = var or nil }
+    end
+    if not dense_array(v.rows) then error("invalid places rows") end
     for _, r in ipairs(v.rows) do
+      if type(r) ~= "table" or not PLACE_SOURCES[r.src]
+        or (r.phase ~= nil and (r.k ~= "chara" or not PLACE_PHASES[r.phase])) then
+        error("invalid places metadata")
+      end
+      if r.k == "chara" then
+        if (r.src == "subquest" or r.src == "mainquest") then
+          if type(r.table_qid) ~= "number" or math.tointeger(r.table_qid) == nil
+            or r.table_qid < 0 then error("invalid quest table owner") end
+        elseif r.table_qid ~= nil then error("stray quest table owner") end
+      elseif r.table_qid ~= nil then error("quest table owner on non-monster row") end
+      if r.gate ~= nil and (r.k ~= "chara" and r.k ~= "chest" or not valid_gate(r.gate)) then
+        error("invalid places gate")
+      end
       local ok = type(r) == "table" and PLACES_KINDS[r.k] == true
         and type(r.uid) == "string" and r.uid ~= ""
         and to_int(r.id) ~= nil and finite(r.x) and finite(r.y) and finite(r.z)
@@ -284,13 +354,17 @@ function M.new(a, reads, io)
       else
         rows = rows + 1
         local uid = r.uid:lower()
-        places_uids[uid] = true
+        new_uids[uid] = true
         local x, y, z = round1(r.x), round1(r.y), round1(r.z)
         local id = to_int(r.id)
         if r.k == "chara" then
-          if type(r.name) == "string" and r.name ~= "" then names[id] = r.name end
-          chara_rows[#chara_rows + 1] = { uid = uid, id = id, name = names[id],
-            x = x, y = y, z = z, src = r.src, phase = r.phase }
+          if type(r.name) == "string" and r.name ~= "" then new_names[id] = r.name end
+          new_chara[#new_chara + 1] = { uid = uid, id = id, name = r.name,
+            x = x, y = y, z = z, src = r.src, phase = r.phase,
+            table_qid = r.table_qid, gate = r.gate }
+          if r.src == "subquest" or r.src == "mainquest" or r.phase ~= nil or r.gate ~= nil then
+            new_conditional[uid] = true
+          end
         elseif normal_src(r.src) then
           local e = { k = r.k, id = id, x = x, y = y, z = z, src = "file" }
           if r.k == "chest" and type(r.items) == "table" then
@@ -316,10 +390,14 @@ function M.new(a, reads, io)
             if r.trap == true then e.trap = true end
             if r.pawn == true then e.pawn = true end
           end
-          static[uid] = e
+          if r.k == "chest" then e.quest = chest_quest(r.gate) or e.quest end
+          new_static[uid] = e
         end
       end
     end
+    for id, name in pairs(new_names) do names[id] = name end
+    static, chara_rows, places_uids, conditional_uids = new_static, new_chara, new_uids,
+      new_conditional
     places.rows, places.dropped = rows, dropped
   end
 
@@ -342,7 +420,7 @@ function M.new(a, reads, io)
         if type(v.pak) == "string" then places.pak = v.pak end
       else
         places.state = "bad"
-        static, chara_rows, places_uids = {}, {}, {}
+        static, chara_rows, places_uids, conditional_uids = {}, {}, {}, {}
         places.rows, places.dropped = 0, 0
       end
     end
@@ -360,10 +438,10 @@ function M.new(a, reads, io)
     if type(raw.pak) == "string" then loaded_pak = raw.pak end
     if type(raw.entries) ~= "table" then return end
     local stale_stamp = places.pak ~= nil and raw.pak ~= places.pak
-    -- SPEC 17.10.9.2: chara rows the file keeps (src normal, no phase)
+    -- SPEC 17.10.9.2: unconditional chara rows (no quest source, phase or gate)
     local kept_chara = {}
     for _, r in ipairs(chara_rows) do
-      if normal_src(r.src) and r.phase == nil then
+      if not conditional_uids[r.uid] then
         kept_chara[r.uid] = true
       end
     end
@@ -380,7 +458,9 @@ function M.new(a, reads, io)
         local nm = type(e.name) == "string" and e.name or nil
         local pruned = false
         if places.state == "ok" then
-          if e.k == "monster" then
+          if conditional_uids[uidl] then
+            pruned = true
+          elseif e.k == "monster" then
             pruned = not kept_chara[uidl]
           elseif e.k == "chest" or e.k == "token" or e.k == "beetle" then
             pruned = places_uids[uidl] == true and static[uidl] == nil
@@ -405,6 +485,7 @@ function M.new(a, reads, io)
   local function same_pos(e, x, y, z) return e.x == x and e.y == y and e.z == z end
 
   local function learn(uid, k, id, pos_x, pos_y, pos_z, table_ix, name)
+    if conditional_uids[uid] then return end
     local x, y, z = round1(pos_x), round1(pos_y), round1(pos_z)
     local cur = learned[uid]
     if cur ~= nil then
@@ -446,19 +527,25 @@ function M.new(a, reads, io)
     return "drop"
   end
 
-  local function classify(id, name, src, phase)
+  local function classify(id, name)
     if S.cast ~= nil and S.cast[id] then return "giver" end
-    if not normal_src(src) or phase ~= nil then return "drop" end
     return family_class(fam_of(name or names[id]))
   end
 
   local function sort_places()
     S.need_sort = false
     S.file_monsters = {}
+    S.file_giver_rows = {}
+    S.file_givers = {}
+    givers_cache, givers_rev = nil, -1
     for _, r in ipairs(chara_rows) do
-      local c = classify(r.id, r.name, r.src, r.phase)
+      local c = classify(r.id, r.name)
       if c == "giver" then
-        learn(r.uid, "giver", r.id, r.x, r.y, r.z, nil, r.name)
+        if conditional_uids[r.uid] then
+          S.file_giver_rows[r.uid] = { uid = r.uid, id = r.id, x = r.x, y = r.y, z = r.z }
+        else
+          learn(r.uid, "giver", r.id, r.x, r.y, r.z, nil, r.name)
+        end
       elseif c == "large" or c == "small" then
         S.file_monsters[r.uid] = { k = "monster", id = r.id, x = r.x, y = r.y,
           z = r.z, src = "file", name = r.name }
@@ -526,6 +613,123 @@ function M.new(a, reads, io)
     return h.value
   end
 
+  local gate_round = { quests = {}, variables = {}, season_read = false, season = nil }
+  local gate_stats = { season4 = nil, normal = { eligible = 0, total = 0 },
+    quest = { eligible = 0, total = 0 }, read_failures = { season4 = 0, quest = 0, variable = 0 } }
+
+  local function gate_quest(qid)
+    local cached = gate_round.quests[qid]
+    if cached ~= nil then return cached end
+    local ok, value = call("quest_state", qid)
+    if not ok or type(value) ~= "table" or type(value.active) ~= "boolean"
+      or type(value.ended) ~= "boolean" then
+      gate_stats.read_failures.quest = gate_stats.read_failures.quest + 1
+      value = false
+    end
+    gate_round.quests[qid] = value
+    return value
+  end
+
+  local function gate_season()
+    if gate_round.season_read then return gate_round.season end
+    gate_round.season_read = true
+    local ok, value = call("game_season4")
+    if ok and type(value) == "boolean" then gate_round.season = value
+    else gate_stats.read_failures.season4 = gate_stats.read_failures.season4 + 1 end
+    gate_stats.season4 = gate_round.season
+    return gate_round.season
+  end
+
+  local function gate_variable(c)
+    local key = table.concat({ c.qid, c.name_hash, c.value_type, c.compare_type,
+      c.bool_value and 1 or 0, c.int_value }, ":")
+    local cached = gate_round.variables[key]
+    if cached ~= nil then return cached end
+    local ok, value = call("quest_variable", c)
+    if not ok or type(value) ~= "boolean" then
+      gate_stats.read_failures.variable = gate_stats.read_failures.variable + 1
+      value = false
+    end
+    gate_round.variables[key] = value
+    return value
+  end
+
+  local function row_eligible(r)
+    if r.table_qid ~= nil then
+      local state = gate_quest(r.table_qid)
+      if state == false or state.active ~= true or state.ended ~= false then return false end
+    end
+    if r.phase ~= nil then
+      local season = gate_season()
+      if season == nil or (r.phase == "season4") ~= season then return false end
+    end
+    local g = r.gate
+    if g == nil then return true end
+    local matched = 0
+    for _, c in ipairs(g.conditions) do
+      local ok
+      if c.kind == "quest" then
+        local state = gate_quest(c.qid)
+        ok = state ~= false and state.ended == c.finish
+      else
+        ok = gate_variable(c)
+      end
+      if ok then matched = matched + 1
+      elseif g.check == 0 then return false end
+    end
+    return g.check == 0 or matched > 0
+  end
+
+  local function apply_file_gates(enabled)
+    gate_round = { quests = {}, variables = {}, season_read = false, season = nil }
+    gate_stats = { season4 = nil, normal = { eligible = 0, total = 0 },
+      quest = { eligible = 0, total = 0 }, read_failures = { season4 = 0, quest = 0, variable = 0 } }
+    local eligible, file_givers = {}, {}
+    local gate_work = enabled or next(S.file_giver_rows) ~= nil
+    if gate_work then
+      for _, r in ipairs(chara_rows) do
+        local group = (r.src == "subquest" or r.src == "mainquest") and "quest" or "normal"
+        local counts = gate_stats[group]
+        counts.total = counts.total + 1
+        local yes = row_eligible(r)
+        if yes then counts.eligible = counts.eligible + 1 end
+        if yes and S.file_monsters[r.uid] ~= nil then eligible[r.uid] = S.file_monsters[r.uid] end
+        -- Quest-cast rows are giver anchors, not monster spawns. Keep their
+        -- file positions available even before the source quest activates.
+        local fg = S.file_giver_rows[r.uid]
+        if fg ~= nil then
+          local current_giver = file_givers[fg.id]
+          if current_giver == nil or fg.uid < current_giver.uid then file_givers[fg.id] = fg end
+        end
+      end
+    end
+    local current, changed = S.eligible_file_monsters, false
+    for uid in pairs(current) do if eligible[uid] == nil then changed = true; break end end
+    if not changed then
+      for uid in pairs(eligible) do if current[uid] == nil then changed = true; break end end
+    end
+    if changed then S.eligible_file_monsters = eligible end
+    local giver_changed = false
+    for id, current_giver in pairs(S.file_givers) do
+      local next_giver = file_givers[id]
+      if next_giver == nil or next_giver.uid ~= current_giver.uid then
+        giver_changed = true; break
+      end
+    end
+    if not giver_changed then
+      for id, next_giver in pairs(file_givers) do
+        local current_giver = S.file_givers[id]
+        if current_giver == nil or current_giver.uid ~= next_giver.uid then
+          giver_changed = true; break
+        end
+      end
+    end
+    if giver_changed then
+      S.file_givers = file_givers
+      givers_cache, givers_rev = nil, -1
+    end
+  end
+
   -- ----- cast set (SPEC 17.10.9: first built each session) -----
   local function ensure_cast()
     if S.cast ~= nil then return true end
@@ -585,7 +789,7 @@ function M.new(a, reads, io)
   -- Returns the set of every reserved row uid (lower case), valid position or not.
   local function learn_reserved(rows, chara_ok)
     local file_ok = places.state == "ok"
-    local uids = {}
+    local uids, live_givers = {}, {}
     for _, r in ipairs(rows) do
       local uid = type(r) == "table" and type(r.uid) == "string" and r.uid:lower() or nil
       if uid ~= nil then uids[uid] = true end
@@ -607,12 +811,20 @@ function M.new(a, reads, io)
           if type(r.cid_name) == "string" and r.cid_name ~= "" then
             names[cid] = r.cid_name
           end
-          local c = classify(cid, r.cid_name, r.src, r.phase)
+          local c = classify(cid, r.cid_name)
           if c == "giver" then
-            learn(uid, "giver", cid, r.pos.x, r.pos.y, r.pos.z,
-              to_int(r.table_ix), names[cid])
+            if conditional_uids[uid] then
+              local current_giver = live_givers[cid]
+              if current_giver == nil or uid < current_giver.uid then
+                live_givers[cid] = { uid = uid, x = round1(r.pos.x),
+                  y = round1(r.pos.y), z = round1(r.pos.z) }
+              end
+            else
+              learn(uid, "giver", cid, r.pos.x, r.pos.y, r.pos.z,
+                to_int(r.table_ix), names[cid])
+            end
           elseif c == "large" or c == "small" then
-            if file_ok and S.file_monsters[uid] == nil then
+            if file_ok and (conditional_uids[uid] or S.file_monsters[uid] == nil) then
               live_only(uid, "monster", cid, r.pos.x, r.pos.y, r.pos.z, names[cid])
             else
               learn(uid, "monster", cid, r.pos.x, r.pos.y, r.pos.z,
@@ -622,6 +834,8 @@ function M.new(a, reads, io)
         end
       end
     end
+    S.live_givers = live_givers
+    givers_cache, givers_rev = nil, -1
     return uids
   end
 
@@ -1010,19 +1224,18 @@ function M.new(a, reads, io)
   end
 
   -- ----- effective atlas -----
-  -- The static + file monsters + learned merge and its sorted keys are kept
-  -- until the learned set (rev) or the file monsters table changes (SPEC
-  -- 28.5.3.1: sort_places and w:reset() each replace S.file_monsters). The
-  -- live rows are laid over it (S.live first, the merge behind it). Returns
-  -- that map and the sorted keys, live uids included.
+  -- The static + eligible file monsters + learned merge and its sorted keys
+  -- are kept until the learned set (rev) or eligibility changes. The live rows
+  -- are laid over it (S.live first, the merge behind it). Returns that map and
+  -- the sorted keys, live uids included.
   local eff_cache = nil
   local function effective()
     local c = eff_cache
-    if c == nil or c.rev ~= rev or c.fm ~= S.file_monsters then
+    if c == nil or c.rev ~= rev or c.eligible ~= S.eligible_file_monsters then
       stats.eff_builds = stats.eff_builds + 1
       local eff = {}
       for uid, e in pairs(static) do eff[uid] = e end
-      for uid, e in pairs(S.file_monsters) do eff[uid] = e end
+      for uid, e in pairs(S.eligible_file_monsters) do eff[uid] = e end
       for uid, e in pairs(learned) do
         if e.k == "chest" and eff[uid] ~= nil then
           if e.items == nil then e.items = eff[uid].items end
@@ -1032,7 +1245,8 @@ function M.new(a, reads, io)
         end
         eff[uid] = e
       end
-      c = { rev = rev, fm = S.file_monsters, map = eff, keys = sorted_keys(eff) }
+      c = { rev = rev, eligible = S.eligible_file_monsters,
+        map = eff, keys = sorted_keys(eff) }
       eff_cache = c
     end
     if next(S.live) == nil then return c.map, c.keys end
@@ -1634,10 +1848,16 @@ function M.new(a, reads, io)
     lap("reserved", t)
     t = clock()
     if cast_ok and boss_ok and S.need_sort then sort_places() end
+    apply_file_gates(any_monsters)
     lap("sort", t)
     local reserved_uids = nil
     t = clock()
-    if rows ~= nil then reserved_uids = learn_reserved(rows, cast_ok and boss_ok) end
+    if rows ~= nil then
+      reserved_uids = learn_reserved(rows, cast_ok and boss_ok)
+    elseif next(S.live_givers) ~= nil then
+      S.live_givers = {}
+      givers_cache, givers_rev = nil, -1
+    end
     lap("learn", t)
     t = clock()
     local loaded_seen = read_loaded(reserved_uids)
@@ -2224,6 +2444,16 @@ function M.new(a, reads, io)
         end
       end
     end
+    for id, e in pairs(S.file_givers) do
+      local cur = ids[id]
+      if cur == nil or e.uid < cur then
+        ids[id] = e.uid
+        out[id] = { x = e.x, y = e.y, z = e.z }
+      end
+    end
+    for id, e in pairs(S.live_givers) do
+      out[id] = { x = e.x, y = e.y, z = e.z }
+    end
     givers_cache, givers_rev = out, rev
     return out
   end
@@ -2234,8 +2464,12 @@ function M.new(a, reads, io)
 
   function w:reset()
     S = new_session()
+    givers_cache, givers_rev = nil, -1
     w.path_job = nil
     if type(reads.reset) == "function" then pcall(reads.reset) end
+    gate_round = { quests = {}, variables = {}, season_read = false, season = nil }
+    gate_stats = { season4 = nil, normal = { eligible = 0, total = 0 },
+      quest = { eligible = 0, total = 0 }, read_failures = { season4 = 0, quest = 0, variable = 0 } }
     input_tbl = nil
     committed = false
     last_round = nil
@@ -2263,6 +2497,8 @@ function M.new(a, reads, io)
     if stats.drops ~= nil then
       drops = { cids = stats.drops.cids, ids = stats.drops.ids }
     end
+    local conditional_learned = 0
+    for uid in pairs(learned) do if conditional_uids[uid] then conditional_learned = conditional_learned + 1 end end
     return {
       atlas = { file = nfile, learned = nlearned, dropped = atlas_dropped,
         pruned = atlas_pruned },
@@ -2280,6 +2516,12 @@ function M.new(a, reads, io)
       held_rounds = stats.held_rounds, route_builds = stats.route_builds,
       shop_index_runs = stats.shop_index_runs, chest_kinds_calls = stats.chest_kinds_calls,
       last_save_reason = stats.last_save_reason,
+      gates = { season4 = gate_stats.season4,
+        normal_source = { eligible = gate_stats.normal.eligible, total = gate_stats.normal.total },
+        quest_source = { eligible = gate_stats.quest.eligible, total = gate_stats.quest.total },
+        read_failures = { season4 = gate_stats.read_failures.season4,
+          quest = gate_stats.read_failures.quest, variable = gate_stats.read_failures.variable },
+        conditional_learned = conditional_learned },
     }
   end
 
@@ -2791,6 +3033,82 @@ function M.game_reads()
   end
 
   local icon_guid = {}
+  local variable_objects, quest_log_end_method = {}, nil
+  local variable_info_type, variable_condition_type = nil, nil
+
+  function R.game_season4()
+    local gs = single("app.GameSystem")
+    local value = C(gs, "get_GameSeason4")
+    if type(value) == "boolean" then return value end
+    local field = G(gs, "<GameSeason4>k__BackingField")
+    if type(field) == "boolean" then return field end
+    error("GameSeason4 unreadable")
+  end
+
+  function R.quest_state(qid)
+    local qm = single("app.QuestManager")
+    local qlm = single("app.QuestLogManager")
+    local active = C(qm, "checkActivated", qid)
+    if type(active) ~= "boolean" then error("quest activation unreadable") end
+    if quest_log_end_method == nil then
+      local ok, method = pcall(function()
+        local td = sdk.find_type_definition("app.QuestLogManager")
+        return td ~= nil and td:get_method("isQuestLogEnd(app.QuestDefine.ID)") or nil
+      end)
+      if ok then quest_log_end_method = method end
+    end
+    if qlm == nil or quest_log_end_method == nil then error("quest log end method unavailable") end
+    local ok, ended = pcall(function() return quest_log_end_method:call(qlm, qid) end)
+    if not ok or type(ended) ~= "boolean" then error("quest end state unreadable") end
+    return { active = active, ended = ended }
+  end
+
+  function R.quest_variable(c)
+    local key = table.concat({ c.qid, c.name_hash, c.value_type, c.compare_type,
+      c.bool_value and 1 or 0, c.int_value }, ":")
+    local wrapper = variable_objects[key]
+    if wrapper == nil then
+      local condition, info, condition_ref, info_ref
+      local ok, result = pcall(function()
+        variable_info_type = variable_info_type or sdk.find_type_definition(
+          "app.GenerateManager.QuestFlagInfos.QuestVariableInfo")
+        variable_condition_type = variable_condition_type or sdk.find_type_definition(
+          "app.QuestVariableCondition")
+        if variable_info_type == nil or variable_condition_type == nil then error("condition type missing") end
+        condition = variable_condition_type:create_instance()
+        if condition == nil then error("condition construction failed") end
+        local condition_added = condition:add_ref()
+        condition_ref = true
+        if condition_added == nil then error("condition retention failed") end
+        condition = condition_added
+        info = variable_info_type:create_instance()
+        if info == nil then error("variable info construction failed") end
+        local info_added = info:add_ref()
+        info_ref = true
+        if info_added == nil then error("variable info retention failed") end
+        info = info_added
+        condition:set_field("_QuestID", c.qid)
+        condition:set_field("_NameHash", c.name_hash)
+        condition:set_field("_ValueType", c.value_type)
+        condition:set_field("_CompareType", c.compare_type)
+        condition:set_field("_BoolValue", c.bool_value)
+        condition:set_field("_IntValue", c.int_value)
+        info:set_field("_Condition", condition)
+        return { info = info, condition = condition }
+      end)
+      if not ok or result == nil then
+        if info_ref and info ~= nil then pcall(function() info:release() end) end
+        if condition_ref and condition ~= nil then pcall(function() condition:release() end) end
+        error("variable condition construction failed")
+      end
+      variable_objects[key] = result
+      wrapper = result
+    end
+    local qm = single("app.QuestManager")
+    local value = C(wrapper.info, "evaluate", qm)
+    if type(value) ~= "boolean" then error("variable evaluation failed") end
+    return value
+  end
 
   local function gm_position(g)
     local tr = C(C(g, "get_GameObject"), "get_Transform")
@@ -3555,6 +3873,12 @@ function M.game_reads()
     rec_cache = nil
     sched.dict, sched.at = nil, -math.huge
     icon_guid = {}
+    for _, pair in pairs(variable_objects) do
+      for _, obj in pairs(pair) do
+        if obj ~= nil then pcall(function() obj:release() end) end
+      end
+    end
+    variable_objects = {}
   end
 
   local function family_set(ids)

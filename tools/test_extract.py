@@ -2,9 +2,11 @@
 python -m unittest discover -s tools -p "test_*.py"
 """
 import contextlib
+import collections
 import getpass
 import importlib.util
 import io
+import json
 import os
 import re
 import shutil
@@ -130,10 +132,107 @@ class RszTests(unittest.TestCase):
 
 
 class RowTests(unittest.TestCase):
+    def test_gate_schema_and_rejection_boundaries(self):
+        def inst(i, t, **fields):
+            n = qnml_rsz.Inst(i, t)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        qtype = "app.GenerateManager.QuestFlagInfos.QuestFlagInfo"
+        vtype = "app.GenerateManager.QuestFlagInfos.QuestVariableInfo"
+        ctype = "app.QuestVariableCondition"
+
+        def decode(check=0, infos=(), *, qi_fields=None, flag_fields=None, var_fields=None,
+                   condition_fields=None, omit_infos=False, omit_check=False,
+                   missing_qi=False, missing_sf=False):
+            entries = [R(0) if kind == "null" else R(10 + i)
+                       for i, kind in enumerate(infos)]
+            nodes = {}
+            for i, kind in enumerate(infos):
+                idx = 10 + i
+                if kind == "null":
+                    continue
+                if kind == "unknown":
+                    nodes[idx] = inst(idx, "app.GenerateManager.QuestFlagInfos.Unknown")
+                elif kind == "quest":
+                    nodes[idx] = inst(idx, qtype, **(flag_fields if flag_fields is not None else {
+                        "_QuestID": 30030, "_IsFinishCheck": True}))
+                elif kind == "variable":
+                    nodes[idx] = inst(idx, vtype, **(var_fields if var_fields is not None else {
+                        "_Condition": R(20)}))
+                    nodes[20] = inst(20, ctype, **(condition_fields if condition_fields is not None else {
+                        "_QuestID": 51010, "_NameHash": 110914987, "_ValueType": 1,
+                        "_CompareType": 1, "_BoolValue": True, "_IntValue": 7}))
+            if not missing_qi:
+                qfields = {} if qi_fields is None else dict(qi_fields)
+                if not omit_check:
+                    qfields.setdefault("_CheckType", check)
+                if not omit_infos:
+                    qfields.setdefault("_Infos", entries)
+                nodes[2] = inst(2, "app.GenerateManager.QuestFlagInfos", **qfields)
+            if not missing_sf:
+                nodes[1] = inst(1, "app.GenerateSetting.SetFlagSettingData",
+                                **({} if missing_qi else {"_QuestFlagInfos": R(2)}))
+            cont = inst(3, "app.Container", **({} if missing_sf else {"_SetFlagSetting": R(1)}))
+            all_nodes = [cont] + list(nodes.values())
+            by_idx = {node.idx: node for node in all_nodes}
+            insts = [by_idx.get(i + 1) or inst(i + 1, "app.Filler") for i in range(max(by_idx))]
+            return ew.gate_of(insts, cont)
+
+        self.assertIsNone(decode(missing_sf=True))
+        self.assertIsNone(decode(missing_qi=True))
+        self.assertIsNone(decode(0, []))
+        self.assertIsNone(decode(1, []))
+        self.assertEqual(decode(0, ["quest"]), {
+            "check": 0, "conditions": [{"kind": "quest", "qid": 30030, "finish": True}]})
+        self.assertEqual(decode(1, ["quest"]), {
+            "check": 1, "conditions": [{"kind": "quest", "qid": 30030, "finish": True}]})
+        self.assertEqual(decode(0, ["variable"]), {
+            "check": 0, "conditions": [{"kind": "variable", "qid": 51010,
+                "name_hash": 110914987, "value_type": 1, "compare_type": 1,
+                "bool_value": True, "int_value": 7}]})
+        self.assertEqual(len(decode(1, ["quest", "variable"]) ["conditions"]), 2)
+
+        for fields in ({"_Infos": None}, {"_Infos": "bad"}):
+            with self.subTest(infos_shape=fields), self.assertRaises(ew.ExtractError):
+                decode(qi_fields=fields)
+        with self.assertRaises(ew.ExtractError):
+            decode(qi_fields={"_Infos": ["bad"]})
+        with self.assertRaises(ew.ExtractError):
+            decode(omit_infos=True)
+        with self.assertRaises(ew.ExtractError):
+            decode(omit_check=True, infos=[])
+        with self.assertRaises(ew.ExtractError):
+            decode(omit_check=True, infos=["quest"])
+        for check in (None, True, "0", -1, 2):
+            with self.subTest(check=check), self.assertRaises(ew.ExtractError):
+                decode(check=check, infos=[])
+            with self.subTest(check_nonempty=check), self.assertRaises(ew.ExtractError):
+                decode(check=check, infos=["quest"])
+        for infos in (["null"], ["unknown"]):
+            with self.subTest(infos=infos), self.assertRaises(ew.ExtractError):
+                decode(infos=infos)
+        for fields in ({"_QuestID": 1}, {"_QuestID": "1", "_IsFinishCheck": True},
+                       {"_QuestID": 1, "_IsFinishCheck": 1}):
+            with self.subTest(quest_fields=fields), self.assertRaises(ew.ExtractError):
+                decode(infos=["quest"], flag_fields=fields)
+        for fields in ({}, {"_QuestID": 1}, {"_QuestID": 1, "_NameHash": 2,
+                       "_ValueType": 1, "_CompareType": 1, "_BoolValue": True},
+                       {"_QuestID": 1, "_NameHash": 2, "_ValueType": True,
+                        "_CompareType": 1, "_BoolValue": True, "_IntValue": 4}):
+            with self.subTest(variable_fields=fields), self.assertRaises(ew.ExtractError):
+                decode(infos=["variable"], condition_fields=fields)
+        for fields in ({}, {"_Condition": R(0)}, {"_Condition": None}):
+            with self.subTest(variable_element_fields=fields), self.assertRaises(ew.ExtractError):
+                decode(infos=["variable"], var_fields=fields)
+
     def test_phase_tag(self):
         self.assertEqual(ew.phase_of("a/DNG_01/_beforeSeason4/x.user"), "beforeseason4")
+        self.assertEqual(ew.phase_of("a/b/BEFORESEASON4_season4/x.user"), "beforeseason4")
+        self.assertEqual(ew.phase_of("a/b/BeforeSeason4_season4/x.user"), "beforeseason4")
         self.assertEqual(ew.phase_of("a/b__Season4/x.user"), "season4")
         self.assertEqual(ew.phase_of("a/b_season4/x.user"), "season4")
+        self.assertIsNone(ew.phase_of("a/b/BeforeSeason5/x.user"))
         self.assertIsNone(ew.phase_of("a/b/x.user"))
 
     def test_chara_set_only(self):
@@ -161,6 +260,118 @@ class RowTests(unittest.TestCase):
         self.assertEqual((rows[0]["k"], rows[0]["uid"], rows[0]["id"], rows[0]["name"], rows[0]["src"]),
                          ("chara", "g1", 5, "ch5", "normal"))
         self.assertEqual(rows[0]["x"], 1.0)
+
+    def test_quest_table_owner_ids(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+
+        def collect(src, path):
+            table = [inst(1, "app.GenerateTable", _EnemySetInfo=R(2)),
+                     inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3)]),
+                     inst(3, "app.GenerateRowData", _ManualSetGuid="g1", _GimmickID=0,
+                          _CharaID=5, _ManualPos=(1.0, 2.0, 3.0), _Container=R(0))]
+            lists = [inst(1, "app.GenerateTableData", path=path),
+                     inst(2, "app.GenerateTableListData")]
+            # Supply all four lists; the chosen list contains the table.
+            lists[1].fields.update({"_NormalTableList": [], "_SubQuestTableList": [],
+                                    "_MainQuestTableList": [], "_RandomNormalTableList": []})
+            field = {"normal": "_NormalTableList", "subquest": "_SubQuestTableList",
+                     "mainquest": "_MainQuestTableList", "random": "_RandomNormalTableList"}[src]
+            lists[1].fields[field] = [R(1)]
+            rows, *_ = ew.collect_rows({path: table, "l.user": lists}, {}, set(), {})
+            return rows[0]
+
+        self.assertEqual(collect("normal", "a/b/t.user")["src"], "normal")
+        self.assertNotIn("table_qid", collect("random", "a/b/t.user"))
+        for src in ("subquest", "mainquest"):
+            with self.subTest(src=src):
+                self.assertEqual(collect(src, "a/qu123456/t.user")["table_qid"], 123456)
+                for path in ("a/qu12345/t.user", "a/qu1234567/t.user", "a/t.user"):
+                    with self.assertRaises(ew.ExtractError):
+                        collect(src, path)
+
+    def test_conditional_fixture_matches_synthetic_rows(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        qflag = "app.GenerateManager.QuestFlagInfos.QuestFlagInfo"
+        qvar = "app.GenerateManager.QuestFlagInfos.QuestVariableInfo"
+        normal = [inst(1, "app.GenerateTable", _EnemySetInfo=R(2)),
+                  inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3)]),
+                  inst(3, "app.GenerateRowData", _ManualSetGuid="00000000-0000-0000-0000-000000000001",
+                       _GimmickID=0, _CharaID=5, _ManualPos=(1.0, 2.0, 3.0), _Container=R(0))]
+        quest = [inst(1, "app.GenerateTable", _EnemySetInfo=R(2)),
+                 inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3)]),
+                 inst(3, "app.GenerateRowData", _ManualSetGuid="00000000-0000-0000-0000-000000000002",
+                      _GimmickID=0, _CharaID=6, _ManualPos=(10.0, 2.0, 3.0), _Container=R(4)),
+                 inst(4, "app.Container", _SetFlagSetting=R(5)),
+                 inst(5, "app.GenerateSetting.SetFlagSettingData", _QuestFlagInfos=R(6)),
+                 inst(6, "app.GenerateManager.QuestFlagInfos", _CheckType=0, _Infos=[R(7), R(8)]),
+                 inst(7, qflag, _QuestID=11040, _IsFinishCheck=False),
+                 inst(8, qvar, _Condition=R(9)),
+                 inst(9, "app.QuestVariableCondition", _QuestID=51010, _NameHash=110914987,
+                      _ValueType=1, _CompareType=1, _BoolValue=True, _IntValue=0)]
+        chest = [inst(1, "app.GenerateTable", _GimmickSetInfo=R(2)),
+                 inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3)]),
+                 inst(3, "app.GenerateRowData", _ManualSetGuid="00000000-0000-0000-0000-000000000003",
+                      _GimmickID=10, _ManualPos=(30.0, 2.0, 4.0), _Container=R(4)),
+                 inst(4, "app.Container", _GimmickSetting=R(5), _SetFlagSetting=R(6)),
+                 inst(5, "app.GimmickSetting", _ParamId=1),
+                 inst(6, "app.GenerateSetting.SetFlagSettingData", _QuestFlagInfos=R(7)),
+                 inst(7, "app.GenerateManager.QuestFlagInfos", _CheckType=1, _Infos=[R(8)]),
+                 inst(8, qflag, _QuestID=11040, _IsFinishCheck=False)]
+        listing = [inst(1, "app.GenerateTableData", path="a-normal.user"),
+                   inst(2, "app.GenerateTableData", path="manual/beforeseason4/qu020082/c-quest.user"),
+                   inst(3, "app.GenerateTableData", path="b-chest.user"),
+                   inst(4, "app.GenerateTableListData", _NormalTableList=[R(1), R(3)],
+                        _SubQuestTableList=[R(2)], _MainQuestTableList=[], _RandomNormalTableList=[])]
+        rows, *_ = ew.collect_rows({"a-normal.user": normal, "b-chest.user": chest,
+                                    "manual/beforeseason4/qu020082/c-quest.user": quest,
+                                    "list.user": listing},
+                                   {1: {"items": [], "trap": False, "pawn": False}}, set(),
+                                   {"5": "ch5", "6": "ch6"})
+        order = {"chest": 0, "token": 1, "beetle": 2, "chara": 3}
+        rows.sort(key=lambda r: (order[r["k"]], r["uid"]))
+        fixture_path = os.path.join(os.path.dirname(TOOLS), "tests", "fixtures",
+                                    "conditional_places_v2.json")
+        with open(fixture_path, encoding="utf-8") as f:
+            expected = json.load(f)
+        self.assertEqual({"version": 2, "rows": rows}, expected)
+
+    def test_generated_conditional_data_oracle(self):
+        path = os.path.join(os.path.dirname(TOOLS), "data", "Clairvoyance_places.json")
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["version"], 2)
+        chara = [row for row in data["rows"] if row["k"] == "chara"]
+        self.assertEqual(len(chara), 3248)
+        source_counts = collections.Counter(row["src"] for row in chara)
+        self.assertEqual(source_counts["normal"], 3035)
+        self.assertEqual(source_counts["subquest"] + source_counts["mainquest"], 213)
+        quest_rows = [row for row in chara if row["src"] in ("subquest", "mainquest")]
+        self.assertTrue(all(type(row.get("table_qid")) is int for row in quest_rows))
+        self.assertEqual(len({row["table_qid"] for row in quest_rows}), 29)
+        self.assertFalse(any(row.get("phase") == "season5" for row in chara))
+        phase_rows = [row for row in chara if "phase" in row]
+        self.assertEqual(len(phase_rows), 351)
+        self.assertEqual(sum("gate" in row for row in phase_rows), 336)
+        unphased_normal = [row for row in chara if row["src"] == "normal" and "phase" not in row]
+        quest_gates = [row for row in unphased_normal if "gate" in row and
+                       any(c["kind"] == "quest" for c in row["gate"]["conditions"])]
+        variable_gates = [row for row in unphased_normal if "gate" in row and
+                          any(c["kind"] == "variable" for c in row["gate"]["conditions"])]
+        # Includes two BeforeSeason5 path rows, which intentionally emit no phase tag.
+        self.assertEqual(len(quest_gates), 493)
+        all_normal_quest_gates = [row for row in chara if row["src"] == "normal" and
+                                  "gate" in row and any(c["kind"] == "quest"
+                                  for c in row["gate"]["conditions"])]
+        self.assertEqual(len(all_normal_quest_gates), 829)
+        self.assertEqual(len(variable_gates), 15)
 
     def test_third_chest_types(self):
         def inst(i, t, path=None, **fields):
@@ -239,11 +450,19 @@ class RowTests(unittest.TestCase):
             extra = []
             if check_type is not None:
                 sf = R(base + n * 10 + 1)
-                extra = [inst(base + n * 10 + 1, "app.SetFlagSetting", _QuestFlagInfos=R(base + n * 10 + 2)),
-                         inst(base + n * 10 + 2, "app.QuestFlagInfos", _CheckType=check_type,
+                extra = [inst(base + n * 10 + 1, "app.GenerateSetting.SetFlagSettingData", _QuestFlagInfos=R(base + n * 10 + 2)),
+                         inst(base + n * 10 + 2, "app.GenerateManager.QuestFlagInfos", _CheckType=check_type,
                               _Infos=[R(base + n * 10 + 3 + j) for j in range(len(infos))])]
                 for j, (t, f) in enumerate(infos):
-                    extra.append(inst(base + n * 10 + 3 + j, t, **f))
+                    if t == QV:
+                        extra.append(inst(base + n * 10 + 3 + j, t,
+                                          _Condition=R(base + n * 10 + 8)))
+                        extra.append(inst(base + n * 10 + 8, "app.QuestVariableCondition",
+                                          **(f or {"_QuestID": 51010, "_NameHash": 110914987,
+                                                  "_ValueType": 1, "_CompareType": 1,
+                                                  "_BoolValue": True, "_IntValue": 0})))
+                    else:
+                        extra.append(inst(base + n * 10 + 3 + j, t, **f))
             return [inst(10 + n, "app.GenerateRowData", _GimmickID=10, _ManualSetGuid=guid,
                          _ManualPos=(1.0, 2.0, 3.0), _Container=R(base + n * 10)),
                     inst(base + n * 10, "app.Container", _GimmickSetting=R(base + n * 10 + 9),
@@ -272,13 +491,18 @@ class RowTests(unittest.TestCase):
         r = {x["uid"]: x for x in rows}
         for k in ("quest", "trap", "pawn"):
             self.assertNotIn(k, r["plain"])
-        self.assertEqual(r["all"]["quest"], {"any": False, "q": [[11020, True]]})
-        self.assertEqual(r["any"]["quest"], {"any": True, "q": [[5, False], [6, True]]})
-        self.assertEqual(r["var"]["quest"], {"any": False, "q": [], "var": True})
+        self.assertEqual(r["all"]["gate"], {"check": 0, "conditions": [
+            {"kind": "quest", "qid": 11020, "finish": True}]})
+        self.assertEqual(r["any"]["gate"], {"check": 1, "conditions": [
+            {"kind": "quest", "qid": 5, "finish": False},
+            {"kind": "quest", "qid": 6, "finish": True}]})
+        self.assertEqual(r["var"]["gate"], {"check": 0, "conditions": [
+            {"kind": "variable", "qid": 51010, "name_hash": 110914987,
+             "value_type": 1, "compare_type": 1, "bool_value": True, "int_value": 0}]})
         self.assertTrue(r["trap"]["trap"])
         self.assertNotIn("pawn", r["trap"])
         self.assertTrue(r["pawn"]["pawn"])
-        self.assertEqual((kinds["quest"], kinds["trap"], kinds["pawn"]), (3, 1, 1))
+        self.assertEqual((kinds["gate"], kinds["trap"], kinds["pawn"]), (3, 1, 1))
         with self.assertRaises(ew.ExtractError):
             ew.collect_rows({"t.user": full, "l.user": lst}, params, {2}, {})
         ew.collect_rows({"t.user": full, "l.user": lst}, params, {99}, {})
@@ -290,7 +514,7 @@ class RowTests(unittest.TestCase):
             return n
         R = qnml_rsz.Ref
         table = [inst(1, "app.GenerateTable", _GimmickSetInfo=R(2)),
-                 inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3), R(4), R(5)]),
+                 inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3), R(4)]),
                  inst(3, "app.GenerateRowData", _GimmickID=10, _ManualSetGuid="k5",
                       _ManualPos=(1.0, 2.0, 3.0), _Container=R(6)),
                  inst(4, "app.GenerateRowData", _GimmickID=10, _ManualSetGuid="k0",
@@ -302,19 +526,23 @@ class RowTests(unittest.TestCase):
                  inst(8, "app.Container", _GimmickSetting=R(10), _SetFlagSetting=R(11)),
                  inst(9, "app.GimmickSetting", _ParamId=1, _KeyLocationId=5),
                  inst(10, "app.GimmickSetting", _ParamId=1, _KeyLocationId=0),
-                 inst(11, "app.SetFlagSetting", _QuestFlagInfos=R(12)),
-                 inst(12, "app.QuestFlagInfos", _CheckType=0, _Infos=[R(13)]),
+                 inst(11, "app.GenerateSetting.SetFlagSettingData", _QuestFlagInfos=R(12)),
+                 inst(12, "app.GenerateManager.QuestFlagInfos", _CheckType=0, _Infos=[R(13)]),
                  inst(13, "app.GenerateManager.QuestFlagInfos.SomethingNew")]
+        full = list(table)
         lst = [inst(1, "app.GenerateTableData", path="t.user"),
                inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)], _SubQuestTableList=[],
                     _MainQuestTableList=[], _RandomNormalTableList=[])]
         params = {1: {"items": [], "trap": False, "pawn": False}}
-        rows, _unj, _ids, kinds = ew.collect_rows({"t.user": table, "l.user": lst}, params, set(), {})
+        rows, _unj, _ids, kinds = ew.collect_rows({"t.user": full, "l.user": lst}, params, set(), {})
         r = {x["uid"]: x for x in rows}
         self.assertEqual(kinds["key locations"], 1)
         self.assertNotIn("key locations", r["k5"])
-        self.assertEqual(r["unk"]["quest"], {"any": False, "q": [], "var": True})
-        self.assertEqual(kinds["quest"], 1)
+        self.assertEqual(kinds["gate"], 0)
+        bad = list(full)
+        bad[1] = inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3), R(4), R(5)])
+        with self.assertRaises(ew.ExtractError):
+            ew.collect_rows({"t.user": bad, "l.user": lst}, params, set(), {})
 
     def test_missing_key_fails(self):
         with tempfile.TemporaryDirectory() as d:
