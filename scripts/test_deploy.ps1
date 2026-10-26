@@ -82,19 +82,16 @@ try {
         @{
             Name = "main_file"
             RelativePath = "reframework/autorun/Clairvoyance.lua"
-            Path = "reframework/autorun/Clairvoyance.lua"
             Type = "Leaf"
         },
         @{
             Name = "module_directory"
             RelativePath = "reframework/autorun/Clairvoyance"
-            Path = "reframework/autorun/Clairvoyance"
             Type = "Container"
         },
         @{
             Name = "image_directory"
             RelativePath = "reframework/images/Clairvoyance"
-            Path = "reframework/images/Clairvoyance"
             Type = "Container"
         }
     )
@@ -102,7 +99,7 @@ try {
         foreach ($mode in @("missing", "wrong_type")) {
             $caseName = "source_$($source.Name)_$mode"
             $case = New-Case $caseName 0
-            $sourcePath = Join-Path $case.Root $source.Path
+            $sourcePath = Join-Path $case.Root $source.RelativePath
             if (Test-Path -LiteralPath $sourcePath) {
                 Remove-Item -LiteralPath $sourcePath -Recurse -Force
             }
