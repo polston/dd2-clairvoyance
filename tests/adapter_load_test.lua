@@ -55,7 +55,15 @@ sdk = permissive()
 function sdk.find_type_definition() return type_stub() end
 log = permissive()
 re = permissive()
-ValueType = permissive()
+ValueType = {
+  new = function()
+    local bytes = {}
+    return {
+      bytes = bytes,
+      write_byte = function(_, offset, value) bytes[offset] = value end,
+    }
+  end,
+}
 Vector3f = permissive()
 -- learned-name store: stored file with good and bad entries; dumps captured
 local dumped, dump_count, dump_result = nil, 0, true
@@ -88,6 +96,18 @@ for _, name in ipairs(exports) do
   assert(A[name] ~= nil, "missing export: " .. name)
 end
 assert(A.PUBLIC_MAP_POSITIONS == nil, "PUBLIC_MAP_POSITIONS must be gone")
+
+local parsed_guid = A.guid_parse("00112233-4455-6677-8899-aabbccddeeff")
+local guid_bytes = {}
+for offset = 0, 15 do
+  guid_bytes[#guid_bytes + 1] = string.format("%02x", parsed_guid.bytes[offset])
+end
+assert(table.concat(guid_bytes) == "33221100554477668899aabbccddeeff",
+  "guid_parse writes the expected zero-based bytes")
+local malformed_guid = "not-a-guid"
+local guid_ok, guid_error = pcall(A.guid_parse, malformed_guid)
+assert(not guid_ok and tostring(guid_error):find("malformed GUID '" .. malformed_guid .. "'", 1, true),
+  "guid_parse preserves malformed input in its error")
 
 -- giver_audit_step (SPEC 18.5.1.4)
 do
