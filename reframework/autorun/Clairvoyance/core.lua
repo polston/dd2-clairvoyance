@@ -2021,12 +2021,19 @@ function M.nearest(quests)
   return best
 end
 
-local function journal_pass(read, prev, always, expanded, now)
+local function journal_pass(read, prev, always, expanded, now, reuse)
   local out = {}
   local function take(q)
-    local v = read(q)
-    if type(v) ~= "table" then v = { missing = true } end
-    v.read_at = now
+    local shared = reuse and reuse[q]
+    local v
+    if type(shared) == "table" and shared.read_at == now then
+      v = {}
+      for k, value in pairs(shared) do v[k] = value end
+    else
+      v = read(q)
+      if type(v) ~= "table" then v = { missing = true } end
+      v.read_at = now
+    end
     out[q] = v
   end
   for _, q in ipairs(always) do take(q) end
@@ -2050,7 +2057,7 @@ end
 
 -- Journal reads for the tracked quest, the nearest quest and the expanded
 -- rows. Locked records are read only with spoilers on.
-function M.journal_reads(adapter, quests, show, tracked_qid, nearest_qid, by_in)
+function M.journal_reads(adapter, quests, show, tracked_qid, nearest_qid, by_in, focus_journal)
   local by = by_in
   if by == nil then
     by = {}
@@ -2080,7 +2087,7 @@ function M.journal_reads(adapter, quests, show, tracked_qid, nearest_qid, by_in)
   local journal, journal_all = {}, nil
   if adapter.journal_now then
     journal = journal_pass(adapter.journal_now, show.prev_journal or {},
-      always, expanded, now)
+      always, expanded, now, focus_journal)
   end
   if spoilers and adapter.journal_all then
     journal_all = journal_pass(adapter.journal_all, show.prev_journal_all or {},
@@ -2091,7 +2098,7 @@ end
 
 -- All v9 per-record fields and reads for one tick (only called while the
 -- tree records exist).
-function M.tree_detail(adapter, quests, show, rec_by)
+function M.tree_detail(adapter, quests, show, rec_by, focus_journal)
   local tracked_qid = adapter.tracked_qid and adapter.tracked_qid() or nil
   local origin = show.tree_origin
   local has_origin = type(origin) == "table" and type(origin.x) == "number"
@@ -2106,7 +2113,7 @@ function M.tree_detail(adapter, quests, show, rec_by)
   local n = M.nearest(quests)
   local nearest_qid = n and n.qid or nil
   local journal, journal_all = M.journal_reads(adapter, quests, show,
-    tracked_qid, nearest_qid, rec_by)
+    tracked_qid, nearest_qid, rec_by, focus_journal)
   return tracked_qid, nearest_qid, journal, journal_all
 end
 
@@ -2473,6 +2480,56 @@ function M.step_reads(adapter, qids, prev, now)
   return out
 end
 
+-- SPEC 39.5: a small independent cache for current focused journal entries.
+-- Each record is the plain journal value plus read_at; nil/failed reads are
+-- represented as { missing = true, read_at = now }. A same-tick tree read is
+-- shared, but this cache never changes or prunes the caller's tree cache.
+M.FOCUS_JOURNAL_CAP = 2
+M.FOCUS_JOURNAL_MIN_AGE = 2
+function M.focus_journal_reads(read, active, prev, now, tree)
+  prev, tree = prev or {}, tree or {}
+  local out, live, ranked = {}, {}, {}
+  for _, qid in ipairs(active or {}) do
+    if type(qid) == "number" and not live[qid] then
+      live[qid] = true
+      local old = prev[qid]
+      local shared = tree[qid]
+      if type(shared) == "table" and shared.read_at == now then
+        out[qid] = shared
+      elseif old ~= nil and now - (old.read_at or 0) < M.FOCUS_JOURNAL_MIN_AGE then
+        out[qid] = old
+      else
+        ranked[#ranked + 1] = qid
+      end
+    end
+  end
+  table.sort(ranked, function(a, b)
+    local pa, pb = prev[a], prev[b]
+    if (pa == nil) ~= (pb == nil) then return pa == nil end
+    local aa, ab = pa and pa.read_at or 0, pb and pb.read_at or 0
+    if aa ~= ab then return aa < ab end
+    return a < b
+  end)
+  local reads = 0
+  for _, qid in ipairs(ranked) do
+    if reads < M.FOCUS_JOURNAL_CAP then
+      reads = reads + 1
+      local ok, value = pcall(read, qid)
+      local rec = {}
+      if type(value) == "table" then
+        for k, v in pairs(value) do rec[k] = v end
+      else
+        rec.missing = true
+      end
+      rec.read_at = now
+      out[qid] = rec
+    elseif prev[qid] ~= nil then
+      out[qid] = prev[qid]
+    end
+  end
+  return out
+end
+
 function M.compute(adapter, show)
   show = show or DEFAULT_SHOW
   local q = show.search
@@ -2514,7 +2571,7 @@ function M.compute(adapter, show)
   -- v19 (SPEC 32): the focused quests that are live. focus_inprog is set here,
   -- before the loop, whose first statement drops main quests.
   local active = M.focus_active(show.focus_qids, show.focus_tracked_qid, adapter)
-  local fset, focus_inprog, focus_rec = {}, {}, {}
+  local fset, focus_inprog, focus_rec, focus_cat = {}, {}, {}, {}
   for _, qid in ipairs(active) do
     fset[qid] = true
     if prog[qid] then focus_inprog[qid] = true end
@@ -2596,6 +2653,7 @@ function M.compute(adapter, show)
       if fset[qid] then
         get_candidates()
         focus_rec[qid] = { hint = hint, first = cands[1] }
+        focus_cat[qid] = cat
       end
       -- A locked quest that no name source can label (no log entry, nothing
       -- learned, nothing in the game's text files) gets no marker rather
@@ -2770,9 +2828,92 @@ function M.compute(adapter, show)
   end
   for _, m in ipairs(markers) do m.inprog = nil end
 
+  local focus_journal = {}
+  if adapter.journal_now ~= nil then
+    local focus_in_progress = {}
+    for _, qid in ipairs(active) do
+      if prog[qid] then focus_in_progress[#focus_in_progress + 1] = qid end
+    end
+    focus_journal = M.focus_journal_reads(adapter.journal_now,
+      focus_in_progress, show.prev_focus_journal or {}, show.now or 0)
+  end
+  if focus_result ~= nil then
+    local related_controlled = type(show.focus_related_qids) == "table"
+    local related_on = {}
+    for _, qid in ipairs(show.focus_related_qids or {}) do related_on[qid] = true end
+    local needs = adapter.item_needs and adapter.item_needs() or {}
+    for _, qid in ipairs(active) do
+      local cat = focus_cat[qid]
+      local rec = focus_result.quests[qid]
+      rec.name = adapter.quest_name(qid)
+      local objective = { qid = qid, step = nil, npcs = {}, place = nil,
+        npc_positions = {}, items = {}, item_sources = {}, known = false, resolved = false }
+      if cat == "in_progress" then
+        local j = focus_journal[qid]
+        if type(j) == "table" and not j.missing then
+          if type(j.step_index) == "number" and j.step_index >= 0
+            and j.step_index == math.floor(j.step_index) then objective.step = j.step_index end
+          local d = j.dest
+          if type(d) == "table" and valid_pos(d) then
+            local p = { x = d.x, y = d.y, z = d.z, caption = d.caption }
+            p.key = M.match_destination_key(qid, p, show.quest_rel,
+              (show.world or {}).focus_places)
+            objective.place = p
+          end
+        end
+        local issued = adapter.objective_issued_cids
+          and adapter.objective_issued_cids(qid) or nil
+        local seen_npcs = {}
+        for _, cid in ipairs(type(issued) == "table" and issued or {}) do
+          if type(cid) == "number" and cid > 0 and cid == math.floor(cid)
+            and not adapter.is_generic(cid) and not seen_npcs[cid] then
+            seen_npcs[cid] = true; objective.npcs[#objective.npcs + 1] = cid
+          end
+        end
+        table.sort(objective.npcs)
+        local seen_items = {}
+        for _, n in ipairs(type(needs) == "table" and needs[qid] or {}) do
+          if type(n) == "table" and type(n.id) == "number" then
+            if not seen_items[n.id] then
+              seen_items[n.id] = true
+              objective.items[#objective.items + 1] = n.id
+            end
+          end
+        end
+        table.sort(objective.items)
+      elseif cat == "startable" then
+        local giver = focus_rec[qid] and (focus_rec[qid].hint
+          or focus_rec[qid].cid or focus_rec[qid].first) or nil
+        if type(giver) == "number" and giver > 0 and not adapter.is_generic(giver) then
+          objective.npcs[1] = giver
+        end
+      end
+      objective.known = #objective.npcs > 0 or objective.place ~= nil or #objective.items > 0
+      for _, cid in ipairs(objective.npcs) do
+        if adapter.npc_alive(cid) ~= false then
+          local x, y, z
+          if cat == "in_progress" and adapter.objective_pos ~= nil then
+            x, y, z = adapter.objective_pos(cid)
+          else
+            x, y, z = adapter.npc_pos(cid)
+          end
+          if x ~= nil and finite(x) and finite(y) and finite(z) then
+            objective.npc_positions[cid] = { x = x, y = y, z = z }
+            objective.resolved = true
+          end
+        end
+      end
+      if objective.place ~= nil then objective.resolved = true end
+      rec.objective = objective
+      rec.show_related = not related_controlled or related_on[qid] == true
+      rec.related_shown = rec.show_related
+      rec.related_hidden = not rec.show_related
+    end
+  end
   local tracked_qid, nearest_qid, journal, journal_all
   if quests ~= nil then
-    tracked_qid, nearest_qid, journal, journal_all = M.tree_detail(adapter, quests, show, rec_by)
+    tracked_qid, nearest_qid, journal, journal_all = M.tree_detail(adapter, quests,
+      show, rec_by, focus_journal)
   end
 
   -- v8 (SPEC 15.3h): item markers, appended AFTER every quest marker
@@ -2783,6 +2924,48 @@ function M.compute(adapter, show)
     ims, item_capped = M.item_markers(adapter, item_toggles and shown_inprog or {},
       show.origin, q, focus_inprog)
     for _, m in ipairs(ims) do markers[#markers + 1] = m end
+  end
+
+  -- Attach the chosen drawable current-item source to the objective snapshot.
+  if focus_result ~= nil then
+    for _, qid in ipairs(active) do
+      local objective = focus_result.quests[qid].objective
+      for _, id in ipairs(objective.items or {}) do
+        local best, best_d2
+        for _, m in ipairs(markers) do
+          if m.cat == "quest_item" and m.item_id == id then
+            local d2 = valid_pos(show.origin) and dist2(m.pos, show.origin) or 0
+            if best == nil or d2 < best_d2 or (d2 == best_d2 and m.key < best.key) then
+              best, best_d2 = m, d2
+            end
+          end
+        end
+        if best ~= nil then
+          objective.item_sources[id] = { key = best.key, pos = pos_copy(best.pos),
+            name = adapter.item_name and adapter.item_name(id) or nil }
+          objective.resolved = true
+        end
+      end
+    end
+    local owners_by_item = {}
+    for _, qid in ipairs(active) do
+      local objective = focus_result.quests[qid].objective
+      for _, id in ipairs(objective.items or {}) do
+        local src = objective.item_sources[id]
+        if src ~= nil then
+          local owners = owners_by_item[src.key] or {}
+          owners[#owners + 1] = qid
+          owners_by_item[src.key] = owners
+        end
+      end
+    end
+    for _, m in ipairs(markers) do
+      local owners = owners_by_item[m.key]
+      if m.cat == "quest_item" and owners ~= nil then
+        table.sort(owners)
+        m.objective, m.objective_qids = true, owners
+      end
+    end
   end
 
   -- v10 (SPEC 17.4): world markers, appended AFTER every item marker. The
@@ -2864,6 +3047,83 @@ function M.compute(adapter, show)
     for _, qid in ipairs(active) do akey[qid] = true end
     -- 1. cid -> covering marker key (first marker per cid)
     local cover_key, rel_keys = {}, {}
+    local objective_cids, ancillary_owners = {}, {}
+    for _, qid in ipairs(active) do
+      local fq = rs[qid]
+      local objective = fq and fq.objective or nil
+      for _, cid in ipairs(objective and objective.npcs or {}) do
+        if valid_pos(objective.npc_positions and objective.npc_positions[cid]) then
+          objective_cids[cid] = true
+        end
+      end
+    end
+    for _, qid in ipairs(active) do
+      local fq = rs[qid]
+      local objective = fq and fq.objective or nil
+      local rel_npcs, rel_seen = {}, {}
+      for _, cid in ipairs(fq and fq.npcs or {}) do
+        if not objective_cids[cid] and not rel_seen[cid] then
+          rel_seen[cid] = true
+          rel_npcs[#rel_npcs + 1] = cid
+          local owners = ancillary_owners[cid]
+          if owners == nil then owners = {}; ancillary_owners[cid] = owners end
+          owners[#owners + 1] = qid
+        end
+      end
+      if fq ~= nil then fq.related_npcs = rel_npcs end
+    end
+    local ancillary_shown_n, ancillary_hidden_n, per_quest_counts = 0, 0, {}
+    for cid, owners in pairs(ancillary_owners) do
+      local shown = type(show.focus_related_qids) ~= "table"
+      for _, owner in ipairs(owners) do
+        if rs[owner] and rs[owner].show_related == true then shown = true end
+      end
+      if shown then ancillary_shown_n = ancillary_shown_n + 1
+      else ancillary_hidden_n = ancillary_hidden_n + 1 end
+    end
+    for _, qid in ipairs(active) do
+      local fq = rs[qid]
+      local counts = { related = 0, shown = 0, hidden = 0 }
+      for _, cid in ipairs(fq and fq.related_npcs or {}) do
+        counts.related = counts.related + 1
+        local shown = type(show.focus_related_qids) ~= "table"
+        for _, owner in ipairs(ancillary_owners[cid] or {}) do
+          if rs[owner] and rs[owner].show_related == true then shown = true end
+        end
+        if shown then counts.shown = counts.shown + 1 else counts.hidden = counts.hidden + 1 end
+      end
+      per_quest_counts[qid] = counts
+      if fq ~= nil then
+        fq.related_count, fq.related_shown_count, fq.related_hidden_count =
+          counts.related, counts.shown, counts.hidden
+      end
+    end
+    focus_result.related_counts = { shown = ancillary_shown_n, hidden = ancillary_hidden_n,
+      per_quest = per_quest_counts }
+    local hidden_ancillary = {}
+    for cid, owners in pairs(ancillary_owners) do
+      local shown = type(show.focus_related_qids) ~= "table"
+      for _, owner in ipairs(owners) do
+        if rs[owner] and rs[owner].show_related == true then shown = true end
+      end
+      if not shown and not objective_cids[cid] then hidden_ancillary[cid] = true end
+    end
+    local function hidden_pass(list)
+      if list == nil then return end
+      local n = 0
+      for _, m in ipairs(list) do
+        local cid = M.marker_cid(m)
+        if cid == nil and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller") then cid = m.cid end
+        local explicit_result = q ~= nil and m.focus_kept ~= true and M.is_result(m)
+        if cid == nil or not hidden_ancillary[cid] or explicit_result then
+          if explicit_result and hidden_ancillary[cid] then m.related_search = true end
+          n = n + 1; list[n] = m
+        end
+      end
+      for i = #list, n + 1, -1 do list[i] = nil end
+    end
+    hidden_pass(markers)
+    hidden_pass(fullmap_world)
     -- a world marker covers only when the full map also holds it (SPEC 32.6.2)
     local fm_keys
     if fullmap_world ~= nil then
@@ -2893,30 +3153,105 @@ function M.compute(adapter, show)
     end
     local no_pos, seen_cid, added = {}, {}, 0
     for _, qid in ipairs(active) do
-      for _, cid in ipairs(rs[qid] and rs[qid].npcs or {}) do
+      local all = {}
+      local function add_cid(cid)
+        for _, old in ipairs(all) do if old == cid then return end end
+        all[#all + 1] = cid
+      end
+      for _, cid in ipairs(rs[qid] and rs[qid].npcs or {}) do add_cid(cid) end
+      for _, cid in ipairs(rs[qid] and rs[qid].objective and rs[qid].objective.npcs or {}) do
+        if valid_pos(rs[qid].objective.npc_positions and rs[qid].objective.npc_positions[cid]) then add_cid(cid) end
+      end
+      for _, cid in ipairs(all) do
         if not seen_cid[cid] then
           seen_cid[cid] = true
           local covered = cover_key[cid]
-          if covered ~= nil then rel_keys[covered] = true end
-          if adapter.npc_alive(cid) ~= false then
-            local x, y, z = adapter.npc_pos(cid)
+          local objective_target = objective_cids[cid] == true
+          local owners = ancillary_owners[cid] or {}
+          local visible_related = false
+          for _, owner in ipairs(owners) do
+            local fq = rs[owner]
+            if fq ~= nil and fq.show_related == true then visible_related = true end
+          end
+          local visible = objective_target or visible_related
+          if covered ~= nil and visible then rel_keys[covered] = true end
+          if visible and adapter.npc_alive(cid) ~= false then
+            local target_pos
+            if objective_target then
+              for _, owner in ipairs(active) do
+                local p = rs[owner] and rs[owner].objective
+                  and rs[owner].objective.npc_positions[cid]
+                if valid_pos(p) then target_pos = p; break end
+              end
+            end
+            local x, y, z
+            if target_pos ~= nil then x, y, z = target_pos.x, target_pos.y, target_pos.z
+            else x, y, z = adapter.npc_pos(cid) end
             if x == nil then
-              no_pos[#no_pos + 1] = cid
+              if objective_target or visible_related then no_pos[#no_pos + 1] = cid end
             elseif covered == nil then
               local label = names and names[cid]
               if label == nil or label == "" then
                 label = adapter.npc_name and adapter.npc_name(cid) or nil
               end
               if label == nil or label == "" then label = "NPC " .. cid end
+              local objective_qids = {}
+              for _, owner in ipairs(active) do
+                for _, target in ipairs(rs[owner] and rs[owner].objective and rs[owner].objective.npcs or {}) do
+                  if target == cid then objective_qids[#objective_qids + 1] = owner end
+                end
+              end
+              table.sort(objective_qids)
               markers[#markers + 1] = { key = string.format("n:%d", cid), cat = "focus_npc",
-                cid = cid, qids = {}, pos = { x = x, y = y, z = z }, label = label }
+                cid = cid, qids = {}, pos = { x = x, y = y, z = z }, label = label,
+                objective = objective_target or nil, objective_qids = #objective_qids > 0 and objective_qids or nil }
               added = added + 1
             end
+          end
+          if covered ~= nil and visible and objective_target then
+            local function annotate(list)
+              for _, m in ipairs(list or {}) do
+                if m.key == covered then
+                  local oq, seen = m.objective_qids or {}, {}
+                  for _, owner in ipairs(oq) do seen[owner] = true end
+                  for _, owner in ipairs(active) do
+                    for _, target in ipairs(rs[owner] and rs[owner].objective
+                      and rs[owner].objective.npcs or {}) do
+                      if target == cid and not seen[owner] then
+                        seen[owner] = true; oq[#oq + 1] = owner
+                      end
+                    end
+                  end
+                  table.sort(oq)
+                  m.objective, m.objective_qids = true, oq
+                  return
+                end
+              end
+            end
+            annotate(markers)
+            annotate(fullmap_world)
           end
         end
       end
     end
-    -- 3. destination markers, one per place key
+    -- Objective destinations are separate qid-addressed markers. Existing
+    -- extracted-place markers within two metres are suppressed below.
+    local objective_places = {}
+    for _, qid in ipairs(active) do
+      local objective = rs[qid] and rs[qid].objective or nil
+      local p = objective and objective.place or nil
+      if type(p) == "table" and valid_pos(p) then
+        objective_places[#objective_places + 1] = { qid = qid, pos = p }
+        local caption = p.caption
+        if type(caption) ~= "string" or caption == "" then caption = adapter.quest_name(qid) end
+        if caption == nil or caption == "" then caption = "Quest " .. qid end
+        markers[#markers + 1] = { key = "o:p:" .. tostring(qid), cat = "focus_place",
+          qid = qid, place = p.key, qids = {}, pos = pos_copy(p),
+          label = "Objective: " .. caption, objective = true, objective_qids = { qid } }
+        added = added + 1
+      end
+    end
+    -- 3. ancillary/extracted destination markers, one per place key
     local fplaces = (show.world or {}).focus_places
     local pk, pseen = {}, {}
     for _, qid in ipairs(active) do
@@ -2926,7 +3261,14 @@ function M.compute(adapter, show)
     end
     for _, key in ipairs(pk) do
       local pp = type(fplaces) == "table" and fplaces[key] or nil
+      local covered_by_objective = false
       if valid_pos(pp) then
+        for _, o in ipairs(objective_places) do
+          local dx, dy, dz = pp.x - o.pos.x, pp.y - o.pos.y, pp.z - o.pos.z
+          if dx * dx + dy * dy + dz * dz <= 4 then covered_by_objective = true; break end
+        end
+      end
+      if valid_pos(pp) and not covered_by_objective then
         local nms = {}
         for _, qid in ipairs(active) do
           for _, k2 in ipairs(rs[qid] and rs[qid].places or {}) do
@@ -2944,6 +3286,8 @@ function M.compute(adapter, show)
     -- 4. the hide / dim pass
     local dim = show.focus_unrelated == 1
     local function related(m)
+      if m.related_search == true then return false end
+      if m.objective == true then return true end
       if m.cat == "focus_npc" or m.cat == "focus_place" or m.cat == "route_stop"
         or m.related or rel_keys[m.key] then return true end
       if m.cat == "hint_pin" and akey[m.qid] then return true end
@@ -2972,7 +3316,10 @@ function M.compute(adapter, show)
       end
       for i = #list, n + 1, -1 do list[i] = nil end
     end
-    focus_counts = { related = 0, added = added, dimmed = 0, hidden = 0, no_pos = no_pos }
+    focus_counts = { related = 0, added = added, dimmed = 0, hidden = 0, no_pos = no_pos,
+      ancillary_shown = focus_result.related_counts and focus_result.related_counts.shown or 0,
+      ancillary_hidden = focus_result.related_counts and focus_result.related_counts.hidden or 0,
+      per_quest = focus_result.related_counts and focus_result.related_counts.per_quest or {} }
     pass(markers, focus_counts)
     if fullmap_world ~= nil then pass(fullmap_world) end
   end
@@ -2998,6 +3345,7 @@ function M.compute(adapter, show)
     npc_rows = npc_rows,
     npc_match_cids = npc_match_cids,
     focus = focus_result,
+    focus_journal = focus_journal,
     focus_counts = focus_counts,
   }
 end
@@ -3006,6 +3354,27 @@ end
 -- second (pure; the caller supplies both timestamps).
 function M.tree_wanted(now, open_at)
   return open_at ~= nil and now - open_at < 1.0
+end
+
+-- Match a live journal destination to one of this quest's extracted keys.
+-- Position is authoritative; the extracted key only supplies stable metadata.
+function M.match_destination_key(qid, dest, quest_rel, focus_places)
+  if not valid_pos(dest) or type(quest_rel) ~= "table"
+    or type(focus_places) ~= "table" then return nil end
+  local entry = quest_rel[qid]
+  local best, best_d2
+  for _, d in ipairs(type(entry) == "table" and entry.dest or {}) do
+    local key = type(d) == "table" and d.key or nil
+    local pos = key ~= nil and focus_places[key] or nil
+    if valid_pos(pos) then
+      local d2 = dist2(dest, pos)
+      if d2 <= 4 and (best_d2 == nil or d2 < best_d2
+        or (d2 == best_d2 and key < best)) then
+        best, best_d2 = key, d2
+      end
+    end
+  end
+  return best
 end
 
 -- Hysteresis: a marker's committed position moves only when the live one is
@@ -3027,6 +3396,13 @@ function M.signature(markers, committed)
       table.concat(m.qids, ","), m.label or "", m.hover or "",
       (m.cat or "") .. (m.done and "|d" or "") .. (m.faded and "|f" or "") .. (m.dim and "|m" or "") .. (m.step and ("|s" .. m.step) or "")
         .. (m.slot and ("|k" .. m.slot) or "")
+        .. (m.objective and "|o" or "")
+        .. (function()
+          local qids = {}
+          for _, qid in ipairs(m.objective_qids or {}) do qids[#qids + 1] = qid end
+          table.sort(qids)
+          return #qids > 0 and ("|oq" .. table.concat(qids, ",")) or ""
+        end)()
         .. (m.cat == "route_stop" and ("|t" .. tostring(m.stop)) or ""))
   end
   table.sort(parts)
@@ -3048,7 +3424,28 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
     if mode > 0 then
       for _, qid in ipairs(active) do
         local q = focus.quests ~= nil and focus.quests[qid] or nil
-        local src = q ~= nil and (mode == 1 and q.step_npcs or q.npcs) or nil
+        local objective = q ~= nil and q.objective or nil
+        local src
+        if objective ~= nil then
+          src = {}
+          for _, cid in ipairs(objective.npcs or {}) do
+            if valid_pos(objective.npc_positions and objective.npc_positions[cid]) then
+              src[#src + 1] = cid
+            end
+          end
+          if mode == 2 and q.related_shown == true then
+            local combined, has = {}, {}
+            for _, cid in ipairs(src) do
+              if not has[cid] then has[cid] = true; combined[#combined + 1] = cid end
+            end
+            for _, cid in ipairs(q.npcs or {}) do
+              if not has[cid] then has[cid] = true; combined[#combined + 1] = cid end
+            end
+            src = combined
+          end
+        else
+          src = q ~= nil and (mode == 1 and q.step_npcs or q.npcs) or nil
+        end
         for _, cid in ipairs(src or {}) do
           if not seen[cid] then
             seen[cid] = true
@@ -3061,6 +3458,52 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
         end
       end
     end
+    if opt ~= nil and opt.places == true then
+      local direct = {}
+      for _, qid in ipairs(active) do
+        local q = focus.quests ~= nil and focus.quests[qid] or nil
+        local obj = q ~= nil and q.objective or nil
+        if obj ~= nil then
+          local endpoint, kind, name
+          local p = obj.place
+          if type(p) == "table" and valid_pos(p) then
+            endpoint, kind = pos_copy(p), "place"
+            name = p.caption
+            if name == nil or name == "" then name = q.name or ("Quest " .. qid) end
+          else
+            local candidates = {}
+            for _, id in ipairs(obj.items or {}) do
+              local source = obj.item_sources and obj.item_sources[id]
+              if type(source) == "table" and valid_pos(source.pos) then
+                local d = 0
+                if valid_pos(opt.player) then d = dist2(source.pos, opt.player) end
+                candidates[#candidates + 1] = { id = id, source = source, d = d }
+              end
+            end
+            table.sort(candidates, function(a, b)
+              if a.d ~= b.d then return a.d < b.d end
+              return tostring(a.source.key) < tostring(b.source.key)
+            end)
+            local best = candidates[1]
+            if best ~= nil then
+              endpoint, kind = pos_copy(best.source.pos), "item"
+              name = best.source.name or (q.name or ("Quest " .. qid))
+            end
+          end
+          if endpoint ~= nil and type(qid) == "number" and qid > 0
+            and qid == math.floor(qid) and qid <= 0x7FFFFFFF then
+            local code = kind == "place" and 1 or 2
+            local cid = -(0x10000000000 + qid * 4 + code)
+            direct[#direct + 1] = { cid = cid, place = 0, direct = true,
+              objective = true, qid = qid, kind = kind, name = name, pos = endpoint }
+          end
+        end
+      end
+      for _, member in ipairs(direct) do
+        total = total + 1
+        if #list + reserve() < ROUTE_CAP then list[#list + 1] = member end
+      end
+    end
     if opt ~= nil and opt.places == true and places ~= nil then
       -- SPEC 32.14.11.1: gather the candidates, order them (prev first, then
       -- nearest the player, then candidate order), keep one place per 150 m
@@ -3068,7 +3511,8 @@ function M.route_members(focus, quest_rel, places, target_cid, opt, name_of)
       local pseen, cand = {}, {}
       for _, qid in ipairs(active) do
         local rel = quest_rel ~= nil and quest_rel[qid] or nil
-        for _, d in ipairs(rel ~= nil and rel.dest or {}) do
+        local q = focus.quests ~= nil and focus.quests[qid] or nil
+        for _, d in ipairs((q ~= nil and q.objective ~= nil) and {} or (rel ~= nil and rel.dest or {})) do
           local key = d.key
           if key ~= nil and not pseen[key] and places[key] ~= nil then
             pseen[key] = true
@@ -3124,6 +3568,9 @@ end
 function M.marker_cid(m)
   if type(m) ~= "table" or type(m.key) ~= "string" then return nil end
   if m.cat == "focus_npc" then return m.cid end
+  if m.objective == true and (m.cat == "npc_search" or m.cat == "shop" or m.cat == "seller") then
+    return m.cid
+  end
   return tonumber(m.key:match("^c:(%d+)$"))
 end
 
@@ -3387,11 +3834,14 @@ end
 -- v5 (SPEC 12.3b): pure builder for the objective table.
 -- records: array of {qid, cid, issued}; progressing: {[qid]=true};
 -- prev: previous return value or nil. Returns
--- { cids = {[qid]={cid,...}}, miss = {[qid]=n},
+-- { cids = {[qid]={cid,...}}, issued = {[qid]={cid,...}},
+--   miss = {[qid]=n}, issued_miss = {[qid]=n},
 --   issued_streak = {[qid]={cid=c,n=n}} }.
 function M.objective_table(records, prev, progressing)
   local prev_cids = prev and prev.cids or {}
+  local prev_issued = prev and prev.issued or {}
   local prev_miss = prev and prev.miss or {}
+  local prev_issued_miss = prev and prev.issued_miss or {}
   local prev_streak = prev and prev.issued_streak or {}
   local by_qid = {}   -- qid -> {cid -> issued(bool)}
   for _, r in ipairs(records or {}) do
@@ -3402,7 +3852,7 @@ function M.objective_table(records, prev, progressing)
       set[r.cid] = set[r.cid] or (r.issued == true)
     end
   end
-  local out = { cids = {}, miss = {}, issued_streak = {} }
+  local out = { cids = {}, issued = {}, miss = {}, issued_miss = {}, issued_streak = {} }
   for qid, set in pairs(by_qid) do
     local issued, rest = {}, {}
     for cid, is in pairs(set) do
@@ -3413,6 +3863,25 @@ function M.objective_table(records, prev, progressing)
     local arr = {}
     for _, c in ipairs(issued) do arr[#arr + 1] = c end
     for _, c in ipairs(rest) do arr[#arr + 1] = c end
+    if #issued > 0 then
+      local prior = prev_issued[qid] and prev_issued[qid][1] or nil
+      if prior ~= nil and set[prior] == true and issued[1] ~= prior then
+        for i, cid in ipairs(issued) do
+          if cid == prior then table.remove(issued, i); break end
+        end
+        table.insert(issued, 1, prior)
+      end
+      out.issued[qid] = issued
+    else
+      local prior = prev_issued[qid]
+      if prior ~= nil then
+        local n = (prev_issued_miss[qid] or 0) + 1
+        if n <= 3 then
+          out.issued[qid] = prior
+          out.issued_miss[qid] = n
+        end
+      end
+    end
     -- Debounced stickiness (SPEC 12.3b): the previous first cid keeps
     -- first place while it is in the top tier; a new top issued cid
     -- displaces a non-issued sticky first only after 2 consecutive
@@ -3453,7 +3922,24 @@ function M.objective_table(records, prev, progressing)
       end
     end
   end
+  -- Issued targets share the same three-build retention when the qid is
+  -- absent from the processor walk. A non-progressing quest drops at once.
+  for qid, arr in pairs(prev_issued) do
+    if out.issued[qid] == nil and by_qid[qid] == nil and progressing[qid] then
+      local n = (prev_issued_miss[qid] or 0) + 1
+      if n <= 3 then
+        out.issued[qid] = arr
+        out.issued_miss[qid] = n
+      end
+    end
+  end
   return out
+end
+
+-- Nil means no current issued NPC target is known.
+function M.objective_issued_cids(table_, qid)
+  return type(table_) == "table" and type(table_.issued) == "table"
+    and table_.issued[qid] or nil
 end
 
 return M
