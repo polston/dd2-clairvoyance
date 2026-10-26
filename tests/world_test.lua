@@ -1111,6 +1111,18 @@ do
     local giver = w:givers()[3369196004]
     check("conditional cast row: Sphinx stays in the giver map " .. label,
       giver ~= nil and giver.x == 40 and giver.y == 0 and giver.z == 50)
+    f.data.reserved = { mrow(uid, 3369196004, "ch253001_00", 400, 500) }
+    w:refresh(20, true, on("monsters", "small_monsters"))
+    local live_giver = w:givers()[3369196004]
+    check("conditional cast row: live giver position overrides file " .. label,
+      live_giver ~= nil and live_giver.x == 400 and live_giver.y == 0
+        and live_giver.z == 500)
+    f.data.reserved = {}
+    w:refresh(40, true, on("monsters", "small_monsters"))
+    local fallback_giver = w:givers()[3369196004]
+    check("conditional cast row: file giver returns after live row leaves " .. label,
+      fallback_giver ~= nil and fallback_giver.x == 40 and fallback_giver.y == 0
+        and fallback_giver.z == 50)
     check("conditional cast row: absent from monster markers " .. label,
       find(w:input().monsters, uid) == nil)
     check("conditional cast row: legacy giver entry is pruned and session-only " .. label,

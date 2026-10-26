@@ -55,7 +55,8 @@ end
 -- position rules shared with core (an origin-adjacent position is unknown)
 local dist, near_zero, valid_pos = core.dist, core.near_zero, core.valid_pos
 
--- A places or live row with no src, or src "normal", is a normal placement.
+-- Live rows may omit src; validated format-2 file rows may not. Missing live
+-- src and explicit "normal" are both normal placements.
 local function normal_src(s) return s == nil or s == "normal" end
 
 -- The 5-character family prefix of a character name, or nil.
@@ -227,7 +228,7 @@ function M.new(a, reads, io)
   local static = {}        -- uid -> file entry (chest, token, beetle)
   local chara_rows = {}    -- raw places chara rows
   local places_uids = {}   -- every valid places row uid
-  local conditional_uids = {} -- file monsters that must never be learned
+  local conditional_uids = {} -- conditional file chara UIDs, including givers
   local learned = {}       -- uid -> learned entry
   local atlas_dropped = 0
   local atlas_pruned = 0
@@ -255,6 +256,7 @@ function M.new(a, reads, io)
       settle = nil, msgs = {}, disc_set = nil, disc_count = nil,
       disc_cache = {}, need_sort = true, file_monsters = {}, held = {}, live = {},
       drop_ids = nil, eligible_file_monsters = {}, file_giver_rows = {}, file_givers = {},
+      live_givers = {},
       -- SPEC 28.5.3.3: item lists kept per chest uid / treasure name
       chest_lists = {}, treasure_lists = {},
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
@@ -436,7 +438,7 @@ function M.new(a, reads, io)
     if type(raw.pak) == "string" then loaded_pak = raw.pak end
     if type(raw.entries) ~= "table" then return end
     local stale_stamp = places.pak ~= nil and raw.pak ~= places.pak
-    -- SPEC 17.10.9.2: chara rows the file keeps (src normal, no phase)
+    -- SPEC 17.10.9.2: unconditional chara rows (no quest source, phase or gate)
     local kept_chara = {}
     for _, r in ipairs(chara_rows) do
       if not conditional_uids[r.uid] then
@@ -787,7 +789,7 @@ function M.new(a, reads, io)
   -- Returns the set of every reserved row uid (lower case), valid position or not.
   local function learn_reserved(rows, chara_ok)
     local file_ok = places.state == "ok"
-    local uids = {}
+    local uids, live_givers = {}, {}
     for _, r in ipairs(rows) do
       local uid = type(r) == "table" and type(r.uid) == "string" and r.uid:lower() or nil
       if uid ~= nil then uids[uid] = true end
@@ -811,7 +813,13 @@ function M.new(a, reads, io)
           end
           local c = classify(cid, r.cid_name)
           if c == "giver" then
-            if not conditional_uids[uid] then
+            if conditional_uids[uid] then
+              local current_giver = live_givers[cid]
+              if current_giver == nil or uid < current_giver.uid then
+                live_givers[cid] = { uid = uid, x = round1(r.pos.x),
+                  y = round1(r.pos.y), z = round1(r.pos.z) }
+              end
+            else
               learn(uid, "giver", cid, r.pos.x, r.pos.y, r.pos.z,
                 to_int(r.table_ix), names[cid])
             end
@@ -826,6 +834,8 @@ function M.new(a, reads, io)
         end
       end
     end
+    S.live_givers = live_givers
+    givers_cache, givers_rev = nil, -1
     return uids
   end
 
@@ -1842,7 +1852,12 @@ function M.new(a, reads, io)
     lap("sort", t)
     local reserved_uids = nil
     t = clock()
-    if rows ~= nil then reserved_uids = learn_reserved(rows, cast_ok and boss_ok) end
+    if rows ~= nil then
+      reserved_uids = learn_reserved(rows, cast_ok and boss_ok)
+    elseif next(S.live_givers) ~= nil then
+      S.live_givers = {}
+      givers_cache, givers_rev = nil, -1
+    end
     lap("learn", t)
     t = clock()
     local loaded_seen = read_loaded(reserved_uids)
@@ -2435,6 +2450,9 @@ function M.new(a, reads, io)
         ids[id] = e.uid
         out[id] = { x = e.x, y = e.y, z = e.z }
       end
+    end
+    for id, e in pairs(S.live_givers) do
+      out[id] = { x = e.x, y = e.y, z = e.z }
     end
     givers_cache, givers_rev = out, rev
     return out
