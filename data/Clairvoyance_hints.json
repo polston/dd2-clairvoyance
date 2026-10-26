@@ -743,6 +743,14 @@
   "quest": "Captain Brant at the Stardrop Inn in Vernworth sends you to a masquerade to get close to the false Sovran. Meet him at night; he gives you an Eventide Mask.",
   "steps": {
    "0": {
+    "pins": [
+     {
+      "label": "Hidden door",
+      "x": 397.95300483703613,
+      "y": 73.50188446044922,
+      "z": -821.0272216796875
+     }
+    ],
     "text": "First get courtly attire: the tunic and breeches, found in the Comptroller's home in the Noble Quarter, the castle guest chambers, or bought. Wear both with the mask. Go to the hall in Vernworth Castle at night; the party runs every second night, so wait on a bench if none. Inside, follow the false Sovran by going to the back wall and through the hidden passage to the balcony, where Wilhelmina covers for you. Do not linger, since the passage closes at sunrise and you must retry in two days."
    },
    "1": {
