@@ -789,6 +789,47 @@ do
   check("quests v2: normalized source evidence is a detached structural copy",
     cat and cat.sources[1].evidence.ref.placement.stable == "before")
 end
+do
+  local reminder = { reminder_msg_id = "00000000-0000-0000-0000-000000000002",
+    is_finished = true, is_or = false, reminders = {} }
+  local artifact_shaped = { version = 2, quests = { ["100"] = {
+    cast = { 4294967295 }, npcs = { 4294967295 }, items = { 2147483647 },
+    dest = { { cid = 4294967295, key = 2147483647 } },
+    tasks = {}, deliveries = { { key = 0, serial = 0, incomplete_possible = false,
+      operator = 1, groups = { { index = 0, item_ids = { 1 }, count = 1,
+        is_all_item = false, is_infinite = false, ignore_restriction_items = {} } } } },
+    guidance = { { index = 0, task_index = 1, destination_index = 0, destinations = {
+      { index = 0, target = { kind = "local_area", local_area = 2147483647 }, cid = nil,
+        concierge_type = 1, gimmick_id = -2147483648, is_chara_at_destination = false,
+        register_conditions = { { kind = "item", enabled = true, is_not = false,
+          item_id = 1, set_num = true, num = 2 } },
+        conditions = { { kind = "quest_log_reminder",
+          reminder_msg_id = "00000000-0000-0000-0000-000000000001",
+          is_finished = false, is_or = true, reminders = { reminder } } },
+        delivery = { is_not = false, check_storage = true, group_id = 0,
+          refs = { { qid = 100, key = 0, serial = 0 } } } },
+    } } },
+  } } }
+  local rel, catalog = N.parse_quests(artifact_shaped)
+  local q = catalog and catalog.quests[100]
+  check("quests artifact shape: unsigned legacy NPC fields preserve U32 max",
+    rel[100] and rel[100].cast[1] == 4294967295 and rel[100].npcs[1] == 4294967295
+      and rel[100].dest[1].cid == 4294967295)
+  check("quests artifact shape: zero delivery key/serial resolves without rejection",
+    q and q.deliveries[1] and q.deliveries[1].key == 0 and q.guidance[1]
+      and type(q.guidance[1].destinations[1]) == "table"
+      and q.guidance[1].destinations[1].delivery.refs[1].serial == 0)
+  check("quests artifact shape: bool item set_num and recursive reminder records survive",
+    q and q.guidance[1] and type(q.guidance[1].destinations[1]) == "table"
+      and q.guidance[1].destinations[1].register_conditions[1].set_num == true
+      and q.guidance[1].destinations[1].conditions[1].reminders[1].is_finished == true
+      and q.guidance[1].destinations[1].conditions[1].reminders[1].reminders ~= nil)
+  check("quests artifact shape: parent destination index and signed fields preserve wire values",
+    q and q.guidance[1] and type(q.guidance[1].destinations[1]) == "table"
+      and q.guidance[1].destination_index == 0
+      and q.guidance[1].destinations[1].gimmick_id == -2147483648
+      and q.guidance[1].destinations[1].target.local_area == 2147483647)
+end
 
 if failures > 0 then
   print(failures .. " failure(s)")
