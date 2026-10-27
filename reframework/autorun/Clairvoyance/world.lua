@@ -2388,6 +2388,34 @@ function M.new(a, reads, io)
 
   function w:input() return input_tbl end
 
+  local function objective_clone(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] ~= nil then return seen[value] end
+    local out = {}
+    seen[value] = out
+    for k, v in pairs(value) do
+      out[objective_clone(k, seen)] = objective_clone(v, seen)
+    end
+    return out
+  end
+  local function objective_same(a0, b0, pairs_seen)
+    if type(a0) ~= type(b0) then return false end
+    if type(a0) ~= "table" then return a0 == b0 end
+    pairs_seen = pairs_seen or {}
+    local seen = pairs_seen[a0]
+    if seen ~= nil then return seen == b0 end
+    pairs_seen[a0] = b0
+    for k, v in pairs(a0) do
+      if rawget(b0, k) == nil and v ~= nil then return false end
+      if not objective_same(v, b0[k], pairs_seen) then return false end
+    end
+    for k, v in pairs(b0) do
+      if rawget(a0, k) == nil and v ~= nil then return false end
+    end
+    return true
+  end
+
   function w:objective_place_snapshot(task_snapshot)
     local journal_generation = type(task_snapshot) == "table"
       and task_snapshot.journal_generation or nil
@@ -2406,41 +2434,18 @@ function M.new(a, reads, io)
     local function copy_pos(pos)
       return valid_pos(pos) and { x = pos.x, y = pos.y, z = pos.z } or nil
     end
-    local function clone(value, seen)
-      if type(value) ~= "table" then return value end
-      seen = seen or {}
-      if seen[value] ~= nil then return seen[value] end
-      local out = {}
-      seen[value] = out
-      for k, v in pairs(value) do out[clone(k, seen)] = clone(v, seen) end
-      return out
-    end
-    local function same(a0, b0, pairs_seen)
-      if type(a0) ~= type(b0) then return false end
-      if type(a0) ~= "table" then return a0 == b0 end
-      pairs_seen = pairs_seen or {}
-      local seen = pairs_seen[a0]
-      if seen ~= nil then return seen == b0 end
-      pairs_seen[a0] = b0
-      for k, v in pairs(a0) do
-        if rawget(b0, k) == nil and v ~= nil then return false end
-        if not same(v, b0[k], pairs_seen) then return false end
-      end
-      for k, v in pairs(b0) do
-        if rawget(a0, k) == nil and v ~= nil then return false end
-      end
-      return true
-    end
     local function publish(status, reason, places)
-      local evidence = { status = status, reason = reason, places = clone(places) }
+      local evidence = { status = status, reason = reason,
+        places = objective_clone(places) }
       for _, place in ipairs(evidence.places) do place.generation = nil end
       local state = S.objective_place_observation
       local generation = state and state.generation or 1
-      if state ~= nil and not same(state.value, evidence) then
+      if state ~= nil and not objective_same(state.value, evidence) then
         generation = math.min(2147483647, generation + 1)
       end
-      S.objective_place_observation = { generation = generation, value = clone(evidence) }
-      local out = clone(places)
+      S.objective_place_observation = { generation = generation,
+        value = objective_clone(evidence) }
+      local out = objective_clone(places)
       for _, place in ipairs(out) do place.generation = generation end
       return { generation = generation, status = status, reason = reason, places = out }
     end
@@ -2537,46 +2542,22 @@ function M.new(a, reads, io)
     local function integer(value, minimum)
       return type(value) == "number" and math.type(value) == "integer" and value >= minimum
     end
-    local function clone(value, seen)
-      if type(value) ~= "table" then return value end
-      seen = seen or {}
-      if seen[value] ~= nil then return seen[value] end
-      local out = {}
-      seen[value] = out
-      for k, v in pairs(value) do out[clone(k, seen)] = clone(v, seen) end
-      return out
-    end
     local function candidate_evidence(rows)
-      if type(rows) ~= "table" then return clone(rows) end
-      local out = clone(rows)
+      if type(rows) ~= "table" then return objective_clone(rows) end
+      local out = objective_clone(rows)
       for _, candidate in ipairs(out) do
         if type(candidate) == "table" then candidate.generation = nil end
       end
       return out
     end
-    local function same(a0, b0, pairs_seen)
-      if type(a0) ~= type(b0) then return false end
-      if type(a0) ~= "table" then return a0 == b0 end
-      pairs_seen = pairs_seen or {}
-      local seen = pairs_seen[a0]
-      if seen ~= nil then return seen == b0 end
-      pairs_seen[a0] = b0
-      for k, v in pairs(a0) do
-        if rawget(b0, k) == nil and v ~= nil then return false end
-        if not same(v, b0[k], pairs_seen) then return false end
-      end
-      for k, v in pairs(b0) do
-        if rawget(a0, k) == nil and v ~= nil then return false end
-      end
-      return true
-    end
     local function observe(name, status, reason, evidence)
       local state = S.objective_source_observations[name]
       local generation = state and state.generation or 1
-      if state ~= nil and not same(state.value, evidence) then
+      if state ~= nil and not objective_same(state.value, evidence) then
         generation = math.min(2147483647, generation + 1)
       end
-      S.objective_source_observations[name] = { generation = generation, value = clone(evidence) }
+      S.objective_source_observations[name] = { generation = generation,
+        value = objective_clone(evidence) }
       return { provider = name, generation = generation, status = status,
         reason = reason, candidates = {} }
     end
@@ -2617,7 +2598,7 @@ function M.new(a, reads, io)
             candidates_valid = false; break
           end
         end
-        if candidates_valid then status, candidates = "ok", clone(row.candidates)
+        if candidates_valid then status, candidates = "ok", objective_clone(row.candidates)
         else reason = "candidate_generation_mismatch" end
       else
         reason = type(row.reason) == "string" and row.reason or "provider_snapshot_partial"
@@ -2630,7 +2611,7 @@ function M.new(a, reads, io)
       if row ~= nil then
         for k, v in pairs(row) do
           if k ~= "generation" and k ~= "status" and k ~= "reason" and k ~= "candidates" then
-            evidence[k] = clone(v)
+            evidence[k] = objective_clone(v)
           end
         end
       end
@@ -2642,7 +2623,7 @@ function M.new(a, reads, io)
       if row ~= nil then
         for k, v in pairs(row) do
           if k ~= "generation" and k ~= "status" and k ~= "reason" and k ~= "candidates" then
-            out[k] = clone(v)
+            out[k] = objective_clone(v)
           end
         end
       end
@@ -2658,7 +2639,8 @@ function M.new(a, reads, io)
       elseif status == "ok" and array(rows) ~= nil then reason = name .. "_eligibility_unproven"
       else reason = type(reason) == "string" and reason or name .. "_snapshot_unreadable" end
       local evidence = { task_valid = valid_task and true or false, read_status = status,
-        reason = reason, rows = type(rows) == "table" and clone(rows) or rows }
+        reason = reason,
+        rows = type(rows) == "table" and objective_clone(rows) or rows }
       local out = observe(name, "unknown", reason, evidence)
       providers[#providers + 1] = out
     end
@@ -2861,15 +2843,6 @@ function M.new(a, reads, io)
     return normalized, generation, true
   end
 
-  local function route_tree_clone(value, seen)
-    if type(value) ~= "table" then return value end
-    seen = seen or {}
-    if seen[value] ~= nil then return seen[value] end
-    local out = {}
-    seen[value] = out
-    for k, v in pairs(value) do out[route_tree_clone(k, seen)] = route_tree_clone(v, seen) end
-    return out
-  end
   local objective_member_scalars = { "route_id", "cid", "place", "qid", "kind", "direct",
     "target_key", "ordinal", "name", "objective", "objective_generation" }
   local function same_objective_publication(publication)
@@ -2947,7 +2920,7 @@ function M.new(a, reads, io)
         return
       end
       list = normalized
-      S.objective_publication = route_tree_clone(publication)
+      S.objective_publication = objective_clone(publication)
     elseif type(publication) == "table" then
       local legacy = legacy_publication_array(publication)
       if legacy == nil then

@@ -4324,7 +4324,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
     diagnostics[#diagnostics + 1] = { provider = provider, reason = reason, id = id }
   end
   local function add(qid, task_index, tuple, kind, target, provider, source_id,
-      item_ids, eligibility, reason, generation)
+      item_ids, eligibility, reason)
     if eligibility ~= "eligible" then
       if reason ~= nil then diagnostic(provider, reason, source_id) end
       return
@@ -4366,7 +4366,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
           local target = type(signal.target) == "table" and signal.target or {}
           if signal.kind == "npc" and type(target.cid) == "number" then
             add(quest.qid, nil, { quest.qid, "issued_npc", target.cid }, "npc", target,
-              "issued_npc", nil, nil, signal.eligibility, signal.reason, signal.generation)
+              "issued_npc", nil, nil, signal.eligibility, signal.reason)
           end
         end
       end
@@ -4392,7 +4392,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
           local target = type(signal.target) == "table" and signal.target or {}
           if signal.kind == "npc" and type(target.cid) == "number" then
             add(qid, task_index, { qid, "issued_npc", target.cid }, "npc", target, "issued_npc", nil, nil,
-              signal.eligibility, signal.reason, signal.generation)
+              signal.eligibility, signal.reason)
           end
         end
       end
@@ -4402,7 +4402,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         local target = type(live.target) == "table" and live.target or {}
         if target.pos or target.cid then
           add(qid, task_index, { qid, "live_destination", 0 }, target.cid and "npc" or "place", target,
-            "live_destination", nil, nil, live.eligibility, live.reason, live.generation)
+            "live_destination", nil, nil, live.eligibility, live.reason)
         end
       end
       local function signal_list(list, owner_kind, owner_index, parent_destination_index)
@@ -4429,13 +4429,13 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
                 and { qid, "task", ti, index, "npc" }
                 or { qid, "guidance", owner_index or signal.concierge_index, index, "npc" }
               add(qid, task_index, identity,
-                "npc", target, owner_kind, nil, nil, signal.eligibility, signal.reason, signal.generation)
+                "npc", target, owner_kind, nil, nil, signal.eligibility, signal.reason)
             elseif signal_kind == "place" and pos then
               local identity = owner_kind == "task"
                 and { qid, "task", ti, index, "place" }
                 or { qid, "guidance", owner_index or signal.concierge_index, index, "place" }
               add(qid, task_index, identity,
-                "place", target, owner_kind, nil, nil, signal.eligibility, signal.reason, signal.generation)
+                "place", target, owner_kind, nil, nil, signal.eligibility, signal.reason)
             end
           end
         end
