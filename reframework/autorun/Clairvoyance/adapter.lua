@@ -3420,8 +3420,16 @@ do
   local PIN_GUID_PREFIX = "51a1c0de-0000-4004-8000-"
   local FOCUS_NPC_GUID_PREFIX = "51a1c0de-0000-4005-8000-"
   local FOCUS_PLACE_GUID_PREFIX = "51a1c0de-0000-4006-8000-"
+  local OBJECTIVE_GUID_PREFIX = "51a1c0de-0000-4008-8000-"
   function A.map_marker_guid(m)
     local c = m.cat
+    if c == "objective" then
+      local ordinal = m.objective_ordinal
+      if type(ordinal) ~= "number" or math.type(ordinal) ~= "integer"
+          or ordinal < 1 or ordinal > 1099511627775 then return nil end
+      return A.guid_parse(OBJECTIVE_GUID_PREFIX .. string.format("%012x",
+        ordinal))
+    end
     if c == "focus_npc" then
       return A.guid_parse(FOCUS_NPC_GUID_PREFIX .. string.format("%012x",
         m.cid % 0x1000000000000))
@@ -3514,6 +3522,8 @@ end
 
 function A.make()
   local a = {}
+  local objective_task_state = { owner = nil, focus = nil, journal = nil,
+    needs = nil, focus_epoch = 0, journal_generation = 0, need_generation = 0 }
   local LOC_KINDS = { "placed", "box", "drop" }   -- item_locations order
   a.overhead_block_reason = A.overhead_block_reason
   function a.acceptable_ids()
@@ -3687,11 +3697,341 @@ function A.make()
     OBJECTIVE_STATS.index_builds = PROC_INDEX_BUILDS
     return OBJECTIVE_STATS
   end
+  function a.objective_task_snapshot(focus_qids, objective_catalog)
+    local function same(x, y)
+      if type(x) ~= type(y) then return false end
+      if type(x) ~= "table" then return x == y end
+      for k, v in pairs(x) do if not same(v, y[k]) then return false end end
+      for k in pairs(y) do if x[k] == nil then return false end end
+      return true
+    end
+    local function clone(v)
+      if type(v) ~= "table" then return v end
+      local out = {}
+      for k, x in pairs(v) do out[k] = clone(x) end
+      return out
+    end
+    local function list(value, cap)
+      if value == nil then return {}, true, false end
+      local ok, rows, n = read_collection_items(value)
+      if not ok then return {}, false, false end
+      if n > cap then
+        local kept = {}
+        for i = 1, cap do kept[i] = rows[i] end
+        return kept, false, true
+      end
+      return rows, true, false
+    end
+    local function same_object(x, y)
+      if x == y then return true end
+      if x == nil or y == nil then return false end
+      local ax, ay
+      pcall(function() ax = x:get_address() end)
+      pcall(function() ay = y:get_address() end)
+      return type(ax) == "number" and ax ~= 0 and ax == ay
+    end
+    local function position(v)
+      local x, y, z = vec_xyz(v)
+      if x == nil then return nil end
+      return { x = x, y = y, z = z }
+    end
+    local function place_target(row)
+      if type(row) ~= "table" then return nil end
+      local t = row.target
+      if type(t) == "table" then
+        if t.kind == "key_location" and type(t.key) == "number" and t.key > 0 then
+          return { place = { kind = "key_location", key = t.key } }
+        elseif t.kind == "local_area" and type(t.local_area) == "number" and t.local_area >= 0 then
+          return { place = { kind = "local_area", local_area = t.local_area } }
+        end
+      end
+      if type(row.cid) == "number" and row.cid > 0 then return { cid = row.cid } end
+      if type(row.key) == "number" and row.key > 0 then
+        return { place = { kind = "key_location", key = row.key } }
+      end
+      if type(row.local_area) == "number" and row.local_area >= 0 then
+        return { place = { kind = "local_area", local_area = row.local_area } }
+      end
+      return nil
+    end
+    local function native_target(dest, parsed)
+      local dest_type = int_value(safe_call(dest, "get_DestType"))
+      local cid = int_value(safe_call(dest, "get_CharaID"))
+      local key = int_value(safe_call(dest, "get_KeyLocation"))
+      local area = int_value(safe_call(dest, "get_LocalArea"))
+      if dest_type ~= parsed.dest_type then return nil end
+      local expected = place_target(parsed)
+      if expected == nil then return nil end
+      if expected.cid ~= nil then
+        if cid ~= expected.cid then return nil end
+        return { cid = cid, pos = position(safe_call(dest, "getDestination")) }
+      end
+      if expected.place.kind == "key_location" then
+        if key ~= expected.place.key then return nil end
+      elseif expected.place.kind == "local_area" and area ~= expected.place.local_area then
+        return nil
+      end
+      return { place = expected.place, pos = position(safe_call(dest, "getDestination")) }
+    end
+    local function read_quest(qid, entry, needs, catalog_quests)
+      local result = { qid = qid, read_status = "unknown", issued_npcs = {},
+        task_destinations = {}, guidance = {}, item_ownership = {} }
+      local qlm = sdk.get_managed_singleton("app.QuestLogManager")
+      if qlm == nil then result.reason = "quest_log_manager_unavailable"; return result end
+      local info = safe_call(safe_field(qlm, "_QuestLogInfoDict"), "get_Item", qid)
+      if info == nil then result.reason = "quest_log_info_unavailable"; return result end
+      local ti = int_value(safe_call(info, "get_CurrentTaskIndex"))
+      if ti == nil then ti = int_value(safe_field(info, "<CurrentTaskIndex>k__BackingField")) end
+      if type(ti) ~= "number" or ti < 0 or ti ~= math.floor(ti) then
+        result.reason = "current_task_index_unreadable"; return result
+      end
+      result.task_index = ti
+      local parsed_task = type(entry.tasks) == "table" and entry.tasks[ti + 1] or nil
+      if type(parsed_task) ~= "table" or parsed_task.index ~= ti then
+        result.reason = "current_task_catalog_mismatch"; return result
+      end
+      local ok_task, task = pcall(function() return qlm:call("getCurrentTask", qid) end)
+      if not ok_task or task == nil then result.reason = "current_task_unreadable"; return result end
+      local active_ok, active = pcall(function() return task:call("getActiveDestinations") end)
+      if not active_ok then result.reason = "destination_active_list_unreadable"; return result end
+      local active_rows, active_readable, active_truncated = list(active, 256)
+      if not active_readable then
+        result.reason = active_truncated and "destination_active_list_truncated"
+          or "destination_active_list_unreadable"
+        return result
+      end
+      local source_value = safe_field(task, "_Destinations")
+      if source_value == nil then result.reason = "destination_source_list_unreadable"; return result end
+      local source, source_readable, source_truncated = list(source_value, 256)
+      if not source_readable then
+        result.reason = source_truncated and "destination_source_list_truncated"
+          or "destination_source_list_unreadable"
+        return result
+      end
+      local source_by_index, active_order = {}, {}
+      for i, obj in ipairs(source) do source_by_index[i - 1] = obj end
+      for _, obj in ipairs(active_rows) do
+        local duplicate = false
+        for _, old in ipairs(active_order) do if same_object(old, obj) then duplicate = true break end end
+        if not duplicate then active_order[#active_order + 1] = obj end
+      end
+      if #active_rows == 0 and not active then
+        active_order = {}
+      end
+      local active_source = {}
+      for _, obj in ipairs(active_order) do
+        local found
+        for index = 0, #source - 1 do
+          if same_object(obj, source_by_index[index]) then
+            if found ~= nil then result.reason = "destination_source_identity_ambiguous"; return result end
+            found = index
+          end
+        end
+        if found == nil then result.reason = "destination_object_mismatch"; return result end
+        active_source[found] = obj
+      end
+      local destinations = parsed_task.destinations
+      if type(destinations) ~= "table" then result.reason = "task_destination_catalog_unreadable"; return result end
+      for index = 0, #source - 1 do
+        local obj, parsed = active_source[index], destinations[index + 1]
+        if obj ~= nil then
+          if type(parsed) ~= "table" or parsed.index ~= index then
+            result.reason = "task_destination_catalog_mismatch"; return result
+          end
+          local target = native_target(obj, parsed)
+          if target == nil then result.reason = "task_destination_target_mismatch"; return result end
+          local row = { kind = target.cid and "npc" or "place", task_index = ti,
+            destination_index = index, signal_index = index, target = target,
+            eligibility = "eligible" }
+          result.task_destinations[#result.task_destinations + 1] = row
+          if result.live_destination == nil then result.live_destination = {
+            task_index = ti, target = clone(target), eligibility = "eligible" } end
+        end
+      end
+      result.read_status = "ok"
+      local issued = qnml_core.objective_issued_cids(OBJECTIVE_TABLE, qid)
+      for _, cid in ipairs(issued or {}) do
+        result.issued_npcs[#result.issued_npcs + 1] = { kind = "npc", task_index = ti,
+          target = { cid = cid }, eligibility = "eligible" }
+      end
+
+      local expected = {}
+      for _, g in ipairs(entry.guidance or {}) do
+        if type(g) == "table" and g.task_index == ti then expected[#expected + 1] = g end
+      end
+      if #expected > 0 then
+        local data_ok, data = pcall(function() return info:call("getCurrentTaskConciergeData") end)
+        if not data_ok or data == nil then
+          for _, g in ipairs(expected) do result.guidance[#result.guidance + 1] = {
+            task_index = ti, concierge_index = g.index, eligibility = "unknown",
+            reason = "concierge_data_unreadable", signals = {} } end
+        else
+          local live_ti = int_value(safe_call(data, "get_TaskIndex"))
+          if live_ti == nil then live_ti = int_value(safe_field(data, "_TaskIndex")) end
+          local destinations_ok, destinations = pcall(function() return data:call("get_Destinations") end)
+          local live_rows, live_ok, live_truncated
+          if not destinations_ok or destinations == nil then live_rows, live_ok, live_truncated = {}, false, false
+          else live_rows, live_ok, live_truncated = list(destinations, 256) end
+          for _, g in ipairs(expected) do
+            local out = { task_index = ti, concierge_index = g.index,
+              destination_index = g.destination_index, signals = {} }
+            if live_ti == nil then
+              out.eligibility, out.reason = "unknown", "concierge_task_index_unreadable"
+            elseif live_ti ~= ti then
+              out.eligibility, out.reason = "ineligible", "concierge_task_mismatch"
+            elseif not live_ok then
+              out.eligibility, out.reason = "unknown", live_truncated
+                and "concierge_destinations_truncated" or "concierge_list_unreadable"
+            elseif #live_rows == 0 then
+              out.eligibility, out.reason = "empty", "concierge_no_current_destination"
+            else
+              local parsed_rows = g.destinations or {}
+              local all_eligible, any_unknown, why = true, false, nil
+              for index, parsed in ipairs(parsed_rows) do
+                local native = live_rows[index]
+                if type(parsed) ~= "table" then
+                  any_unknown, why = true, "concierge_catalog_destination_invalid"
+                elseif native == nil then
+                  any_unknown, why = true, "concierge_destination_missing"
+                else
+                  local status_ok, status = pcall(function() return native:call("evaluate", qid) end)
+                  local register_call_ok, register = pcall(function() return native:call("evaluateRegisterCondition", qid) end)
+                  local status_num = status_ok and int_value(status) or nil
+                  local native_cid = int_value(safe_call(native, "get_CharaID"))
+                  local parsed_target = type(parsed.cid) == "number" and parsed.cid > 0
+                    and { cid = parsed.cid } or place_target(parsed)
+                  local target = parsed_target and clone(parsed_target) or nil
+                  if parsed.cid ~= native_cid or target == nil then
+                    any_unknown, why = true, "concierge_destination_mismatch"
+                  elseif not status_ok then
+                    any_unknown, why = true, "concierge_status_exception"
+                  elseif status_num == nil then
+                    any_unknown, why = true, "concierge_status_unreadable"
+                  elseif status_num ~= 0 then
+                    all_eligible = false
+                    local status_names = { [1] = "no_destination", [2] = "time", [3] = "no_navi",
+                      [4] = "item_delivery", [5] = "item_delivery_key_in_junk",
+                      [6] = "character_unavailable", [7] = "no_knowledge",
+                      [8] = "whiteout_break_guide", [9] = "whiteout_cannot_guide",
+                      [10] = "whiteout_change_camp", [11] = "field_guide_no_navi" }
+                    why = "concierge_status_" .. (status_names[status_num] or tostring(status_num))
+                  elseif not register_call_ok then
+                    any_unknown, why = true, "concierge_register_condition_exception"
+                  elseif register ~= true then
+                    if register == false then
+                      all_eligible = false
+                      why = "concierge_register_condition_false"
+                    else
+                      any_unknown, why = true, "concierge_register_condition_unreadable"
+                    end
+                  else
+                    local signal = { kind = target.cid and "npc" or "place",
+                      task_index = ti, concierge_index = g.index, destination_index = parsed.index,
+                      signal_index = parsed.index, target = target, eligibility = "eligible" }
+                    out.signals[#out.signals + 1] = signal
+                    for _, condition in ipairs(parsed.conditions or {}) do
+                      if condition.kind == "item" and condition.enabled and not condition.is_not then
+                        for _, need in ipairs(needs[qid] or {}) do
+                          local required = condition.set_num and condition.num
+                            or type(condition.num) == "number" and condition.num + 1 or nil
+                          if need.id == condition.item_id and need.num == required then
+                            result.item_ownership[#result.item_ownership + 1] = {
+                              item_id = need.id, count = need.num, proof_kind = "condition",
+                              eligibility = "eligible", task_index = ti,
+                              concierge_index = g.index, destination_index = parsed.index }
+                          end
+                        end
+                      end
+                    end
+                    local delivery = parsed.delivery
+                    if type(delivery) == "table" and #((delivery.refs) or {}) > 0 then
+                      local resolved_delivery = clone(delivery)
+                      resolved_delivery.groups = {}
+                      for _, ref in ipairs(delivery.refs) do
+                        local owner = catalog_quests and catalog_quests[ref.qid]
+                        for _, record in ipairs(type(owner) == "table" and owner.deliveries or {}) do
+                          if record.key == ref.key then
+                            resolved_delivery.groups[#resolved_delivery.groups + 1] = {
+                              qid = ref.qid, ref_key = ref.key, delivery = clone(record) }
+                          end
+                        end
+                      end
+                      result.item_ownership[#result.item_ownership + 1] = {
+                        proof_kind = "delivery", eligibility = "unknown",
+                        reason = "delivery_group_item_join_unproven", task_index = ti,
+                        concierge_index = g.index, destination_index = parsed.index,
+                        delivery = resolved_delivery }
+                    end
+                  end
+                end
+              end
+              if any_unknown then out.eligibility, out.reason = "unknown", why
+              elseif all_eligible and #out.signals > 0 then out.eligibility = "eligible"
+              elseif all_eligible then out.eligibility, out.reason = "empty", "concierge_no_signal"
+              else out.eligibility, out.reason = "ineligible", why end
+            end
+            result.guidance[#result.guidance + 1] = out
+          end
+        end
+      end
+      return result
+    end
+    local qlm = sdk.get_managed_singleton("app.QuestLogManager")
+    if qlm ~= objective_task_state.owner then
+      objective_task_state.owner = qlm
+      objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
+      objective_task_state.focus_epoch, objective_task_state.journal_generation,
+        objective_task_state.need_generation = 0, 0, 0
+    end
+    local focus, focus_seen = {}, {}
+    for _, qid in ipairs(type(focus_qids) == "table" and focus_qids or {}) do
+      if type(qid) == "number" and qid > 0 and qid <= 2147483647
+          and qid == math.floor(qid) and not focus_seen[qid] then
+        focus_seen[qid] = true; focus[#focus + 1] = qid
+      end
+    end
+    if not same(focus, objective_task_state.focus) then
+      objective_task_state.focus_epoch = objective_task_state.focus_epoch + 1
+      objective_task_state.focus = clone(focus)
+    end
+    local normalized = type(objective_catalog) == "table" and objective_catalog.version == 2
+      and type(objective_catalog.quests) == "table" and objective_catalog.quests or nil
+    local quests, journal_rows, need_rows = {}, {}, {}
+    for _, qid in ipairs(focus) do
+      local entry = normalized and normalized[qid] or nil
+      local row
+      if type(entry) == "table" then row = read_quest(qid, entry, ITEM_NEEDS or {}, normalized)
+      else row = { qid = qid, read_status = "unknown", reason = "objective_catalog_quest_unavailable",
+        issued_npcs = {}, task_destinations = {}, guidance = {}, item_ownership = {} } end
+      quests[#quests + 1] = row
+      local journal_row = clone(row)
+      journal_row.item_ownership = {}
+      journal_rows[#journal_rows + 1] = journal_row
+      need_rows[qid] = { status = ITEM_NEEDS == nil and "unknown" or "ok",
+        current = clone(ITEM_NEEDS and ITEM_NEEDS[qid] or {}),
+        ownership = clone(row.item_ownership) }
+    end
+    if not same(journal_rows, objective_task_state.journal) then
+      objective_task_state.journal_generation = objective_task_state.journal_generation + 1
+      objective_task_state.journal = clone(journal_rows)
+    end
+    if not same(need_rows, objective_task_state.needs) then
+      objective_task_state.need_generation = objective_task_state.need_generation + 1
+      objective_task_state.needs = clone(need_rows)
+    end
+    return { focus_epoch = objective_task_state.focus_epoch,
+      journal_generation = objective_task_state.journal_generation,
+      need_generation = objective_task_state.need_generation, quests = quests }
+  end
   function a.reset_session_caches()
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")
     if qlm ~= QUEST_SESSION_OWNER then
       QUEST_SESSION_OWNER = qlm
       reset_runtime_caches()
+      objective_task_state.owner = qlm
+      objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
+      objective_task_state.focus_epoch, objective_task_state.journal_generation,
+        objective_task_state.need_generation = 0, 0, 0
       return true
     end
     return false
