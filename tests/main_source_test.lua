@@ -163,6 +163,31 @@ check("objective route policy preserves search, names and capped route counts",
     and tick_body:find("core.route_members", 1, true) == nil
     and tick_body:find("wt.routes_n", 1, true) ~= nil
     and tick_body:find("wt.routes_total", 1, true) ~= nil)
+check("objective task reads are limited to progressing focused quests",
+  tick_body:find("adapter.progressing_ids", 1, true) ~= nil
+    and tick_body:find("progressing_seen[qid]", 1, true) ~= nil)
+check("localized objective names cover every target owner",
+  tick_body:find("for _, owner in ipairs(target.owners or {}) do", 1, true) ~= nil)
+check("shown ancillary routes use the semantic route list without requiring markers",
+  tick_body:find("fq ~= nil and fq.route_related_npcs or {}", 1, true) ~= nil
+    and tick_body:find("pcall(adapter.npc_name, cid)", 1, true) ~= nil
+    and tick_body:find("marker.cat == \"focus_npc\"", 1, true) == nil)
+check("progressing-only publication carries positioned startable givers as a bounded legacy member",
+  tick_body:find("policy.startable_givers = {}", 1, true) ~= nil
+    and tick_body:find("fq.progressing == false", 1, true) ~= nil
+    and tick_body:find("core.objective_routes(", 1, true) ~= nil)
+check("world search target keeps its reserved route slot when a shown ancillary shares its CID",
+  tick_body:find("if cid ~= wt.route_cid then", 1, true) ~= nil
+    and tick_body:find("policy.route_cap = 8", 1, true) == nil)
+check("world target-first route can satisfy a matching objective member",
+  tick_body:find("route.cid == wt.route_cid and route.cid == member.cid", 1, true) ~= nil
+    and tick_body:find("reserved_search", 1, true) ~= nil)
+check("stale route publication removes route-stop markers before point and signature work",
+  tick_body:find("if not routes_current then", 1, true) ~= nil
+    and tick_body:find("without_stale_route_stops(result.markers)", 1, true) ~= nil
+    and tick_body:find("without_stale_route_stops(result.fullmap_world)", 1, true) ~= nil
+    and tick_body:find("if type(list) ~= \"table\" then return list end", 1, true) ~= nil
+    and tick_body:find("local route_on, has_pts, route_pts = core.route_point_state(result,", 1, true) ~= nil)
 local set_routes_n = 0
 for _ in src:gmatch('wt%.q%("set_routes"') do set_routes_n = set_routes_n + 1 end
 check("main has exactly one set_routes handoff", set_routes_n == 1)
@@ -200,6 +225,14 @@ check("focus debug copies objective and related fields",
     and debug_focus:find("owners =", 1, true) ~= nil
     and debug_focus:find("eligibility = target.eligibility", 1, true) ~= nil
     and debug_focus:find("item_ids =", 1, true) ~= nil)
+check("focus debug copies provider generations and registry diagnostics",
+  debug_focus:find("objective_snapshot.stamp", 1, true) ~= nil
+    and debug_focus:find("provider_generations", 1, true) ~= nil
+    and debug_focus:find("focus_epoch = objective_snapshot.stamp", 1, true) ~= nil
+    and debug_focus:find("journal_generation = objective_snapshot.stamp", 1, true) ~= nil
+    and debug_focus:find("need_generation = objective_snapshot.stamp", 1, true) ~= nil
+    and debug_focus:find("registry_diagnostics", 1, true) ~= nil
+    and debug_focus:find("key_type = diagnostic.key_type", 1, true) ~= nil)
 check("focus debug makes no managed NPC reads",
   debug_focus:find("adapter.npc_pos", 1, true) == nil
     and debug_focus:find("adapter.npc_alive", 1, true) == nil)

@@ -1282,15 +1282,22 @@ re.on_frame(function()
         pcall(adapter.invalidate_items)
       end
     end
+    local progressing_seen = {}
+    local ok_progressing, progressing = pcall(adapter.progressing_ids)
+    if ok_progressing then
+      for _, qid in ipairs(type(progressing) == "table" and progressing or {}) do
+        if type(qid) == "number" then progressing_seen[qid] = true end
+      end
+    end
     local objective_qids, objective_seen = {}, {}
     for _, qid in ipairs(show.focus_qids or {}) do
-      if type(qid) == "number" and not objective_seen[qid] then
+      if type(qid) == "number" and progressing_seen[qid] and not objective_seen[qid] then
         objective_seen[qid] = true
         objective_qids[#objective_qids + 1] = qid
       end
     end
     local tracked = settings.focus_tracked and show.focus_tracked_qid or nil
-    if type(tracked) == "number" and not objective_seen[tracked] then
+    if type(tracked) == "number" and progressing_seen[tracked] and not objective_seen[tracked] then
       objective_qids[#objective_qids + 1] = tracked
     end
     local ok_objective, task_snapshot = pcall(adapter.objective_task_snapshot,
@@ -1306,13 +1313,15 @@ re.on_frame(function()
     local named_npcs, named_targets, objective_quest_names = {}, {}, {}
     for _, target in ipairs(show.objective_snapshot ~= nil
         and show.objective_snapshot.targets or {}) do
-      local owner = target.owners ~= nil and target.owners[1] or nil
-      if owner ~= nil and objective_quest_names[owner.qid] == nil then
-        local ok_name, name = pcall(adapter.quest_name, owner.qid)
-        if ok_name and type(name) == "string" and name ~= "" then
-          objective_quest_names[owner.qid] = name
+      for _, owner in ipairs(target.owners or {}) do
+        if objective_quest_names[owner.qid] == nil then
+          local ok_name, name = pcall(adapter.quest_name, owner.qid)
+          if ok_name and type(name) == "string" and name ~= "" then
+            objective_quest_names[owner.qid] = name
+          end
         end
       end
+      local owner = target.owners ~= nil and target.owners[1] or nil
       if target.target ~= nil and target.target.cid ~= nil
           and not named_npcs[target.target.cid] then
         local ok_name, name = pcall(adapter.npc_name, target.target.cid)
@@ -1393,20 +1402,43 @@ re.on_frame(function()
         for _, qid in ipairs(result.focus.active or {}) do
           local fq = result.focus.quests and result.focus.quests[qid]
           for _, cid in ipairs(fq ~= nil and fq.route_related_npcs or {}) do
-            for _, marker in ipairs(result.markers or {}) do
-              if marker.cid == cid and marker.cat == "focus_npc" and marker.pos ~= nil then
-                local known_name = false
+            local name
+            for _, row in ipairs(policy.names.npcs) do
+              if row.cid == cid then name = row.name; break end
+            end
+            if name == nil then
+              local ok_name, found = pcall(adapter.npc_name, cid)
+              if ok_name and type(found) == "string" and found ~= "" then name = found end
+              if name ~= nil then policy.names.npcs[#policy.names.npcs + 1] = { cid = cid, name = name } end
+            end
+            if cid ~= wt.route_cid then
+              policy.shown_ancillary[#policy.shown_ancillary + 1] = {
+                qid = qid, cid = cid, name = name }
+            end
+          end
+        end
+      end
+      policy.startable_givers = {}
+      if (policy.npc_route_mode or 0) >= 1 and result.focus ~= nil then
+        for _, qid in ipairs(result.focus.active or {}) do
+          local fq = result.focus.quests and result.focus.quests[qid]
+          local objective = fq ~= nil and fq.objective or nil
+          if fq ~= nil and fq.progressing == false then
+            for _, cid in ipairs(objective ~= nil and objective.npcs or {}) do
+              local pos = objective.npc_positions and objective.npc_positions[cid] or nil
+              if cid ~= wt.route_cid and type(pos) == "table"
+                  and type(pos.x) == "number" and type(pos.y) == "number"
+                  and type(pos.z) == "number" then
+                local name
                 for _, row in ipairs(policy.names.npcs) do
-                  if row.cid == cid then known_name = true; break end
+                  if row.cid == cid then name = row.name; break end
                 end
-                if not known_name and type(marker.label) == "string" then
-                  policy.names.npcs[#policy.names.npcs + 1] = { cid = cid, name = marker.label }
+                if name == nil then
+                  local ok_name, found = pcall(adapter.npc_name, cid)
+                  if ok_name and type(found) == "string" and found ~= "" then name = found end
                 end
-                policy.shown_ancillary[#policy.shown_ancillary + 1] = {
-                  qid = qid, cid = cid,
-                  name = marker.label,
-                  pos = { x = marker.pos.x, y = marker.pos.y, z = marker.pos.z } }
-                break
+                policy.startable_givers[#policy.startable_givers + 1] = {
+                  qid = qid, cid = cid, pos = pos, name = name }
               end
             end
           end
@@ -1452,15 +1484,29 @@ re.on_frame(function()
         for route_id, member in pairs(expected_routes) do
           local found = false
           for _, route in ipairs(show.routes or {}) do
-            if route.cid == route_id and route.objective_generation == route_publication.objective_generation
+            if (route.cid == route_id and route.objective_generation == route_publication.objective_generation
                 and route.target_key == member.target_key and route.ordinal == member.ordinal
-                and route.name == member.name then
+                and route.name == member.name)
+                or (route.cid == wt.route_cid and route.cid == member.cid
+                  and route.objective_generation == nil) then
               found = true
               break
             end
           end
           if not found then routes_current = false; break end
         end
+      end
+      if not routes_current then
+        local function without_stale_route_stops(list)
+          if type(list) ~= "table" then return list end
+          local kept = {}
+          for _, marker in ipairs(list or {}) do
+            if marker.cat ~= "route_stop" then kept[#kept + 1] = marker end
+          end
+          return kept
+        end
+        result.markers = without_stale_route_stops(result.markers)
+        result.fullmap_world = without_stale_route_stops(result.fullmap_world)
       end
       local route_on, has_pts, route_pts = core.route_point_state(result,
         routes_current and show.routes or nil,
@@ -2263,8 +2309,24 @@ local function install_debug()
             diagnostics[i] = { provider = diagnostic.provider, reason = diagnostic.reason,
               id = diagnostic.id }
           end
+          local provider_generations = {}
+          for i, provider in ipairs(objective_snapshot.stamp
+              and objective_snapshot.stamp.providers or {}) do
+            provider_generations[i] = { provider = provider.provider,
+              generation = provider.generation }
+          end
+          local registry_diagnostics = {}
+          for i, diagnostic in ipairs(objective_snapshot.registry_diagnostics or {}) do
+            registry_diagnostics[i] = { reason = diagnostic.reason,
+              key_type = diagnostic.key_type, key = diagnostic.key,
+              ordinal = diagnostic.ordinal }
+          end
           out.objective_snapshot = { generation = objective_snapshot.generation,
-            targets = targets, diagnostics = diagnostics }
+            stamp = { focus_epoch = objective_snapshot.stamp and objective_snapshot.stamp.focus_epoch,
+              journal_generation = objective_snapshot.stamp and objective_snapshot.stamp.journal_generation,
+              need_generation = objective_snapshot.stamp and objective_snapshot.stamp.need_generation,
+              providers = provider_generations }, targets = targets,
+            diagnostics = diagnostics, registry_diagnostics = registry_diagnostics }
         end
         for _, r in ipairs((wt.q("input", nil) or {}).routes or {}) do
           local e = { cid = r.cid, name = r.name, stops = #(r.stops or {}),

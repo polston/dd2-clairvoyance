@@ -2355,7 +2355,8 @@ local focus_names_memo = {}   -- cid -> name, cached on the identity of world.np
 
 local function related_same(m, adapter, active, rel, places, needs, live, objs)
   if m == nil or m.adapter ~= adapter or m.rel ~= rel or m.places ~= places
-    or m.needs ~= needs or #m.active ~= #active then
+    or m.needs ~= needs or m.progressing_known ~= live.progressing_known
+    or #m.active ~= #active then
     return false
   end
   for i, qid in ipairs(active) do
@@ -2368,9 +2369,10 @@ local function related_same(m, adapter, active, rel, places, needs, live, objs)
 end
 
 function M.related_sets(adapter, active, rel, places, live)
+  local progressing_known = type(live) == "table" and type(live.prog) == "table"
   live = live or {}
   local givers, prog = live.givers or {}, live.prog or {}
-  live = { givers = givers, prog = prog }
+  live = { givers = givers, prog = prog, progressing_known = progressing_known }
   local needs = adapter.item_needs and adapter.item_needs() or nil
   local objs = {}
   for i, qid in ipairs(active) do
@@ -2431,7 +2433,10 @@ function M.related_sets(adapter, active, rel, places, live)
       end
       table.sort(pl)
     end
-    result[qid] = { npcs = npcs, step_npcs = step, items = items, places = pl }
+    local progressing
+    if progressing_known then progressing = prog[qid] == true end
+    result[qid] = { npcs = npcs, step_npcs = step, items = items, places = pl,
+      progressing = progressing }
   end
 
   local keep_active, keep_givers, keep_prog = {}, {}, {}
@@ -2441,7 +2446,8 @@ function M.related_sets(adapter, active, rel, places, live)
     keep_prog[i] = (prog[qid] == true)
   end
   related_memo = { adapter = adapter, active = keep_active, givers = keep_givers,
-    prog = keep_prog, rel = rel, places = places, needs = needs, objs = objs, result = result }
+    prog = keep_prog, progressing_known = progressing_known,
+    rel = rel, places = places, needs = needs, objs = objs, result = result }
   return result
 end
 
@@ -2888,7 +2894,7 @@ function M.compute(adapter, show)
           end
         end
         table.sort(objective.items)
-      elseif cat == "startable" and show.objective_snapshot == nil then
+      elseif cat == "startable" then
         local giver = focus_rec[qid] and (focus_rec[qid].cid
           or focus_rec[qid].hint or focus_rec[qid].first) or nil
         if type(giver) == "number" and giver > 0 and not adapter.is_generic(giver) then
@@ -3073,8 +3079,7 @@ function M.compute(adapter, show)
       local f = focus_rec[qid]
       local objective = fq and fq.objective or nil
       if focus_cat[qid] == "startable" and f ~= nil
-        and type(f.key) == "string" and f.key:sub(1, 2) == "p:"
-        and objective ~= nil then
+        and type(f.key) == "string" and objective ~= nil then
         for _, cid in ipairs(objective.npcs or {}) do
           if valid_pos(objective.npc_positions and objective.npc_positions[cid]) then
             for _, m in ipairs(markers) do
@@ -4739,8 +4744,52 @@ function M.objective_routes(snapshot, player_origin, policy)
     by_endpoint[endpoint] = true; members[#members + 1] = member
   end
   if policy.search_target then add(policy.search_target) end
+  -- SPEC 39 compatibility: startable givers are outside the progressing-only
+  -- objective snapshot; merge them into focus order before the next quest.
+  local startable_givers, next_startable = {}, 1
+  if (policy.npc_route_mode or 0) >= 1 then
+    for _, row in ipairs(objective_array(policy.startable_givers) or {}) do
+      if type(row) == "table" and objective_uint(row.qid, 2147483647)
+          and objective_uint(row.cid, 4294967295) and valid_pos(row.pos) then
+        startable_givers[#startable_givers + 1] = row
+      end
+    end
+    table.sort(startable_givers, function(a, b)
+      local ar, br = focus_rank[a.qid] or math.huge, focus_rank[b.qid] or math.huge
+      if ar ~= br then return ar < br end
+      if a.qid ~= b.qid then return a.qid < b.qid end
+      return a.cid < b.cid
+    end)
+  end
+  local function add_startable(row)
+    if type(row) == "table" and objective_uint(row.qid, 2147483647)
+        and objective_uint(row.cid, 4294967295) and valid_pos(row.pos) then
+      local endpoint = "n:" .. tostring(row.cid)
+      if not by_endpoint[endpoint] then
+        by_endpoint[endpoint] = true
+        members[#members + 1] = { route_id = row.cid, cid = row.cid,
+          name = row.name or objective_name(policy, { target = { cid = row.cid } }),
+          item_ids = {}, qid = row.qid, kind = "npc", direct = false,
+          pos = objective_copy_pos(row.pos), objective_generation = generation }
+      end
+    end
+  end
   for _, obj in ipairs(ordered) do
-    if obj.kind ~= "source" then add(obj) end
+    if obj.kind ~= "source" then
+      local _, rank = owner_order(obj)
+      while startable_givers[next_startable] ~= nil do
+        local row = startable_givers[next_startable]
+        local giver_rank = focus_rank[row.qid] or math.huge
+        if giver_rank > rank then break end
+        add_startable(row)
+        next_startable = next_startable + 1
+      end
+      add(obj)
+    end
+  end
+  while startable_givers[next_startable] ~= nil do
+    add_startable(startable_givers[next_startable])
+    next_startable = next_startable + 1
   end
   local ids = {}; for id in pairs(items) do ids[#ids + 1] = id end; table.sort(ids)
   for _, id in ipairs(ids) do add(items[id].obj) end

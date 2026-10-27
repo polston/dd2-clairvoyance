@@ -5706,6 +5706,41 @@ do
         and wired.objective_routes.objective_generation == 12
         and wired.objective_routes.generation == nil
         and wired.objective_routes.members[1].target_key == wired_snapshot.targets[1].key)
+    local startable_pos = pos(55)
+    local startable_adapter = fake_adapter({ acceptable = { 40 }, hints = { [40] = 55 },
+      names = { [40] = "Forty" }, npc_pos = { [55] = startable_pos } })
+    local startable_snapshot = core.compute(startable_adapter, { focus_qids = { 40 },
+      focus_related_qids = {}, now = 0,
+      objective_snapshot = { generation = 15, targets = {} },
+      objective_policy = { npc_route_mode = 1, focus_order = { 40 },
+        startable_givers = { { qid = 40, cid = 55, pos = startable_pos, name = "Giver" } } } })
+    local startable_marker, startable_route
+    for _, marker in ipairs(startable_snapshot.markers) do
+      if marker.cid == 55 and marker.objective == true then startable_marker = marker end
+    end
+    for _, member in ipairs(startable_snapshot.objective_routes.members) do
+      if member.cid == 55 then startable_route = member end
+    end
+    check("objective compute: v2 progress snapshot preserves startable giver marker and route",
+      startable_marker ~= nil and startable_marker.cat == "startable"
+        and startable_route ~= nil and startable_route.qid == 40
+        and startable_route.kind == "npc" and startable_route.target_key == nil
+        and startable_route.place == nil)
+    local ancillary_result = core.compute(fake_adapter({ progressing = { 41 },
+      hints = { [41] = 96 }, names = { [41] = "Forty One" }, npc_pos = { [96] = pos(96) } }), {
+      focus_qids = { 41 }, focus_related_qids = { 41 }, now = 0,
+      objective_snapshot = { generation = 16, targets = {} },
+      objective_policy = { npc_route_mode = 2, focus_order = { 41 } } })
+    local ancillary_ids = ancillary_result.focus.quests[41].route_related_npcs or {}
+    local ancillary_rows = {}
+    for _, cid in ipairs(ancillary_ids) do ancillary_rows[#ancillary_rows + 1] = { qid = 41, cid = cid } end
+    local ancillary_publication = core.objective_routes(ancillary_result.objective_snapshot,
+      nil, { npc_route_mode = 2, shown_ancillary = ancillary_rows })
+    check("objective compute: shown ancillary route can have no route member position",
+      #ancillary_ids == 1 and ancillary_ids[1] == 96
+        and #ancillary_publication.members == 1
+        and ancillary_publication.members[1].cid == 96
+        and ancillary_publication.members[1].pos == nil)
     local isolated = core.objective_snapshot({ generation = 7, quests = {
         { qid = 1, task_index = 0, read_status = "ok", issued_npcs = {},
           task_destinations = {}, guidance = {}, item_ownership = {
@@ -5807,6 +5842,17 @@ do
       focus_order = { 10 }, search_target = search, route_cap = 1 })
     check("objective routes: search target is reserved ahead of the route cap",
       #reserved.members == 1 and reserved.members[1].target_key == search.key)
+    local cap_snapshot = { generation = 19, targets = {} }
+    for i = 1, 8 do
+      cap_snapshot.targets[i] = { key = "cap:" .. i, ordinal = i, kind = "npc",
+        generation = 19, target = { cid = 5000 + i, pos = pos(i) },
+        owners = { { qid = 50 } }, item_ids = {}, eligibility = "eligible" }
+    end
+    local capped_with_search_slot, cap_shown, cap_total = core.objective_routes(
+      cap_snapshot, pos(0), { npc_route_mode = 1, focus_order = { 50 }, route_cap = 7 })
+    check("objective routes: seven published members plus one reserved world target equal the eight-route cap",
+      #capped_with_search_slot.members == cap_shown and cap_shown == 7
+        and cap_total == 8 and cap_shown + 1 == 8)
     local order_snapshot = core.objective_snapshot({ generation = 14, focus_epoch = 2,
       journal_generation = 4, need_generation = 5, quests = {
         { qid = 10, task_index = 0, read_status = "ok", issued_npcs = {
@@ -5832,9 +5878,26 @@ do
         and ordered_publication.members[1].cid == 110
         and ordered_publication.members[2].qid == 11 and ordered_publication.members[2].direct == true
         and ordered_publication.members[3].qid == 10 and ordered_publication.members[3].cid == 100
-        and ordered_publication.members[4].direct == true
+        and ordered_publication.members[4].qid == 10 and ordered_publication.members[4].direct == true
         and ordered_publication.members[5].cid == 101 and ordered_publication.members[6].cid == 102
         and ordered_publication.members[7].direct == true)
+    local interleaved, interleaved_shown, interleaved_total = core.objective_routes(
+      order_snapshot, pos(0), { npc_route_mode = 1, objective_places = true,
+        focus_order = { 11, 10 }, route_cap = 2, startable_givers = {
+          { qid = 10, cid = 910, pos = pos(30), name = "Ten giver" },
+          { qid = 11, cid = 911, pos = pos(31), name = "Eleven giver" },
+        } })
+    check("objective routes: startable givers interleave by focus rank before the eight-member cap",
+      interleaved_shown == 2 and #interleaved.members == 2 and interleaved_total > 2
+        and interleaved.members[1].cid == 911 and interleaved.members[1].qid == 11
+        and interleaved.members[2].cid == 110 and interleaved.members[2].target_key ~= nil)
+    local malformed_startables_ok = pcall(core.objective_routes, order_snapshot, pos(0), {
+      npc_route_mode = 1, focus_order = { 11, 10 }, startable_givers = {
+        false, { qid = "bad", cid = 912, pos = pos(32) },
+        { qid = 10, cid = 912, pos = pos(32), name = "Valid" },
+      } })
+    check("objective routes: malformed startable rows are filtered before rank sorting",
+      malformed_startables_ok)
     check("objective publication stamp preserves task and need generations",
       order_snapshot.stamp.focus_epoch == 2 and order_snapshot.stamp.journal_generation == 4
         and order_snapshot.stamp.need_generation == 5)
