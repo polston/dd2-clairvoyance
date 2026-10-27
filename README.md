@@ -10,8 +10,8 @@ map and in your view.
    locked, and quest-item.
 2. Overhead indicators mark the quest giver for startable quests and the current
    objective NPC for quests in progress.
-3. In-progress quests track their current objective, including the items a quest
-   still needs.
+3. In-progress quests track their current objective, including still-needed
+   items when current-step task data proves them.
 4. Startable quests that are gated behind another quest say what they wait on in
    their map hover.
 5. A Quest tree panel in the settings window groups every known side quest by
@@ -50,11 +50,12 @@ map and in your view.
     with reviewed text and step-specific pins on the full map, minimap and in
     the world. The masquerade's hidden-door pin disappears once the passage opens.
 19. Focusing a quest marks its resolved current objective distinctly: issued
-    NPCs, the current journal destination and still-needed quest items. Related
-    NPCs are hidden by default and can be restored per quest with **Show related
-    NPCs**. Routes follow current objective NPCs, destinations and item sources;
-    route mode 2 also includes shown related NPCs. If current game data cannot
-    resolve a target or item source, that objective remains unresolved.
+    NPCs, the current journal destination, current-step still-needed items and
+    any eligible sources. Related NPCs are hidden by default and can be restored
+    per quest with **Show related NPCs**. Routes follow current objective NPCs,
+    destinations and item sources; route mode 2 also includes shown related
+    NPCs. If current game data cannot resolve a target or item source, that
+    objective remains unresolved.
 
 ## Requirements
 
@@ -139,12 +140,12 @@ color, at the top left of the full map; the stop a route stands at
 shows the route's name after its number. With quest focus on, **Current
 objective NPCs** routes to issued NPC targets. **Objective + shown related
 NPCs** also includes the ancillary NPCs enabled for each quest. **Routes to
-objective places/items** routes to the current journal destination, or to the
-nearest retained source of a still-needed quest item when there is no current
-destination. All are counted in the same eight, and "Routes: n of N" says how
-many candidate routes are shown. An NPC with a single stop gets a line from
-you. "Unrelated opacity (%)" sets how faint Dim markers are; Dim markers are
-drawn without an outline.
+objective places/items** routes to current journal destinations and, when the
+game proves one eligible, the nearest source of each current-step needed item.
+Both can appear together. All are counted in the same eight, and "Routes: n of
+N" says how many candidate routes are shown. An NPC with a single stop gets a
+line from you. "Unrelated opacity (%)" sets how faint Dim markers are; Dim
+markers are drawn without an outline.
 
 ### Quest focus
 
