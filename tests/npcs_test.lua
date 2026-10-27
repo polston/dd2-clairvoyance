@@ -790,7 +790,8 @@ do
     cat and cat.sources[1].evidence.ref.placement.stable == "before")
 end
 do
-  local reminder = { reminder_msg_id = "00000000-0000-0000-0000-000000000002",
+  local reminder = { kind = "quest_log_reminder",
+    reminder_msg_id = "00000000-0000-0000-0000-000000000002",
     is_finished = true, is_or = false, reminders = {} }
   local artifact_shaped = { version = 2, quests = { ["100"] = {
     cast = { 4294967295 }, npcs = { 4294967295 }, items = { 2147483647 },
@@ -823,12 +824,19 @@ do
     q and q.guidance[1] and type(q.guidance[1].destinations[1]) == "table"
       and q.guidance[1].destinations[1].register_conditions[1].set_num == true
       and q.guidance[1].destinations[1].conditions[1].reminders[1].is_finished == true
+      and q.guidance[1].destinations[1].conditions[1].reminders[1].kind == "quest_log_reminder"
       and q.guidance[1].destinations[1].conditions[1].reminders[1].reminders ~= nil)
   check("quests artifact shape: parent destination index and signed fields preserve wire values",
     q and q.guidance[1] and type(q.guidance[1].destinations[1]) == "table"
       and q.guidance[1].destination_index == 0
       and q.guidance[1].destinations[1].gimmick_id == -2147483648
       and q.guidance[1].destinations[1].target.local_area == 2147483647)
+  local wrong_reminder = { version = 2, quests = { ["100"] = artifact_shaped.quests["100"] } }
+  wrong_reminder.quests["100"].guidance[1].destinations[1].conditions[1].reminders[1].kind = "quest_log_condition"
+  local _, invalid_catalog = N.parse_quests(wrong_reminder)
+  check("quests artifact shape: recursive reminder record kind is validated",
+    invalid_catalog and invalid_catalog.quests[100]
+      and invalid_catalog.quests[100].guidance[1].destinations[1] == false)
 end
 
 if failures > 0 then

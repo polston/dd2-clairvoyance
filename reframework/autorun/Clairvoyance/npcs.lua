@@ -424,7 +424,7 @@ function M.parse_quests(t)
       return { kind = kind, enabled = c.enabled, is_not = c.is_not, children = children }
     elseif kind == "quest_log_reminder" then
       local function reminder(r, reminder_depth)
-        if type(r) ~= "table" or reminder_depth > 32
+        if type(r) ~= "table" or r.kind ~= "quest_log_reminder" or reminder_depth > 32
             or type(r.reminder_msg_id) ~= "string"
             or not r.reminder_msg_id:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$")
             or not bool(r.is_finished) or not bool(r.is_or) then return nil end
@@ -432,7 +432,7 @@ function M.parse_quests(t)
           return reminder(child, reminder_depth + 1)
         end)
         if not children then return nil end
-        return { reminder_msg_id = r.reminder_msg_id, is_finished = r.is_finished,
+        return { kind = r.kind, reminder_msg_id = r.reminder_msg_id, is_finished = r.is_finished,
           is_or = r.is_or, reminders = children }
       end
       if type(c.reminder_msg_id) ~= "string"
