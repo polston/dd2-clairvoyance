@@ -8,12 +8,215 @@ cannot run it later, and exits 1.
 """
 import argparse
 import os
+import re
 import sys
 import time
 
 # The harness prefixes its own periodic dump lines with this; a chunk's lines
 # never start with it.
 NOISE = "~ "
+POST_SUCCESS_GRACE = 1.0
+UNSAFE_METHODS = {"create_instance", "set_field", "add_ref", "release"}
+
+
+def _long_bracket(source, pos):
+    """Return (content_start, closing token) for a Lua long bracket at pos."""
+    if pos >= len(source) or source[pos] != "[":
+        return None
+    end = pos + 1
+    while end < len(source) and source[end] == "=":
+        end += 1
+    if end >= len(source) or source[end] != "[":
+        return None
+    return end + 1, "]" + source[pos + 1:end] + "]"
+
+
+def _short_string(source, pos):
+    """Return a best-effort Lua short-string value and its end offset."""
+    quote = source[pos]
+    value = []
+    simple = {
+        "a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r",
+        "t": "\t", "v": "\v", "\\": "\\", '"': '"', "'": "'",
+    }
+    pos += 1
+    while pos < len(source):
+        ch = source[pos]
+        if ch == "\\" and pos + 1 < len(source):
+            escaped = source[pos + 1]
+            if escaped.isdigit():
+                end = pos + 1
+                while (end < len(source) and end < pos + 4 and
+                       source[end].isdigit()):
+                    end += 1
+                code = int(source[pos + 1:end])
+                value.append(chr(code) if code <= 255 else "")
+                pos = end
+            elif (escaped == "x" and pos + 3 < len(source) and
+                  all(c in "0123456789abcdefABCDEF"
+                      for c in source[pos + 2:pos + 4])):
+                value.append(chr(int(source[pos + 2:pos + 4], 16)))
+                pos += 4
+            elif escaped == "z":
+                pos += 2
+                while pos < len(source) and source[pos].isspace():
+                    pos += 1
+            else:
+                value.append(simple.get(escaped, escaped))
+                pos += 2
+        elif ch == quote:
+            return "".join(value), pos + 1
+        else:
+            value.append(ch)
+            pos += 1
+    return "".join(value), pos
+
+
+def _lua_tokens(source):
+    """Tokenize enough Lua to find unsafe member access outside literals."""
+    tokens = []
+    pos = 0
+    while pos < len(source):
+        if source.startswith("--", pos):
+            long = _long_bracket(source, pos + 2)
+            if long:
+                start, closing = long
+                end = source.find(closing, start)
+                pos = len(source) if end < 0 else end + len(closing)
+            else:
+                end = source.find("\n", pos + 2)
+                pos = len(source) if end < 0 else end + 1
+            continue
+        ch = source[pos]
+        if ch.isspace():
+            pos += 1
+            continue
+        if ch in "'\"":
+            value, pos = _short_string(source, pos)
+            tokens.append(("string", value))
+            continue
+        long = _long_bracket(source, pos)
+        if long:
+            start, closing = long
+            end = source.find(closing, start)
+            value = source[start:] if end < 0 else source[start:end]
+            if value.startswith(("\r\n", "\n\r")):
+                value = value[2:]
+            elif value.startswith(("\r", "\n")):
+                value = value[1:]
+            tokens.append(("string", value))
+            pos = len(source) if end < 0 else end + len(closing)
+            continue
+        if ch == "_" or ch.isalpha():
+            end = pos + 1
+            while (end < len(source) and
+                   (source[end] == "_" or source[end].isalnum())):
+                end += 1
+            tokens.append(source[pos:end])
+            pos = end
+            continue
+        tokens.append(ch)
+        pos += 1
+    return tokens
+
+
+def _receiver_token(token):
+    return (token in (")", "]") or
+            isinstance(token, str) and
+            bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", token)))
+
+
+def _matching_close(tokens, start, opening, closing):
+    depth = 0
+    for pos in range(start, len(tokens)):
+        if tokens[pos] == opening:
+            depth += 1
+        elif tokens[pos] == closing:
+            depth -= 1
+            if depth == 0:
+                return pos
+    return None
+
+
+def _sdk_expression(tokens, start, end):
+    if start > end:
+        return False
+    if start == end:
+        return tokens[start] == "sdk"
+    if (tokens[start] == "(" and
+            _matching_close(tokens, start, "(", ")") == end):
+        return _sdk_expression(tokens, start + 1, end - 1)
+    return False
+
+
+def _sdk_receiver(tokens, end):
+    if end < 0:
+        return False
+    if tokens[end] == "sdk":
+        return True
+    if tokens[end] != ")":
+        return False
+    depth = 1
+    pos = end - 1
+    while pos >= 0:
+        if tokens[pos] == ")":
+            depth += 1
+        elif tokens[pos] == "(":
+            depth -= 1
+            if depth == 0:
+                return _sdk_expression(tokens, pos, end)
+        pos -= 1
+    return False
+
+
+def unsafe_probe_call(source):
+    tokens = _lua_tokens(source)
+    for pos, token in enumerate(tokens):
+        if (token == "." and pos + 1 < len(tokens) and
+                tokens[pos + 1] == "create_resource" and
+                _sdk_receiver(tokens, pos - 1)):
+            return "sdk.create_resource"
+        if (token in (".", ":") and pos + 1 < len(tokens) and
+                tokens[pos + 1] in UNSAFE_METHODS):
+            return tokens[pos + 1]
+        if (token == "[" and pos > 0 and pos + 2 < len(tokens) and
+                _receiver_token(tokens[pos - 1]) and
+                isinstance(tokens[pos + 1], tuple) and
+                tokens[pos + 1][0] == "string" and tokens[pos + 2] == "]"):
+            member = tokens[pos + 1][1]
+            if _sdk_receiver(tokens, pos - 1) and member == "create_resource":
+                return "sdk.create_resource"
+            if member in UNSAFE_METHODS:
+                return member
+    return None
+
+
+def crash_evidence(text):
+    low = text.lower()
+    if re.search(r"exception occurred\s*:\s*[0-9a-f]+", low):
+        return "engine exception"
+    if "attempting to write dump" in low:
+        return "crash dump write"
+    return None
+
+
+def crash_dump_stamp(path):
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return stat.st_size, stat.st_mtime_ns
+
+
+def crash_dump_changed(before, after):
+    return before != after
+
+
+def command_result(text):
+    matches = re.findall(r"CHK cmd ok=(true|false)\b", text)
+    if not matches:
+        return None
+    return matches[-1] == "true"
 
 
 def is_mod_error(line):
@@ -32,22 +235,43 @@ def main():
     a = ap.parse_args()
     log = os.path.join(a.game, "re2_framework_log.txt")
     cmd = os.path.join(a.game, "reframework", "data", "qnml_cmd.txt")
+    crash_dump = os.path.join(a.game, "reframework_crash.dmp")
     with open(a.chunk, encoding="utf-8") as f:
         src = f.read()
+    unsafe = unsafe_probe_call(src)
+    if unsafe:
+        print("UNSAFE PROBE: %s" % unsafe)
+        return 2
     start = os.path.getsize(log)
+    dump_before = crash_dump_stamp(crash_dump)
     with open(cmd, "w", encoding="utf-8") as f:
         f.write(src)
     deadline = time.time() + a.timeout
-    text, done = "", False
-    while time.time() < deadline:
+    text, result, result_at, fatal = "", None, None, None
+    while time.time() < deadline or result_at is not None:
         time.sleep(0.5)
         with open(log, "rb") as f:
             f.seek(start)
             text = f.read().decode("utf-8", "replace")
-        if "CHK cmd ok=" in text:
-            done = True
+        fatal = crash_evidence(text)
+        if fatal is None and crash_dump_changed(
+                dump_before, crash_dump_stamp(crash_dump)):
+            fatal = "crash dump changed"
+        if fatal is not None:
             break
-    if not done:
+        observed = command_result(text)
+        if observed is not None and result is None:
+            result = observed
+            if not result:
+                break
+            result_at = time.time()
+        if result_at is not None and time.time() - result_at >= POST_SUCCESS_GRACE:
+            break
+    if fatal is not None:
+        print("CRASH: %s" % fatal)
+        with open(cmd, "w", encoding="utf-8") as f:
+            f.write("")
+    elif result is None:
         print("TIMEOUT")
         with open(cmd, "w", encoding="utf-8") as f:
             f.write("")
@@ -63,7 +287,7 @@ def main():
                 print(s)
         elif is_mod_error(line):
             print("LOG", line[-200:])
-    return 0 if done else 1
+    return 0 if result is True and fatal is None else 1
 
 
 if __name__ == "__main__":
