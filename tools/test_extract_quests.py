@@ -148,7 +148,7 @@ class ObjectiveExtractorTests(unittest.TestCase):
                  _NameHash=8, _ValueType=1, _CompareType=2, _BoolValue=False, _IntValue=0),
             inst(13, item_type, _IsEnabled=False, _IsNot=True, _ItemID=400,
                  _SetNum=False, _Num=1),
-            inst(14, concierge_type, _TaskIndex=4, _Destinations=[R(15), R(16)]),
+            inst(14, concierge_type, _TaskIndex=1, _Destinations=[R(15), R(16)]),
             inst(15, concierge_dest_type, _GuidancePos=R(18), _ConciergeType=3,
                  _CharaID=0xF0000001, _GimmickID=29, _IsCharaAtDestination=False,
                  _DeliveryIsNot=True, _DeliveryCheckStorage=True, _DeliveryGroupID=-1,
@@ -165,7 +165,7 @@ class ObjectiveExtractorTests(unittest.TestCase):
             inst(21, "app.GuidanceLocalArea", LocalArea=0),
             inst(22, "app.ClassSelector`1<app.ConciergeConditionBase>", _Process=R(12)),
             inst(23, "app.ClassSelector`1<app.ConciergeConditionBase>", _Process=R(13)),
-            inst(24, concierge_type, _TaskIndex=4, _Destinations=[]),
+            inst(24, concierge_type, _TaskIndex=1, _Destinations=[]),
         ]
 
         extension = eq.decode_journal_objectives(insts, {}, eq.kept_chara(CHARA) | {0xF0000001})
@@ -187,8 +187,8 @@ class ObjectiveExtractorTests(unittest.TestCase):
                  "is_update_condition": False, "has_display_conditions": False,
                  "display_conditions": []}]},
         ])
-        self.assertEqual(extension["guidance"][0]["task_index"], 4)
-        self.assertEqual([g["task_index"] for g in extension["guidance"]], [4, 4])
+        self.assertEqual(extension["guidance"][0]["task_index"], 1)
+        self.assertEqual([g["task_index"] for g in extension["guidance"]], [1, 1])
         self.assertEqual([g["index"] for g in extension["guidance"]], [0, 1])
         self.assertEqual([x["index"] for x in extension["guidance"][0]["destinations"]], [0, 1])
         first = extension["guidance"][0]["destinations"][0]
@@ -213,6 +213,18 @@ class ObjectiveExtractorTests(unittest.TestCase):
                  "name_hash": 8, "value_type": 1, "compare_type": 2, "bool_value": False, "int_value": 0},
                 {"kind": "item", "enabled": False, "is_not": True, "item_id": 400,
                  "set_num": False, "num": 1}]})
+
+    def test_concierge_task_index_out_of_range_rejected(self):
+        insts = [
+            inst(1, "app.QuestLogResource", _QuestId=30150,
+                 _TaskList=[R(2)], _ConciergeList=[R(3)]),
+            inst(2, "app.QuestLogResource.QuestLogTaskData",
+                 _HasDestination=False, _Destinations=[]),
+            inst(3, "app.QuestLogConciergeData", _TaskIndex=1,
+                 _Destinations=[]),
+        ]
+        with self.assertRaises(ew.ExtractError):
+            eq.decode_journal_objectives(insts, {})
 
     def test_unknown_condition_and_target_fail_closed(self):
         unknown = inst(1, "app.ConciergeConditionFuture", _IsEnabled=True, _IsNot=False)
@@ -259,6 +271,10 @@ class ObjectiveExtractorTests(unittest.TestCase):
         refs = eq.decode_delivery_refs(insts, [R(9), R(10)], delivery_index)
         self.assertEqual(refs, [{"qid": 30150, "key": 71, "serial": 71},
                                 {"qid": 30150, "key": 72, "serial": 72}])
+        self.assertEqual(eq.decode_delivery_refs(insts, [R(9)], delivery_index, group_id=1),
+                         [{"qid": 30150, "key": 71, "serial": 71}])
+        with self.assertRaises(ew.ExtractError):
+            eq.decode_delivery_refs(insts, [R(10)], delivery_index, group_id=1)
         for mutate in (
                 lambda: setattr(insts[8], "type", "app.OtherSelectData"),
                 lambda: setattr(insts[8], "fields", {"_QuestID": 30150, "_Key": 9}),
@@ -289,6 +305,15 @@ class ObjectiveExtractorTests(unittest.TestCase):
         quests = {"30150": {"deliveries": [{"key": 71, "serial": 71}],
             "guidance": [{"destinations": [{"delivery": {"refs": [
                 {"qid": 30150, "key": 71, "serial": 72}]}}]}]}}
+        with self.assertRaises(ew.ExtractError):
+            eq.validate_delivery_integrity(quests)
+
+    def test_emitted_delivery_group_out_of_range_is_rejected(self):
+        quests = {"30150": {"deliveries": [
+            {"key": 71, "serial": 71, "groups": []}],
+            "guidance": [{"destinations": [{"delivery": {
+                "group_id": 0,
+                "refs": [{"qid": 30150, "key": 71, "serial": 71}]}}]}]}}
         with self.assertRaises(ew.ExtractError):
             eq.validate_delivery_integrity(quests)
 
@@ -544,12 +569,13 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(lines[2], "objectives: tasks 298, task destinations 341, concierge records 246, guidance destinations 240, deliveries 184, delivery refs 77")
         self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 15, records without quest id 1, records without item data 0, reward records 496, gift records 0, transformation records 0, eligible archive source descriptors 0")
         quests = out["quests"]
-        old = json.loads(subprocess.check_output(
-            ["git", "show", "e6dd0ea:data/Clairvoyance_quests.json"], text=True))
         legacy_fields = ("cast", "npcs", "items", "dest", "decoded")
-        self.assertTrue(all(all(quest.get(field) == old["quests"].get(qid, {}).get(field)
-                                for field in legacy_fields)
-                            for qid, quest in quests.items()))
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "quests_v1_legacy.json")
+        with open(fixture_path, encoding="utf-8") as fixture_file:
+            legacy = json.load(fixture_file)
+        self.assertEqual({qid: {field: quest.get(field) for field in legacy_fields}
+                          for qid, quest in quests.items()}, legacy)
         key_targets = area_targets = npc_links = ref_count = group_count = item_id_count = 0
         delivery_count = 0
         top_level_reminders = destinations_with_refs = false_with_dest = 0

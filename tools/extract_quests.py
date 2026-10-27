@@ -241,7 +241,7 @@ def _decode_item_delivery(insts, deliver, key, qid, diagnostics=None):
 
 
 def decode_deliveries(insts, diagnostics=None):
-    """Index item delivery definitions by quest and source-order delivery key."""
+    """Index item delivery definitions by quest and QuestDeliver serial."""
     result, lookup = {}, {}
     serials, pairs = collections.defaultdict(set), set()
     for data in insts:
@@ -274,11 +274,13 @@ def decode_deliveries(insts, diagnostics=None):
                 continue
             row["key"] = serial
             result[qid].append({k: v for k, v in row.items() if k != "qid"})
-            lookup[qid][serial] = {"serial": serial, "has_item_data": True}
+            lookup[qid][serial] = {"serial": serial, "has_item_data": True,
+                                   "group_count": len(row["groups"])}
     return result, lookup
 
 
-def decode_delivery_refs(insts, refs, delivery_index):
+def decode_delivery_refs(insts, refs, delivery_index, group_id=-1):
+    group_id = _integer(group_id, "delivery group id", -1)
     output = []
     for ref in refs:
         selection = qnml_rsz.deref(insts, ref)
@@ -291,6 +293,8 @@ def decode_delivery_refs(insts, refs, delivery_index):
             raise ew.ExtractError("unresolved quest delivery reference")
         if not target["has_item_data"]:
             raise ew.ExtractError("referenced quest delivery has no item data")
+        if group_id >= target["group_count"]:
+            raise ew.ExtractError("delivery group index out of range")
         output.append({"qid": qid, "key": key, "serial": target["serial"]})
     return output
 
@@ -319,6 +323,8 @@ def decode_guidance_destination(insts, destination, index, delivery_index):
     refs = _field(destination, "_DeliverData")
     if not isinstance(refs, list):
         raise ew.ExtractError("invalid delivery reference array")
+    group_id = _integer(_field(destination, "_DeliveryGroupID"), "delivery group id", -1)
+    delivery_refs = decode_delivery_refs(insts, refs, delivery_index, group_id)
     return {"index": index, "target": target,
             "cid": None if cid in (0, INVALID_CHARA_ID, PLAYER_CHARA_ID) else cid,
             "concierge_type": _integer(_field(destination, "_ConciergeType"), "concierge type"),
@@ -328,8 +334,7 @@ def decode_guidance_destination(insts, destination, index, delivery_index):
             "conditions": _condition_array(insts, _field(destination, "_Conditions"), "conditions"),
             "delivery": {"is_not": _boolean(_field(destination, "_DeliveryIsNot"), "delivery negation"),
                          "check_storage": _boolean(_field(destination, "_DeliveryCheckStorage"), "delivery storage flag"),
-                         "group_id": _integer(_field(destination, "_DeliveryGroupID"), "delivery group id", -1),
-                         "refs": decode_delivery_refs(insts, refs, delivery_index)}}
+                         "group_id": group_id, "refs": delivery_refs}}
 
 
 def decode_journal_objectives(insts, delivery_index, kept=None):
@@ -351,6 +356,8 @@ def decode_journal_objectives(insts, delivery_index, kept=None):
     concierge_rows = _ref_array(insts, _field(root, "_ConciergeList"), "concierge records", CONCIERGE_TYPE)
     for concierge_index, concierge in enumerate(concierge_rows):
         task_index = _integer(_field(concierge, "_TaskIndex"), "concierge task index", 0)
+        if task_index >= len(tasks):
+            raise ew.ExtractError("concierge task index out of range")
         destinations = _ref_array(insts, _field(concierge, "_Destinations"), "concierge destinations")
         guidance.append({"index": concierge_index, "task_index": task_index,
                          "destinations": [decode_guidance_destination(insts, row, index, delivery_index)
@@ -394,12 +401,16 @@ def validate_delivery_integrity(quests):
     for quest in quests.values():
         for guidance in quest["guidance"]:
             for destination in guidance["destinations"]:
+                group_id = _integer(destination["delivery"].get("group_id", -1),
+                                    "delivery group id", -1)
                 for ref in destination["delivery"]["refs"]:
                     target = by_quest.get(ref["qid"], {}).get(ref["key"])
                     if target is None:
                         raise ew.ExtractError("unresolved emitted quest delivery reference")
                     if _integer(ref.get("serial"), "delivery reference serial", 0) != target["serial"]:
                         raise ew.ExtractError("emitted quest delivery serial mismatch")
+                    if group_id >= len(target.get("groups", [])):
+                        raise ew.ExtractError("emitted delivery group index out of range")
 
 
 def kept_chara(chara_enum):
