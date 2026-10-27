@@ -261,7 +261,7 @@ function M.new(a, reads, io)
       chest_lists = {}, treasure_lists = {},
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
-      target_member = nil, members = {}, member_of = {}, route_cache = {},
+      target_member = nil, members = {}, member_of = {}, objective_generation = nil, route_cache = {},
       route_fail = {}, fail_seq = 0,
       -- SPEC 32.14: sticky route colour slots; slot_of (cid -> slot) and
       -- slot_cid (slot -> cid) together are the spec's S.slots
@@ -610,7 +610,7 @@ function M.new(a, reads, io)
     else
       h.failed = true
     end
-    return h.value
+    return h.value, ok and v ~= nil
   end
 
   local gate_round = { quests = {}, variables = {}, season_read = false, season = nil }
@@ -1081,10 +1081,12 @@ function M.new(a, reads, io)
 
   local function compute_sellers()
     local needs = a.item_needs()
-    if type(needs) ~= "table" then return {} end
+    if type(needs) ~= "table" then error("item needs unavailable") end
     local by_item = core.needs_by_item(needs)
     local located = {}
-    for _, r in ipairs(a.item_locations() or {}) do
+    local locations = a.item_locations()
+    if type(locations) ~= "table" then error("item locations unavailable") end
+    for _, r in ipairs(locations) do
       if type(r) == "table" and type(r.id) == "number" then located[r.id] = true end
     end
     local wanted = {}
@@ -1190,7 +1192,7 @@ function M.new(a, reads, io)
               local lk = row_locked(b)
               local it = by_id[b.item]
               if it == nil then
-                it = { name = item_name(b.item), locked = true }
+                it = { id = b.item, name = item_name(b.item), locked = true }
                 by_id[b.item] = it
                 items[#items + 1] = it
               end
@@ -1635,12 +1637,19 @@ function M.new(a, reads, io)
     end
     set_from(m.cid, pl)
     return { cid = m.cid, place = 0, direct = true, objective = m.objective,
-      qid = m.qid, kind = m.kind, name = m.name, pos = pcopy(m.pos),
+      qid = m.qid, kind = m.kind, target_key = m.target_key, ordinal = m.ordinal,
+      objective_generation = m.objective_generation, name = m.name, pos = pcopy(m.pos),
       stops = { { pos = pcopy(pl), discovered = true },
                 { pos = pcopy(m.pos), discovered = true } } }
   end
 
   local function direct_member(e)
+    if type(e) ~= "table" then return false end
+    if e.ordinal ~= nil then
+      return type(e.target_key) == "string" and e.target_key ~= ""
+        and core.objective_direct_route_id(e.ordinal) == e.cid
+        and e.place == 0 and e.objective == true and valid_pos(e.pos)
+    end
     local route_id = core.objective_route_id(e.qid, e.kind)
     return route_id ~= nil and e.cid == route_id
       and e.place == 0 and e.objective == true and type(e.name) == "string"
@@ -1651,6 +1660,8 @@ function M.new(a, reads, io)
     return type(a) == "table" and type(b) == "table"
       and a.direct == true and b.direct == true and a.name == b.name
       and a.qid == b.qid and a.kind == b.kind and a.objective == b.objective
+      and a.target_key == b.target_key and a.ordinal == b.ordinal
+      and a.objective_generation == b.objective_generation
       and valid_pos(a.pos) and valid_pos(b.pos) and a.pos.x == b.pos.x
       and a.pos.y == b.pos.y and a.pos.z == b.pos.z
   end
@@ -1964,6 +1975,7 @@ function M.new(a, reads, io)
     lap("effective", t)
     local out = { chests = {}, treasure = {}, tokens = {}, beetles = {},
       monsters = {}, sellers = {}, schedule = schedule, settlements = {},
+      objective_source_status = {},
       first_token = first_token }
 
     if S.settle ~= nil then
@@ -2127,9 +2139,11 @@ function M.new(a, reads, io)
     local first_shops = stats.search_first_ms == nil
     if need_shops then
       local t0 = clock()
-      local list = guarded("shop_index", compute_shops)
+      local list, fresh = guarded("shop_index", compute_shops)
       lap("shop_index", t0)
       out.shops = list or {}
+      out.objective_source_status.shop = fresh and "ok" or "unknown"
+      if not fresh then out.objective_source_status.shop_reason = "shop_snapshot_unreadable" end
       if stats.search_first_ms == nil and list ~= nil then
         stats.search_first_ms = (clock() - t0) * 1000
       end
@@ -2138,8 +2152,10 @@ function M.new(a, reads, io)
     -- sellers
     if tg.sellers or fq then
       t = clock()
-      local list = guarded("sellers", compute_sellers)
+      local list, fresh = guarded("sellers", compute_sellers)
       lap("sellers", t)
+      out.objective_source_status.seller = fresh and "ok" or "unknown"
+      if not fresh then out.objective_source_status.seller_reason = "seller_snapshot_unreadable" end
       for _, s in ipairs(list or EMPTY) do
         local keep = tg.sellers and true or false
         if not keep then
@@ -2362,6 +2378,205 @@ function M.new(a, reads, io)
 
   function w:input() return input_tbl end
 
+  function w:objective_place_snapshot(task_snapshot)
+    local generation = type(task_snapshot) == "table"
+      and task_snapshot.journal_generation or nil
+    local function unknown(reason)
+      return { generation = generation or 0, status = "unknown", reason = reason, places = {} }
+    end
+    local function array(value)
+      if type(value) ~= "table" then return nil end
+      local n, count = #value, 0
+      for k in pairs(value) do
+        if type(k) ~= "number" or math.type(k) ~= "integer" or k < 1 or k > n then return nil end
+        count = count + 1
+      end
+      return count == n and value or nil
+    end
+    local function integer(value, minimum)
+      return type(value) == "number" and math.type(value) == "integer" and value >= minimum
+    end
+    local function copy_pos(pos)
+      return valid_pos(pos) and { x = pos.x, y = pos.y, z = pos.z } or nil
+    end
+    if not integer(generation, 1) or type(task_snapshot) ~= "table"
+        or array(task_snapshot.quests) == nil then
+      return unknown("task_snapshot_unavailable")
+    end
+    local places, seen, wanted = {}, {}, false
+    local function resolve(qid, task_index, owner_kind, owner_index, signal_index, target)
+      if type(target) ~= "table" or type(target.place) ~= "table" then return true end
+      wanted = true
+      local place = target.place
+      local pos = copy_pos(target.pos)
+      if pos == nil and place.kind == "key_location" and integer(place.key, 1) then
+        local ok, value = call("key_pos", place.key)
+        if ok then pos = copy_pos(value) end
+      elseif pos == nil and place.kind == "local_area" and integer(place.local_area, 0) then
+        local ok, values = call("area_nodes", { area = place.local_area })
+        local rows = ok and array(values) or nil
+        if rows == nil or #rows == 0 then return false end
+        for _, value in ipairs(rows) do
+          local point = copy_pos(value)
+          if point == nil then return false end
+          if pos == nil then pos = point end
+        end
+      end
+      if pos == nil or (place.kind ~= "key_location" and place.kind ~= "local_area") then return false end
+      local key = table.concat({ tostring(qid), tostring(task_index), tostring(owner_kind),
+        tostring(owner_index), tostring(signal_index) }, ":")
+      if not seen[key] then
+        seen[key] = true
+        places[#places + 1] = { qid = qid, task_index = task_index,
+          owner_kind = owner_kind, owner_index = owner_index, signal_index = signal_index,
+          target = { place = { kind = place.kind,
+            key = place.kind == "key_location" and place.key or nil,
+            local_area = place.kind == "local_area" and place.local_area or nil } },
+          pos = pos, eligibility = "eligible", generation = generation }
+      end
+      return true
+    end
+    for _, quest in ipairs(task_snapshot.quests) do
+      if type(quest) ~= "table" or quest.read_status ~= "ok"
+          or not integer(quest.qid, 1) or not integer(quest.task_index, 0) then
+        return unknown(type(quest) == "table" and quest.reason or "task_snapshot_partial")
+      end
+      local task_signals, guidance_rows = array(quest.task_destinations), array(quest.guidance)
+      if task_signals == nil or guidance_rows == nil then return unknown("task_snapshot_partial") end
+      for _, signal in ipairs(task_signals) do
+        if type(signal) ~= "table" then return unknown("task_destination_malformed") end
+        if signal.kind == "place" and signal.task_index == quest.task_index then
+          if signal.eligibility == "unknown" then return unknown(signal.reason or "task_place_unknown") end
+          if signal.eligibility == "eligible" and not resolve(quest.qid, quest.task_index,
+              "task", quest.task_index, signal.destination_index, signal.target) then
+            return unknown(signal.reason or "task_place_unresolved")
+          end
+        end
+      end
+      for _, guidance in ipairs(guidance_rows) do
+        if type(guidance) ~= "table" then return unknown("guidance_malformed") end
+        if guidance.task_index == quest.task_index then
+          if guidance.eligibility == "unknown" then return unknown(guidance.reason or "guidance_place_unknown") end
+          if guidance.eligibility == "eligible" then
+            local signals = array(guidance.signals)
+            if signals == nil then return unknown("guidance_signals_unreadable") end
+            for _, signal in ipairs(signals) do
+              if type(signal) ~= "table" then return unknown("guidance_signal_malformed") end
+              if signal.kind == "place" and signal.eligibility == "eligible"
+                  and not resolve(quest.qid, quest.task_index, "guidance",
+                    guidance.concierge_index, guidance.destination_index, signal.target) then
+                return unknown(signal.reason or "guidance_place_unresolved")
+              elseif signal.kind == "place" and signal.eligibility == "unknown" then
+                return unknown(signal.reason or "guidance_place_unknown")
+              end
+            end
+          end
+        end
+      end
+    end
+    if not wanted or #places == 0 then return unknown("current_place_unavailable") end
+    return { generation = generation, status = "ok", places = places }
+  end
+
+  function w:objective_source_snapshots(objective_catalog, task_snapshot)
+    local function array(value)
+      if type(value) ~= "table" then return nil end
+      local n, count = #value, 0
+      for k in pairs(value) do
+        if type(k) ~= "number" or math.type(k) ~= "integer" or k < 1 or k > n then return nil end
+        count = count + 1
+      end
+      return count == n and value or nil
+    end
+    local function copy_pos(pos)
+      return valid_pos(pos) and { x = pos.x, y = pos.y, z = pos.z } or nil
+    end
+    local function integer(value, minimum)
+      return type(value) == "number" and math.type(value) == "integer" and value >= minimum
+    end
+    local generation = type(task_snapshot) == "table" and task_snapshot.need_generation or nil
+    local valid_task = type(generation) == "number" and math.type(generation) == "integer"
+      and generation > 0 and type(task_snapshot.quests) == "table"
+      and array(task_snapshot.quests) ~= nil
+    local providers, seen = {}, {}
+    local ok, base = false, nil
+    if valid_task and type(a.objective_item_source_snapshots) == "function" then
+      ok, base = pcall(a.objective_item_source_snapshots, objective_catalog, task_snapshot)
+    end
+    if ok and type(base) == "table" then
+      for _, provider in ipairs(array(base) or {}) do
+        if type(provider) == "table" then
+          local row = {}
+          for k, v in pairs(provider) do row[k] = v end
+          if row.status == "unknown" then
+            row.candidates = {}
+            if type(row.reason) ~= "string" or row.reason == "" then row.reason = "provider_evidence_unproven" end
+          elseif row.status ~= "ok" or array(row.candidates) == nil then
+            row.status, row.candidates = "unknown", {}
+            row.reason = type(row.reason) == "string" and row.reason or "provider_snapshot_partial"
+          end
+          if row.provider == "placed" or row.provider == "chest" or row.provider == "loot" then
+            if not seen[row.provider] then
+              providers[#providers + 1] = row
+              seen[row.provider] = true
+            end
+          end
+        end
+      end
+    end
+    for _, name in ipairs({ "placed", "chest", "loot" }) do
+      if not seen[name] then
+        providers[#providers + 1] = { provider = name, generation = valid_task and generation or 1,
+          status = "unknown", reason = "adapter_source_snapshot_unavailable", candidates = {} }
+      end
+    end
+    for _, name in ipairs({ "shop", "seller" }) do
+      local status = type(input_tbl) == "table" and type(input_tbl.objective_source_status) == "table"
+        and input_tbl.objective_source_status[name] or nil
+      local rows = type(input_tbl) == "table" and input_tbl[name == "shop" and "shops" or "sellers"] or nil
+      local out = { provider = name, generation = valid_task and generation or 1,
+        status = "unknown", reason = "source_snapshot_unavailable", candidates = {} }
+      if not valid_task then out.reason = "task_snapshot_unavailable"
+      elseif status == "ok" and array(rows) ~= nil then
+        local candidates, complete = {}, true
+        for _, row in ipairs(rows) do
+          if type(row) ~= "table" or not integer(row.cid, 1) or copy_pos(row.pos) == nil then
+            complete = false; break
+          end
+          if name == "shop" then
+            local items = array(row.items)
+            if items == nil then complete = false; break end
+            for _, item in ipairs(items) do
+              if type(item) ~= "table" or not integer(item.id, 1)
+                  or type(item.locked) ~= "boolean" then complete = false; break end
+              candidates[#candidates + 1] = { id = "shop:" .. tostring(row.shop) .. ":" .. tostring(item.id),
+                item_ids = { item.id }, target = { cid = row.cid }, pos = copy_pos(row.pos),
+                eligibility = item.locked and "ineligible" or "eligible",
+                reason = item.locked and "shop_stock_locked" or nil, generation = generation }
+            end
+          else
+            if not integer(row.item, 1) or type(row.shop) ~= "number"
+                or type(row.maybe_locked) ~= "boolean" then complete = false; break end
+            candidates[#candidates + 1] = { id = "seller:" .. tostring(row.shop) .. ":"
+                .. tostring(row.item) .. ":" .. tostring(row.cid), item_ids = { row.item },
+              target = { cid = row.cid }, pos = copy_pos(row.pos),
+              eligibility = row.maybe_locked and "ineligible" or "eligible",
+              reason = row.maybe_locked and "seller_stock_locked" or nil, generation = generation }
+          end
+          if not complete then break end
+        end
+        if complete then out.status, out.reason, out.candidates = "ok", nil, candidates
+        else out.reason = name .. "_snapshot_partial" end
+      else
+        local reason = type(input_tbl) == "table" and input_tbl.objective_source_status
+          and input_tbl.objective_source_status[name .. "_reason"] or nil
+        out.reason = type(reason) == "string" and reason or name .. "_snapshot_unreadable"
+      end
+      providers[#providers + 1] = out
+    end
+    return providers
+  end
+
   -- the next refresh runs a round even inside the throttle window
   function w:poke() last_round = nil end
 
@@ -2379,10 +2594,167 @@ function M.new(a, reads, io)
     last_round = nil
   end
 
-  -- the focus members (plan Contract 4): S.members is owned only here; the
-  -- search target is never touched. A change of membership pokes; a change
-  -- of order or name only is published by the next round.
-  function w:set_routes(list)
+  -- Remove every published member before replacing an objective generation.
+  local function clear_members_now()
+    local old = S.members
+    S.members, S.member_of = {}, {}
+    for _, m in ipairs(old) do
+      local cid = m.cid
+      free_slot(cid)
+      local place_from = S.place_from[cid]
+      if place_from ~= nil and w.near ~= nil then w.near[place_from] = nil end
+      S.place_from[cid], S.route_cache[cid], S.route_fail[cid] = nil, nil, nil
+      if w.rps ~= nil then w.rps[cid] = nil end
+      if w.path_job ~= nil and w.path_job.cid == cid then w.path_job = nil end
+      local routes = input_tbl and input_tbl.routes
+      if type(routes) == "table" then
+        for i = #routes, 1, -1 do
+          if type(routes[i]) == "table" and routes[i].cid == cid then table.remove(routes, i) end
+        end
+        if #routes == 0 then input_tbl.routes = nil end
+      end
+    end
+  end
+
+  local function route_dense_array(value)
+    if type(value) ~= "table" then return nil end
+    local n, count = #value, 0
+    for k in pairs(value) do
+      if type(k) ~= "number" or math.type(k) ~= "integer" or k < 1 or k > n then return nil end
+      count = count + 1
+    end
+    return count == n and value or nil
+  end
+  local function route_positive(value, maximum)
+    return type(value) == "number" and math.type(value) == "integer"
+      and value >= 1 and value <= maximum
+  end
+  local function route_key_valid(key)
+    if type(key) ~= "string" or key == "" then return false end
+    local ok, allocated = pcall(core.target_registry_allocate,
+      { by_key = {}, next_ordinal = 1, diagnostics = {} }, { key })
+    return ok and type(allocated) == "table" and allocated[key] == 1
+  end
+  local function route_ids_valid(ids)
+    ids = route_dense_array(ids)
+    if ids == nil then return false end
+    for _, id in ipairs(ids) do if not route_positive(id, 2147483647) then return false end end
+    return true
+  end
+  local function route_ids_copy(ids)
+    local out = {}
+    for i, id in ipairs(ids or {}) do out[i] = id end
+    return out
+  end
+  local function normalize_objective_publication(publication)
+    local only_expected = true
+    for k in pairs(publication) do
+      if k ~= "objective_generation" and k ~= "members" then only_expected = false; break end
+    end
+    local generation = publication.objective_generation
+    local raw_members = route_dense_array(publication.members)
+    local normalized = {}
+    local valid = only_expected and route_positive(generation, 2147483647) and raw_members ~= nil
+    if not valid then return nil, generation, false end
+    for _, e in ipairs(raw_members) do
+      if type(e) ~= "table" or e.objective_generation ~= generation
+          or not route_positive(e.qid, 2147483647) or not route_ids_valid(e.item_ids) then
+        return nil, generation, false
+      end
+      local ancillary = e.target_key == nil and e.ordinal == nil
+      local m
+      if e.direct == true then
+        if ancillary or not route_key_valid(e.target_key) or not route_positive(e.ordinal, 1099511627775)
+            or core.objective_direct_route_id(e.ordinal) ~= e.route_id
+            or e.cid ~= nil or e.place ~= 0 or not valid_pos(e.pos)
+            or (e.kind ~= "place" and e.kind ~= "source" and e.kind ~= "item") then
+          return nil, generation, false
+        end
+        m = { cid = e.route_id, name = type(e.name) == "string" and e.name or "Objective",
+          place = 0, direct = true, objective = true, qid = e.qid,
+          kind = e.kind == "source" and "item" or e.kind,
+          target_key = e.target_key, ordinal = e.ordinal,
+          objective_generation = generation, pos = pcopy(e.pos), item_ids = route_ids_copy(e.item_ids) }
+      elseif ancillary then
+        if e.direct ~= false or e.kind ~= "npc" or not route_positive(e.cid, 4294967295)
+            or e.route_id ~= e.cid or e.place ~= nil or #e.item_ids ~= 0 then
+          return nil, generation, false
+        end
+        local name = e.name
+        if type(name) ~= "string" then
+          local ok_name, value = pcall(a.npc_name, e.cid)
+          name = ok_name and type(value) == "string" and value or ("NPC " .. tostring(e.cid))
+        end
+        m = { cid = e.cid, name = name, qid = e.qid, kind = "npc",
+          objective_generation = generation, item_ids = {} }
+      else
+        if e.direct ~= false or not route_key_valid(e.target_key)
+            or not route_positive(e.ordinal, 1099511627775) or e.kind ~= "npc"
+            or not route_positive(e.cid, 4294967295) or e.route_id ~= e.cid or e.place ~= e.cid
+            or not valid_pos(e.pos) then
+          return nil, generation, false
+        end
+        local name = e.name
+        if type(name) ~= "string" then
+          local ok_name, value = pcall(a.npc_name, e.cid)
+          name = ok_name and type(value) == "string" and value or ("NPC " .. tostring(e.cid))
+        end
+        m = { cid = e.cid, name = name, objective = true,
+          qid = e.qid, kind = "npc", target_key = e.target_key, ordinal = e.ordinal,
+          objective_generation = generation, item_ids = route_ids_copy(e.item_ids), pos = pcopy(e.pos) }
+      end
+      normalized[#normalized + 1] = m
+    end
+    return normalized, generation, true
+  end
+
+  -- Exact objective publications use a generation-bearing envelope. Bare
+  -- lists remain only for the staged legacy caller and reject any objective
+  -- shape before that compatibility path can observe it.
+  function w:set_routes(publication)
+    local is_envelope = type(publication) == "table"
+      and (rawget(publication, "members") ~= nil or rawget(publication, "objective_generation") ~= nil)
+    local generation, list = nil, publication
+    if is_envelope then
+      local normalized, valid_generation, valid = normalize_objective_publication(publication)
+      generation = valid_generation
+      if not valid then
+        local had = #S.members > 0 or S.objective_generation ~= nil
+        clear_members_now()
+        S.objective_generation = nil
+        if had then w.route_gen = w.route_gen + 1 end
+        last_round = nil
+        return
+      end
+      list = normalized
+    elseif type(publication) == "table" then
+      for _, e in ipairs(publication) do
+        if type(e) == "table" and (e.objective == true or e.objective_generation ~= nil
+            or e.target_key ~= nil or e.ordinal ~= nil or e.direct == true) then
+          local had = #S.members > 0 or S.objective_generation ~= nil
+          clear_members_now()
+          S.objective_generation = nil
+          if had then w.route_gen = w.route_gen + 1 end
+          last_round = nil
+          return
+        end
+      end
+    else
+      local had = #S.members > 0 or S.objective_generation ~= nil
+      clear_members_now()
+      S.objective_generation = nil
+      if had then w.route_gen = w.route_gen + 1 end
+      last_round = nil
+      return
+    end
+
+    if is_envelope and S.objective_generation ~= generation then
+      clear_members_now()
+      S.objective_generation = generation
+      last_round = nil
+      w.route_gen = w.route_gen + 1
+    end
+    -- the same list as the current members: nothing to rebuild
     -- the same list as the current members: nothing to rebuild
     if type(list) == "table" and #list == #S.members then
       local same = true
@@ -2391,7 +2763,9 @@ function M.new(a, reads, io)
         local any_direct = type(e) == "table" and (e.direct == true or m.direct == true)
         if type(e) ~= "table" or e.cid ~= m.cid or e.place ~= m.place
             or (any_direct and not same_direct_payload(e, m))
-            or (not any_direct and e.name ~= m.name) then
+            or (not any_direct and (e.name ~= m.name
+              or e.target_key ~= m.target_key or e.ordinal ~= m.ordinal
+              or e.objective_generation ~= m.objective_generation)) then
           same = false
           break
         end
@@ -2413,7 +2787,14 @@ function M.new(a, reads, io)
           local m = { cid = e.cid, name = e.name, place = e.place }
           if is_direct then
             m.direct, m.objective, m.qid, m.kind = true, e.objective, e.qid, e.kind
+            m.target_key, m.ordinal = e.target_key, e.ordinal
+            m.objective_generation = e.objective_generation
             m.pos = pcopy(e.pos)
+          elseif is_envelope then
+            m.objective, m.qid, m.kind = e.objective, e.qid, e.kind
+            m.target_key, m.ordinal = e.target_key, e.ordinal
+            m.objective_generation = e.objective_generation
+            m.item_ids, m.pos = e.item_ids, e.pos
           end
           members[#members + 1] = m
           member_of[e.cid] = m

@@ -3559,28 +3559,41 @@ do
     do
       local f, d = sfix()
       local w = f.new()
-      local direct = { cid = -1099511747937, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = P(410.5, 73.5, -821.2) }
+      local function publication(members, generation)
+        return { objective_generation = generation or 1, members = members }
+      end
+      local function direct_member(kind, name, pos, ordinal, generation)
+        local key = kind == "item" and core.target_key({ "source", "seller:test" })
+          or core.target_key({ 30040, "task", 0, ordinal or 1, "place" })
+        return { route_id = core.objective_direct_route_id(ordinal or 1), place = 0,
+          direct = true, qid = 30040, kind = kind == "item" and "source" or "place",
+          target_key = key, ordinal = ordinal or 1, name = name, pos = pos,
+          item_ids = {}, objective_generation = generation or 1 }
+      end
+      local function objective_npc(cid, name, pos)
+        return { route_id = cid, cid = cid, place = cid, qid = 30040, kind = "npc",
+          direct = false, target_key = core.target_key({ 30040, "issued_npc", cid }),
+          ordinal = cid, name = name, pos = pos, item_ids = {}, objective_generation = 1 }
+      end
+      local direct = direct_member("place", "Objective: Hall", P(410.5, 73.5, -821.2))
       local tg = ptg(P(5, 1, 5), nil)
       local original = P(direct.pos.x, direct.pos.y, direct.pos.z)
-      local route_id_calls, old_route_id = 0, core.objective_route_id
-      core.objective_route_id = function(qid, kind)
+      local route_id_calls, old_route_id = 0, core.objective_direct_route_id
+      core.objective_direct_route_id = function(ordinal)
         route_id_calls = route_id_calls + 1
-        return old_route_id(qid, kind)
+        return old_route_id(ordinal)
       end
-      w:set_routes({ direct })
-      core.objective_route_id = old_route_id
+      w:set_routes(publication({ direct }))
+      core.objective_direct_route_id = old_route_id
       check("direct route: validation uses the shared objective route id helper",
-        route_id_calls == 1)
+        route_id_calls >= 1)
       local gen = w.route_gen
-      w:set_routes({ { cid = direct.cid, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = P(410.5, 73.5, -821.2) } })
+      w:set_routes(publication({ direct_member("place", "Objective: Hall", P(410.5, 73.5, -821.2)) }))
       check("direct route: unchanged position is idempotent", w.route_gen == gen)
       direct.pos.x = 999
       w:refresh(0, true, tg)
-      local e = route_in(w, -1099511747937)
+      local direct_id = core.objective_direct_route_id(1)
+      local e = route_in(w, direct_id)
       check("direct route: publishes two stops from player to copied target",
         e ~= nil and e.place == 0 and #e.stops == 2
         and e.stops[1].pos.x == 5 and e.stops[1].pos.y == 1 and e.stops[1].pos.z == 5
@@ -3601,13 +3614,11 @@ do
         kind = "place", name = "Objective: Hall" }
       local function replace(fields)
         for key, value in pairs(fields) do target_state[key] = value end
-        local cid = target_state.kind == "item" and -1099511747938 or direct.cid
-        local m = { cid = cid, place = 0, direct = true, objective = true,
-          qid = 30040, kind = target_state.kind, name = target_state.name,
-          pos = P(target_state.x, target_state.y, target_state.z) }
-        w:set_routes({ m })
+        local m = direct_member(target_state.kind, target_state.name,
+          P(target_state.x, target_state.y, target_state.z))
+        w:set_routes(publication({ m }))
         local changed = w:refresh(1, true, tg) == true
-        local got = route_in(w, cid)
+        local got = route_in(w, direct_id)
         return changed, got
       end
       local changed, got = replace({ x = 411.5 })
@@ -3635,82 +3646,78 @@ do
         end
         d2.area_nodes[49] = { P(1, 0, 1) }
         local w2 = n2.new()
-        w2:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" },
-          { cid = -1099511747937, place = 0, direct = true, objective = true,
-            qid = 30040, kind = "place", name = "Objective: Hall", pos = original } })
+        w2:set_routes(publication({ objective_npc(2001, "Aa", P(1, 0, 1)),
+          objective_npc(2002, "Bb", P(2, 0, 2)), direct_member("place", "Objective: Hall", original) }))
         local tg2 = ptg(P(5, 1, 5), nil)
         for tick = 0, 5 do
           w2:refresh(tick, true, tg2)
         end
-        local a, b, de = route_in(w2, 2001), route_in(w2, 2002), route_in(w2, -1099511747937)
+        local direct_id = core.objective_direct_route_id(1)
+        local a, b, de = route_in(w2, 2001), route_in(w2, 2002), route_in(w2, direct_id)
         check("direct route: pending NPC readiness keeps objective in slot three",
           a ~= nil and b ~= nil and de ~= nil and a.slot == 1 and b.slot == 2 and de.slot == 3)
-        w2:set_routes({ { cid = 2003, name = "Cc" }, { cid = 2004, name = "Dd" },
-          { cid = -1099511747937, place = 0, direct = true, objective = true,
-            qid = 30040, kind = "place", name = "Objective: Hall", pos = original } })
+        w2:set_routes(publication({ objective_npc(2003, "Cc", P(3, 0, 3)),
+          objective_npc(2004, "Dd", P(4, 0, 4)), direct_member("place", "Objective: Hall", original) }))
         w2:refresh(10, true, tg2)
-        de = route_in(w2, -1099511747937)
+        de = route_in(w2, direct_id)
         check("direct route: an assigned objective slot survives pending NPCs",
           de ~= nil and de.slot == 3)
       end
 
       local place = { cid = -77, place = 77, name = "Legacy place" }
-      w:set_routes({ place, { cid = -1099511747937, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = original } })
+      w:set_routes({ place })
+      w:set_routes(publication({ direct_member("place", "Objective: Hall", original, 2, 2) }, 2))
       local tboth = ptg(P(5, 1, 5), { 77 })
       d.keypos[77] = P(200, 0, 200)
       w:refresh(2, true, tboth)
-      local legacy, objective = route_in(w, -77), route_in(w, -1099511747937)
-      check("direct route: coexists with legacy place member",
-        legacy ~= nil and legacy.place == 77 and objective ~= nil and objective.place == 0
-        and objective.direct == true)
+      local legacy, objective = route_in(w, -77), route_in(w, core.objective_direct_route_id(2))
+      check("direct route: canonical ordinal id is disjoint from legacy place ids",
+        legacy == nil and objective ~= nil and objective.place == 0
+        and objective.direct == true and objective.cid ~= -77)
 
-      w.path_job = { cid = -1099511747937 }
-      w.rps[-1099511747937] = true
+      local direct2 = core.objective_direct_route_id(2)
+      w.path_job = { cid = direct2 }
+      w.rps[direct2] = true
       w:set_routes({ place })
       check("direct route: leaving clears its slot, path job and path cache",
-        w.path_job == nil and w.rps[-1099511747937] == nil
-        and route_in(w, -1099511747937) == nil)
+        w.path_job == nil and w.rps[direct2] == nil and route_in(w, direct2) == nil)
       w.near["5.0,1.0,5.0"] = 8
-      w:set_routes({ { cid = -1099511747937, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = original } })
+      w:set_routes(publication({ direct_member("place", "Objective: Hall", original) }))
       w:refresh(3, true, ptg(P(6, 1, 6), nil))
       check("direct route: leaving clears its place_from origin",
         w.near["5.0,1.0,5.0"] == 8)
 
       w:set_route(2001, "Aa")
-      w:set_routes({ { cid = -1099511747937, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = original } })
+      w:set_routes(publication({ direct_member("place", "Objective: Hall", original) }))
       local n = 0
       repeat n = n + 1 until not w:refresh(4, true, tg) or n > 20
       local routes = (w:input() or {}).routes or {}
       check("direct route: search target reservation and dedupe stay unchanged",
         #routes == 2 and routes[1].cid == 2001
-        and route_in(w, -1099511747937) ~= nil)
+        and route_in(w, core.objective_direct_route_id(1)) ~= nil)
     end
 
     -- 1c: direct routes require both a valid player and a valid copied target.
     do
       local f, d = sfix()
       local w = f.new()
-      local direct = { cid = -1099511747937, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = P(410.5, 73.5, -821.2) }
-      w:set_routes({ direct })
+      local direct = { route_id = core.objective_direct_route_id(1), place = 0,
+        direct = true, qid = 30040, kind = "place", name = "Objective: Hall",
+        target_key = core.target_key({ 30040, "task", 0, 1, "place" }), ordinal = 1,
+        item_ids = {}, objective_generation = 1, pos = P(410.5, 73.5, -821.2) }
+      local publication = function() return { objective_generation = 1, members = { direct } } end
+      w:set_routes(publication())
       w:refresh(0, true, ptg(nil, nil))
-      check("direct route: missing player publishes nothing", route_in(w, direct.cid) == nil)
+      check("direct route: missing player publishes nothing", route_in(w, direct.route_id) == nil)
       w:poke()
       w:refresh(1, true, ptg(P(5, 1, 5), nil))
       check("direct route: valid member publishes after player appears",
-        route_in(w, direct.cid) ~= nil)
+        route_in(w, direct.route_id) ~= nil)
       direct.pos = { x = "invalid", y = 0, z = 0 }
-      w:set_routes({ direct })
+      w:set_routes(publication())
       w:poke()
       w:refresh(2, true, ptg(P(5, 1, 5), nil))
-      check("direct route: invalid target publishes nothing", route_in(w, direct.cid) == nil)
+      check("direct route: invalid target publishes nothing", route_in(w, direct.route_id) == nil)
     end
 
     -- 2: no build, no signature read, no schedule_now failure
@@ -6064,6 +6071,172 @@ do
   w3:poke()
   w3:refresh(0, true, { treasure = true, focus_keys = { 2302 } })
   check("focus places: malformed position not cached", f3.reads_n.key_pos == 2)
+end
+
+-- 36. objective place/source snapshots and generation-atomic route handoff
+do
+  local f = fixture()
+  f.reads.key_pos = function(key)
+    f.reads_n.key_pos = (f.reads_n.key_pos or 0) + 1
+    if f.fail.key_pos then error("key position unreadable") end
+    return f.data.kpos and f.data.kpos[key]
+  end
+  f.reads.area_nodes = function(row)
+    f.reads_n.area_nodes = (f.reads_n.area_nodes or 0) + 1
+    f.data.last_area_row = row
+    if f.fail.area_nodes then error("area nodes unreadable") end
+    return f.data.area_nodes and f.data.area_nodes[row.area]
+  end
+  f.data.kpos = { [77] = P(10, 20, 30) }
+  f.data.area_nodes = { [0] = { P(40, 50, 60) } }
+  local base_providers = {
+    { provider = "placed", generation = 4, status = "unknown",
+      reason = "objective_source_scan_not_performed", candidates = {} },
+    { provider = "chest", generation = 4, status = "unknown",
+      reason = "objective_source_scan_not_performed", candidates = {} },
+    { provider = "loot", generation = 4, status = "unknown",
+      reason = "objective_source_scan_not_performed", candidates = {} },
+  }
+  f.adapter.objective_item_source_snapshots = function()
+    f.adapter_n.objective_item_source_snapshots = (f.adapter_n.objective_item_source_snapshots or 0) + 1
+    return base_providers
+  end
+  local w = f.new()
+  local task = { need_generation = 4, journal_generation = 2, quests = { { qid = 30040, task_index = 0,
+    read_status = "ok", live_destination = nil, item_ownership = {},
+    task_destinations = {
+      { kind = "place", task_index = 0, destination_index = 2,
+        target = { place = { kind = "local_area", local_area = 0 } }, eligibility = "eligible" },
+      { kind = "place", task_index = 0, destination_index = 3,
+        target = { place = { kind = "key_location", key = 77 } }, eligibility = "eligible" },
+    }, guidance = {} } } }
+  local resolved_places = w:objective_place_snapshot(task)
+  check("objective places: local-area zero and key resolve through exact node readers",
+    resolved_places ~= nil and resolved_places.status == "ok" and #resolved_places.places == 2
+      and resolved_places.places[1].pos.x == 40 and resolved_places.places[2].pos.x == 10
+      and f.data.last_area_row.area == 0 and f.data.last_area_row.location == nil
+      and (f.reads_n.key_pos or 0) == 1 and (f.reads_n.area_nodes or 0) == 1)
+  f.fail.key_pos = true
+  local unreadable = w:objective_place_snapshot(task)
+  check("objective places: partial native failure is wholly unknown",
+    unreadable.status == "unknown" and unreadable.reason ~= nil and #unreadable.places == 0)
+  f.fail.key_pos = nil
+  f.data.kpos[77] = nil
+  local empty = w:objective_place_snapshot(task)
+  check("objective places: empty node result is unknown, not an empty success",
+    empty.status == "unknown" and empty.reason ~= nil and #empty.places == 0)
+
+  local source_task = { need_generation = 4, quests = {} }
+  local source_rows = w:objective_source_snapshots(nil, source_task)
+  check("objective sources: adapter diagnostic envelopes pass through as frozen unknown",
+    #source_rows >= 5 and source_rows[1].provider == "placed"
+      and source_rows[1].status == "unknown" and #source_rows[1].candidates == 0
+      and source_rows[1].reason ~= nil)
+  check("objective sources: missing snapshots cannot claim shop or seller availability",
+    source_rows[4].provider == "shop" and source_rows[4].status == "unknown"
+      and #source_rows[4].candidates == 0 and source_rows[4].reason ~= nil
+      and source_rows[5].provider == "seller" and source_rows[5].status == "unknown"
+      and #source_rows[5].candidates == 0 and source_rows[5].reason ~= nil)
+
+  local sf = fixture({ files = { [K.PLACES] = places({
+    prow("chara", "shop_npc", 5, 0, 0, { name = "ch220000_00" }) }) } })
+  sf.data.catalog, sf.data.cast = { 1 }, { [1] = { 2058 } }
+  sf.data.sched_ids, sf.data.shop = { 2058 }, { [2058] = 41 }
+  sf.data.sched, sf.data.shops = { [2058] = P(100, 0, 100) }, {
+    [41] = { { item = 378, release_qid = 0, sentiment_bit = 0,
+      total_pay = 0, flag = 0, var_cond = 0 } },
+  }
+  sf.data.needs, sf.data.locs = { [100] = { { id = 378, num = 1 } } }, {}
+  sf.adapter.objective_item_source_snapshots = function()
+    return base_providers
+  end
+  local sw = sf.new()
+  sw:refresh(0, true, { search = true, shops = true, sellers = true })
+  local available = sw:objective_source_snapshots(nil, source_task)
+  check("objective sources: fresh shop and seller snapshots publish eligible item candidates",
+    available[4].status == "ok" and available[4].candidates[1].item_ids[1] == 378
+      and available[4].candidates[1].eligibility == "eligible"
+      and available[5].status == "ok" and available[5].candidates[1].item_ids[1] == 378
+      and available[5].candidates[1].eligibility == "eligible")
+  sf.fail.shops = true
+  sf.afail.item_needs = true
+  sw:poke()
+  sw:refresh(10, true, { search = true, shops = true, sellers = true })
+  local stale = sw:objective_source_snapshots(nil, source_task)
+  check("objective sources: failed seller refresh discards held candidates",
+    stale[4].status == "ok" and stale[5].status == "unknown" and #stale[5].candidates == 0)
+  sf.fail.shops, sf.afail.item_needs = nil, nil
+  sw:poke()
+  sw:refresh(20, true, { search = true, shops = true, sellers = true })
+  sw:input().shops[1].items[1].id = nil
+  local partial = sw:objective_source_snapshots(nil, source_task)
+  check("objective sources: partial shop rows fail closed without candidates",
+    partial[4].status == "unknown" and #partial[4].candidates == 0
+      and partial[4].reason ~= nil)
+
+  local envelope = { objective_generation = 9, members = {
+    { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
+      direct = false, target_key = core.target_key({ 30040, "issued_npc", 2001 }),
+      ordinal = 1, pos = P(1, 0, 1), item_ids = {}, objective_generation = 9 },
+    { route_id = core.objective_direct_route_id(1), qid = 30040, kind = "place", direct = true,
+      target_key = core.target_key({ 30040, "task", 0, 1, "place" }), ordinal = 1,
+      place = 0, pos = P(10, 20, 30), item_ids = {}, objective_generation = 9 },
+  } }
+  local route_tg = { search = true, player = P(0, 0, 0), focus_keys = {} }
+  w:set_routes(envelope)
+  local generation = w.route_gen
+  w:set_routes(envelope)
+  check("objective routes: same generation and membership is idempotent",
+    w.route_gen == generation)
+  local mixed = { objective_generation = 10, members = {
+    { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
+      direct = false, target_key = core.target_key({ 30040, "issued_npc", 2001 }),
+      ordinal = 1, pos = P(1, 0, 1), item_ids = {}, objective_generation = 9 },
+  } }
+  w:set_routes(mixed)
+  check("objective routes: mixed-generation envelopes clear old membership immediately",
+    (w:input() == nil or w:input().routes == nil) and w.route_gen > generation)
+  local malformed = { objective_generation = 11, members = {
+    { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
+      direct = false, target_key = "not-canonical", ordinal = 1, pos = P(1, 0, 1),
+      item_ids = {}, objective_generation = 11 },
+  } }
+  w:set_routes(malformed)
+  check("objective routes: malformed envelope cannot escape through legacy-list compatibility",
+    w:input() == nil or w:input().routes == nil)
+  w:set_routes({ { cid = -77, place = 77, name = "Legacy place" } })
+  w:refresh(0, true, route_tg)
+  check("objective routes: bare legacy place list remains supported",
+    route_in(w, -77) == nil)
+  w:set_routes(envelope)
+  w:refresh(0, true, route_tg)
+  check("objective routes: valid direct publication carries its generation before stops",
+    route_in(w, core.objective_direct_route_id(1)) ~= nil
+      and route_in(w, core.objective_direct_route_id(1)).objective_generation == 9
+      and route_in(w, core.objective_direct_route_id(1)).target_key == envelope.members[2].target_key)
+
+  local ancillary = { objective_generation = 12, members = {
+    { route_id = 2002, cid = 2002, qid = 30040, kind = "npc", direct = false,
+      item_ids = {}, objective_generation = 12 },
+  } }
+  w:set_routes(ancillary)
+  local ancillary_generation = w.route_gen
+  w:set_routes(ancillary)
+  check("objective routes: ancillary CID-only publication is accepted and idempotent",
+    w.route_gen == ancillary_generation)
+
+  w:set_routes(envelope)
+  w:refresh(1, true, route_tg)
+  local old_direct = core.objective_direct_route_id(1)
+  w.path_job, w.rps[old_direct] = { cid = old_direct }, true
+  w:set_routes({ objective_generation = 10, members = {
+    { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
+      direct = false, target_key = core.target_key({ 30040, "issued_npc", 2001 }),
+      ordinal = 1, pos = P(1, 0, 1), item_ids = {}, objective_generation = 10 },
+  } })
+  check("objective routes: generation change clears published stops and old path state immediately",
+    (w:input() == nil or w:input().routes == nil)
+      and w.path_job == nil and w.rps[old_direct] == nil)
 end
 
 if failures > 0 then os.exit(1) end
