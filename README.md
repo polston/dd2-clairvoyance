@@ -52,7 +52,9 @@ map and in your view.
 19. Focusing a quest marks its resolved current objective distinctly: issued
     NPCs, the current journal destination and still-needed quest items. Related
     NPCs are hidden by default and can be restored per quest with **Show related
-    NPCs**.
+    NPCs**. Routes follow current objective NPCs, destinations and item sources;
+    route mode 2 also includes shown related NPCs. If current game data cannot
+    resolve a target or item source, that objective remains unresolved.
 
 ## Requirements
 

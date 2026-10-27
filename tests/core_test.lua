@@ -5614,6 +5614,26 @@ do
       #routes.members == 1 and routes.members[1].direct == true
         and routes.members[1].ordinal == snap.targets[2].ordinal
         and routes.members[1].route_id == core.objective_direct_route_id(snap.targets[2].ordinal))
+    local named_marker = core.objective_markers({}, nil, snap, { names = {
+      npcs = {}, targets = { { key = snap.targets[2].key, name = "Wakestone" } } },
+      category_visibility = {} })
+    local named_routes, named_shown, named_total = core.objective_routes(snap, pos(0), {
+      npc_route_mode = 1, objective_places = true, focus_order = { 10 },
+      names = { npcs = {}, targets = { { key = snap.targets[2].key, name = "Wakestone" } } },
+      quest_names = { [10] = "The Stolen Throne" }, route_cap = 1 })
+    check("objective marker and route names use structured target names",
+      named_marker[1].label == "Objective: Wakestone"
+        and named_routes.members[1].name == "Objective: Wakestone (for The Stolen Throne)"
+        and named_shown == 1 and named_total == 1)
+    local named_npc_snapshot = { generation = 91, targets = { {
+      key = tk({ 10, "issued_npc", 78 }), ordinal = 1, kind = "npc", generation = 91,
+      target = { cid = 78, pos = pos(1) }, owners = { { qid = 10, task_index = 0 } },
+      item_ids = {}, eligibility = "eligible" } } }
+    local named_npc_routes = core.objective_routes(named_npc_snapshot, pos(0), {
+      npc_route_mode = 1, names = { npcs = { { cid = 78, name = "Captain Brant" } },
+        targets = {} }, category_visibility = {} })
+    check("objective NPC routes use the structured name policy",
+      named_npc_routes.members[1].name == "Captain Brant")
 
     local snapshots = core.objective_snapshot({ generation = 5, quests = {
         { qid = 11, task_index = 1, read_status = "ok", issued_npcs = {},
@@ -5648,6 +5668,10 @@ do
       #two_item_routes.members == 2 and two_item_routes.members[1].item_ids[1] == 1
         and two_item_routes.members[2].item_ids[1] == 2
         and two_item_routes.members[1].ordinal ~= two_item_routes.members[2].ordinal)
+    local capped_routes, capped_shown, capped_total = core.objective_routes(snapshots, nil,
+      { npc_route_mode = 1, objective_places = true, focus_order = { 11, 10 }, route_cap = 1 })
+    check("objective route counts report the publication cap and full eligible total",
+      #capped_routes.members == 1 and capped_shown == 1 and capped_total == 2)
     local unchanged = pos(5)
     local only_unknown = core.objective_snapshot({ generation = 6, quests = {
         { qid = 12, task_index = 1, read_status = "unknown", reason = "journal unavailable",

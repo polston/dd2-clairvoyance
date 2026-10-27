@@ -4650,7 +4650,7 @@ function M.objective_routes(snapshot, player_origin, policy)
   local members, by_endpoint = {}, {}
   if type(snapshot) ~= "table" or not objective_generation(snapshot.generation)
       or objective_array(snapshot.targets) == nil then
-    return { objective_generation = 0, members = members }
+    return { objective_generation = 0, members = members }, 0, 0
   end
   local generation = snapshot.generation
   local focus_rank = {}
@@ -4716,6 +4716,25 @@ function M.objective_routes(snapshot, player_origin, policy)
     local member = { route_id = route_id, qid = first and first.qid, target_key = obj.key,
       ordinal = obj.ordinal, kind = obj.kind, direct = direct, pos = pos, item_ids = obj.item_ids,
       objective_generation = generation }
+    if obj.kind == "npc" then
+      member.name = objective_name(policy, obj)
+    elseif obj.kind == "place" then
+      local caption = objective_name(policy, obj)
+      if caption == "Objective" and first ~= nil then
+        caption = (policy.quest_names or {})[first.qid] or ("Quest " .. tostring(first.qid))
+      end
+      member.name = caption:sub(1, 11) == "Objective: " and caption or ("Objective: " .. caption)
+    else
+      local item = objective_name(policy, obj)
+      if item == obj.source_id then
+        item = "Item " .. tostring((objective_array(obj.item_ids) or {})[1] or "?")
+      end
+      local quest = first ~= nil and (policy.quest_names or {})[first.qid] or nil
+      if type(quest) ~= "string" or quest == "" then
+        quest = "Quest " .. tostring(first and first.qid or "?")
+      end
+      member.name = "Objective: " .. item .. " (for " .. quest .. ")"
+    end
     if direct then member.place = 0 else member.cid, member.place = cid, cid end
     by_endpoint[endpoint] = true; members[#members + 1] = member
   end
@@ -4732,15 +4751,16 @@ function M.objective_routes(snapshot, player_origin, policy)
       local seen = false
       for _, member in ipairs(members) do if member.cid == row.cid then seen = true end end
       if not seen then members[#members + 1] = { route_id = row.cid, cid = row.cid,
-        item_ids = {},
+        name = row.name or objective_name(policy, { target = { cid = row.cid } }), item_ids = {},
         qid = row.qid, kind = "npc", direct = false, pos = objective_copy_pos(row.pos),
         objective_generation = generation } end
     end
   end
   end
   local cap = math.min(8, math.max(0, policy.route_cap or 8))
+  local total = #members
   while #members > cap do members[#members] = nil end
-  return { objective_generation = generation, members = members }
+  return { objective_generation = generation, members = members }, #members, total
 end
 
 return M
