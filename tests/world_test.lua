@@ -6361,6 +6361,46 @@ do
     { route_id = 2002, cid = 2002, qid = 30040, kind = "npc", direct = false,
       item_ids = {}, objective_generation = 12 },
   } }
+  local ancillary_world = fixture().new()
+  ancillary_world:set_routes(ancillary)
+  ancillary_world:refresh(0, true, route_tg)
+  local ancillary_entry = route_in(ancillary_world, 2002)
+  check("objective routes: ancillary render retains false objective status and CID-only identity",
+    ancillary_entry ~= nil and ancillary_entry.objective == false
+      and ancillary_entry.target_key == nil and ancillary_entry.ordinal == nil
+      and ancillary_entry.objective_generation == 12)
+
+  local function objective_npc(cid, ordinal, generation)
+    return { route_id = cid, cid = cid, place = cid, qid = 30040, kind = "npc", direct = false,
+      target_key = core.target_key({ 30040, "issued_npc", cid }), ordinal = ordinal,
+      pos = P(cid, 0, cid), item_ids = {}, objective_generation = generation }
+  end
+  local ancillary_member = { route_id = 2102, cid = 2102, qid = 30040, kind = "npc",
+    direct = false, item_ids = {}, objective_generation = 30 }
+  local mixed_world = fixture().new()
+  mixed_world:set_routes({ objective_generation = 30, members = {
+    objective_npc(2101, 1, 30), ancillary_member, objective_npc(2103, 2, 30),
+  } })
+  mixed_world:refresh(0, true, route_tg)
+  local mixed_slots = { route_in(mixed_world, 2101).slot,
+    route_in(mixed_world, 2102).slot, route_in(mixed_world, 2103).slot }
+  mixed_world:set_routes({ objective_generation = 31, members = {
+    objective_npc(2101, 1, 31), objective_npc(2104, 3, 31),
+    objective_npc(2103, 2, 31),
+    { route_id = 2102, cid = 2102, qid = 30040, kind = "npc", direct = false,
+      item_ids = {}, objective_generation = 31 },
+  } })
+  mixed_world:refresh(1, true, route_tg)
+  check("objective routes: mixed reorder preserves objective identities and ancillary CID slot",
+    route_in(mixed_world, 2101).slot == mixed_slots[1]
+      and route_in(mixed_world, 2102).slot == mixed_slots[2]
+      and route_in(mixed_world, 2103).slot == mixed_slots[3]
+      and route_in(mixed_world, 2104).slot == 4)
+  check("objective routes: mixed render marks only canonical members as objectives",
+    route_in(mixed_world, 2101).objective == true
+      and route_in(mixed_world, 2102).objective == false
+      and route_in(mixed_world, 2104).objective == true)
+
   w:set_routes(ancillary)
   local ancillary_generation = w.route_gen
   w:set_routes(ancillary)

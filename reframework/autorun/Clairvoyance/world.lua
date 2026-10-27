@@ -1545,7 +1545,7 @@ function M.new(a, reads, io)
   -- route: the error entry)
   local function route_contract(entry, member)
     if member.objective_generation ~= nil then
-      entry.objective, entry.qid, entry.kind = true, member.qid, member.kind
+      entry.objective, entry.qid, entry.kind = member.objective == true, member.qid, member.kind
       entry.target_key, entry.ordinal = member.target_key, member.ordinal
       entry.objective_generation = member.objective_generation
     end
@@ -2650,15 +2650,23 @@ function M.new(a, reads, io)
     local old = S.members
     local preserve = {}
     for _, m in ipairs(preserve_members or EMPTY) do
-      if type(m.target_key) == "string" and type(m.ordinal) == "number" then
-        preserve[m.cid] = { target_key = m.target_key, ordinal = m.ordinal }
+      if preserve[m.cid] == nil and m.objective == true
+          and type(m.target_key) == "string" and type(m.ordinal) == "number" then
+        preserve[m.cid] = { kind = "objective", target_key = m.target_key, ordinal = m.ordinal }
+      elseif preserve[m.cid] == nil and m.objective == false
+          and m.target_key == nil and m.ordinal == nil and m.direct ~= true then
+        preserve[m.cid] = { kind = "ancillary" }
       end
     end
     S.members, S.member_of = {}, {}
     for _, m in ipairs(old) do
       local cid = m.cid
       local identity = preserve[cid]
-      if identity == nil or identity.target_key ~= m.target_key or identity.ordinal ~= m.ordinal then
+      local exact = identity ~= nil and identity.kind == "objective" and m.objective == true
+        and identity.target_key == m.target_key and identity.ordinal == m.ordinal
+      local ancillary = identity ~= nil and identity.kind == "ancillary" and m.objective == false
+        and m.target_key == nil and m.ordinal == nil and m.direct ~= true
+      if not exact and not ancillary then
         free_slot(cid)
       end
       local place_from = S.place_from[cid]
@@ -2780,7 +2788,7 @@ function M.new(a, reads, io)
           local ok_name, value = pcall(a.npc_name, e.cid)
           name = ok_name and type(value) == "string" and value or ("NPC " .. tostring(e.cid))
         end
-        m = { cid = e.cid, name = name, qid = e.qid, kind = "npc",
+        m = { cid = e.cid, name = name, objective = false, qid = e.qid, kind = "npc",
           objective_generation = generation, item_ids = {} }
       else
         if e.direct ~= false or not route_key_valid(e.target_key)
