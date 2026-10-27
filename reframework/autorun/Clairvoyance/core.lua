@@ -4234,9 +4234,9 @@ end
 
 local function objective_place_key(place)
   if type(place) ~= "table" then return nil end
-  if place.kind == "key_location" and type(place.key) == "number" then
+  if place.kind == "key_location" and canonical_integer(place.key) and place.key >= 1 then
     return "key:" .. tostring(place.key)
-  elseif place.kind == "local_area" and type(place.local_area) == "number" then
+  elseif place.kind == "local_area" and canonical_integer(place.local_area) and place.local_area >= 0 then
     return "area:" .. tostring(place.local_area)
   end
   return nil
@@ -4650,7 +4650,7 @@ function M.objective_routes(snapshot, player_origin, policy)
   local members, by_endpoint = {}, {}
   if type(snapshot) ~= "table" or not objective_generation(snapshot.generation)
       or objective_array(snapshot.targets) == nil then
-    return { generation = 0, members = members }
+    return { objective_generation = 0, members = members }
   end
   local generation = snapshot.generation
   local focus_rank = {}
@@ -4715,7 +4715,7 @@ function M.objective_routes(snapshot, player_origin, policy)
     local first = owner_order(obj)
     local member = { route_id = route_id, qid = first and first.qid, target_key = obj.key,
       ordinal = obj.ordinal, kind = obj.kind, direct = direct, pos = pos, item_ids = obj.item_ids,
-      generation = generation }
+      objective_generation = generation }
     if direct then member.place = 0 else member.cid, member.place = cid, cid end
     by_endpoint[endpoint] = true; members[#members + 1] = member
   end
@@ -4732,15 +4732,15 @@ function M.objective_routes(snapshot, player_origin, policy)
       local seen = false
       for _, member in ipairs(members) do if member.cid == row.cid then seen = true end end
       if not seen then members[#members + 1] = { route_id = row.cid, cid = row.cid,
-        target_key = M.target_key({ row.qid, "ancillary", row.cid }), item_ids = {},
+        item_ids = {},
         qid = row.qid, kind = "npc", direct = false, pos = objective_copy_pos(row.pos),
-        generation = generation } end
+        objective_generation = generation } end
     end
   end
   end
   local cap = math.min(8, math.max(0, policy.route_cap or 8))
   while #members > cap do members[#members] = nil end
-  return { generation = generation, members = members }
+  return { objective_generation = generation, members = members }
 end
 
 return M

@@ -5679,7 +5679,8 @@ do
     for _, marker in ipairs(wired.markers) do if marker.objective_key == wired_snapshot.targets[1].key then wired_marker = marker end end
     check("objective compute: snapshot projects before focus filtering and publishes matching routes",
       wired_marker ~= nil and wired_marker.objective == true
-        and wired.objective_routes.generation == 12
+        and wired.objective_routes.objective_generation == 12
+        and wired.objective_routes.generation == nil
         and wired.objective_routes.members[1].target_key == wired_snapshot.targets[1].key)
     local isolated = core.objective_snapshot({ generation = 7, quests = {
         { qid = 1, task_index = 0, read_status = "ok", issued_npcs = {},
@@ -5927,8 +5928,10 @@ do
     local source_routes = core.objective_routes(matched, nil,
       { npc_route_mode = 0, objective_places = true, focus_order = { 50 } })
     check("objective route publication preserves the objective snapshot generation",
-      source_routes.generation == matched.generation
-        and source_routes.members[1].generation == matched.generation)
+      source_routes.objective_generation == matched.generation
+        and source_routes.generation == nil
+        and source_routes.members[1].objective_generation == matched.generation
+        and source_routes.members[1].generation == nil)
 
     local sellers = { { key = "w:sell:1:5", cat = "seller", cid = 88, qids = { 50 }, pos = pos(8) } }
     local source_marker, source_full = core.objective_markers(sellers, sellers, matched,
@@ -5965,8 +5968,13 @@ do
     check("objective routes: SPEC ancillary row does not need an undocumented position",
       #ancillary.members == 1 and ancillary.members[1].qid == 50
         and ancillary.members[1].cid == 99 and ancillary.members[1].pos == nil
-        and ancillary.members[1].target_key == core.target_key({ 50, "ancillary", 99 })
-        and type(ancillary.members[1].item_ids) == "table")
+        and ancillary.members[1].route_id == 99 and ancillary.members[1].kind == "npc"
+        and ancillary.members[1].direct == false
+        and type(ancillary.members[1].item_ids) == "table" and #ancillary.members[1].item_ids == 0
+        and ancillary.members[1].objective_generation == 9
+        and ancillary.members[1].generation == nil
+        and ancillary.members[1].target_key == nil
+        and ancillary.members[1].ordinal == nil and ancillary.members[1].place == nil)
 
     local marker_toggle_off = core.objective_markers({}, nil, { generation = 4, targets = {
       { key = tk({ 40, "task", 0, 1, "place" }), ordinal = 4, kind = "place",
@@ -5999,6 +6007,27 @@ do
       invalid_coverage[1].objective == nil and invalid_coverage[2].objective == nil
         and invalid_coverage[3].objective == nil and invalid_coverage[4].objective == nil
         and invalid_coverage[5].objective == nil)
+
+    local negative_place_task = { focus_epoch = 1, journal_generation = 1, need_generation = 1,
+      quests = { { qid = 40, task_index = 0, read_status = "ok", issued_npcs = {},
+        item_ownership = {}, guidance = {}, task_destinations = {
+          { kind = "place", task_index = 0, destination_index = 0,
+            target = { place = { kind = "key_location", key = -1 }, pos = pos(1) },
+            eligibility = "eligible" },
+        } } } }
+    local negative_place_snapshot = core.objective_snapshot(negative_place_task, nil, {}, core.target_registry_new())
+    local negative_place_record = { key = tk({ 40, "task", 0, 0, "place" }), ordinal = 1,
+      kind = "place", generation = negative_place_snapshot.generation,
+      target = { place = { kind = "key_location", key = -1 }, pos = pos(1) },
+      owners = { { qid = 40, task_index = 0 } }, item_ids = {}, eligibility = "eligible" }
+    local negative_place_view = { generation = negative_place_snapshot.generation,
+      targets = { negative_place_record } }
+    local negative_place_markers = core.objective_markers({}, nil, negative_place_view, {})
+    local negative_place_routes = core.objective_routes(negative_place_view, nil,
+      { npc_route_mode = 1, objective_places = true })
+    check("objective place domain: negative key_location is rejected by snapshot, markers, and routes",
+      #negative_place_snapshot.targets == 0 and #negative_place_markers == 0
+        and #negative_place_routes.members == 0)
 
     local legacy_only = core.compute(objadapter(), { focus_qids = { 10 }, focus_related_qids = {}, now = 0,
       objective_snapshot = { generation = 2, stamp = {}, targets = {} },
