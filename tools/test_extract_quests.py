@@ -2,10 +2,12 @@
 python -m unittest discover -s tools -p "test_extract_quests.py"
 """
 import contextlib
+import collections
 import io
 import json
 import os
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -107,11 +109,223 @@ class RelationTests(unittest.TestCase):
                           "dest": [{"cid": 101, "key": 2308}], "decoded": True})
 
 
+class ObjectiveExtractorTests(unittest.TestCase):
+    def test_ordered_tasks_guidance_and_recursive_reminders(self):
+        task_type = "app.QuestLogResource.QuestLogTaskData"
+        dest_type = "app.QuestLogResource.QuestLogTaskDestination"
+        concierge_type = "app.QuestLogConciergeData"
+        concierge_dest_type = "app.QuestLogConciergeData.Destination"
+        reminder_type = "app.ConciergeConditionQuestLogReminder"
+        task_condition_type = "app.QuestLogResource.QuestLogCondition"
+        qvar_type = "app.ConciergeConditionQuestVariable"
+        item_type = "app.ConciergeConditionItem"
+        or_type = "app.ConciergeConditionQuestVariableGroupOR"
+        insts = [
+            inst(1, task_type, _HasDestination=False, _Destinations=[]),
+            inst(2, task_type, _HasDestination=True, _Destinations=[R(3), R(4)]),
+            inst(3, dest_type, _SetDestination=False, _DestType=2, _CharaID=0xF0000001,
+                 _KeyLocation=0, _Area=17, _LocalArea=0, _HasShowConditions=True,
+                 _IsUpdateCondition=True, _ShowConditions=[R(5)], _HasDisplayConditions=True,
+                 _Conditions=[R(6)]),
+            inst(4, dest_type, _SetDestination=True, _DestType=3, _CharaID=101,
+                 _KeyLocation=2308, _Area=19, _LocalArea=42, _HasShowConditions=False,
+                 _IsUpdateCondition=False, _ShowConditions=[], _HasDisplayConditions=False,
+                 _Conditions=[]),
+            inst(5, task_condition_type, _QuestID=30150, _NameHash=4294967295,
+                 _ValueType=2, _CompareType=4, _BoolValue=True, _IntValue=-7),
+            inst(6, task_condition_type, _QuestID=-7, _NameHash=8, _ValueType=1,
+                 _CompareType=2, _BoolValue=False, _IntValue=0),
+            inst(7, reminder_type, _ReminderMsgId="00112233-4455-6677-8899-aabbccddeeff",
+                 _IsFinished=True, _IsOr=False, _ReminderList=[R(8), R(9)]),
+            inst(8, reminder_type, _ReminderMsgId="10112233-4455-6677-8899-aabbccddeeff",
+                 _IsFinished=False, _IsOr=True, _ReminderList=[R(10)]),
+            inst(9, reminder_type, _ReminderMsgId="20112233-4455-6677-8899-aabbccddeeff",
+                 _IsFinished=True, _IsOr=False, _ReminderList=[]),
+            inst(10, reminder_type, _ReminderMsgId="30112233-4455-6677-8899-aabbccddeeff",
+                 _IsFinished=False, _IsOr=False, _ReminderList=[]),
+            inst(11, or_type, _IsEnabled=True, _IsNot=True, Conditions=[R(22), R(23)]),
+            inst(12, qvar_type, _IsEnabled=True, _IsNot=False, _QuestID=7,
+                 _NameHash=8, _ValueType=1, _CompareType=2, _BoolValue=False, _IntValue=0),
+            inst(13, item_type, _IsEnabled=False, _IsNot=True, _ItemID=400,
+                 _SetNum=False, _Num=1),
+            inst(14, concierge_type, _TaskIndex=4, _Destinations=[R(15), R(16)]),
+            inst(15, concierge_dest_type, _GuidancePos=R(18), _ConciergeType=3,
+                 _CharaID=0xF0000001, _GimmickID=29, _IsCharaAtDestination=False,
+                 _DeliveryIsNot=True, _DeliveryCheckStorage=True, _DeliveryGroupID=-1,
+                 _DeliverData=[], _RegisterConditions=[R(7)], _Conditions=[R(11)]),
+            inst(16, concierge_dest_type, _GuidancePos=R(19), _ConciergeType=5,
+                 _CharaID=102, _GimmickID=-1, _IsCharaAtDestination=True,
+                 _DeliveryIsNot=False, _DeliveryCheckStorage=False, _DeliveryGroupID=2,
+                 _DeliverData=[], _RegisterConditions=[], _Conditions=[]),
+            inst(17, "app.QuestLogResource", _QuestId=30150,
+                 _TaskList=[R(1), R(2)], _ConciergeList=[R(14), R(24)]),
+            inst(18, "app.ClassSelector`1<app.GuidanceData>", _Process=R(20)),
+            inst(19, "app.ClassSelector`1<app.GuidanceData>", _Process=R(21)),
+            inst(20, "app.GuidanceKeyLocation", _KeyLocation=2308),
+            inst(21, "app.GuidanceLocalArea", LocalArea=0),
+            inst(22, "app.ClassSelector`1<app.ConciergeConditionBase>", _Process=R(12)),
+            inst(23, "app.ClassSelector`1<app.ConciergeConditionBase>", _Process=R(13)),
+            inst(24, concierge_type, _TaskIndex=4, _Destinations=[]),
+        ]
+
+        extension = eq.decode_journal_objectives(insts, {}, eq.kept_chara(CHARA) | {0xF0000001})
+        self.assertEqual(extension["tasks"], [
+            {"index": 0, "has_destination": False, "destinations": []},
+            {"index": 1, "has_destination": True, "destinations": [
+                {"index": 0, "set_destination": False, "dest_type": 2,
+                 "cid": 0xF0000001, "key": None, "area": 17, "local_area": 0,
+                 "has_show_conditions": True, "show_conditions": [
+                     {"kind": "quest_log_condition", "qid": 30150, "name_hash": 4294967295,
+                      "value_type": 2, "compare_type": 4, "bool_value": True, "int_value": -7}],
+                 "is_update_condition": True, "has_display_conditions": True,
+                 "display_conditions": [{"kind": "quest_log_condition", "qid": -7,
+                     "name_hash": 8, "value_type": 1, "compare_type": 2,
+                     "bool_value": False, "int_value": 0}]},
+                {"index": 1, "set_destination": True, "dest_type": 3, "cid": 101,
+                 "key": 2308, "area": 19, "local_area": 42,
+                 "has_show_conditions": False, "show_conditions": [],
+                 "is_update_condition": False, "has_display_conditions": False,
+                 "display_conditions": []}]},
+        ])
+        self.assertEqual(extension["guidance"][0]["task_index"], 4)
+        self.assertEqual([g["task_index"] for g in extension["guidance"]], [4, 4])
+        self.assertEqual([g["index"] for g in extension["guidance"]], [0, 1])
+        self.assertEqual([x["index"] for x in extension["guidance"][0]["destinations"]], [0, 1])
+        first = extension["guidance"][0]["destinations"][0]
+        self.assertEqual(first["target"], {"kind": "key_location", "key": 2308})
+        self.assertEqual(extension["guidance"][0]["destinations"][1]["target"],
+                         {"kind": "local_area", "local_area": 0})
+        self.assertEqual(first["cid"], 0xF0000001)
+        self.assertEqual(first["delivery"], {"is_not": True, "check_storage": True,
+            "group_id": -1, "refs": []})
+        self.assertEqual(first["register_conditions"][0], {
+            "kind": "quest_log_reminder", "reminder_msg_id": "00112233-4455-6677-8899-aabbccddeeff",
+            "is_finished": True, "is_or": False, "reminders": [
+                {"kind": "quest_log_reminder", "reminder_msg_id": "10112233-4455-6677-8899-aabbccddeeff",
+                 "is_finished": False, "is_or": True, "reminders": [
+                     {"kind": "quest_log_reminder", "reminder_msg_id": "30112233-4455-6677-8899-aabbccddeeff",
+                      "is_finished": False, "is_or": False, "reminders": []}]},
+                {"kind": "quest_log_reminder", "reminder_msg_id": "20112233-4455-6677-8899-aabbccddeeff",
+                 "is_finished": True, "is_or": False, "reminders": []}]})
+        self.assertEqual(first["conditions"][0], {"kind": "quest_variable_or", "enabled": True,
+            "is_not": True, "children": [
+                {"kind": "quest_variable", "enabled": True, "is_not": False, "qid": 7,
+                 "name_hash": 8, "value_type": 1, "compare_type": 2, "bool_value": False, "int_value": 0},
+                {"kind": "item", "enabled": False, "is_not": True, "item_id": 400,
+                 "set_num": False, "num": 1}]})
+
+    def test_unknown_condition_and_target_fail_closed(self):
+        unknown = inst(1, "app.ConciergeConditionFuture", _IsEnabled=True, _IsNot=False)
+        with self.assertRaises(ew.ExtractError):
+            eq.decode_condition(unknown, [])
+        bad_target = inst(2, "app.QuestLogConciergeData.Destination", _GuidancePos=None,
+                          _CharaID=101, _ConciergeType=0, _GimmickID=0,
+                          _IsCharaAtDestination=False, _DeliveryIsNot=False,
+                          _DeliveryCheckStorage=False, _DeliveryGroupID=-1,
+                          _DeliverData=[], _RegisterConditions=[], _Conditions=[])
+        with self.assertRaises(ew.ExtractError):
+            eq.decode_guidance_destination([bad_target], bad_target, 0, {})
+
+    def test_delivery_structure_and_reference_integrity(self):
+        insts = [
+            inst(1, "app.QuestContextData.DeliverData", _IDValue=30150,
+                 _Delivers=[R(2), R(3)]),
+            inst(2, "app.QuestDeliver", _SerialNum=71, _Item=R(4)),
+            inst(3, "app.QuestDeliver", _SerialNum=72, _Item=R(5)),
+            inst(4, "app.QuestDeliver.ItemData", _IncompletePossible=True,
+                 _Operator=1, _Value=[R(6), R(7)]),
+            inst(5, "app.QuestDeliver.ItemData", _IncompletePossible=False,
+                 _Operator=0, _Value=[R(8)]),
+            inst(6, "app.QuestDeliver.ItemData.ValueInfo", _ItemID=[378, 400], _Count=5,
+                 _IsAllItem=False, _IsInfinite=False, _IgnoreRestrictionItem=[9]),
+            inst(7, "app.QuestDeliver.ItemData.ValueInfo", _ItemID=[401], _Count=1,
+                 _IsAllItem=True, _IsInfinite=True, _IgnoreRestrictionItem=[]),
+            inst(8, "app.QuestDeliver.ItemData.ValueInfo", _ItemID=[500], _Count=2,
+                 _IsAllItem=False, _IsInfinite=False, _IgnoreRestrictionItem=[]),
+            inst(9, "app.QuestDeliverSelectData", _QuestID=30150, _Key=71),
+            inst(10, "app.QuestDeliverSelectData", _QuestID=30150, _Key=72),
+        ]
+        delivery_catalog, delivery_index = eq.decode_deliveries(insts)
+        deliveries = delivery_catalog[30150]
+        self.assertEqual(deliveries, [{"key": 71, "serial": 71, "incomplete_possible": True,
+            "operator": 1, "groups": [
+                {"index": 0, "item_ids": [378, 400], "count": 5, "is_all_item": False,
+                 "is_infinite": False, "ignore_restriction_items": [9]},
+                {"index": 1, "item_ids": [401], "count": 1, "is_all_item": True,
+                 "is_infinite": True, "ignore_restriction_items": []}]},
+            {"key": 72, "serial": 72, "incomplete_possible": False, "operator": 0,
+             "groups": [{"index": 0, "item_ids": [500], "count": 2, "is_all_item": False,
+                         "is_infinite": False, "ignore_restriction_items": []}]}])
+        refs = eq.decode_delivery_refs(insts, [R(9), R(10)], delivery_index)
+        self.assertEqual(refs, [{"qid": 30150, "key": 71, "serial": 71},
+                                {"qid": 30150, "key": 72, "serial": 72}])
+        for mutate in (
+                lambda: setattr(insts[8], "type", "app.OtherSelectData"),
+                lambda: setattr(insts[8], "fields", {"_QuestID": 30150, "_Key": 9}),
+                lambda: setattr(insts[8], "fields", {"_QuestID": 30151, "_Key": 0})):
+            before = [dict(x.fields) for x in insts]
+            mutate()
+            with self.assertRaises(ew.ExtractError):
+                eq.decode_delivery_refs(insts, [R(9)], delivery_index)
+            for x, fields in zip(insts, before):
+                x.fields = fields
+                x.type = "app.QuestDeliverSelectData" if x.idx == 9 else x.type
+
+    def test_duplicate_delivery_keys_and_serials_rejected(self):
+        base = [inst(1, "app.QuestContextData.DeliverData", _IDValue=30150,
+                     _Delivers=[R(2), R(3)]),
+                inst(2, "app.QuestDeliver", _SerialNum=71, _Item=R(4)),
+                inst(3, "app.QuestDeliver", _SerialNum=71, _Item=R(4)),
+                inst(4, "app.QuestDeliver.ItemData", _IncompletePossible=False,
+                     _Operator=0, _Value=[])]
+        with self.assertRaises(ew.ExtractError):
+            eq.decode_deliveries(base)
+        base[2].fields["_SerialNum"] = 72
+        base[0].fields["_Delivers"] = [R(2), R(2)]
+        with self.assertRaises(ew.ExtractError):
+            eq.decode_deliveries(base)
+
+    def test_emitted_delivery_serial_mismatch_is_rejected(self):
+        quests = {"30150": {"deliveries": [{"key": 71, "serial": 71}],
+            "guidance": [{"destinations": [{"delivery": {"refs": [
+                {"qid": 30150, "key": 71, "serial": 72}]}}]}]}}
+        with self.assertRaises(ew.ExtractError):
+            eq.validate_delivery_integrity(quests)
+
+    def test_non_item_delivery_is_diagnostic_only_and_cannot_resolve_guidance(self):
+        insts = [inst(1, "app.QuestContextData.DeliverData", _IDValue=30150,
+                      _Delivers=[R(2)]),
+                 inst(2, "app.QuestDeliver", _SerialNum=71, _Item=None),
+                 inst(3, "app.QuestDeliverSelectData", _QuestID=30150, _Key=71)]
+        diagnostics = collections.Counter()
+        definitions, index = eq.decode_deliveries(insts, diagnostics)
+        self.assertEqual(definitions, {30150: []})
+        self.assertEqual(diagnostics["delivery_records_without_item_data"], 1)
+        with self.assertRaises(ew.ExtractError):
+            eq.decode_delivery_refs(insts, [R(3)], index)
+
+    def test_zero_delivery_item_sentinel_is_counted_but_not_shipped(self):
+        insts = [inst(1, "app.QuestContextData.DeliverData", _IDValue=30150,
+                      _Delivers=[R(2)]),
+                 inst(2, "app.QuestDeliver", _SerialNum=71, _Item=R(3)),
+                 inst(3, "app.QuestDeliver.ItemData", _IncompletePossible=True,
+                      _Operator=0, _Value=[R(4)]),
+                 inst(4, "app.QuestDeliver.ItemData.ValueInfo", _ItemID=[0, 378],
+                      _Count=1, _IsAllItem=False, _IsInfinite=False,
+                      _IgnoreRestrictionItem=[])]
+        diagnostics = collections.Counter()
+        definitions, _ = eq.decode_deliveries(insts, diagnostics)
+        self.assertEqual(definitions[30150][0]["groups"][0]["item_ids"], [378])
+        self.assertEqual(diagnostics["delivery_item_id_zero_sentinels"], 1)
+
+
 H = {name: 0x5100 + n for n, name in enumerate((
     "app.quest.action.NpcControlParam", "app.quest.condition.CheckHasItemParam.ItemInfo",
     "app.QuestContextData.ContextData", "app.QuestContextData.DeliverData", "app.QuestDeliver",
     "app.QuestDeliver.ItemData", "app.QuestDeliver.ItemData.ValueInfo",
-    "app.QuestLogResource.QuestLogTaskDestination"))}
+    "app.QuestLogResource.QuestLogTaskDestination", "app.QuestLogResource",
+    "app.QuestLogResource.QuestLogTaskData", "app.QuestLogConciergeData",
+    "app.QuestDeliverSelectData"))}
 
 
 def _type(name, *fields):
@@ -125,11 +339,19 @@ QLAYOUTS = {"types": dict([
           ("CastNPCIDs", "U32", 4, 4, True)),
     _type("app.QuestContextData.DeliverData", ("_IDValue", "S32", 4, 4, False),
           ("_Delivers", "Object", 4, 4, True)),
-    _type("app.QuestDeliver", ("_Item", "Object", 4, 4, False)),
-    _type("app.QuestDeliver.ItemData", ("_Value", "Object", 4, 4, True)),
+    _type("app.QuestDeliver", ("_SerialNum", "S32", 4, 4, False), ("_Item", "Object", 4, 4, False)),
+    _type("app.QuestDeliver.ItemData", ("_Value", "Object", 4, 4, True),),
     _type("app.QuestDeliver.ItemData.ValueInfo", ("_ItemID", "S32", 4, 4, True)),
     _type("app.QuestLogResource.QuestLogTaskDestination", ("_CharaID", "U32", 4, 4, False),
           ("_KeyLocation", "S32", 4, 4, False)),
+    _type("app.QuestLogResource", ("_QuestId", "S32", 4, 4, False),
+          ("_TaskList", "Object", 4, 4, True), ("_ConciergeList", "Object", 4, 4, True)),
+    _type("app.QuestLogResource.QuestLogTaskData", ("_HasDestination", "Bool", 1, 1, False),
+          ("_Destinations", "Object", 4, 4, True)),
+    _type("app.QuestLogConciergeData", ("_TaskIndex", "S32", 4, 4, False),
+          ("_Destinations", "Object", 4, 4, True)),
+    _type("app.QuestDeliverSelectData", ("_QuestID", "S32", 4, 4, False),
+          ("_Key", "S32", 4, 4, False)),
 ]), "enums": {"CharacterID": CHARA}}
 
 
@@ -195,9 +417,7 @@ def e2e_files():
     context = usr_file([
         ctx_inst(20090, [101]), ctx_inst(20141, [102]),
         (h("app.QuestContextData.DeliverData"), [20141, [4]]),
-        (h("app.QuestDeliver"), [5]),
-        (h("app.QuestDeliver.ItemData"), [[6]]),
-        (h("app.QuestDeliver.ItemData.ValueInfo"), [[400]]),
+        (h("app.QuestDeliver"), [71, 0]),
     ])
     scene_a = scn_file([(h("app.quest.action.NpcControlParam"), [103]),
                         (h("app.quest.condition.CheckHasItemParam.ItemInfo"), [201])])
@@ -206,16 +426,22 @@ def e2e_files():
         eq.CONTEXT_PATH: context,
         eq.scene_path(20090): scene_a,
         eq.scene_path(10040): scene_b,
-        eq.journal_path(20090): usr_file([dest_inst(101, 2308)]),
-        eq.journal_path(30010): usr_file([dest_inst(104, 2400)]),
+        eq.journal_path(20090): usr_file([dest_inst(101, 2308),
+            (h("app.QuestLogResource"), [20090, [], []])]),
+        eq.journal_path(30010): usr_file([dest_inst(104, 2400),
+            (h("app.QuestLogResource"), [30010, [], []])]),
     }
 
 
-E2E_OUT = {"version": 1, "pak": "7:9", "quests": {
-    "10040": {"cast": [], "npcs": [], "items": [], "dest": [], "decoded": False},
+E2E_OUT = {"version": 2, "pak": "7:9", "quests": {
+    "10040": {"cast": [], "npcs": [], "items": [], "dest": [], "decoded": False,
+              "tasks": [], "guidance": [], "deliveries": []},
+    "30010": {"cast": [], "npcs": [], "items": [], "dest": [{"cid": 104, "key": 2400}],
+              "decoded": False, "tasks": [], "guidance": [], "deliveries": []},
     "20090": {"cast": [101], "npcs": [103], "items": [201], "dest": [{"cid": 101, "key": 2308}],
-              "decoded": True},
-    "20141": {"cast": [102], "npcs": [], "items": [400], "dest": [], "decoded": False}}}
+              "decoded": True, "tasks": [], "guidance": [], "deliveries": []},
+    "20141": {"cast": [102], "npcs": [], "items": [], "dest": [], "decoded": False,
+              "tasks": [], "guidance": [], "deliveries": []}}}
 
 
 class ExtractTests(unittest.TestCase):
@@ -236,11 +462,13 @@ class ExtractTests(unittest.TestCase):
     def test_extract_end_to_end(self):
         out, lines = eq.extract(self.game, "00", QLAYOUTS)
         self.assertEqual(out, E2E_OUT)
-        self.assertEqual(list(out["quests"]), ["10040", "20090", "20141"])
-        self.assertEqual(lines[0], "quests 3, scenes 2, decoded 1, journals 2")
-        self.assertEqual(lines[1], "entries: cast 2, npcs 1, items 2, dest 1")
-        self.assertTrue(lines[2].startswith("undecoded 10040: "))
-        self.assertEqual(len(lines), 3)
+        self.assertEqual(list(out["quests"]), ["10040", "20090", "20141", "30010"])
+        self.assertEqual(lines[0], "quests 4, scenes 2, decoded 1, journals 2")
+        self.assertEqual(lines[1], "entries: cast 2, npcs 1, items 1, dest 2")
+        self.assertEqual(lines[2], "objectives: tasks 0, task destinations 0, concierge records 0, guidance destinations 0, deliveries 0, delivery refs 0")
+        self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 0, records without quest id 0, records without item data 1, reward records 0, gift records 0, transformation records 0, eligible archive source descriptors 0")
+        self.assertTrue(lines[4].startswith("undecoded 10040: "))
+        self.assertEqual(len(lines), 5)
         self.assertEqual(FakePak.closed, 1)
         for p in (eq.scene_path(10000), eq.scene_path(39999), eq.journal_path(39999)):
             self.assertIn(p, FakePak.reads)
@@ -299,7 +527,135 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(code, 0)
         with open(out_path, encoding="utf-8") as f:
             self.assertEqual(json.load(f), E2E_OUT)
-        self.assertEqual(buf.getvalue().splitlines()[-1], "quests written: 3")
+        self.assertEqual(buf.getvalue().splitlines()[-1], "quests written: 4")
+
+    def _run_real_archive_oracle(self):
+        game = os.path.join(chr(67) + chr(58) + chr(92), "Program Files (x86)",
+                            "Steam", "steamapps", "common", "Dragons Dogma 2")
+        key_hex = eq.key_check.read_key()
+        if not os.path.isfile(os.path.join(game, ew.PAK_NAME)) or not key_hex:
+            self.skipTest("local game archive or local key unavailable")
+        out, lines = eq.extract(game, key_hex, eq.load_layouts())
+        artifact_path = os.path.join(os.path.dirname(eq.HERE), "data", "Clairvoyance_quests.json")
+        with open(artifact_path, encoding="utf-8") as artifact_file:
+            self.assertEqual(json.load(artifact_file), out)
+        self.assertEqual(out["pak"], "318966:1887616979")
+        self.assertEqual(lines[0], "quests 122, scenes 114, decoded 105, journals 86")
+        self.assertEqual(lines[2], "objectives: tasks 298, task destinations 341, concierge records 246, guidance destinations 240, deliveries 184, delivery refs 77")
+        self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 15, records without quest id 1, records without item data 0, reward records 496, gift records 0, transformation records 0, eligible archive source descriptors 0")
+        quests = out["quests"]
+        old = json.loads(subprocess.check_output(
+            ["git", "show", "e6dd0ea:data/Clairvoyance_quests.json"], text=True))
+        legacy_fields = ("cast", "npcs", "items", "dest", "decoded")
+        self.assertTrue(all(all(quest.get(field) == old["quests"].get(qid, {}).get(field)
+                                for field in legacy_fields)
+                            for qid, quest in quests.items()))
+        key_targets = area_targets = npc_links = ref_count = group_count = item_id_count = 0
+        delivery_count = 0
+        top_level_reminders = destinations_with_refs = false_with_dest = 0
+        show_flags = display_flags = update_flags = 0
+        multi_nonempty = multi_with_empty = 0
+        conditions = collections.Counter()
+        negative_task_condition_qids = 0
+
+        def walk(value):
+            nonlocal negative_task_condition_qids
+            if isinstance(value, dict):
+                if "kind" in value:
+                    conditions[value["kind"]] += 1
+                    if value["kind"] == "quest_log_condition" and value["qid"] < 0:
+                        negative_task_condition_qids += 1
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        for qid, quest in quests.items():
+            deliveries = {d["key"]: d for d in quest["deliveries"]}
+            self.assertEqual(len(deliveries), len(quest["deliveries"]))
+            self.assertEqual(len({d["serial"] for d in quest["deliveries"]}), len(quest["deliveries"]))
+            delivery_count += len(deliveries)
+            task_sets = []
+            nonempty_task_sets = []
+            for delivery in quest["deliveries"]:
+                for group in delivery["groups"]:
+                    group_count += 1
+                    item_id_count += len(group["item_ids"])
+                    self.assertTrue(all(type(item_id) is int and 0 < item_id <= 2 ** 31 - 1
+                                        for item_id in group["item_ids"]))
+            for task in quest["tasks"]:
+                self.assertEqual(task["index"], quest["tasks"].index(task))
+                task_set = frozenset((d["cid"], d["key"]) for d in task["destinations"]
+                                     if d["cid"] is not None or d["key"] is not None)
+                task_sets.append(task_set)
+                if task_set:
+                    nonempty_task_sets.append(task_set)
+                if not task["has_destination"] and task_set:
+                    false_with_dest += 1
+                for destination in task["destinations"]:
+                    show_flags += destination["has_show_conditions"]
+                    display_flags += destination["has_display_conditions"]
+                    update_flags += destination["is_update_condition"]
+                    walk(destination["show_conditions"])
+                    walk(destination["display_conditions"])
+            if len(set(nonempty_task_sets)) > 1:
+                multi_nonempty += 1
+            if len(set(task_sets)) > 1:
+                multi_with_empty += 1
+            for concierge in quest["guidance"]:
+                self.assertEqual(concierge["index"], quest["guidance"].index(concierge))
+                for destination in concierge["destinations"]:
+                    if destination["target"]["kind"] == "key_location":
+                        key_targets += 1
+                    else:
+                        self.assertEqual(destination["target"]["kind"], "local_area")
+                        area_targets += 1
+                    npc_links += destination["cid"] is not None
+                    top_level_reminders += sum(c.get("kind") == "quest_log_reminder"
+                                               for c in destination["register_conditions"])
+                    destinations_with_refs += bool(destination["delivery"]["refs"])
+                    walk(destination["register_conditions"])
+                    walk(destination["conditions"])
+                    for ref in destination["delivery"]["refs"]:
+                        ref_count += 1
+                        resolved = quests[str(ref["qid"])]["deliveries"]
+                        match = next(d for d in resolved if d["key"] == ref["key"])
+                        self.assertEqual(match["serial"], ref["serial"])
+        self.assertEqual((key_targets, area_targets, npc_links, top_level_reminders, ref_count),
+                         (226, 14, 144, 51, 77))
+        self.assertEqual((multi_nonempty, multi_with_empty, false_with_dest,
+                          show_flags, display_flags, update_flags, destinations_with_refs),
+                         (57, 61, 52, 55, 27, 0, 73))
+        self.assertEqual((group_count, item_id_count), (194, 1082))
+        self.assertEqual(delivery_count, 184)
+        self.assertEqual(conditions, collections.Counter({"quest_log_condition": 405,
+            "quest_log_reminder": 53, "quest_variable": 103, "item": 10,
+            "quest_variable_or": 6}))
+        self.assertEqual(negative_task_condition_qids, 260)
+        self.assertNotIn("sources", out)
+        self.assertTrue(all("sources" not in quest for quest in quests.values()))
+
+        spellbound = quests["30150"]
+        self.assertEqual([task["index"] for task in spellbound["tasks"]],
+                         list(range(len(spellbound["tasks"]))))
+        self.assertGreaterEqual(len(spellbound["tasks"]), 2)
+        self.assertFalse(any(d["key"] == 3262 for d in spellbound["tasks"][0]["destinations"]))
+        self.assertTrue(any(d["key"] == 3262 for d in spellbound["tasks"][1]["destinations"]))
+        refs = [ref for g in spellbound["guidance"] for d in g["destinations"]
+                for ref in d["delivery"]["refs"]]
+        self.assertEqual(len(refs), 4)
+        self.assertEqual(len({(r["qid"], r["key"]) for r in refs}), 1)
+        delivery = next(d for d in quests[str(refs[0]["qid"])]["deliveries"]
+                        if d["key"] == refs[0]["key"])
+        self.assertEqual(delivery["operator"], 0)
+        self.assertEqual(len(delivery["groups"]), 5)
+        self.assertEqual(sum(len(g["item_ids"]) for g in delivery["groups"]), 10)
+
+
+class RealDataOracleTests(unittest.TestCase):
+    def test_real_archive_oracle(self):
+        ExtractTests._run_real_archive_oracle(self)
 
 
 if __name__ == "__main__":
