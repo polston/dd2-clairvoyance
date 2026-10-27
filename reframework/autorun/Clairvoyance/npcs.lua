@@ -563,11 +563,20 @@ function M.parse_quests(t)
     if not ids or #ids == 0 or not inputs then return nil end
     local ref = copy_plain(s.evidence.ref, {}, 0)
     if not ref then return nil end
+    local function source_place_target(v)
+      local place = place_target(v)
+      if place then return place end
+      if type(v) == "table" and v.kind == "position" then
+        local pos = position(v)
+        if pos then return { kind = "position", x = pos.x, y = pos.y, z = pos.z } end
+      end
+      return nil
+    end
     local target = s.target
     if type(target) ~= "table" or (target.cid == nil and target.place == nil)
         or (target.cid ~= nil and target.place ~= nil)
         or (target.cid ~= nil and not is_integer(target.cid, 1, 4294967295)) then return nil end
-    local place = target.place and place_target(target.place) or nil
+    local place = target.place and source_place_target(target.place) or nil
     if target.place ~= nil and not place then return nil end
     return { id = s.id, kind = s.kind, item_ids = ids,
       target = { cid = target.cid, place = place },
@@ -581,28 +590,49 @@ function M.parse_quests(t)
     return true
   end
   local conflicts, source_seen = {}, {}
-  local catalog_sources = {}
-  if t.sources ~= nil then
-    if dense_array(t.sources) then
-      for i, raw in ipairs(t.sources) do
-        local s = source_record(raw)
-        if s then
-          local old = source_seen[s.id]
-          if old then
-            local same = same_value(old, s)
-            if not same then conflicts[s.id] = true end
-          else source_seen[s.id] = s; catalog_sources[#catalog_sources + 1] = s end
-        else fail("source " .. i .. " malformed") end
-      end
-    else fail("sources malformed") end
+  local function collect_sources(raw, label)
+    local out, local_seen = {}, {}
+    if raw == nil then return out end
+    if not dense_array(raw) then fail(label .. " malformed"); return out end
+    for i, value in ipairs(raw) do
+      local source = source_record(value)
+      if source then
+        local old = source_seen[source.id]
+        if old and not same_value(old, source) then conflicts[source.id] = true
+        elseif old == nil then source_seen[source.id] = source end
+        if not local_seen[source.id] then
+          local_seen[source.id] = true
+          out[#out + 1] = source
+        end
+      else fail(label .. " " .. i .. " malformed") end
+    end
+    return out
   end
-  for id in pairs(conflicts) do fail("source id conflicts: " .. id) end
-  local filtered_sources = {}
-  for _, s in ipairs(catalog_sources) do if not conflicts[s.id] then filtered_sources[#filtered_sources + 1] = s end end
+  local catalog_sources = collect_sources(t.sources, "source")
+  local quest_sources = {}
   for key, raw in pairs(t.quests) do
     local qid = canonical_qid(key)
     if qid and type(raw) == "table" then
-      local entry = { tasks = task_array(raw.tasks, qid), guidance = {}, deliveries = {}, sources = {} }
+      quest_sources[qid] = collect_sources(raw.sources, "quest " .. qid .. " source")
+    end
+  end
+  for id in pairs(conflicts) do fail("source id conflicts: " .. id) end
+  local function without_conflicts(sources)
+    local out = {}
+    for _, source in ipairs(sources) do
+      if not conflicts[source.id] then out[#out + 1] = source end
+    end
+    return out
+  end
+  local filtered_sources = without_conflicts(catalog_sources)
+  for qid, sources in pairs(quest_sources) do
+    quest_sources[qid] = without_conflicts(sources)
+  end
+  for key, raw in pairs(t.quests) do
+    local qid = canonical_qid(key)
+    if qid and type(raw) == "table" then
+      local entry = { tasks = task_array(raw.tasks, qid), guidance = {}, deliveries = {},
+        sources = quest_sources[qid] or {} }
       local deliveries = delivery_array(raw.deliveries)
       if not deliveries then fail("quest " .. qid .. " deliveries malformed") else entry.deliveries = deliveries end
       if not dense_array(raw.guidance) then
@@ -663,7 +693,7 @@ function M.parse_quests(t)
         end)
         if not guidance then fail("quest " .. qid .. " guidance malformed") else entry.guidance = guidance end
       end
-      if entry.tasks or #entry.guidance > 0 or #entry.deliveries > 0 then
+      if entry.tasks or #entry.guidance > 0 or #entry.deliveries > 0 or #entry.sources > 0 then
         catalog_quests[qid] = entry
       end
     end

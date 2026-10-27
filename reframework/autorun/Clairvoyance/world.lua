@@ -262,7 +262,8 @@ function M.new(a, reads, io)
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
       target_member = nil, members = {}, member_of = {}, objective_generation = nil,
-      objective_publication = nil, objective_source_observations = {}, route_cache = {},
+      objective_publication = nil, objective_place_observation = nil,
+      objective_source_observations = {}, route_cache = {},
       route_fail = {}, fail_seq = 0,
       -- SPEC 32.14: sticky route colour slots; slot_of (cid -> slot) and
       -- slot_cid (slot -> cid) together are the spec's S.slots
@@ -2388,11 +2389,8 @@ function M.new(a, reads, io)
   function w:input() return input_tbl end
 
   function w:objective_place_snapshot(task_snapshot)
-    local generation = type(task_snapshot) == "table"
+    local journal_generation = type(task_snapshot) == "table"
       and task_snapshot.journal_generation or nil
-    local function unknown(reason)
-      return { generation = generation or 0, status = "unknown", reason = reason, places = {} }
-    end
     local function array(value)
       if type(value) ~= "table" then return nil end
       local n, count = #value, 0
@@ -2408,7 +2406,46 @@ function M.new(a, reads, io)
     local function copy_pos(pos)
       return valid_pos(pos) and { x = pos.x, y = pos.y, z = pos.z } or nil
     end
-    if not integer(generation, 1) or type(task_snapshot) ~= "table"
+    local function clone(value, seen)
+      if type(value) ~= "table" then return value end
+      seen = seen or {}
+      if seen[value] ~= nil then return seen[value] end
+      local out = {}
+      seen[value] = out
+      for k, v in pairs(value) do out[clone(k, seen)] = clone(v, seen) end
+      return out
+    end
+    local function same(a0, b0, pairs_seen)
+      if type(a0) ~= type(b0) then return false end
+      if type(a0) ~= "table" then return a0 == b0 end
+      pairs_seen = pairs_seen or {}
+      local seen = pairs_seen[a0]
+      if seen ~= nil then return seen == b0 end
+      pairs_seen[a0] = b0
+      for k, v in pairs(a0) do
+        if rawget(b0, k) == nil and v ~= nil then return false end
+        if not same(v, b0[k], pairs_seen) then return false end
+      end
+      for k, v in pairs(b0) do
+        if rawget(a0, k) == nil and v ~= nil then return false end
+      end
+      return true
+    end
+    local function publish(status, reason, places)
+      local evidence = { status = status, reason = reason, places = clone(places) }
+      for _, place in ipairs(evidence.places) do place.generation = nil end
+      local state = S.objective_place_observation
+      local generation = state and state.generation or 1
+      if state ~= nil and not same(state.value, evidence) then
+        generation = math.min(2147483647, generation + 1)
+      end
+      S.objective_place_observation = { generation = generation, value = clone(evidence) }
+      local out = clone(places)
+      for _, place in ipairs(out) do place.generation = generation end
+      return { generation = generation, status = status, reason = reason, places = out }
+    end
+    local function unknown(reason) return publish("unknown", reason, {}) end
+    if not integer(journal_generation, 1) or type(task_snapshot) ~= "table"
         or array(task_snapshot.quests) == nil then
       return unknown("task_snapshot_unavailable")
     end
@@ -2441,7 +2478,7 @@ function M.new(a, reads, io)
           target = { kind = place.kind,
             key = place.kind == "key_location" and place.key or nil,
             local_area = place.kind == "local_area" and place.local_area or nil },
-          pos = pos, eligibility = "eligible", generation = generation }
+          pos = pos, eligibility = "eligible" }
       end
       return true
     end
@@ -2484,7 +2521,7 @@ function M.new(a, reads, io)
       end
     end
     if not wanted or #places == 0 then return unknown("current_place_unavailable") end
-    return { generation = generation, status = "ok", places = places }
+    return publish("ok", nil, places)
   end
 
   function w:objective_source_snapshots(objective_catalog, task_snapshot)
@@ -2653,6 +2690,9 @@ function M.new(a, reads, io)
       if preserve[m.cid] == nil and m.objective == true
           and type(m.target_key) == "string" and type(m.ordinal) == "number" then
         preserve[m.cid] = { kind = "objective", target_key = m.target_key, ordinal = m.ordinal }
+      elseif preserve[m.cid] == nil and m.objective == true
+          and m.target_key == nil and m.ordinal == nil and m.direct ~= true then
+        preserve[m.cid] = { kind = "startable" }
       elseif preserve[m.cid] == nil and m.objective == false
           and m.target_key == nil and m.ordinal == nil and m.direct ~= true then
         preserve[m.cid] = { kind = "ancillary" }
@@ -2666,7 +2706,9 @@ function M.new(a, reads, io)
         and identity.target_key == m.target_key and identity.ordinal == m.ordinal
       local ancillary = identity ~= nil and identity.kind == "ancillary" and m.objective == false
         and m.target_key == nil and m.ordinal == nil and m.direct ~= true
-      if not exact and not ancillary then
+      local startable = identity ~= nil and identity.kind == "startable" and m.objective == true
+        and m.target_key == nil and m.ordinal == nil and m.direct ~= true
+      if not exact and not ancillary and not startable then
         free_slot(cid)
       end
       local place_from = S.place_from[cid]
@@ -2760,14 +2802,17 @@ function M.new(a, reads, io)
       for k in pairs(e) do
         if k ~= "route_id" and k ~= "cid" and k ~= "place" and k ~= "qid" and k ~= "kind"
             and k ~= "direct" and k ~= "target_key" and k ~= "ordinal" and k ~= "name"
-            and k ~= "pos" and k ~= "item_ids" and k ~= "objective_generation" then
+            and k ~= "pos" and k ~= "item_ids" and k ~= "objective"
+            and k ~= "objective_generation" then
           return nil, generation, false
         end
       end
       local ancillary = e.target_key == nil and e.ordinal == nil
       local m
       if e.direct == true then
-        if ancillary or not route_key_valid(e.target_key) or not route_positive(e.ordinal, 1099511627775)
+        if ancillary or (e.objective ~= nil and e.objective ~= true)
+            or not route_key_valid(e.target_key)
+            or not route_positive(e.ordinal, 1099511627775)
             or core.objective_direct_route_id(e.ordinal) ~= e.route_id
             or e.cid ~= nil or e.place ~= 0 or not valid_pos(e.pos)
             or (e.kind ~= "place" and e.kind ~= "source") then
@@ -2780,7 +2825,10 @@ function M.new(a, reads, io)
           objective_generation = generation, pos = pcopy(e.pos), item_ids = route_ids_copy(e.item_ids) }
       elseif ancillary then
         if e.direct ~= false or e.kind ~= "npc" or not route_positive(e.cid, 4294967295)
-            or e.route_id ~= e.cid or e.place ~= nil or #e.item_ids ~= 0 then
+            or e.route_id ~= e.cid or e.place ~= nil or #e.item_ids ~= 0
+            or (e.objective ~= nil and type(e.objective) ~= "boolean")
+            or (e.objective == true and not valid_pos(e.pos))
+            or (e.pos ~= nil and not valid_pos(e.pos)) then
           return nil, generation, false
         end
         local name = e.name
@@ -2788,10 +2836,12 @@ function M.new(a, reads, io)
           local ok_name, value = pcall(a.npc_name, e.cid)
           name = ok_name and type(value) == "string" and value or ("NPC " .. tostring(e.cid))
         end
-        m = { cid = e.cid, name = name, objective = false, qid = e.qid, kind = "npc",
+        m = { cid = e.cid, name = name, objective = e.objective == true,
+          qid = e.qid, kind = "npc", pos = valid_pos(e.pos) and pcopy(e.pos) or nil,
           objective_generation = generation, item_ids = {} }
       else
-        if e.direct ~= false or not route_key_valid(e.target_key)
+        if e.direct ~= false or (e.objective ~= nil and e.objective ~= true)
+            or not route_key_valid(e.target_key)
             or not route_positive(e.ordinal, 1099511627775) or e.kind ~= "npc"
             or not route_positive(e.cid, 4294967295) or e.route_id ~= e.cid or e.place ~= e.cid
             or not valid_pos(e.pos) then
@@ -2821,7 +2871,7 @@ function M.new(a, reads, io)
     return out
   end
   local objective_member_scalars = { "route_id", "cid", "place", "qid", "kind", "direct",
-    "target_key", "ordinal", "name", "objective_generation" }
+    "target_key", "ordinal", "name", "objective", "objective_generation" }
   local function same_objective_publication(publication)
     if S.objective_publication == nil or publication.objective_generation ~= S.objective_generation then
       return false
@@ -2837,7 +2887,8 @@ function M.new(a, reads, io)
       for k in pairs(member) do
         if k ~= "route_id" and k ~= "cid" and k ~= "place" and k ~= "qid" and k ~= "kind"
             and k ~= "direct" and k ~= "target_key" and k ~= "ordinal" and k ~= "name"
-            and k ~= "pos" and k ~= "item_ids" and k ~= "objective_generation" then return false end
+            and k ~= "pos" and k ~= "item_ids" and k ~= "objective"
+            and k ~= "objective_generation" then return false end
       end
       for k in pairs(old) do if rawget(member, k) == nil then return false end end
       for _, key in ipairs(objective_member_scalars) do
@@ -2934,8 +2985,12 @@ function M.new(a, reads, io)
         if type(e) ~= "table" or e.cid ~= m.cid or e.place ~= m.place
             or (any_direct and not same_direct_payload(e, m))
             or (not any_direct and (e.name ~= m.name
+              or e.objective ~= m.objective or e.qid ~= m.qid or e.kind ~= m.kind
               or e.target_key ~= m.target_key or e.ordinal ~= m.ordinal
-              or e.objective_generation ~= m.objective_generation)) then
+              or e.objective_generation ~= m.objective_generation
+              or (e.pos == nil) ~= (m.pos == nil)
+              or (e.pos ~= nil and (not valid_pos(e.pos) or not valid_pos(m.pos)
+                or e.pos.x ~= m.pos.x or e.pos.y ~= m.pos.y or e.pos.z ~= m.pos.z)))) then
           same = false
           break
         end

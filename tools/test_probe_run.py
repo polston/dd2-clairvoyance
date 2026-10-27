@@ -1,6 +1,7 @@
 """Tests for the local in-game probe runner safety boundary."""
 
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -41,6 +42,99 @@ class ProbeSourceSafety(unittest.TestCase):
         for source, expected in cases.items():
             with self.subTest(source=source):
                 self.assertEqual(probe_run.unsafe_probe_call(source), expected)
+
+    def test_dynamic_and_indirect_engine_access_is_rejected(self):
+        cases = {
+            'return sdk["create_" .. "resource"]("x")':
+                "dynamic sdk access",
+            'local s = sdk; return s.create_resource("x")':
+                "indirect sdk access",
+            'local f = o.call; return f(o, "set_Enabled", false)':
+                "indirect managed call",
+            'local method = "set_Enabled"; return o:call(method, false)':
+                "dynamic managed method",
+            'local method = "set_Enabled"; return o["call"](o, method, false)':
+                "dynamic managed method",
+            'return o[method](o)': "dynamic member call",
+            'return rawget(_G, "sdk").create_resource("x")':
+                "indirect global access",
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(probe_run.unsafe_probe_call(source), expected)
+
+    def test_secondary_code_loading_is_rejected(self):
+        cases = {
+            'return load("return sdk.create_resource(\\"x\\")")()': "load",
+            'return loadfile("probe.lua")()': "loadfile",
+            'return dofile("probe.lua")': "dofile",
+            'return require(module_name)': "require",
+            'return require("not.reviewed")': "require",
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(probe_run.unsafe_probe_call(source), expected)
+
+    def test_reviewed_read_only_globals_remain_allowed(self):
+        source = """
+local D = _G.QNML_DEBUG
+local qlm = sdk.get_managed_singleton("app.QuestLogManager")
+local td = sdk.find_type_definition("app.QuestLogManager")
+local world = require("Clairvoyance.world")
+return D, qlm, td, world
+"""
+        self.assertIsNone(probe_run.unsafe_probe_call(source))
+
+    def test_phase0_uses_the_reviewed_managed_call_capability(self):
+        path = os.path.join(
+            os.path.dirname(__file__), "probe", "objective_phase0.lua")
+        with open(path, encoding="utf-8") as stream:
+            source = stream.read()
+        self.assertIn("reviewed_call", source)
+        self.assertIn("reviewed_invoke", source)
+        self.assertNotRegex(source, r":call\s*\(\s*name\b")
+        tokens = probe_run._lua_tokens(source)
+        needed = set()
+        for pos, token in enumerate(tokens):
+            if token in probe_run.REVIEWED_CAPABILITIES:
+                self.assertLess(pos + 1, len(tokens))
+                self.assertEqual(tokens[pos + 1], "(")
+                args = probe_run._call_arguments(tokens, pos + 1)
+                index = probe_run.REVIEWED_CAPABILITIES[token]
+                self.assertGreater(len(args), index)
+                self.assertEqual(len(args[index]), 1)
+                self.assertIsInstance(args[index][0], tuple)
+                needed.add(args[index][0][1])
+        harness_path = os.path.join(
+            os.path.dirname(__file__), "probe", "qnml_check.lua")
+        with open(harness_path, encoding="utf-8") as stream:
+            harness = stream.read()
+        allowed = set(re.findall(r'\["([^"]+)"\]\s*=\s*true', harness))
+        self.assertEqual(needed, probe_run.REVIEWED_METHODS)
+        self.assertEqual(needed - allowed, set())
+
+    def test_reviewed_capabilities_require_direct_allowlisted_literals(self):
+        rejected = {
+            'return reviewed_call(o, "set_Enabled", false)':
+                "unreviewed managed method",
+            'return reviewed_call(o, method)':
+                "unreviewed managed method",
+            'local f = reviewed_call; return f(o, "get_Count")':
+                "indirect reviewed call",
+            'return reviewed_invoke(method, o, name)':
+                "unreviewed managed method",
+            'local f = reviewed_invoke; return f(method, o, "getContext")':
+                "indirect reviewed call",
+        }
+        for source, expected in rejected.items():
+            with self.subTest(source=source):
+                self.assertEqual(probe_run.unsafe_probe_call(source), expected)
+        for source in (
+                'return reviewed_call(o, "get_Count")',
+                'return reviewed_try_call(o, "get_Count")',
+                'return reviewed_invoke(method, o, "getContext")'):
+            with self.subTest(source=source):
+                self.assertIsNone(probe_run.unsafe_probe_call(source))
 
     def test_comments_preserve_token_boundaries(self):
         source = 'return--[[ gap ]]sdk.create_resource("x")'
@@ -97,10 +191,10 @@ class ProbeSourceSafety(unittest.TestCase):
 
         # Native evaluator exceptions and original destination identity/gates
         # stay visible instead of being collapsed into an ordinary nil.
-        self.assertIn("local function call_result", source)
-        self.assertIn('call_result(dest, "evaluateShow")', source)
-        self.assertIn('call_result(task, "getActiveDestinations")', source)
-        self.assertIn('call_result(dest, "evaluateRegisterCondition", qid)', source)
+        self.assertNotIn("local function call_result", source)
+        self.assertIn('reviewed_try_call(dest, "evaluateShow")', source)
+        self.assertIn('reviewed_try_call(task, "getActiveDestinations")', source)
+        self.assertIn('reviewed_try_call(dest, "evaluateRegisterCondition", qid)', source)
         self.assertIn('F(task, "_HasDestination")', source)
         self.assertIn('F(dest, "_SetDestination")', source)
         self.assertIn('F(dest, "_HasShowConditions")', source)
@@ -111,10 +205,10 @@ class ProbeSourceSafety(unittest.TestCase):
         # Availability evidence uses the repository's measured read paths and
         # cannot turn unreadable identifiers/state into a positive example.
         self.assertIn('F(gimmick, "ItemId")', source)
-        self.assertIn('C(gimmick, "get_GmContext")', source)
+        self.assertIn('reviewed_call(gimmick, "get_GmContext")', source)
         self.assertIn("local function item_context_like", source)
         self.assertIn("local function save_item_contexts", source)
-        self.assertIn('C(gimmick, "get_UniqId")', source)
+        self.assertIn('reviewed_call(gimmick, "get_UniqId")', source)
         self.assertIn("debug.getupvalue(reads.save_records", source)
         self.assertIn('F(value, "UniqueID")', source)
         self.assertIn('"holder_unique_id"', source)

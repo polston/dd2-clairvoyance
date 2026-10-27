@@ -5664,9 +5664,11 @@ do
         and snapshots.targets[1].owners[1].qid ~= snapshots.targets[2].owners[1].qid)
     local two_item_routes = core.objective_routes(snapshots, nil, { npc_route_mode = 1,
       objective_places = true, focus_order = { 11, 10 }, route_cap = 8 })
-    check("objective routes: multiple needed items remain separate ordinal targets in item order",
-      #two_item_routes.members == 2 and two_item_routes.members[1].item_ids[1] == 1
-        and two_item_routes.members[2].item_ids[1] == 2
+    check("objective routes: sources follow active-focus order, then item id within each quest",
+      #two_item_routes.members == 2 and two_item_routes.members[1].qid == 11
+        and two_item_routes.members[1].item_ids[1] == 2
+        and two_item_routes.members[2].qid == 10
+        and two_item_routes.members[2].item_ids[1] == 1
         and two_item_routes.members[1].ordinal ~= two_item_routes.members[2].ordinal)
     local capped_routes, capped_shown, capped_total = core.objective_routes(snapshots, nil,
       { npc_route_mode = 1, objective_places = true, focus_order = { 11, 10 }, route_cap = 1 })
@@ -5675,15 +5677,23 @@ do
     local unchanged = pos(5)
     local only_unknown = core.objective_snapshot({ generation = 6, quests = {
         { qid = 12, task_index = 1, read_status = "unknown", reason = "journal unavailable",
-          issued_npcs = {}, task_destinations = {}, guidance = {}, item_ownership = {
+          issued_npcs = {
+            { kind = "npc", target = { cid = 120, pos = pos(12) }, eligibility = "eligible" },
+          }, task_destinations = {
+            { kind = "npc", task_index = 1, destination_index = 1,
+              target = { cid = 121, pos = pos(13) }, eligibility = "eligible" },
+          }, guidance = {}, item_ownership = {
             { item_id = 3, count = 1, proof_kind = "condition", eligibility = "eligible" },
           } },
       } }, { generation = 3, status = "unknown", places = {} }, {
         { provider = "chest", generation = 9, status = "unknown", reason = "open state unreadable",
           candidates = { { id = "must-ignore", item_ids = { 3 }, target = {}, pos = pos(1), eligibility = "eligible" } } },
       }, core.target_registry_new())
-    check("objective snapshot: unknown task/provider never publishes eligible candidates",
-      #only_unknown.targets == 0 and #only_unknown.diagnostics >= 2
+    check("objective snapshot: unknown task keeps independent issued NPCs but rejects task and item evidence",
+      #only_unknown.targets == 1 and only_unknown.targets[1].provider == "issued_npc"
+        and only_unknown.targets[1].target.cid == 120
+        and only_unknown.targets[1].owners[1].task_index == nil
+        and #only_unknown.diagnostics >= 2
         and unchanged.x == 5)
     local base = { { key = "c:77", cat = "quest", qids = { 10 }, cid = 77, pos = pos(1) } }
     local fullmap = { { key = "c:77", cat = "quest", qids = { 10 }, cid = 77, pos = pos(1) } }
@@ -5725,7 +5735,7 @@ do
       startable_marker ~= nil and startable_marker.cat == "startable"
         and startable_route ~= nil and startable_route.qid == 40
         and startable_route.kind == "npc" and startable_route.target_key == nil
-        and startable_route.place == nil)
+        and startable_route.place == nil and startable_route.objective == true)
     local ancillary_result = core.compute(fake_adapter({ progressing = { 41 },
       hints = { [41] = 96 }, names = { [41] = "Forty One" }, npc_pos = { [96] = pos(96) } }), {
       focus_qids = { 41 }, focus_related_qids = { 41 }, now = 0,
@@ -5980,7 +5990,7 @@ do
     local source_registry = core.target_registry_new()
     local mismatch = core.objective_snapshot(source_task, nil, {
       { provider = "seller", generation = 2, status = "ok", candidates = {
-        { id = "offer", kind = "shop_stock", item_ids = { 5 }, target = { cid = 88 },
+        { id = "w:sell:1:5", kind = "shop_stock", item_ids = { 5 }, target = { cid = 88 },
           eligibility = "eligible", pos = pos(8), generation = 1 },
       } },
     }, source_registry)
@@ -5988,7 +5998,7 @@ do
       #mismatch.targets == 0 and type(mismatch.generation) == "number" and mismatch.generation > 0)
     local no_candidate_generation = core.objective_snapshot(source_task, nil, {
       { provider = "seller", generation = 2, status = "ok", candidates = {
-        { id = "offer", kind = "shop_stock", item_ids = { 5 }, target = { cid = 88 },
+        { id = "w:sell:1:5", kind = "shop_stock", item_ids = { 5 }, target = { cid = 88 },
           eligibility = "eligible", pos = pos(8) },
       } },
     }, core.target_registry_new())
@@ -5996,13 +6006,13 @@ do
       #no_candidate_generation.targets == 0)
     local matched = core.objective_snapshot(source_task, nil, {
       { provider = "seller", generation = 2, status = "ok", candidates = {
-        { id = "offer", kind = "shop_stock", item_ids = { 5, 6 }, target = { cid = 88 },
+        { id = "w:sell:1:5", kind = "shop_stock", item_ids = { 5, 6 }, target = { cid = 88 },
           eligibility = "eligible", pos = pos(8), generation = 2 },
       } },
     }, source_registry)
     local stable = core.objective_snapshot(source_task, nil, {
       { provider = "seller", generation = 2, status = "ok", candidates = {
-        { id = "offer", kind = "shop_stock", item_ids = { 5 }, target = { cid = 88 },
+        { id = "w:sell:1:5", kind = "shop_stock", item_ids = { 5 }, target = { cid = 88 },
           eligibility = "eligible", pos = pos(8), generation = 2 },
       } },
     }, source_registry)
@@ -6020,12 +6030,18 @@ do
         and source_routes.members[1].objective_generation == matched.generation
         and source_routes.members[1].generation == nil)
 
-    local sellers = { { key = "w:sell:1:5", cat = "seller", cid = 88, qids = { 50 }, pos = pos(8) } }
+    local sellers = {
+      { key = "w:sell:1:5", cat = "seller", cid = 88, qids = { 50 }, pos = pos(8) },
+      { key = "w:sell:2:5", cat = "seller", cid = 88, qids = {}, pos = pos(8) },
+    }
     local source_marker, source_full = core.objective_markers(sellers, sellers, matched,
       { names = { targets = { { key = matched.targets[1].key, name = "Offer" } } }, objective_places = false })
-    check("objective markers: CID source reuses seller marker independent of route toggle",
-      #source_marker == 1 and source_marker[1].key == "w:sell:1:5"
-        and source_marker[1].objective == true and source_marker[1].label ~= "Objective: offer")
+    check("objective markers: source reuses only its exact marker identity, never a same-CID sibling",
+      #source_marker == 2 and #source_full == 2
+        and source_marker[1].key == "w:sell:1:5" and source_marker[1].objective == true
+        and source_marker[2].key == "w:sell:2:5" and source_marker[2].objective == nil
+        and source_full[1].objective == true and source_full[2].objective == nil
+        and source_marker[1].label ~= "Objective: w:sell:1:5")
     check("objective markers: every covering target owner is unioned",
       source_marker[1] ~= nil and type(source_marker[1].objective_qids) == "table"
         and table.concat(source_marker[1].objective_qids, ",") == "50")

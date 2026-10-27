@@ -732,6 +732,35 @@ do
     cat and #cat.sources == 1 and cat.sources[1].id == "source:1|é")
 end
 do
+  local _, cat = N.parse_quests({ version = 2, sources = {
+    { id = "global-position", kind = "placed_pickup", item_ids = { 5 },
+      target = { place = { kind = "position", x = 1.5, y = -2, z = 3 } },
+      evidence = { provider = "pickup", ref = { index = 1 } }, inputs = {} },
+  }, quests = { ["73"] = { tasks = {}, guidance = {}, deliveries = {}, sources = {
+    { id = "quest-position", kind = "quest_reward", item_ids = { 6 },
+      target = { place = { kind = "position", x = -4, y = 5.25, z = 6 } },
+      evidence = { provider = "reward", ref = { index = 2 } }, inputs = {} },
+  } } } })
+  check("quests v2: top-level and quest-local position sources stay connected",
+    cat and #cat.sources == 1 and cat.sources[1].target.place.kind == "position"
+      and cat.sources[1].target.place.x == 1.5
+      and cat.quests[73] and #cat.quests[73].sources == 1
+      and cat.quests[73].sources[1].id == "quest-position"
+      and cat.quests[73].sources[1].target.place.y == 5.25)
+end
+do
+  local _, cat = N.parse_quests({ version = 2, sources = {
+    { id = "cross-scope-conflict", kind = "placed_pickup", item_ids = { 5 },
+      target = { cid = 1 }, evidence = { provider = "pickup", ref = {} }, inputs = {} },
+  }, quests = { ["74"] = { tasks = {}, guidance = {}, deliveries = {}, sources = {
+    { id = "cross-scope-conflict", kind = "placed_pickup", item_ids = { 5 },
+      target = { cid = 2 }, evidence = { provider = "pickup", ref = {} }, inputs = {} },
+  } } } })
+  check("quests v2: conflicting source ids are removed across ownership scopes",
+    cat and #cat.sources == 0 and cat.quests[74] and #cat.quests[74].sources == 0
+      and #cat.diagnostics > 0)
+end
+do
   local good_delivery = { key = 3, serial = 3, incomplete_possible = true, operator = 0,
     groups = { { index = 0, item_ids = { 5, 6 }, count = 2, is_all_item = false,
       is_infinite = false, ignore_restriction_items = {} } } }

@@ -42,22 +42,6 @@ local function field_result(o, name)
   return false, nil
 end
 
-local function call_result(o, name, ...)
-  if o == nil then return false, nil end
-  local args = { ... }
-  local ok, a, b, c = pcall(function()
-    return o:call(name, table.unpack(args))
-  end)
-  if ok then return true, a, b, c end
-  return false, nil
-end
-
-local function C(o, name, ...)
-  local ok, a, b, c = call_result(o, name, ...)
-  if ok then return a, b, c end
-  return nil
-end
-
 local function singleton(name)
   local ok, value = pcall(sdk.get_managed_singleton, name)
   if ok then return value end
@@ -142,12 +126,12 @@ local function seq(value, cap)
     end
   end
 
-  local n = C(value, "get_Count")
+  local n = reviewed_call(value, "get_Count")
   if not valid_count(n) then return {}, 0, false, false end
   local out, complete = {}, true
   for i = 0, math.min(n, cap) - 1 do
     local direct_ok, row = pcall(function() return value:get_element(i) end)
-    if not direct_ok or row == nil then row = C(value, "get_Item", i) end
+    if not direct_ok or row == nil then row = reviewed_call(value, "get_Item", i) end
     if row == nil then complete = false break end
     out[#out + 1] = row
   end
@@ -173,7 +157,7 @@ local function dict_entries(value, cap)
       if #out < cap then out[#out + 1] = entry end
     end
   end
-  local logical = int_value(C(value, "get_Count"))
+  local logical = int_value(reviewed_call(value, "get_Count"))
   local readable = not slot_capped and (logical == nil or logical == total)
   return out, logical or total, slot_capped or total > cap, readable
 end
@@ -235,7 +219,7 @@ for _, qid in ipairs(focus_active) do
   end
 end
 if #qids == 0 then
-  local progressing = C(qlm, "getProgressingQuestIds")
+  local progressing = reviewed_call(qlm, "getProgressingQuestIds")
   local rows, _, capped, readable = seq(progressing, CAP.quests)
   if not readable then unknown("progressing_quests_unreadable") end
   if capped then unknown("focus_quests_truncated") end
@@ -261,8 +245,8 @@ section("destination", function()
   local found, active_total, source_total_all = 0, 0, 0
   for _, qid in ipairs(qids) do
     local info = quest_info(qid)
-    local task = C(qlm, "getCurrentTask", qid)
-    local task_index = int_value(C(info, "get_CurrentTaskIndex"))
+    local task = reviewed_call(qlm, "getCurrentTask", qid)
+    local task_index = int_value(reviewed_call(info, "get_CurrentTaskIndex"))
       or int_value(F(info, "<CurrentTaskIndex>k__BackingField"))
     local focus_quest = type(focus) == "table" and type(focus.quests) == "table"
       and focus.quests[qid] or nil
@@ -270,7 +254,7 @@ section("destination", function()
       and type(focus_quest.objective) == "table" then
       task_index = int_value(focus_quest.objective.step)
     end
-    local active_ok, active = call_result(task, "getActiveDestinations")
+    local active_ok, active = reviewed_try_call(task, "getActiveDestinations")
     local active_rows, active_total_one, active_capped, active_readable
     if active_ok and active == nil then
       -- This API returns nil for a valid empty active set (observed on a task
@@ -309,9 +293,9 @@ section("destination", function()
           break
         end
       end
-      local show_ok, show = call_result(dest, "evaluateShow")
-      local hide_ok, hide = call_result(dest, "evaluateHide")
-      local update_ok, update = call_result(dest, "evaluateUpdateShow")
+      local show_ok, show = reviewed_try_call(dest, "evaluateShow")
+      local hide_ok, hide = reviewed_try_call(dest, "evaluateHide")
+      local update_ok, update = reviewed_try_call(dest, "evaluateUpdateShow")
       local has_show = F(dest, "_HasShowConditions")
       local has_display = F(dest, "_HasDisplayConditions")
       local is_update = F(dest, "_IsUpdateCondition")
@@ -339,9 +323,9 @@ section("destination", function()
         qid, tostring(task_index), source_ordinal - 1,
         tostring(object_id(dest)), bool_text(parent_gate), bool_text(child_gate),
         tostring(active_ordinal ~= nil), tostring(active_ordinal),
-        value_text(C(dest, "get_DestType")), value_text(C(dest, "get_CharaID")),
-        value_text(C(dest, "get_KeyLocation")), value_text(C(dest, "get_Area")),
-        value_text(C(dest, "get_LocalArea")), bool_text(has_show), show_count,
+        value_text(reviewed_call(dest, "get_DestType")), value_text(reviewed_call(dest, "get_CharaID")),
+        value_text(reviewed_call(dest, "get_KeyLocation")), value_text(reviewed_call(dest, "get_Area")),
+        value_text(reviewed_call(dest, "get_LocalArea")), bool_text(has_show), show_count,
         bool_text(has_display), display_count, bool_text(is_update),
         bool_text(show), tostring(show_ok),
         bool_text(hide), tostring(hide_ok), bool_text(update), tostring(update_ok)))
@@ -364,7 +348,7 @@ end)
 local function storage_counts(item_id)
   if item_id == nil then return nil, nil, 1 end
   local party, box, skipped = 0, 0, 0
-  local dict = C(im, "getStorageDict")
+  local dict = reviewed_call(im, "getStorageDict")
   local owners, _, capped, readable = dict_entries(dict, CAP.storage_owners)
   if capped or not readable then skipped = skipped + 1 end
   if #owners == 0 then return nil, nil, skipped + 1 end
@@ -393,8 +377,8 @@ section("concierge", function()
   local destinations, item_rows, threshold = 0, 0, 0
   for _, qid in ipairs(qids) do
     local info = quest_info(qid)
-    local data = C(info, "getCurrentTaskConciergeData")
-    local task_index = int_value(C(data, "get_TaskIndex"))
+    local data = reviewed_call(info, "getCurrentTaskConciergeData")
+    local task_index = int_value(reviewed_call(data, "get_TaskIndex"))
       or int_value(F(data, "_TaskIndex"))
     local focus_quest = type(focus) == "table" and type(focus.quests) == "table"
       and focus.quests[qid] or nil
@@ -403,9 +387,9 @@ section("concierge", function()
       task_index = int_value(focus_quest.objective.step)
     end
     local rows, total, capped, readable =
-      seq(C(data, "get_Destinations"), CAP.destinations)
+      seq(reviewed_call(data, "get_Destinations"), CAP.destinations)
     local registerable, _, registerable_capped, registerable_readable =
-      seq(C(data, "getRegisterableDestinations", qid), CAP.destinations)
+      seq(reviewed_call(data, "getRegisterableDestinations", qid), CAP.destinations)
     if not readable then unknown("concierge_list_unreadable") end
     if capped then unknown("concierge_destinations_truncated") end
     if not registerable_readable then
@@ -420,13 +404,13 @@ section("concierge", function()
       local conds, cond_total, cond_cap, cond_readable =
         seq(F(dest, "_Conditions"), CAP.conditions)
       local dels, del_total, del_cap, del_readable =
-        seq(C(dest, "get_DeliverData"), CAP.deliveries)
-      local group = int_value(C(dest, "get_DeliveryGroupID"))
-      local storage = C(dest, "get_DeliveryCheckStorage")
-      local is_not = C(dest, "get_DeliveryIsNot")
-      local status_ok, status = call_result(dest, "evaluate", qid)
+        seq(reviewed_call(dest, "get_DeliverData"), CAP.deliveries)
+      local group = int_value(reviewed_call(dest, "get_DeliveryGroupID"))
+      local storage = reviewed_call(dest, "get_DeliveryCheckStorage")
+      local is_not = reviewed_call(dest, "get_DeliveryIsNot")
+      local status_ok, status = reviewed_try_call(dest, "evaluate", qid)
       local register_ok, register =
-        call_result(dest, "evaluateRegisterCondition", qid)
+        reviewed_try_call(dest, "evaluateRegisterCondition", qid)
       if not status_ok or not register_ok then
         unknown("concierge_evaluator_exception")
       elseif int_value(status) == nil or type(register) ~= "boolean" then
@@ -443,11 +427,11 @@ section("concierge", function()
         "phase0 concierge row quest=%d task=%s ordinal=%d status=%s status_call=%s register=%s register_call=%s npc=%s cid=%s gimmick=%s conditions=%d/%s delivery=%d/%s group=%s storage=%s is_not=%s",
         qid, tostring(task_index), ordinal, concierge_status_text(status),
         tostring(status_ok), bool_text(register), tostring(register_ok),
-        bool_text(C(dest, "get_SetNpc")), value_text(C(dest, "get_CharaID")),
-        value_text(C(dest, "get_GimmickID")), cond_total, tostring(cond_cap),
+        bool_text(reviewed_call(dest, "get_SetNpc")), value_text(reviewed_call(dest, "get_CharaID")),
+        value_text(reviewed_call(dest, "get_GimmickID")), cond_total, tostring(cond_cap),
         del_total, tostring(del_cap), tostring(group), bool_text(storage), bool_text(is_not)))
       for cond_ordinal, selector in ipairs(conds) do
-        local cond = C(selector, "get_Process")
+        local cond = reviewed_call(selector, "get_Process")
         local tn = typename(cond) or "unknown"
         if tn == "app.ConciergeConditionItem" then
           item_rows = item_rows + 1
@@ -459,9 +443,9 @@ section("concierge", function()
           if item_id == nil then
             unknown("concierge_item_id_unreadable")
           else
-            native_count = C(im, "getItemNumber", item_id)
+            native_count = reviewed_call(im, "getItemNumber", item_id)
           end
-          local eval_ok, eval = call_result(cond, "evaluate", qid)
+          local eval_ok, eval = reviewed_try_call(cond, "evaluate", qid)
           if not eval_ok then unknown("concierge_item_evaluator_exception")
           elseif type(eval) ~= "boolean" then
             unknown("concierge_item_evaluator_unreadable")
@@ -471,13 +455,13 @@ section("concierge", function()
             "phase0 concierge item quest=%d destination=%d condition=%d item=%s num=%s set_num=%s is_not=%s evaluate=%s evaluate_call=%s error=%s party=%s storage=%s native_count=%s skipped=%d",
             qid, ordinal, cond_ordinal, tostring(item_id), tostring(num),
             bool_text(set_num), bool_text(is_not), bool_text(eval), tostring(eval_ok),
-            concierge_status_text(C(cond, "get_ErrorStatus")),
+            concierge_status_text(reviewed_call(cond, "get_ErrorStatus")),
             tostring(party), tostring(box), tostring(native_count), skipped))
         end
       end
       for _, ref in ipairs(dels) do
-        local ref_qid = int_value(C(ref, "get_QuestID"))
-        local key = int_value(C(ref, "get_Key"))
+        local ref_qid = int_value(reviewed_call(ref, "get_QuestID"))
+        local key = int_value(reviewed_call(ref, "get_Key"))
         if ref_qid == nil or key == nil then
           unknown("delivery_ref_unreadable")
         elseif #delivery_refs >= CAP.deliveries then
@@ -531,10 +515,10 @@ section("shop", function()
     local nm = singleton("app.NPCManager")
     local tem = singleton("app.TalkEventManager")
     local chara = F(loaded.holder, "_chara")
-    local data = C(nm, "getNPCCharacterData", loaded.cid)
-    local board = C(chara, "get_AIBlackBoardController")
-    available = C(tem, "isShopTalkEventAvailableForChara", data, board)
-    disabled = C(tem, "isTalkEventInteractDisabled", loaded.cid)
+    local data = reviewed_call(nm, "getNPCCharacterData", loaded.cid)
+    local board = reviewed_call(chara, "get_AIBlackBoardController")
+    available = reviewed_call(tem, "isShopTalkEventAvailableForChara", data, board)
+    disabled = reviewed_call(tem, "isTalkEventInteractDisabled", loaded.cid)
   end
 
   local catalog_finite, catalog_unlimited = nil, nil
@@ -553,18 +537,18 @@ section("shop", function()
         seq(F(param, "_BuyParams"), CAP.shop_rows)
       if not rows_readable then unknown("shop_rows_unreadable") end
       if rows_capped then unknown("shop_rows_truncated") end
-      local pay = C(im, "getItemShopTotalPay", shop_id)
+      local pay = reviewed_call(im, "getItemShopTotalPay", shop_id)
       for _, buy in ipairs(rows) do
         scanned_rows = scanned_rows + 1
-        local stock = C(buy, "get_IsStock")
+        local stock = reviewed_call(buy, "get_IsStock")
         local row = {
           shop = shop_id, item = int_value(F(buy, "_ItemId")), stock = stock,
-          maximum = int_value(C(buy, "get_Stock")),
-          remaining = int_value(C(im, "getItemStockNum", shop_id, buy)),
+          maximum = int_value(reviewed_call(buy, "get_Stock")),
+          remaining = int_value(reviewed_call(im, "getItemStockNum", shop_id, buy)),
           loaded = loaded ~= nil and loaded.shop == shop_id,
         }
         if row.loaded then
-          row.released = C(buy, "IsRelease", pay, loaded.rank)
+          row.released = reviewed_call(buy, "IsRelease", pay, loaded.rank)
         end
         if stock == true and catalog_finite == nil then catalog_finite = row end
         if stock == false and catalog_unlimited == nil then catalog_unlimited = row end
@@ -712,7 +696,7 @@ local function pickup_context(gimmick, saved)
   local function trace_value(label, value)
     trace[#trace + 1] = label .. "=" .. tostring(typename(value))
   end
-  local guid = C(C(gimmick, "get_UniqId"), "ToString()")
+  local guid = reviewed_call(reviewed_call(gimmick, "get_UniqId"), "ToString()")
   if type(guid) == "string" then
     local context = saved[guid:lower()]
     guid_joined = context ~= nil
@@ -723,7 +707,7 @@ local function pickup_context(gimmick, saved)
   else
     trace[#trace + 1] = "uniq_id=unreadable"
   end
-  local direct = C(gimmick, "get_GmContext")
+  local direct = reviewed_call(gimmick, "get_GmContext")
   live_context_present = live_context_present or typename(direct) == "app.GmItemContext"
   if item_context_like(direct) then
     return direct, "gm_method", guid_joined, live_context_present
@@ -736,17 +720,21 @@ local function pickup_context(gimmick, saved)
   end
   trace_value("gm_field", direct)
   if gm_item_context_method ~= nil then
-    local ok, value = pcall(function() return gm_item_context_method:call(gimmick) end)
+    local ok, value = pcall(function()
+      return reviewed_invoke(gm_item_context_method, gimmick, "getContext")
+    end)
     live_context_present = live_context_present or typename(value) == "app.GmItemContext"
     if ok and item_context_like(value) then
       return value, "gm_reflect", guid_joined, live_context_present
     end
     trace_value("gm_reflect", value)
   end
-  local holder = C(gimmick, "get_CompContext")
+  local holder = reviewed_call(gimmick, "get_CompContext")
   trace_value("holder", holder)
   if holder_item_context_method ~= nil and holder ~= nil then
-    local ok, value = pcall(function() return holder_item_context_method:call(holder) end)
+    local ok, value = pcall(function()
+      return reviewed_invoke(holder_item_context_method, holder, "getContext")
+    end)
     live_context_present = live_context_present or typename(value) == "app.GmItemContext"
     if ok and item_context_like(value) then
       return value, "holder_reflect", guid_joined, live_context_present
@@ -764,7 +752,7 @@ local function pickup_context(gimmick, saved)
         value = F(value, "<CurrentContext>k__BackingField")
       end
       if typename(value) == "app.UniqueIDContext" then
-        local holder_guid = C(F(value, "UniqueID"), "ToString()")
+        local holder_guid = reviewed_call(F(value, "UniqueID"), "ToString()")
         if type(holder_guid) == "string" then
           local saved_context = saved[holder_guid:lower()]
           guid_joined = guid_joined or saved_context ~= nil
@@ -884,11 +872,11 @@ section("chest", function()
         seq(F(chest, "ItemList"), CAP.chest_items)
       local item = item_rows[1]
       local context = F(chest, "ItemContext")
-      local uid = C(C(chest, "get_UniqId"), "ToString()")
+      local uid = reviewed_call(reviewed_call(chest, "get_UniqId"), "ToString()")
       local candidate = {
         item = int_value(F(item, "ItemId")), num = int_value(F(item, "ItemNum")),
-        item_total = item_total, opened = C(chest, "get_IsOpenedFreeBit"),
-        unlocked = C(chest, "get_IsUnlockFreeBit"),
+        item_total = item_total, opened = reviewed_call(chest, "get_IsOpenedFreeBit"),
+        unlocked = reviewed_call(chest, "get_IsUnlockFreeBit"),
         pick = F(context, "_IsPick"), keep = F(context, "_IsKeep"),
         uid = type(uid) == "string" and uid:lower() or nil,
       }
@@ -966,7 +954,7 @@ section("grant", function()
   local current, descriptors, relevant, payload_add_rows = 0, 0, 0, 0
   for _, processor in ipairs(processors) do
     local process = F(processor, "Process")
-    local qid = int_value(C(process, "get_QuestID"))
+    local qid = int_value(reviewed_call(process, "get_QuestID"))
     if qset[qid] then
       current = current + 1
       local action = F(process, "QuestAction")
@@ -979,8 +967,8 @@ section("grant", function()
         -- this action is a descriptor, never a current objective candidate.
         local task_owned = nil
         unknown("grant_task_ownership_unknown")
-        local executed, canceled = C(process, "get_Executed"), C(process, "get_Canceled")
-        local done, action_canceled = C(action, "get_DoneAction"), C(action, "get_CanceledAction")
+        local executed, canceled = reviewed_call(process, "get_Executed"), reviewed_call(process, "get_Canceled")
+        local done, action_canceled = reviewed_call(action, "get_DoneAction"), reviewed_call(action, "get_CanceledAction")
         if type(executed) ~= "boolean" or type(canceled) ~= "boolean"
           or type(done) ~= "boolean" or type(action_canceled) ~= "boolean" then
           unknown("grant_state_unreadable")
@@ -990,18 +978,18 @@ section("grant", function()
           local data = F(action, "Data")
           local setting = F(data, "_ItemGet")
           local rows, _, rows_capped, rows_readable =
-            seq(C(setting, "get_ItemList"), CAP.conditions)
+            seq(reviewed_call(setting, "get_ItemList"), CAP.conditions)
           if rows_capped or not rows_readable then unknown("grant_payload_unreadable") end
           for _, row in ipairs(rows) do
-            if C(row, "get_IsRemove") == false then
+            if reviewed_call(row, "get_IsRemove") == false then
               payload = payload + 1
               payload_add_rows = payload_add_rows + 1
             end
           end
         elseif tn == "app.quest.action.QuestReward" then
-          local param = C(action, "get_Data")
+          local param = reviewed_call(action, "get_Data")
           local rows, _, rows_capped, rows_readable =
-            seq(C(param, "get_DataList"), CAP.conditions)
+            seq(reviewed_call(param, "get_DataList"), CAP.conditions)
           if rows_capped or not rows_readable then unknown("grant_payload_unreadable") end
           payload = #rows
         end
@@ -1026,9 +1014,9 @@ section("transform", function()
   if not mix_readable then unknown("transform_crafting_catalog_unreadable") end
   if mix_capped then unknown("transform_crafting_catalog_truncated") end
 
-  local fake_item_ok, fake_item = call_result(im, "get_FakeShopKeepedItem")
-  local fake_time_ok, fake_time = call_result(im, "get_FakeShopCompleteTime")
-  local fake_done_ok, fake_done = call_result(im, "isFakeShopCompleted")
+  local fake_item_ok, fake_item = reviewed_try_call(im, "get_FakeShopKeepedItem")
+  local fake_time_ok, fake_time = reviewed_try_call(im, "get_FakeShopCompleteTime")
+  local fake_done_ok, fake_done = reviewed_try_call(im, "isFakeShopCompleted")
   if not fake_item_ok or not fake_time_ok or not fake_done_ok then
     unknown("transform_forgery_state_unreadable")
   end
@@ -1059,20 +1047,20 @@ section("delivery", function()
   assert(manager ~= nil, "manager")
   local resolved = 0
   for ordinal, ref in ipairs(delivery_refs) do
-    local has_ok, has = call_result(manager, "hasDeliver", ref.qid, ref.key)
-    local finish_ok, finish = call_result(manager, "isFinish", ref.qid, ref.key)
+    local has_ok, has = reviewed_try_call(manager, "hasDeliver", ref.qid, ref.key)
+    local finish_ok, finish = reviewed_try_call(manager, "isFinish", ref.qid, ref.key)
     local dict_ok, contexts = field_result(manager, "_ContextDict")
-    local inner_ok, inner = call_result(contexts, "get_Item", ref.qid)
-    local context_ok, context = call_result(inner, "get_Item", ref.key)
+    local inner_ok, inner = reviewed_try_call(contexts, "get_Item", ref.qid)
+    local context_ok, context = reviewed_try_call(inner, "get_Item", ref.key)
     local data_ok, data = field_result(context, "Data")
-    local item_ok, item_data = call_result(data, "get_Item")
-    local values_ok, value_collection = call_result(item_data, "get_Value")
+    local item_ok, item_data = reviewed_try_call(data, "get_Item")
+    local values_ok, value_collection = reviewed_try_call(item_data, "get_Value")
     local values, alternatives, alternatives_capped, alternatives_readable =
       seq(value_collection, CAP.conditions)
-    local operator_ok, operator_value = call_result(item_data, "get_Operator")
+    local operator_ok, operator_value = reviewed_try_call(item_data, "get_Operator")
     local operator = int_value(operator_value)
     local incomplete = F(item_data, "_IncompletePossible")
-    local context_finish_ok, context_finish = call_result(context, "get_IsFinish")
+    local context_finish_ok, context_finish = reviewed_try_call(context, "get_IsFinish")
     local complete = has_ok and type(has) == "boolean"
       and finish_ok and type(finish) == "boolean"
       and dict_ok and contexts ~= nil and inner_ok and inner ~= nil
@@ -1094,7 +1082,7 @@ section("delivery", function()
       local count_value = int_value(F(value, "_Count"))
       local ignored_ids, ignored_count, ignored_capped, ignored_readable =
         seq(F(value, "_IgnoreRestrictionItem"), CAP.conditions)
-      local all_ok, all_value = call_result(value, "get_IsAllItem")
+      local all_ok, all_value = reviewed_try_call(value, "get_IsAllItem")
       if infinite_value == true then infinite = infinite + 1 end
       if all_value == true then all_item = all_item + 1 end
       if count_value ~= nil then required_total = required_total + count_value end

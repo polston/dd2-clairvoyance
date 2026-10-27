@@ -3904,7 +3904,9 @@ function A.make()
       local ok_task, task = pcall(function() return qlm:call("getCurrentTask", qid) end)
       if not ok_task or task == nil then result.reason = "current_task_unreadable"; return result end
       local active_ok, active = pcall(function() return task:call("getActiveDestinations") end)
-      if not active_ok then result.reason = "destination_active_list_unreadable"; return result end
+      if not active_ok or active == nil then
+        result.reason = "destination_active_list_unreadable"; return result
+      end
       local active_rows, active_readable, active_truncated = list(active, 256)
       if not active_readable then
         result.reason = active_truncated and "destination_active_list_truncated"
@@ -4218,10 +4220,18 @@ function A.make()
     generation = type(generation) == "number" and math.max(1, generation) or objective_task_state.source_generation
     local version = type(objective_catalog) == "table" and objective_catalog.version or nil
     local descriptors, signals, deliveries = {}, {}, {}
-    local catalog = type(objective_catalog) == "table" and objective_catalog.version == 2
-      and objective_catalog.quests or nil
+    local extension = type(objective_catalog) == "table" and objective_catalog.version == 2
+      and objective_catalog or nil
+    local catalog = extension and extension.quests or nil
+    for _, source in ipairs(type(extension) == "table" and extension.sources or {}) do
+      descriptors[#descriptors + 1] = { source = source }
+    end
     if type(catalog) == "table" then
-      for qid, quest in pairs(catalog) do
+      local qids = {}
+      for qid in pairs(catalog) do qids[#qids + 1] = qid end
+      table.sort(qids)
+      for _, qid in ipairs(qids) do
+        local quest = catalog[qid]
         for _, source in ipairs(type(quest) == "table" and quest.sources or {}) do
           descriptors[#descriptors + 1] = { qid = qid, source = source }
         end

@@ -6141,6 +6141,7 @@ do
         target = { place = { kind = "local_area", local_area = 7 } }, eligibility = "eligible" },
     }, guidance = {} } } }
   local resolved_places = w:objective_place_snapshot(task)
+  local resolved_generation = resolved_places.generation
   check("objective places: local-area zero and key resolve through exact node readers",
     resolved_places ~= nil and resolved_places.status == "ok" and #resolved_places.places == 3
       and resolved_places.places[1].pos.x == 40 and resolved_places.places[2].pos.x == 10
@@ -6152,15 +6153,41 @@ do
       and table.concat(f.data.area_rows_seen, ",") == "0,7"
       and f.data.last_area_row.location == nil
       and (f.reads_n.key_pos or 0) == 1 and (f.reads_n.area_nodes or 0) == 2)
+  task.journal_generation = 3
+  local identical_places = w:objective_place_snapshot(task)
+  check("objective places: identical observations keep an independent stable generation",
+    identical_places.status == "ok" and identical_places.generation == resolved_generation)
+  f.data.kpos[77] = P(11, 20, 30)
+  local moved_places = w:objective_place_snapshot(task)
+  check("objective places: a resolved position change advances observation generation",
+    moved_places.status == "ok" and moved_places.generation > identical_places.generation
+      and moved_places.places[2].pos.x == 11)
+  f.data.kpos[78] = P(12, 20, 30)
+  task.quests[1].task_destinations[#task.quests[1].task_destinations + 1] =
+    { kind = "place", task_index = 0, destination_index = 5,
+      target = { place = { kind = "key_location", key = 78 } }, eligibility = "eligible" }
+  local expanded_places = w:objective_place_snapshot(task)
+  check("objective places: resolved content changes advance observation generation",
+    expanded_places.status == "ok" and #expanded_places.places == 4
+      and expanded_places.generation > moved_places.generation)
   f.fail.key_pos = true
   local unreadable = w:objective_place_snapshot(task)
   check("objective places: partial native failure is wholly unknown",
-    unreadable.status == "unknown" and unreadable.reason ~= nil and #unreadable.places == 0)
+    unreadable.status == "unknown" and unreadable.reason ~= nil and #unreadable.places == 0
+      and unreadable.generation > expanded_places.generation)
+  local repeated_unreadable = w:objective_place_snapshot(task)
+  check("objective places: identical failures keep the same observation generation",
+    repeated_unreadable.status == "unknown"
+      and repeated_unreadable.generation == unreadable.generation)
   f.fail.key_pos = nil
+  local recovered_places = w:objective_place_snapshot(task)
+  check("objective places: recovery to successful evidence advances observation generation",
+    recovered_places.status == "ok" and recovered_places.generation > unreadable.generation)
   f.data.kpos[77] = nil
   local empty = w:objective_place_snapshot(task)
   check("objective places: empty node result is unknown, not an empty success",
-    empty.status == "unknown" and empty.reason ~= nil and #empty.places == 0)
+    empty.status == "unknown" and empty.reason ~= nil and #empty.places == 0
+      and empty.generation > recovered_places.generation)
 
   local source_task = { need_generation = 4, quests = {} }
   local source_rows = w:objective_source_snapshots(nil, source_task)
@@ -6369,6 +6396,29 @@ do
     ancillary_entry ~= nil and ancillary_entry.objective == false
       and ancillary_entry.target_key == nil and ancillary_entry.ordinal == nil
       and ancillary_entry.objective_generation == 12)
+
+  local startable_world = fixture().new()
+  startable_world:set_routes({ objective_generation = 13, members = {
+    { route_id = 2201, cid = 2201, qid = 40, kind = "npc", direct = false,
+      objective = true, name = "Quest giver", pos = P(2, 0, 2), item_ids = {},
+      objective_generation = 13 },
+  } })
+  startable_world:refresh(0, true, route_tg)
+  local startable_entry = route_in(startable_world, 2201)
+  check("objective routes: keyless startable giver remains objective, not ancillary",
+    startable_entry ~= nil and startable_entry.objective == true
+      and startable_entry.target_key == nil and startable_entry.ordinal == nil
+      and startable_entry.objective_generation == 13)
+  local startable_slot = startable_entry and startable_entry.slot
+  startable_world:set_routes({ objective_generation = 14, members = {
+    { route_id = 2201, cid = 2201, qid = 40, kind = "npc", direct = false,
+      objective = true, name = "Quest giver", pos = P(2, 0, 2), item_ids = {},
+      objective_generation = 14 },
+  } })
+  startable_world:refresh(1, true, route_tg)
+  check("objective routes: keyless startable giver keeps its objective color slot across generations",
+    route_in(startable_world, 2201).objective == true
+      and route_in(startable_world, 2201).slot == startable_slot)
 
   local function objective_npc(cid, ordinal, generation)
     return { route_id = cid, cid = cid, place = cid, qid = 30040, kind = "npc", direct = false,

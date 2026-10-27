@@ -3281,7 +3281,9 @@ do
   sdk.get_managed_singleton = function(n)
     if n == "app.QuestLogManager" then return oq end
   end
-  local own_catalog = { version = 2, quests = {} }
+  local own_catalog = { version = 2, sources = {
+    { id = "global-source", kind = "placed" },
+  }, quests = {} }
   own_catalog.quests[20040] = {
     tasks = { { index = 0, has_destination = false, destinations = {
       { index = 0, set_destination = false, dest_type = 3, cid = 101, key = 2308,
@@ -3321,8 +3323,11 @@ do
     and source_snapshots[1].status == "unknown"
     and source_snapshots[1].generation == owned_snapshot.need_generation
     and source_snapshots[1].catalog_version == 2
-    and #source_snapshots[1].source_descriptors == 1
-    and source_snapshots[1].source_descriptors[1].source.id == "fixture-source"
+    and #source_snapshots[1].source_descriptors == 2
+    and source_snapshots[1].source_descriptors[1].qid == nil
+    and source_snapshots[1].source_descriptors[1].source.id == "global-source"
+    and source_snapshots[1].source_descriptors[2].qid == 20040
+    and source_snapshots[1].source_descriptors[2].source.id == "fixture-source"
     and source_snapshots[1].source_descriptors ~= source_snapshots[2].source_descriptors
     and #source_snapshots[1].signal_evidence > 0
     and #source_snapshots[1].guidance_delivery_refs > 0,
@@ -4007,6 +4012,11 @@ do
   local empty = oa.objective_task_snapshot({ qid }, catalog)
   assert(empty.quests[1].read_status == "ok" and #empty.quests[1].task_destinations == 0,
     "OT7 exact empty active destination set is known empty")
+  task._calls.getActiveDestinations = nil
+  local nil_active = oa.objective_task_snapshot({ qid }, catalog)
+  assert(nil_active.quests[1].read_status == "unknown"
+    and nil_active.quests[1].reason == "destination_active_list_unreadable",
+    "OT7b nil active destination collection remains unknown")
   task._calls.getActiveDestinations = "RAISE"
   local unreadable = oa.objective_task_snapshot({ qid }, catalog)
   assert(unreadable.quests[1].read_status == "unknown"

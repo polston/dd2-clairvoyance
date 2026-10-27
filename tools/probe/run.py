@@ -17,6 +17,36 @@ import time
 NOISE = "~ "
 POST_SUCCESS_GRACE = 1.0
 UNSAFE_METHODS = {"create_instance", "set_field", "add_ref", "release"}
+SAFE_SDK_METHODS = {"find_type_definition", "get_managed_singleton"}
+SECONDARY_LOADERS = {"load", "loadfile", "dofile"}
+ALLOWED_REQUIRE = {"Clairvoyance.world"}
+REVIEWED_METHODS = {
+    "IsRelease", "ToString()", "evaluate", "evaluateHide",
+    "evaluateRegisterCondition", "evaluateShow", "evaluateUpdateShow",
+    "getActiveDestinations", "getCurrentTask", "getCurrentTaskConciergeData",
+    "getItemNumber", "getItemShopTotalPay", "getItemStockNum",
+    "getNPCCharacterData", "getProgressingQuestIds",
+    "getRegisterableDestinations", "getStorageDict",
+    "get_AIBlackBoardController", "get_Area", "get_Canceled",
+    "get_CanceledAction", "get_CharaID", "get_CompContext", "get_Count",
+    "get_CurrentTaskIndex", "get_Data", "get_DataList", "get_DeliverData",
+    "get_DeliveryCheckStorage", "get_DeliveryGroupID", "get_DeliveryIsNot",
+    "get_Destinations", "get_DestType", "get_DoneAction", "get_ErrorStatus",
+    "get_Executed", "get_FakeShopCompleteTime", "get_FakeShopKeepedItem",
+    "get_GimmickID", "get_GmContext", "get_IsAllItem", "get_IsFinish",
+    "get_IsOpenedFreeBit", "get_IsRemove", "get_IsStock",
+    "get_IsUnlockFreeBit", "get_Item", "get_ItemList", "get_Key",
+    "get_KeyLocation", "get_LocalArea", "get_Operator", "get_Process",
+    "get_QuestID", "get_SetNpc", "get_Stock", "get_TaskIndex", "get_UniqId",
+    "get_Value", "getContext", "hasDeliver", "isFakeShopCompleted",
+    "isFinish", "isShopTalkEventAvailableForChara",
+    "isTalkEventInteractDisabled",
+}
+REVIEWED_CAPABILITIES = {
+    "reviewed_call": 1,
+    "reviewed_try_call": 1,
+    "reviewed_invoke": 2,
+}
 
 
 def _long_bracket(source, pos):
@@ -180,8 +210,41 @@ def _setter_argument(tokens, opening):
     return None
 
 
+def _call_arguments(tokens, opening):
+    closing = _matching_close(tokens, opening, "(", ")")
+    if closing is None:
+        return None
+    args, start = [], opening + 1
+    depths = {"(": 0, "[": 0, "{": 0}
+    pairs = {")": "(", "]": "[", "}": "{"}
+    for pos in range(start, closing):
+        token = tokens[pos]
+        if token in depths:
+            depths[token] += 1
+        elif token in pairs:
+            depths[pairs[token]] -= 1
+        elif token == "," and all(depth == 0 for depth in depths.values()):
+            args.append(tokens[start:pos])
+            start = pos + 1
+    if start < closing:
+        args.append(tokens[start:closing])
+    return args
+
+
+def _managed_method_argument(tokens, opening, colon):
+    args = _call_arguments(tokens, opening)
+    index = 0 if colon else 1
+    if args is None or index >= len(args):
+        return None
+    arg = args[index]
+    if len(arg) == 1 and isinstance(arg[0], tuple) and arg[0][0] == "string":
+        return arg[0][1]
+    return False
+
+
 def unsafe_probe_call(source):
     tokens = _lua_tokens(source)
+    # First preserve the specific diagnostics for direct unsafe calls.
     for pos, token in enumerate(tokens):
         if (token == "." and pos + 1 < len(tokens) and
                 tokens[pos + 1] == "create_resource" and
@@ -192,6 +255,11 @@ def unsafe_probe_call(source):
             return tokens[pos + 1]
         if (token in (".", ":") and pos + 2 < len(tokens) and
                 tokens[pos + 1] == "call" and tokens[pos + 2] == "("):
+            method = _managed_method_argument(tokens, pos + 2, token == ":")
+            if method is False or method is None:
+                return "dynamic managed method"
+            if method in UNSAFE_METHODS or method.startswith("set_"):
+                return method
             setter = _setter_argument(tokens, pos + 2)
             if setter is not None:
                 return setter
@@ -206,9 +274,76 @@ def unsafe_probe_call(source):
                 return member
             if (member == "call" and pos + 3 < len(tokens) and
                     tokens[pos + 3] == "("):
+                method = _managed_method_argument(tokens, pos + 3, False)
+                if method is False or method is None:
+                    return "dynamic managed method"
+                if method in UNSAFE_METHODS or method.startswith("set_"):
+                    return method
                 setter = _setter_argument(tokens, pos + 3)
                 if setter is not None:
                     return setter
+
+    # The guard is deliberately fail-closed around capabilities that can hide
+    # a later engine call. Read-only probes use direct, reviewed SDK members;
+    # arbitrary code loading, SDK aliases and computed member calls do not.
+    for pos, token in enumerate(tokens):
+        if token in REVIEWED_CAPABILITIES:
+            if (pos > 0 and tokens[pos - 1] in (".", ":")) or (
+                    pos + 1 >= len(tokens) or tokens[pos + 1] != "("):
+                return "indirect reviewed call"
+            args = _call_arguments(tokens, pos + 1)
+            index = REVIEWED_CAPABILITIES[token]
+            if args is None or index >= len(args):
+                return "unreviewed managed method"
+            method = args[index]
+            if (len(method) != 1 or not isinstance(method[0], tuple) or
+                    method[0][0] != "string" or method[0][1] not in REVIEWED_METHODS):
+                return "unreviewed managed method"
+        if token in SECONDARY_LOADERS:
+            return token
+        if token == "require":
+            direct = (pos + 3 < len(tokens) and tokens[pos + 1] == "(" and
+                      isinstance(tokens[pos + 2], tuple) and
+                      tokens[pos + 2][0] == "string" and
+                      tokens[pos + 2][1] in ALLOWED_REQUIRE and
+                      tokens[pos + 3] == ")")
+            protected = (pos >= 2 and tokens[pos - 2] == "pcall" and
+                         tokens[pos - 1] == "(" and
+                         pos + 2 < len(tokens) and tokens[pos + 1] == "," and
+                         isinstance(tokens[pos + 2], tuple) and
+                         tokens[pos + 2][0] == "string" and
+                         tokens[pos + 2][1] in ALLOWED_REQUIRE)
+            if not direct and not protected:
+                return "require"
+        if token in ("_G", "_ENV"):
+            reviewed_debug = (token == "_G" and pos + 2 < len(tokens) and
+                              tokens[pos + 1] == "." and
+                              tokens[pos + 2] == "QNML_DEBUG")
+            if not reviewed_debug:
+                return "indirect global access"
+        if token == "sdk":
+            direct = (pos + 2 < len(tokens) and tokens[pos + 1] == "." and
+                      tokens[pos + 2] in SAFE_SDK_METHODS)
+            if not direct:
+                if pos + 1 < len(tokens) and tokens[pos + 1] == "[":
+                    return "dynamic sdk access"
+                return "indirect sdk access"
+        if token in (".", ":") and pos + 1 < len(tokens) and tokens[pos + 1] == "call":
+            if pos + 2 >= len(tokens) or tokens[pos + 2] != "(":
+                return "indirect managed call"
+        if token == "[":
+            closing = _matching_close(tokens, pos, "[", "]")
+            if closing is None:
+                return "dynamic member call"
+            literal = (closing == pos + 2 and
+                       isinstance(tokens[pos + 1], tuple) and
+                       tokens[pos + 1][0] == "string")
+            if (closing + 1 < len(tokens) and tokens[closing + 1] == "(" and
+                    not literal):
+                return "dynamic member call"
+            if (literal and tokens[pos + 1][1] == "call" and
+                    (closing + 1 >= len(tokens) or tokens[closing + 1] != "(")):
+                return "indirect managed call"
     return None
 
 
