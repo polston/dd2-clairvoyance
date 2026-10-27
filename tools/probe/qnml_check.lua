@@ -137,6 +137,18 @@ local function sdk_receiver(tokens, finish)
   end
   return false
 end
+local function setter_argument(tokens, opening)
+  local closing = matching_close(tokens, opening, "(", ")")
+  if closing == nil then return nil end
+  for i = opening + 1, closing - 1 do
+    local token = tokens[i]
+    if type(token) == "table" and token.kind == "string" and
+        token.value:match("^set_") then
+      return token.value
+    end
+  end
+  return nil
+end
 local function unsafe_probe_call(source)
   local tokens = lua_tokens(source)
   for i, token in ipairs(tokens) do
@@ -147,6 +159,11 @@ local function unsafe_probe_call(source)
     if (token == "." or token == ":") and unsafe_methods[tokens[i + 1]] then
       return tokens[i + 1]
     end
+    if (token == "." or token == ":") and tokens[i + 1] == "call" and
+        tokens[i + 2] == "(" then
+      local setter = setter_argument(tokens, i + 2)
+      if setter ~= nil then return setter end
+    end
     local member = tokens[i + 1]
     if token == "[" and i > 1 and type(member) == "table" and
         member.kind == "string" and tokens[i + 2] == "]" and
@@ -155,6 +172,10 @@ local function unsafe_probe_call(source)
         return "sdk.create_resource"
       end
       if unsafe_methods[member.value] then return member.value end
+      if member.value == "call" and tokens[i + 3] == "(" then
+        local setter = setter_argument(tokens, i + 3)
+        if setter ~= nil then return setter end
+      end
     end
   end
   return nil

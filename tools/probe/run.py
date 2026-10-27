@@ -169,6 +169,17 @@ def _sdk_receiver(tokens, end):
     return False
 
 
+def _setter_argument(tokens, opening):
+    closing = _matching_close(tokens, opening, "(", ")")
+    if closing is None:
+        return None
+    for token in tokens[opening + 1:closing]:
+        if (isinstance(token, tuple) and token[0] == "string" and
+                re.match(r"^set_", token[1])):
+            return token[1]
+    return None
+
+
 def unsafe_probe_call(source):
     tokens = _lua_tokens(source)
     for pos, token in enumerate(tokens):
@@ -179,6 +190,11 @@ def unsafe_probe_call(source):
         if (token in (".", ":") and pos + 1 < len(tokens) and
                 tokens[pos + 1] in UNSAFE_METHODS):
             return tokens[pos + 1]
+        if (token in (".", ":") and pos + 2 < len(tokens) and
+                tokens[pos + 1] == "call" and tokens[pos + 2] == "("):
+            setter = _setter_argument(tokens, pos + 2)
+            if setter is not None:
+                return setter
         if (token == "[" and pos > 0 and pos + 2 < len(tokens) and
                 _receiver_token(tokens[pos - 1]) and
                 isinstance(tokens[pos + 1], tuple) and
@@ -188,6 +204,11 @@ def unsafe_probe_call(source):
                 return "sdk.create_resource"
             if member in UNSAFE_METHODS:
                 return member
+            if (member == "call" and pos + 3 < len(tokens) and
+                    tokens[pos + 3] == "("):
+                setter = _setter_argument(tokens, pos + 3)
+                if setter is not None:
+                    return setter
     return None
 
 

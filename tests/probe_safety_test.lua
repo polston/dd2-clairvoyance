@@ -52,6 +52,14 @@ local unsafe_escaped = run_case("", 'local o = {}; return o["re\\108ease"](o)', 
 check("unsafe escaped member rejected",
   unsafe_escaped:find("cmd ok=false unsafe probe call: release", 1, true) ~= nil)
 
+local unsafe_setter_call = run_case("", 'local o = {}; return o:call("set_Enabled", false)', 150)
+check("managed setter call rejected",
+  unsafe_setter_call:find("cmd ok=false unsafe probe call: set_Enabled", 1, true) ~= nil)
+
+local unsafe_bracket_setter_call = run_case("", 'local o = {}; return o["call"](o, "set_Value", 1)', 150)
+check("bracket managed setter call rejected",
+  unsafe_bracket_setter_call:find("cmd ok=false unsafe probe call: set_Value", 1, true) ~= nil)
+
 local comment_gap = run_case('return--[[ gap ]]sdk.create_resource("x")', "", 120)
 check("comment boundary preserved",
   comment_gap:find("cmd ok=false unsafe probe call: sdk.create_resource", 1, true) ~= nil)

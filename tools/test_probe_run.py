@@ -20,6 +20,8 @@ class ProbeSourceSafety(unittest.TestCase):
             "local x = o.add_ref(o)": "add_ref",
             "o:release()": "release",
             "local f = sdk.create_resource": "sdk.create_resource",
+            'o:call("set_Enabled", false)': "set_Enabled",
+            'o["call"](o, "set_Value", 1)': "set_Value",
         }
         for source, expected in cases.items():
             with self.subTest(source=source):
@@ -47,6 +49,100 @@ class ProbeSourceSafety(unittest.TestCase):
     def test_identifier_boundaries_do_not_reject_unrelated_names(self):
         source = "local fake_sdk = {}; return fake_sdk.create_resource"
         self.assertIsNone(probe_run.unsafe_probe_call(source))
+
+    def test_phase0_objective_probe_is_bounded_and_read_only(self):
+        path = os.path.join(
+            os.path.dirname(__file__), "probe", "objective_phase0.lua")
+        with open(path, encoding="utf-8") as stream:
+            source = stream.read()
+
+        self.assertIsNone(probe_run.unsafe_probe_call(source))
+        self.assertNotIn("D.set", source)
+        self.assertNotIn("json.dump_file", source)
+        self.assertNotRegex(source, r"\b(?:fs|io)\s*[\.:\[]")
+        self.assertIn("local CAP =", source)
+        for family in (
+                "destination", "concierge", "shop", "pickup", "chest",
+                "loot", "grant", "transform", "delivery", "unresolved"):
+            with self.subTest(family=family):
+                self.assertIn('section("%s"' % family, source)
+        self.assertNotRegex(
+            source,
+            r"L\([^\n]*(?:\.x|\.y|\.z|UniversalPosition|Position)")
+        self.assertIn("for key, row in pairs(rows) do", source)
+        self.assertNotIn(
+            "for i = 1, math.min(n, cap) do out[#out + 1] = rows[i] end",
+            source)
+        self.assertIn("return value:get_element(i)", source)
+        self.assertIn('qlm:get_field("_QuestLogInfoDict")', source)
+        self.assertIn('F(gm, "<ManagedGimmicksByIDs>k__BackingField")', source)
+        self.assertIn('find_item_context_method("app.ContextHolder")', source)
+        self.assertIn('"RestoredContexts", "Contexts"', source)
+        self.assertIn("local function current_world_output", source)
+        self.assertIn("adapter.item_locations", source)
+        self.assertIn('pcall(wt.q, "input", nil)', source)
+
+    def test_phase0_probe_fails_closed_at_reviewed_evidence_boundaries(self):
+        path = os.path.join(
+            os.path.dirname(__file__), "probe", "objective_phase0.lua")
+        with open(path, encoding="utf-8") as stream:
+            source = stream.read()
+
+        # REFramework arrays can be direct wrappers or userdata vectors;
+        # counts must be integral and non-negative before indexing.
+        self.assertIn("local function valid_count", source)
+        self.assertIn("return value:get_size()", source)
+        self.assertIn("local rows_type = type(rows)", source)
+        self.assertIn("math.tointeger(value) == value and value >= 0", source)
+
+        # Native evaluator exceptions and original destination identity/gates
+        # stay visible instead of being collapsed into an ordinary nil.
+        self.assertIn("local function call_result", source)
+        self.assertIn('call_result(dest, "evaluateShow")', source)
+        self.assertIn('call_result(task, "getActiveDestinations")', source)
+        self.assertIn('call_result(dest, "evaluateRegisterCondition", qid)', source)
+        self.assertIn('F(task, "_HasDestination")', source)
+        self.assertIn('F(dest, "_SetDestination")', source)
+        self.assertIn('F(dest, "_HasShowConditions")', source)
+        self.assertIn('F(dest, "_HasDisplayConditions")', source)
+        self.assertIn("source_index", source)
+        self.assertIn("object_id", source)
+
+        # Availability evidence uses the repository's measured read paths and
+        # cannot turn unreadable identifiers/state into a positive example.
+        self.assertIn('F(gimmick, "ItemId")', source)
+        self.assertIn('C(gimmick, "get_GmContext")', source)
+        self.assertIn("local function item_context_like", source)
+        self.assertIn("local function save_item_contexts", source)
+        self.assertIn('C(gimmick, "get_UniqId")', source)
+        self.assertIn("debug.getupvalue(reads.save_records", source)
+        self.assertIn('F(value, "UniqueID")', source)
+        self.assertIn('"holder_unique_id"', source)
+        self.assertIn('F(F(drop, "MyContext"), "_ItemId")', source)
+        self.assertIn('F(drop, "<IsDeleted>k__BackingField")', source)
+        self.assertIn("chest_evidence_readable", source)
+        self.assertIn("shop_joined_finite", source)
+        self.assertIn("if item_id == nil then return nil, nil, 1 end", source)
+
+        # Grants without a current-task join and incomplete/truncated delivery
+        # expressions remain explicitly unresolved.
+        self.assertIn("grant_task_ownership_unknown", source)
+        self.assertIn("task_owned=", source)
+        self.assertIn("delivery_refs_truncated", source)
+        self.assertIn("delivery_ref_unresolved", source)
+        self.assertIn('F(item_data, "_IncompletePossible")', source)
+        self.assertIn('F(value, "_Count")', source)
+        self.assertIn('F(value, "_IgnoreRestrictionItem")', source)
+        self.assertIn("resolved=%s", source)
+        self.assertIn("focus_quests_truncated", source)
+        self.assertIn("destination_source_list_truncated", source)
+        self.assertIn("concierge_destinations_truncated", source)
+        self.assertIn("shop_catalog_truncated", source)
+        self.assertIn("pickup_scan_truncated", source)
+        self.assertIn("chest_rows_truncated", source)
+        self.assertIn("loot_rows_truncated", source)
+        self.assertIn("grant_processors_truncated", source)
+        self.assertIn("if skipped > 0 then return nil, nil, skipped end", source)
 
     def test_comments_and_strings_do_not_trigger_the_guard(self):
         source = """
