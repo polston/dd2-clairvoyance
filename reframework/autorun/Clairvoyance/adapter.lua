@@ -1993,6 +1993,54 @@ function journal.read_log(body, qid)
     return out
 end
 
+-- Build the one shared index of QuestLogResource objects for this live
+-- QuestLogManager/catalog pair. An unreadable catalog invalidates the old
+-- index so callers cannot accidentally reuse native objects from a prior
+-- catalog state.
+function journal.catalog_index(qlm)
+    if qlm == nil then
+        journal.cat_index, journal.cat_key, journal.all_by = nil, nil, {}
+        return nil
+    end
+    local ok, cat = pcall(function() return qlm:get_field("_Catalog") end)
+    if not ok or cat == nil then
+        journal.cat_index, journal.cat_key, journal.all_by = nil, nil, {}
+        return nil
+    end
+    local key_ok, key = pcall(function()
+        local address = qlm:get_address()
+        local count = int_value(cat:call("getCount"))
+        if address == nil or count == nil then return nil end
+        return tostring(address) .. ":" .. tostring(count)
+    end)
+    if not key_ok or key == nil then
+        journal.cat_index, journal.cat_key, journal.all_by = nil, nil, {}
+        return nil
+    end
+    if key ~= journal.cat_key or journal.cat_index == nil then
+        local values_ok, values = pcall(function() return cat:call("getValues") end)
+        local rows_ok, rows = pcall(function() return items.elements(values) end)
+        if not values_ok or not rows_ok or type(rows) ~= "table" then
+            journal.cat_index, journal.cat_key, journal.all_by = nil, nil, {}
+            return nil
+        end
+        local idx = {}
+        for _, res in ipairs(rows) do
+            local id = int_value(safe_call(res, "get_QuestId"))
+            if id ~= nil then idx[id] = res end
+        end
+        journal.cat_index = idx
+        journal.cat_key = key
+        journal.all_by = {}
+    end
+    return journal.cat_index
+end
+
+function journal.catalog_resource(qlm, qid)
+    local index = journal.catalog_index(qlm)
+    return index ~= nil and index[qid] or nil
+end
+
 function journal.now(qid)
     return journal.read_log(function(qlm, qid)
         local vi = qlm:call("getQuestLog", qid)
@@ -2051,23 +2099,12 @@ end
 
 function journal.all(qid)
     return journal.read_log(function(qlm, qid)
-        local cat = qlm:get_field("_Catalog")
-        if cat == nil then return nil end
-        local key = tostring(qlm:get_address()) .. ":" .. tostring(int_value(cat:call("getCount")))
-        if key ~= journal.cat_key then
-            local idx = {}
-            for _, res in ipairs(items.elements(cat:call("getValues")) or {}) do
-                local id = int_value(res:call("get_QuestId"))
-                if id ~= nil then idx[id] = res end
-            end
-            journal.cat_index = idx
-            journal.cat_key = key
-            journal.all_by = {}
-        end
+        local index = journal.catalog_index(qlm)
+        if index == nil then return nil end
         -- The catalog text cannot change while the (address, count) key holds.
         local hit = journal.all_by[qid]
         if hit ~= nil then return hit end
-        local res = journal.cat_index[qid]
+        local res = index[qid]
         if res == nil then return nil end
         local failed0 = journal.stats.failed
         local r = { summary = journal.msg(res:call("get_Summary")), steps = {} }
@@ -3940,12 +3977,10 @@ function A.make()
         if type(g) == "table" and g.task_index == ti then expected[#expected + 1] = g end
       end
       if #expected > 0 then
-        local raw_records = safe_field(info, "_ConciergeList")
+        local resource = journal.catalog_resource(qlm, qid)
+        local raw_records = resource ~= nil and safe_field(resource, "_ConciergeList") or nil
         local concierge_records, records_readable = list(raw_records, 256)
-        local data_ok, fallback_data = false, nil
-        if #expected == 1 and expected[1].index == 0 and raw_records == nil then
-          data_ok, fallback_data = pcall(function() return info:call("getCurrentTaskConciergeData") end)
-        end
+        if resource == nil then records_readable = false end
         for _, g in ipairs(expected) do
             local guidance_start = #result.guidance
             local out = { task_index = ti, concierge_index = g.index,
@@ -3962,12 +3997,10 @@ function A.make()
             end
             local record = record_index_valid and records_readable
               and concierge_records[g.index + 1] or nil
-            if record == nil and record_index_valid and #expected == 1 and g.index == 0
-                and raw_records == nil and data_ok then
-              record = fallback_data
-            end
             if not record_index_valid then
               out.eligibility, out.reason = "unknown", "concierge_record_index_invalid"
+            elseif resource == nil then
+              out.eligibility, out.reason = "unknown", "concierge_catalog_resource_unavailable"
             elseif not records_readable and raw_records ~= nil then
               out.eligibility, out.reason = "unknown", "concierge_record_list_unreadable"
             elseif record == nil then

@@ -3253,6 +3253,7 @@ do
   local function nobj(fields, calls)
     local o = { fields = fields or {}, calls = calls or {} }
     function o.get_field(_, k) return o.fields[k] end
+    function o.get_address() return o.address end
     function o.call(_, m, ...)
       local v = o.calls[m]
       if v == "RAISE" then error(m) end
@@ -3269,9 +3270,14 @@ do
   local oc = nobj({ _TaskIndex = 0 }, { get_TaskIndex = 0,
     get_Destinations = mcoll({ og }) })
   local oi = nobj({}, { get_CurrentTaskIndex = 0, getCurrentTaskConciergeData = oc })
+  local own_resource = nobj({ _ConciergeList = mcoll({ oc }) }, { get_QuestId = 20040 })
+  local own_native_catalog = nobj({}, { getCount = 1,
+    getValues = arr({ own_resource }) })
   local oq = nobj({ _QuestLogInfoDict = nobj({}, { get_Item = function(q)
     if q == 20040 then return oi end
-  end }) }, { getCurrentTask = function(q) if q == 20040 then return ot end end })
+  end }), _Catalog = own_native_catalog }, {
+    getCurrentTask = function(q) if q == 20040 then return ot end end })
+  oq.address = 0x202
   sdk.get_managed_singleton = function(n)
     if n == "app.QuestLogManager" then return oq end
   end
@@ -3828,9 +3834,12 @@ do
   })
   local info = native({}, { get_CurrentTaskIndex = 0,
     getCurrentTaskConciergeData = concierge })
-  info._fields._ConciergeList = mcoll({ concierge })
   local info_dict = native({}, { get_Item = function(q) if q == qid then return info end end })
-  local qlm = native({ _QuestLogInfoDict = info_dict }, {
+  local quest_resource = native({ _ConciergeList = mcoll({ concierge }) }, {
+    get_QuestId = qid })
+  local quest_catalog = native({}, { getCount = 1,
+    getValues = arr({ quest_resource }) })
+  local qlm = native({ _QuestLogInfoDict = info_dict, _Catalog = quest_catalog }, {
     getCurrentTask = function(q) if q == qid then return task end end,
   }, 0x201)
   local old_gms = sdk.get_managed_singleton
@@ -3911,7 +3920,7 @@ do
     { get_TaskIndex = 0, get_Destinations = mcoll({ duplicate_native_zero }) })
   local record_one = native({ _TaskIndex = 0, _Destinations = mcoll({ duplicate_native_one }) },
     { get_TaskIndex = 0, get_Destinations = mcoll({ duplicate_native_one }) })
-  info._fields._ConciergeList = mcoll({ record_zero, record_one })
+  quest_resource._fields._ConciergeList = mcoll({ record_zero, record_one })
   catalog.quests[qid].guidance = { { index = 1, task_index = 0, destination_index = 0,
     destinations = original_guidance } }
   concierge._calls.get_Destinations = mcoll({ duplicate_native_zero, duplicate_native_one })
@@ -3919,7 +3928,20 @@ do
   assert(indexed_native.concierge_index == 1 and indexed_native.eligibility == "eligible"
     and indexed_native.signals[1].target.pos.x == 10,
     "OT3e generated concierge record index selects its matching native record")
-  info._fields._ConciergeList = mcoll({ concierge })
+  qlm._fields._Catalog = nil
+  local no_native_catalog = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(no_native_catalog.eligibility == "unknown"
+    and no_native_catalog.reason == "concierge_catalog_resource_unavailable"
+    and #no_native_catalog.signals == 0,
+    "OT3e unavailable catalog cannot reuse an indexed native resource")
+  assert(oa.reset_session_caches() == true, "OT3e session owner reset clears catalog index")
+  local reset_native_catalog = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(reset_native_catalog.eligibility == "unknown"
+    and reset_native_catalog.reason == "concierge_catalog_resource_unavailable"
+    and #reset_native_catalog.signals == 0,
+    "OT3e reset catalog index stays unknown without a current native resource")
+  qlm._fields._Catalog = quest_catalog
+  quest_resource._fields._ConciergeList = mcoll({ concierge })
   catalog.quests[qid].guidance = { { index = 0, task_index = 0, destination_index = 0,
     destinations = { original_guidance[1], { index = 1, cid = cid,
       target = { kind = "key_location", key = key }, conditions = {}, delivery = { refs = {} } } } } }
