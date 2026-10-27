@@ -82,6 +82,23 @@ local unsafe_bracket_dynamic_method = run_case('',
 check("bracket dynamic managed method rejected",
   unsafe_bracket_dynamic_method:find("cmd ok=false unsafe probe call: dynamic managed method", 1, true) ~= nil)
 
+local unsafe_raw_managed_call = run_case('',
+  'return o:call("Dispose")', 150)
+check("unreviewed direct managed call rejected",
+  unsafe_raw_managed_call:find("cmd ok=false unsafe probe call: raw managed call", 1, true) ~= nil)
+
+local unsafe_raw_reviewed_call = run_case('',
+  'return o:call("get_Count")', 150)
+check("reviewed method still requires the reviewed capability",
+  unsafe_raw_reviewed_call:find("cmd ok=false unsafe probe call: raw managed call", 1, true) ~= nil)
+
+local unsafe_computed_call_alias = run_case('', [[
+local f = o["ca" .. "ll"]
+return f(o, "set_Enabled", false)
+]], 150)
+check("computed managed call alias rejected",
+  unsafe_computed_call_alias:find("cmd ok=false unsafe probe call: indirect managed call", 1, true) ~= nil)
+
 local unsafe_dynamic_call = run_case('', 'return o[method](o)', 150)
 check("dynamic member call rejected",
   unsafe_dynamic_call:find("cmd ok=false unsafe probe call: dynamic member call", 1, true) ~= nil)

@@ -263,6 +263,7 @@ def unsafe_probe_call(source):
             setter = _setter_argument(tokens, pos + 2)
             if setter is not None:
                 return setter
+            return "raw managed call"
         if (token == "[" and pos > 0 and pos + 2 < len(tokens) and
                 _receiver_token(tokens[pos - 1]) and
                 isinstance(tokens[pos + 1], tuple) and
@@ -282,11 +283,23 @@ def unsafe_probe_call(source):
                 setter = _setter_argument(tokens, pos + 3)
                 if setter is not None:
                     return setter
+                return "raw managed call"
 
     # The guard is deliberately fail-closed around capabilities that can hide
     # a later engine call. Read-only probes use direct, reviewed SDK members;
     # arbitrary code loading, SDK aliases and computed member calls do not.
+    member_aliases = set()
     for pos, token in enumerate(tokens):
+        if (token == "=" and pos > 0 and pos + 2 < len(tokens) and
+                isinstance(tokens[pos - 1], str) and
+                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tokens[pos - 1]) and
+                _receiver_token(tokens[pos + 1]) and tokens[pos + 2] == "["):
+            closing = _matching_close(tokens, pos + 2, "[", "]")
+            if closing is not None:
+                member_aliases.add(tokens[pos - 1])
+    for pos, token in enumerate(tokens):
+        if token in member_aliases and pos + 1 < len(tokens) and tokens[pos + 1] == "(":
+            return "indirect managed call"
         if token in REVIEWED_CAPABILITIES:
             if (pos > 0 and tokens[pos - 1] in (".", ":")) or (
                     pos + 1 >= len(tokens) or tokens[pos + 1] != "("):

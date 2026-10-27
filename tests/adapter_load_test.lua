@@ -4014,9 +4014,10 @@ do
     "OT7 exact empty active destination set is known empty")
   task._calls.getActiveDestinations = nil
   local nil_active = oa.objective_task_snapshot({ qid }, catalog)
-  assert(nil_active.quests[1].read_status == "unknown"
-    and nil_active.quests[1].reason == "destination_active_list_unreadable",
-    "OT7b nil active destination collection remains unknown")
+  assert(nil_active.quests[1].read_status == "ok"
+    and #nil_active.quests[1].task_destinations == 0
+    and #nil_active.quests[1].guidance == 1,
+    "OT7b nil active destination collection is a known empty set")
   task._calls.getActiveDestinations = "RAISE"
   local unreadable = oa.objective_task_snapshot({ qid }, catalog)
   assert(unreadable.quests[1].read_status == "unknown"

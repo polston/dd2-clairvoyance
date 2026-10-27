@@ -5664,11 +5664,11 @@ do
         and snapshots.targets[1].owners[1].qid ~= snapshots.targets[2].owners[1].qid)
     local two_item_routes = core.objective_routes(snapshots, nil, { npc_route_mode = 1,
       objective_places = true, focus_order = { 11, 10 }, route_cap = 8 })
-    check("objective routes: sources follow active-focus order, then item id within each quest",
-      #two_item_routes.members == 2 and two_item_routes.members[1].qid == 11
-        and two_item_routes.members[1].item_ids[1] == 2
-        and two_item_routes.members[2].qid == 10
-        and two_item_routes.members[2].item_ids[1] == 1
+    check("objective routes: generic item sources follow ascending item id",
+      #two_item_routes.members == 2 and two_item_routes.members[1].qid == 10
+        and two_item_routes.members[1].item_ids[1] == 1
+        and two_item_routes.members[2].qid == 11
+        and two_item_routes.members[2].item_ids[1] == 2
         and two_item_routes.members[1].ordinal ~= two_item_routes.members[2].ordinal)
     local capped_routes, capped_shown, capped_total = core.objective_routes(snapshots, nil,
       { npc_route_mode = 1, objective_places = true, focus_order = { 11, 10 }, route_cap = 1 })

@@ -3808,7 +3808,7 @@ function A.make()
       local ok, task = pcall(function() return qlm:call("getCurrentTask", qid) end)
       if not ok or task == nil then result.reason = "current_task_unreadable"; return result end
       local active_ok, active = pcall(function() return task:call("getActiveDestinations") end)
-      if not active_ok or active == nil then
+      if not active_ok then
         result.reason = "destination_active_list_unreadable"; return result
       end
       local rows, readable, truncated = list(active, 256)
@@ -3904,7 +3904,7 @@ function A.make()
       local ok_task, task = pcall(function() return qlm:call("getCurrentTask", qid) end)
       if not ok_task or task == nil then result.reason = "current_task_unreadable"; return result end
       local active_ok, active = pcall(function() return task:call("getActiveDestinations") end)
-      if not active_ok or active == nil then
+      if not active_ok then
         result.reason = "destination_active_list_unreadable"; return result
       end
       local active_rows, active_readable, active_truncated = list(active, 256)

@@ -55,6 +55,10 @@ class ProbeSourceSafety(unittest.TestCase):
                 "dynamic managed method",
             'local method = "set_Enabled"; return o["call"](o, method, false)':
                 "dynamic managed method",
+            'return o:call("Dispose")': "raw managed call",
+            'return o:call("get_Count")': "raw managed call",
+            'local f = o["ca" .. "ll"]; return f(o, "set_Enabled", false)':
+                "indirect managed call",
             'return o[method](o)': "dynamic member call",
             'return rawget(_G, "sdk").create_resource("x")':
                 "indirect global access",

@@ -234,7 +234,7 @@ if #qids == 0 then unknown("no_current_quest") end
 
 local function quest_info(qid)
   local ok, info = pcall(function()
-    return qlm:get_field("_QuestLogInfoDict"):call("get_Item", qid)
+    return reviewed_call(qlm:get_field("_QuestLogInfoDict"), "get_Item", qid)
   end)
   if ok and info ~= nil then return info end
   return nil

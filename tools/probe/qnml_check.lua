@@ -215,6 +215,7 @@ local function unsafe_probe_call(source)
       if unsafe_methods[method] or method:match("^set_") then return method end
       local setter = setter_argument(tokens, i + 2)
       if setter ~= nil then return setter end
+      return "raw managed call"
     end
     local member = tokens[i + 1]
     if token == "[" and i > 1 and type(member) == "table" and
@@ -230,6 +231,7 @@ local function unsafe_probe_call(source)
         if unsafe_methods[method] or method:match("^set_") then return method end
         local setter = setter_argument(tokens, i + 3)
         if setter ~= nil then return setter end
+        return "raw managed call"
       end
     end
   end
@@ -237,7 +239,19 @@ local function unsafe_probe_call(source)
   -- Fail closed around syntax that can hide a later engine call. Read-only
   -- probes use direct, reviewed SDK members; aliases, computed member calls
   -- and secondary code loading are rejected before load().
+  local member_aliases = {}
   for i, token in ipairs(tokens) do
+    local lhs = tokens[i - 1]
+    if token == "=" and type(lhs) == "string" and lhs:match("^[%a_][%w_]*$")
+        and receiver_token(tokens[i + 1]) and tokens[i + 2] == "[" then
+      local close = matching_close(tokens, i + 2, "[", "]")
+      if close ~= nil then member_aliases[lhs] = true end
+    end
+  end
+  for i, token in ipairs(tokens) do
+    if member_aliases[token] and tokens[i + 1] == "(" then
+      return "indirect managed call"
+    end
     local method_index = reviewed_capabilities[token]
     if method_index ~= nil then
       if tokens[i - 1] == "." or tokens[i - 1] == ":" or tokens[i + 1] ~= "(" then

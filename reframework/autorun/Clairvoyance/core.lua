@@ -4707,32 +4707,19 @@ function M.objective_routes(snapshot, player_origin, policy)
   local ordered = {}
   for _, obj in ipairs(snapshot.targets) do
     if objective_record_valid(snapshot, obj) and obj.kind ~= "source" then
-      ordered[#ordered + 1] = { obj = obj }
+      ordered[#ordered + 1] = obj
     end
-  end
-  local ids = {}
-  for id in pairs(items) do ids[#ids + 1] = id end
-  table.sort(ids)
-  for _, id in ipairs(ids) do
-    ordered[#ordered + 1] = { obj = items[id].obj, item_id = id }
   end
   table.sort(ordered, function(a, b)
-    local ao, bo = a.obj, b.obj
-    local _, ar = owner_order(ao)
-    local _, br = owner_order(bo)
+    local _, ar = owner_order(a)
+    local _, br = owner_order(b)
     if ar ~= br then return ar < br end
-    local ak, bk = ao.route_order or 9, bo.route_order or 9
+    local ak, bk = a.route_order or 9, b.route_order or 9
     if ak ~= bk then return ak < bk end
-    if a.item_id ~= b.item_id then
-      if a.item_id == nil then return true end
-      if b.item_id == nil then return false end
-      return a.item_id < b.item_id
+    if (a.sequence or math.huge) ~= (b.sequence or math.huge) then
+      return (a.sequence or math.huge) < (b.sequence or math.huge)
     end
-    if (ao.sequence or math.huge) ~= (bo.sequence or math.huge) then
-      return (ao.sequence or math.huge) < (bo.sequence or math.huge)
-    end
-    if ao.kind == "source" then return M.byte_less(ao.source_id, bo.source_id) end
-    return M.byte_less(ao.key, bo.key)
+    return M.byte_less(a.key, b.key)
   end)
   local function add(obj)
     if not objective_record_valid(snapshot, obj) then return end
@@ -4808,8 +4795,7 @@ function M.objective_routes(snapshot, player_origin, policy)
       end
     end
   end
-  for _, ordered_row in ipairs(ordered) do
-    local obj = ordered_row.obj
+  for _, obj in ipairs(ordered) do
     local _, rank = owner_order(obj)
     while startable_givers[next_startable] ~= nil do
       local row = startable_givers[next_startable]
@@ -4824,6 +4810,8 @@ function M.objective_routes(snapshot, player_origin, policy)
     add_startable(startable_givers[next_startable])
     next_startable = next_startable + 1
   end
+  local ids = {}; for id in pairs(items) do ids[#ids + 1] = id end; table.sort(ids)
+  for _, id in ipairs(ids) do add(items[id].obj) end
   if (policy.npc_route_mode or 0) >= 2 then
   for _, row in ipairs(objective_array(policy.shown_ancillary) or {}) do
     if type(row) == "table" and objective_uint(row.cid, 4294967295)
