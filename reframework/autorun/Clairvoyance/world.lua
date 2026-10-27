@@ -261,7 +261,8 @@ function M.new(a, reads, io)
       chest_lists = {}, treasure_lists = {},
       -- v14 (SPEC 22.7-22.9): NPC name list, route, spawned-holder walk
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
-      target_member = nil, members = {}, member_of = {}, objective_generation = nil, route_cache = {},
+      target_member = nil, members = {}, member_of = {}, objective_generation = nil,
+      objective_publication = nil, objective_source_observations = {}, route_cache = {},
       route_fail = {}, fail_seq = 0,
       -- SPEC 32.14: sticky route colour slots; slot_of (cid -> slot) and
       -- slot_cid (slot -> cid) together are the spec's S.slots
@@ -1542,9 +1543,17 @@ function M.new(a, reads, io)
 
   -- the published entry for a member from its cached route (nil cache or no
   -- route: the error entry)
+  local function route_contract(entry, member)
+    if member.objective_generation ~= nil then
+      entry.objective, entry.qid, entry.kind = true, member.qid, member.kind
+      entry.target_key, entry.ordinal = member.target_key, member.ordinal
+      entry.objective_generation = member.objective_generation
+    end
+    return entry
+  end
   local function render(member, c, hour)
     local cid, name = member.cid, member.name
-    local errt = { cid = cid, name = name, err = ROUTE_ERR }
+    local errt = route_contract({ cid = cid, name = name, err = ROUTE_ERR }, member)
     if c == nil or c.value == nil then return errt end
     refresh_discovery()
     local stops = {}
@@ -1570,8 +1579,8 @@ function M.new(a, reads, io)
         end
       end
     end
-    return { cid = cid, name = name, stops = stops, unplaced = c.value.unplaced,
-             off_schedule = c.value.off_schedule, current = current }
+    return route_contract({ cid = cid, name = name, stops = stops, unplaced = c.value.unplaced,
+      off_schedule = c.value.off_schedule, current = current }, member)
   end
 
   -- every entry of the final list gets its sticky colour slot: the entry
@@ -1677,7 +1686,7 @@ function M.new(a, reads, io)
         local pe = place_entry(m, tg)
         if pe ~= nil then out[#out + 1] = pe end
       else
-        out[#out + 1] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
+        out[#out + 1] = route_contract({ cid = m.cid, name = m.name, err = ROUTE_ERR }, m)
         S.place_from[m.cid] = nil
       end
     end
@@ -1762,7 +1771,7 @@ function M.new(a, reads, io)
       local m = e.m
       if not e.direct and not e.place then
         if e.bad or e.failed then
-          ents[i] = { cid = m.cid, name = m.name, err = ROUTE_ERR }
+          ents[i] = route_contract({ cid = m.cid, name = m.name, err = ROUTE_ERR }, m)
           S.place_from[m.cid] = nil
         else
           local c = S.route_cache[m.cid]
@@ -2429,9 +2438,9 @@ function M.new(a, reads, io)
         seen[key] = true
         places[#places + 1] = { qid = qid, task_index = task_index,
           owner_kind = owner_kind, owner_index = owner_index, signal_index = signal_index,
-          target = { place = { kind = place.kind,
+          target = { kind = place.kind,
             key = place.kind == "key_location" and place.key or nil,
-            local_area = place.kind == "local_area" and place.local_area or nil } },
+            local_area = place.kind == "local_area" and place.local_area or nil },
           pos = pos, eligibility = "eligible", generation = generation }
       end
       return true
@@ -2488,90 +2497,132 @@ function M.new(a, reads, io)
       end
       return count == n and value or nil
     end
-    local function copy_pos(pos)
-      return valid_pos(pos) and { x = pos.x, y = pos.y, z = pos.z } or nil
-    end
     local function integer(value, minimum)
       return type(value) == "number" and math.type(value) == "integer" and value >= minimum
+    end
+    local function clone(value, seen)
+      if type(value) ~= "table" then return value end
+      seen = seen or {}
+      if seen[value] ~= nil then return seen[value] end
+      local out = {}
+      seen[value] = out
+      for k, v in pairs(value) do out[clone(k, seen)] = clone(v, seen) end
+      return out
+    end
+    local function candidate_evidence(rows)
+      if type(rows) ~= "table" then return clone(rows) end
+      local out = clone(rows)
+      for _, candidate in ipairs(out) do
+        if type(candidate) == "table" then candidate.generation = nil end
+      end
+      return out
+    end
+    local function same(a0, b0, pairs_seen)
+      if type(a0) ~= type(b0) then return false end
+      if type(a0) ~= "table" then return a0 == b0 end
+      pairs_seen = pairs_seen or {}
+      local seen = pairs_seen[a0]
+      if seen ~= nil then return seen == b0 end
+      pairs_seen[a0] = b0
+      for k, v in pairs(a0) do
+        if rawget(b0, k) == nil and v ~= nil then return false end
+        if not same(v, b0[k], pairs_seen) then return false end
+      end
+      for k, v in pairs(b0) do
+        if rawget(a0, k) == nil and v ~= nil then return false end
+      end
+      return true
+    end
+    local function observe(name, status, reason, evidence)
+      local state = S.objective_source_observations[name]
+      local generation = state and state.generation or 1
+      if state ~= nil and not same(state.value, evidence) then
+        generation = math.min(2147483647, generation + 1)
+      end
+      S.objective_source_observations[name] = { generation = generation, value = clone(evidence) }
+      return { provider = name, generation = generation, status = status,
+        reason = reason, candidates = {} }
     end
     local generation = type(task_snapshot) == "table" and task_snapshot.need_generation or nil
     local valid_task = type(generation) == "number" and math.type(generation) == "integer"
       and generation > 0 and type(task_snapshot.quests) == "table"
       and array(task_snapshot.quests) ~= nil
-    local providers, seen = {}, {}
+    local providers, rows_by_provider = {}, {}
     local ok, base = false, nil
     if valid_task and type(a.objective_item_source_snapshots) == "function" then
       ok, base = pcall(a.objective_item_source_snapshots, objective_catalog, task_snapshot)
     end
-    if ok and type(base) == "table" then
-      for _, provider in ipairs(array(base) or {}) do
-        if type(provider) == "table" then
-          local row = {}
-          for k, v in pairs(provider) do row[k] = v end
-          if row.status == "unknown" then
-            row.candidates = {}
-            if type(row.reason) ~= "string" or row.reason == "" then row.reason = "provider_evidence_unproven" end
-          elseif row.status ~= "ok" or array(row.candidates) == nil then
-            row.status, row.candidates = "unknown", {}
-            row.reason = type(row.reason) == "string" and row.reason or "provider_snapshot_partial"
-          end
-          if row.provider == "placed" or row.provider == "chest" or row.provider == "loot" then
-            if not seen[row.provider] then
-              providers[#providers + 1] = row
-              seen[row.provider] = true
-            end
-          end
+    local base_rows = ok and array(base) or nil
+    if base_rows ~= nil then
+      for _, row in ipairs(base_rows) do
+        if type(row) == "table" and (row.provider == "placed" or row.provider == "chest"
+            or row.provider == "loot") and rows_by_provider[row.provider] == nil then
+          rows_by_provider[row.provider] = row
         end
       end
     end
     for _, name in ipairs({ "placed", "chest", "loot" }) do
-      if not seen[name] then
-        providers[#providers + 1] = { provider = name, generation = valid_task and generation or 1,
-          status = "unknown", reason = "adapter_source_snapshot_unavailable", candidates = {} }
+      local row = rows_by_provider[name]
+      local status, reason, candidates = "unknown", nil, {}
+      if not valid_task then
+        reason = "task_snapshot_unavailable"
+      elseif row == nil then
+        reason = base_rows == nil and "adapter_source_snapshot_unavailable" or "provider_snapshot_missing"
+      elseif not integer(row.generation, 1) then
+        reason = "provider_generation_invalid"
+      elseif row.status == "unknown" then
+        reason = type(row.reason) == "string" and row.reason ~= "" and row.reason
+          or "provider_evidence_unproven"
+      elseif row.status == "ok" and array(row.candidates) ~= nil then
+        local candidates_valid = true
+        for _, candidate in ipairs(row.candidates) do
+          if type(candidate) ~= "table" or candidate.generation ~= row.generation then
+            candidates_valid = false; break
+          end
+        end
+        if candidates_valid then status, candidates = "ok", clone(row.candidates)
+        else reason = "candidate_generation_mismatch" end
+      else
+        reason = type(row.reason) == "string" and row.reason or "provider_snapshot_partial"
       end
+      local evidence = { task_valid = valid_task and true or false,
+        status = status, reason = reason,
+        adapter_status = row and row.status or nil,
+        adapter_reason = row and row.reason or nil,
+        adapter_candidates = row and candidate_evidence(row.candidates) or nil }
+      if row ~= nil then
+        for k, v in pairs(row) do
+          if k ~= "generation" and k ~= "status" and k ~= "reason" and k ~= "candidates" then
+            evidence[k] = clone(v)
+          end
+        end
+      end
+      local out = observe(name, status, reason, evidence)
+      out.candidates = candidates
+      for _, candidate in ipairs(out.candidates) do
+        if type(candidate) == "table" then candidate.generation = out.generation end
+      end
+      if row ~= nil then
+        for k, v in pairs(row) do
+          if k ~= "generation" and k ~= "status" and k ~= "reason" and k ~= "candidates" then
+            out[k] = clone(v)
+          end
+        end
+      end
+      providers[#providers + 1] = out
     end
     for _, name in ipairs({ "shop", "seller" }) do
       local status = type(input_tbl) == "table" and type(input_tbl.objective_source_status) == "table"
         and input_tbl.objective_source_status[name] or nil
       local rows = type(input_tbl) == "table" and input_tbl[name == "shop" and "shops" or "sellers"] or nil
-      local out = { provider = name, generation = valid_task and generation or 1,
-        status = "unknown", reason = "source_snapshot_unavailable", candidates = {} }
-      if not valid_task then out.reason = "task_snapshot_unavailable"
-      elseif status == "ok" and array(rows) ~= nil then
-        local candidates, complete = {}, true
-        for _, row in ipairs(rows) do
-          if type(row) ~= "table" or not integer(row.cid, 1) or copy_pos(row.pos) == nil then
-            complete = false; break
-          end
-          if name == "shop" then
-            local items = array(row.items)
-            if items == nil then complete = false; break end
-            for _, item in ipairs(items) do
-              if type(item) ~= "table" or not integer(item.id, 1)
-                  or type(item.locked) ~= "boolean" then complete = false; break end
-              candidates[#candidates + 1] = { id = "shop:" .. tostring(row.shop) .. ":" .. tostring(item.id),
-                item_ids = { item.id }, target = { cid = row.cid }, pos = copy_pos(row.pos),
-                eligibility = item.locked and "ineligible" or "eligible",
-                reason = item.locked and "shop_stock_locked" or nil, generation = generation }
-            end
-          else
-            if not integer(row.item, 1) or type(row.shop) ~= "number"
-                or type(row.maybe_locked) ~= "boolean" then complete = false; break end
-            candidates[#candidates + 1] = { id = "seller:" .. tostring(row.shop) .. ":"
-                .. tostring(row.item) .. ":" .. tostring(row.cid), item_ids = { row.item },
-              target = { cid = row.cid }, pos = copy_pos(row.pos),
-              eligibility = row.maybe_locked and "ineligible" or "eligible",
-              reason = row.maybe_locked and "seller_stock_locked" or nil, generation = generation }
-          end
-          if not complete then break end
-        end
-        if complete then out.status, out.reason, out.candidates = "ok", nil, candidates
-        else out.reason = name .. "_snapshot_partial" end
-      else
-        local reason = type(input_tbl) == "table" and input_tbl.objective_source_status
-          and input_tbl.objective_source_status[name .. "_reason"] or nil
-        out.reason = type(reason) == "string" and reason or name .. "_snapshot_unreadable"
-      end
+      local reason = type(input_tbl) == "table" and input_tbl.objective_source_status
+        and input_tbl.objective_source_status[name .. "_reason"] or nil
+      if not valid_task then reason = "task_snapshot_unavailable"
+      elseif status == "ok" and array(rows) ~= nil then reason = name .. "_eligibility_unproven"
+      else reason = type(reason) == "string" and reason or name .. "_snapshot_unreadable" end
+      local evidence = { task_valid = valid_task and true or false, read_status = status,
+        reason = reason, rows = type(rows) == "table" and clone(rows) or rows }
+      local out = observe(name, "unknown", reason, evidence)
       providers[#providers + 1] = out
     end
     return providers
@@ -2595,12 +2646,21 @@ function M.new(a, reads, io)
   end
 
   -- Remove every published member before replacing an objective generation.
-  local function clear_members_now()
+  local function clear_members_now(preserve_members)
     local old = S.members
+    local preserve = {}
+    for _, m in ipairs(preserve_members or EMPTY) do
+      if type(m.target_key) == "string" and type(m.ordinal) == "number" then
+        preserve[m.cid] = { target_key = m.target_key, ordinal = m.ordinal }
+      end
+    end
     S.members, S.member_of = {}, {}
     for _, m in ipairs(old) do
       local cid = m.cid
-      free_slot(cid)
+      local identity = preserve[cid]
+      if identity == nil or identity.target_key ~= m.target_key or identity.ordinal ~= m.ordinal then
+        free_slot(cid)
+      end
       local place_from = S.place_from[cid]
       if place_from ~= nil and w.near ~= nil then w.near[place_from] = nil end
       S.place_from[cid], S.route_cache[cid], S.route_fail[cid] = nil, nil, nil
@@ -2630,10 +2690,38 @@ function M.new(a, reads, io)
       and value >= 1 and value <= maximum
   end
   local function route_key_valid(key)
-    if type(key) ~= "string" or key == "" then return false end
-    local ok, allocated = pcall(core.target_registry_allocate,
-      { by_key = {}, next_ordinal = 1, diagnostics = {} }, { key })
-    return ok and type(allocated) == "table" and allocated[key] == 1
+    if type(key) ~= "string" or key:sub(1, 1) ~= "t" then return false end
+    local sep = key:find(":", 2, true)
+    if sep == nil then return false end
+    local count_text = key:sub(2, sep - 1)
+    local count = tonumber(count_text)
+    if count == nil or count < 1 or count > 5 or count % 1 ~= 0
+        or count_text ~= tostring(count) then return false end
+    local tuple, at = {}, sep + 1
+    for i = 1, count do
+      local tag = key:sub(at, at)
+      if tag == "i" then
+        local stop = key:find(";", at + 1, true)
+        if stop == nil then return false end
+        local raw = key:sub(at + 1, stop - 1)
+        local value = tonumber(raw)
+        if value == nil or math.type(value) ~= "integer" or tostring(value) ~= raw then return false end
+        tuple[i], at = value, stop + 1
+      elseif tag == "s" then
+        local colon = key:find(":", at + 1, true)
+        if colon == nil then return false end
+        local length_text = key:sub(at + 1, colon - 1)
+        local length = tonumber(length_text)
+        if length == nil or length < 0 or length % 1 ~= 0
+            or length_text ~= tostring(length) then return false end
+        local first, last = colon + 1, colon + length
+        if last > #key then return false end
+        tuple[i], at = key:sub(first, last), last + 1
+      else
+        return false
+      end
+    end
+    return at == #key + 1 and core.target_key(tuple) == key
   end
   local function route_ids_valid(ids)
     ids = route_dense_array(ids)
@@ -2661,13 +2749,20 @@ function M.new(a, reads, io)
           or not route_positive(e.qid, 2147483647) or not route_ids_valid(e.item_ids) then
         return nil, generation, false
       end
+      for k in pairs(e) do
+        if k ~= "route_id" and k ~= "cid" and k ~= "place" and k ~= "qid" and k ~= "kind"
+            and k ~= "direct" and k ~= "target_key" and k ~= "ordinal" and k ~= "name"
+            and k ~= "pos" and k ~= "item_ids" and k ~= "objective_generation" then
+          return nil, generation, false
+        end
+      end
       local ancillary = e.target_key == nil and e.ordinal == nil
       local m
       if e.direct == true then
         if ancillary or not route_key_valid(e.target_key) or not route_positive(e.ordinal, 1099511627775)
             or core.objective_direct_route_id(e.ordinal) ~= e.route_id
             or e.cid ~= nil or e.place ~= 0 or not valid_pos(e.pos)
-            or (e.kind ~= "place" and e.kind ~= "source" and e.kind ~= "item") then
+            or (e.kind ~= "place" and e.kind ~= "source") then
           return nil, generation, false
         end
         m = { cid = e.route_id, name = type(e.name) == "string" and e.name or "Objective",
@@ -2708,6 +2803,70 @@ function M.new(a, reads, io)
     return normalized, generation, true
   end
 
+  local function route_tree_clone(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] ~= nil then return seen[value] end
+    local out = {}
+    seen[value] = out
+    for k, v in pairs(value) do out[route_tree_clone(k, seen)] = route_tree_clone(v, seen) end
+    return out
+  end
+  local objective_member_scalars = { "route_id", "cid", "place", "qid", "kind", "direct",
+    "target_key", "ordinal", "name", "objective_generation" }
+  local function same_objective_publication(publication)
+    if S.objective_publication == nil or publication.objective_generation ~= S.objective_generation then
+      return false
+    end
+    for k in pairs(publication) do
+      if k ~= "objective_generation" and k ~= "members" then return false end
+    end
+    local members, previous = route_dense_array(publication.members), S.objective_publication.members
+    if members == nil or #members ~= #previous then return false end
+    for i, member in ipairs(members) do
+      local old = previous[i]
+      if type(member) ~= "table" or type(old) ~= "table" then return false end
+      for k in pairs(member) do
+        if k ~= "route_id" and k ~= "cid" and k ~= "place" and k ~= "qid" and k ~= "kind"
+            and k ~= "direct" and k ~= "target_key" and k ~= "ordinal" and k ~= "name"
+            and k ~= "pos" and k ~= "item_ids" and k ~= "objective_generation" then return false end
+      end
+      for k in pairs(old) do if rawget(member, k) == nil then return false end end
+      for _, key in ipairs(objective_member_scalars) do
+        if member[key] ~= old[key] then return false end
+      end
+      local pos, old_pos = member.pos, old.pos
+      if type(pos) ~= type(old_pos) then return false end
+      if pos ~= nil then
+        if type(pos) ~= "table" or type(old_pos) ~= "table"
+            or pos.x ~= old_pos.x or pos.y ~= old_pos.y or pos.z ~= old_pos.z then return false end
+        for k in pairs(pos) do if k ~= "x" and k ~= "y" and k ~= "z" then return false end end
+        for k in pairs(old_pos) do if rawget(pos, k) == nil then return false end end
+      end
+      local ids, old_ids = route_dense_array(member.item_ids), old.item_ids
+      if ids == nil or #ids ~= #old_ids then return false end
+      for j, id in ipairs(ids) do if id ~= old_ids[j] then return false end end
+    end
+    return true
+  end
+  local function legacy_publication_array(publication)
+    local list = route_dense_array(publication)
+    if list == nil then return nil end
+    for _, e in ipairs(list) do
+      if type(e) ~= "table" or e.objective == true or e.objective_generation ~= nil
+          or e.target_key ~= nil or e.ordinal ~= nil or e.direct ~= nil or e.route_id ~= nil then
+        return nil
+      end
+      if type(e.cid) ~= "number" or math.type(e.cid) ~= "integer" or e.cid == 0
+          or (e.place ~= nil and (not route_positive(e.place, 2147483647) or e.cid ~= -e.place))
+          or (e.name ~= nil and type(e.name) ~= "string") then return nil end
+      for k in pairs(e) do
+        if k ~= "cid" and k ~= "name" and k ~= "place" then return nil end
+      end
+    end
+    return list
+  end
+
   -- Exact objective publications use a generation-bearing envelope. Bare
   -- lists remain only for the staged legacy caller and reject any objective
   -- shape before that compatibility path can observe it.
@@ -2716,40 +2875,43 @@ function M.new(a, reads, io)
       and (rawget(publication, "members") ~= nil or rawget(publication, "objective_generation") ~= nil)
     local generation, list = nil, publication
     if is_envelope then
+      if same_objective_publication(publication) then return end
       local normalized, valid_generation, valid = normalize_objective_publication(publication)
       generation = valid_generation
       if not valid then
         local had = #S.members > 0 or S.objective_generation ~= nil
         clear_members_now()
         S.objective_generation = nil
+        S.objective_publication = nil
         if had then w.route_gen = w.route_gen + 1 end
         last_round = nil
         return
       end
       list = normalized
+      S.objective_publication = route_tree_clone(publication)
     elseif type(publication) == "table" then
-      for _, e in ipairs(publication) do
-        if type(e) == "table" and (e.objective == true or e.objective_generation ~= nil
-            or e.target_key ~= nil or e.ordinal ~= nil or e.direct == true) then
-          local had = #S.members > 0 or S.objective_generation ~= nil
-          clear_members_now()
-          S.objective_generation = nil
-          if had then w.route_gen = w.route_gen + 1 end
-          last_round = nil
-          return
-        end
+      local legacy = legacy_publication_array(publication)
+      if legacy == nil then
+        local had = #S.members > 0 or S.objective_generation ~= nil
+        clear_members_now()
+        S.objective_generation, S.objective_publication = nil, nil
+        if had then w.route_gen = w.route_gen + 1 end
+        last_round = nil
+        return
       end
+      list = legacy
+      S.objective_generation, S.objective_publication = nil, nil
     else
       local had = #S.members > 0 or S.objective_generation ~= nil
       clear_members_now()
-      S.objective_generation = nil
+      S.objective_generation, S.objective_publication = nil, nil
       if had then w.route_gen = w.route_gen + 1 end
       last_round = nil
       return
     end
 
     if is_envelope and S.objective_generation ~= generation then
-      clear_members_now()
+      clear_members_now(list)
       S.objective_generation = generation
       last_round = nil
       w.route_gen = w.route_gen + 1
