@@ -2738,7 +2738,10 @@ function M.new(a, reads, io)
     end
     local valid_task = objective_need_proves_current_work(task_snapshot,
       need_readable and need_snapshot or nil, current_tasks)
-    local providers, rows_by_provider = {}, {}
+    local adapter_provider_names = { "placed", "chest", "loot", "talk_grant", "reward", "forgery" }
+    local adapter_provider_set = {}
+    for _, name in ipairs(adapter_provider_names) do adapter_provider_set[name] = true end
+    local providers, rows_by_provider, adapter_rows_invalid = {}, {}, false
     local ok, base = false, nil
     if valid_task and type(a.objective_item_source_snapshots) == "function" then
       ok, base = pcall(a.objective_item_source_snapshots, objective_catalog, task_snapshot)
@@ -2746,17 +2749,21 @@ function M.new(a, reads, io)
     local base_rows = ok and array(base) or nil
     if base_rows ~= nil then
       for _, row in ipairs(base_rows) do
-        if type(row) == "table" and (row.provider == "placed" or row.provider == "chest"
-            or row.provider == "loot") and rows_by_provider[row.provider] == nil then
+        if type(row) ~= "table" or not adapter_provider_set[row.provider]
+            or rows_by_provider[row.provider] ~= nil then
+          adapter_rows_invalid = true
+        else
           rows_by_provider[row.provider] = row
         end
       end
     end
-    for _, name in ipairs({ "placed", "chest", "loot" }) do
-      local row = rows_by_provider[name]
+    for _, name in ipairs(adapter_provider_names) do
+      local row = not adapter_rows_invalid and rows_by_provider[name] or nil
       local status, reason, candidates = "unknown", nil, {}
       if not valid_task then
         reason = "task_snapshot_unavailable"
+      elseif adapter_rows_invalid then
+        reason = "adapter_source_snapshot_invalid"
       elseif row == nil then
         reason = base_rows == nil and "adapter_source_snapshot_unavailable" or "provider_snapshot_missing"
       elseif not integer(row.generation, 1) then
@@ -5136,7 +5143,7 @@ function M.game_reads()
   -- one row per positive structured drop entry. The game rate is preserved
   -- as raw_rate: without a scale it is neither an availability proof nor a
   -- probability. Access proof is likewise left absent until a live gate exists.
-  function R.objective_monster_rows()
+  function R.objective_monster_rows(task_snapshot, _, need_snapshot)
     local ENEMY_MAX, SOURCE_MAX, TABLE_MAX, ITEM_MAX = 512, 8192, 64, 256
     local function integer(value, minimum)
       return type(value) == "number" and math.type(value) == "integer" and value >= minimum
@@ -5160,6 +5167,33 @@ function M.game_reads()
     local function fail(reason)
       return { complete = false, rows = {}, reason = reason }
     end
+    if type(task_snapshot) ~= "table" or not integer(task_snapshot.need_generation, 1)
+        or type(need_snapshot) ~= "table" or need_snapshot.status ~= "ok"
+        or need_snapshot.complete ~= true
+        or need_snapshot.generation ~= task_snapshot.need_generation
+        or not integer(need_snapshot.source_generation, 1) then
+      return fail("current_need_unavailable")
+    end
+    local wanted = {}
+    for _, group in ipairs(need_snapshot.groups or {}) do
+      if type(group) ~= "table" or not integer(group.qid, 1)
+          or not integer(group.task_index, 0) or group.status ~= "eligible"
+          or group.complete ~= true or group.generation ~= need_snapshot.source_generation
+          or not integer(group.remaining, 1) or type(group.options) ~= "table"
+          or #group.options == 0 then
+        return fail("current_need_malformed")
+      end
+      for _, option in ipairs(group.options) do
+        if type(option) ~= "table" or not integer(option.item_id, 1)
+            or not integer(option.accepted_count, 1) then
+          return fail("current_need_malformed")
+        end
+        wanted[option.item_id] = true
+      end
+    end
+    if next(wanted) == nil then
+      return { complete = true, rows = {}, reason = "no_focused_items" }
+    end
     local enemy_list = G(single("app.EnemyManager"), "_EnemyList")
     local enemies = bounded(enemy_list, ENEMY_MAX)
     if enemies == nil then return fail("enemy_list_unreadable") end
@@ -5180,19 +5214,23 @@ function M.game_reads()
     if not dict_complete(default_dict, defaults) or not dict_complete(param_dict, params) then
       return fail("drop_dictionary_unreadable")
     end
-    local by_cid, default_cids = {}, {}
+    local by_cid, default_cids, source_keys = {}, {}, { default = {}, param = {} }
     local function add_sources(slots, is_default)
+      local family = is_default and "default" or "param"
       for _, entry in ipairs(slots) do
         local value = hs_value(entry)
         if value ~= nil then
-          local cid = int_value(G(value, "_CharaId"))
-          if (cid == nil or cid == 0) and is_default then cid = int_value(G(entry, "key")) end
-          if not integer(cid, 1) then return false end
+          local source_key = u32(int_value(G(entry, "key")))
+          local cid = u32(int_value(G(value, "_CharaId")))
+          if (cid == nil or cid == 0) and is_default then cid = source_key end
+          if not integer(source_key, 1) or source_keys[family][source_key]
+              or not integer(cid, 1) then return false end
+          source_keys[family][source_key] = true
           if is_default then default_cids[cid] = true end
           if is_default or not default_cids[cid] then
             local list = by_cid[cid]
             if list == nil then list = {}; by_cid[cid] = list end
-            list[#list + 1] = value
+            list[#list + 1] = { value = value, family = family, key = source_key }
           end
         end
       end
@@ -5205,8 +5243,8 @@ function M.game_reads()
       local sources = by_cid[cid] or {}
       if #sources > TABLE_MAX then return nil end
       local rows = {}
-      for source_index, source in ipairs(sources) do
-        local tables = bounded(G(source, "_TableList"), TABLE_MAX)
+      for _, source in ipairs(sources) do
+        local tables = bounded(G(source.value, "_TableList"), TABLE_MAX)
         if tables == nil then return nil end
         for table_index, table_row in ipairs(tables) do
           local items = bounded(G(table_row, "_ItemList"), ITEM_MAX)
@@ -5217,10 +5255,10 @@ function M.game_reads()
             if not integer(item_id, 1) or not integer(count, 1) or not integer(rate, 0) then
               return nil
             end
-            if rate > 0 then
+            if rate > 0 and wanted[item_id] then
               rows[#rows + 1] = { item_id = item_id, count = count, raw_rate = rate,
-                drop_row_id = table.concat({ tostring(cid), tostring(source_index),
-                  tostring(table_index), tostring(item_index) }, ":") }
+                drop_row_id = core.target_key({ "source", "monster_drop_row", source.family,
+                  source.key, table_index, item_index }) }
             end
           end
         end
@@ -5232,7 +5270,7 @@ function M.game_reads()
       if enemy == nil then return fail("enemy_identity_unreadable") end
       local chara = C(enemy, "get_Chara")
       local uid = C(C(chara, "get_UniqId"), "ToString()")
-      local cid = int_value(C(chara, "get_CharaID"))
+      local cid = u32(int_value(C(chara, "get_CharaID")))
       local dead = C(chara, "get_IsDead")
       local transform = C(chara, "get_Transform")
       local pos = xyz(C(transform, "get_UniversalPosition"))
