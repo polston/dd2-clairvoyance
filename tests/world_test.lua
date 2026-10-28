@@ -7087,13 +7087,14 @@ do
     access_unknown.status == "unknown" and #access_unknown.candidates == 0)
   monster_rows.rows[1].accessible = true
   monster_rows.rows[1].chance, monster_rows.rows[1].raw_rate = nil, 2500
-  mw:refresh(0, true, { chests = true })
+  mw:poke()
   local scale_unknown = mw:objective_monster_observations(source_task, need_proof)
   check("monster objectives: raw game rate is not normalized probability evidence",
-    scale_unknown.status == "unknown" and #scale_unknown.candidates == 0)
+    scale_unknown.status == "unknown" and #scale_unknown.candidates == 0
+      and scale_unknown.reason == "monster_probability_unproven")
   monster_rows.rows[1].chance, monster_rows.rows[1].raw_rate = 0.25, nil
   monster_rows.rows[2].drop_table_readable = false
-  mw:refresh(0, true, { chests = true })
+  mw:poke()
   local partial_monsters = mw:objective_monster_observations(source_task, need_proof)
   check("monster objectives: unreadable drop table clears whole snapshot",
     partial_monsters.status == "unknown" and #partial_monsters.candidates == 0

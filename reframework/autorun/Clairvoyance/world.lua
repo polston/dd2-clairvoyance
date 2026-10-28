@@ -2974,8 +2974,13 @@ function M.new(a, reads, io)
       local valid_drop_id = (type(drop_id) == "string" and drop_id ~= "")
         or (to_int(drop_id) ~= nil and drop_id > 0)
       if type(row.uid) ~= "string" or row.uid == "" or not valid_drop_id
-        or type(row.alive) ~= "boolean"
-        or type(row.accessible) ~= "boolean" then
+          or type(row.alive) ~= "boolean" then
+        return nil, "monster_identity_or_gate_unreadable"
+      end
+      if row.chance == nil and to_int(row.raw_rate) ~= nil and row.raw_rate >= 0 then
+        return nil, "monster_probability_unproven"
+      end
+      if type(row.accessible) ~= "boolean" then
         return nil, "monster_identity_or_gate_unreadable"
       end
       if not row.alive or not row.accessible then return false end
