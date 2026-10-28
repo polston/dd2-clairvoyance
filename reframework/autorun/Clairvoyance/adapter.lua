@@ -4602,7 +4602,70 @@ function A.make()
       candidates = {}, catalog_version = version,
       source_descriptors = copy(descriptors), signal_evidence = copy(signals),
       guidance_delivery_refs = copy(deliveries) }
+    providers[#providers + 1] = { provider = "forgery", generation = generation,
+      status = "unknown", complete = false,
+      reason = "forgery_order_evidence_unproven",
+      missing_evidence = { "typed_service_and_mapping", "position_and_interaction",
+        "held_input_and_price", "busy_kept_and_completion_state" },
+      candidates = {}, catalog_version = version,
+      source_descriptors = copy(descriptors), signal_evidence = copy(signals),
+      guidance_delivery_refs = copy(deliveries) }
     return providers
+  end
+  function a.objective_forgery_candidate(evidence, generation)
+    local out = { provider = "forgery", generation = type(generation) == "number"
+      and math.max(1, generation) or objective_task_state.source_generation,
+      status = "unknown", complete = false, reason = "forgery_order_evidence_unproven",
+      candidates = {} }
+    if type(evidence) ~= "table" then return out end
+    local id = evidence.identity
+    local service, output = evidence.service_id, evidence.output_item_id
+    if type(id) ~= "table" or id[1] ~= "source" or id[2] ~= "forgery"
+      or type(service) ~= "number" or type(output) ~= "number"
+      or id[3] ~= service or id[4] ~= output
+      or evidence.service_type ~= "NpcShopForgeryParam"
+      or evidence.mapping_input_item_id == nil
+      or evidence.mapping_output_item_id ~= output
+      or evidence.row_enabled ~= true
+      or type(evidence.service_position) ~= "table"
+      or type(evidence.service_position.x) ~= "number"
+      or type(evidence.service_position.y) ~= "number"
+      or type(evidence.service_position.z) ~= "number"
+      or evidence.interactable ~= true
+      or evidence.busy_readable ~= true or evidence.kept_readable ~= true
+      or evidence.completion_readable ~= true
+      or type(evidence.completed) ~= "boolean"
+      or type(evidence.busy) ~= "boolean"
+      or type(evidence.kept_item_id) ~= "number"
+      or type(evidence.kept_item_count) ~= "number" then return out end
+    out.complete = true
+    out.status = "ineligible"
+    out.reason = "forgery_order_not_ready"
+    if evidence.completed then
+      if evidence.kept_item_id == output and evidence.kept_item_count > 0 then
+        out.status, out.reason = "eligible", "matching_forgery_output_ready"
+      end
+    elseif evidence.busy then
+      out.reason = "forgery_order_pending"
+    elseif evidence.idle == true and evidence.kept_item_count == 0
+      and evidence.kept_item_id == 0 and evidence.mapping_input_item_id ~= nil
+      and evidence.price == evidence.mapping_price
+      and type(evidence.price) == "number" and evidence.price > 0
+      and evidence.input_held == true and evidence.price_held == true then
+      out.status, out.reason = "eligible", "forgery_order_can_start"
+    elseif evidence.idle ~= true or evidence.mapping_input_item_id == nil
+      or type(evidence.price) ~= "number" or evidence.mapping_price ~= evidence.price
+      or evidence.price <= 0 or type(evidence.input_held) ~= "boolean"
+      or type(evidence.price_held) ~= "boolean" then
+      out.status, out.complete = "unknown", false
+      out.reason = "forgery_order_evidence_unproven"
+      return out
+    end
+    if out.status == "eligible" then
+      out.candidates[1] = { identity = { "source", "forgery", service, output },
+        item_id = output, service_id = service }
+    end
+    return out
   end
   function a.reset_session_caches()
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")

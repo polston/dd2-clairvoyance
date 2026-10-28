@@ -199,8 +199,40 @@ assert(grouped_complete and #grouped == 1 and grouped[1].remaining == 1
 local empty_need_snapshot = a.objective_need_groups()
 assert(empty_need_snapshot.status == "unknown" and not empty_need_snapshot.complete
   and #empty_need_snapshot.groups == 0, "unrefreshed objective group snapshot is unknown")
+local forgery_identity = { "source", "forgery", 17, 29 }
+local function forgery_evidence(overrides)
+  local e = { identity = forgery_identity, service_id = 17, output_item_id = 29,
+    mapping_input_item_id = 11, mapping_output_item_id = 29, price = 6, mapping_price = 6,
+    service_type = "NpcShopForgeryParam", service_position = { x = 1, y = 2, z = 3 },
+    interactable = true, row_enabled = true, input_held = true, price_held = true,
+    idle = true, busy = false, kept_item_id = 0, kept_item_count = 0,
+    completed = false, completion_readable = true, busy_readable = true,
+    kept_readable = true }
+  for k, v in pairs(overrides or {}) do e[k] = v end
+  return e
+end
+local pre_order = a.objective_forgery_candidate(forgery_evidence())
+assert(pre_order.status == "eligible" and pre_order.candidates[1].identity[2] == "forgery"
+  and pre_order.candidates[1].identity[3] == 17 and pre_order.candidates[1].identity[4] == 29,
+  "forgery pre-order requires mapped output, positioned interactable service, held input and price, and idle state")
+local pending = a.objective_forgery_candidate(forgery_evidence({ idle = false, busy = true,
+  input_held = false, price_held = false, kept_item_id = 11, kept_item_count = 1 }))
+assert(pending.status == "ineligible" and #pending.candidates == 0,
+  "forgery pending order is ineligible and has no candidate")
+local complete = a.objective_forgery_candidate(forgery_evidence({ completed = true,
+  input_held = false, price_held = false, kept_item_id = 29, kept_item_count = 1 }))
+assert(complete.status == "eligible" and complete.candidates[1].identity[4] == 29,
+  "completed matching output remains eligible without input or price")
+local unrelated = a.objective_forgery_candidate(forgery_evidence({ completed = true,
+  input_held = false, price_held = false, kept_item_id = 30, kept_item_count = 1 }))
+assert(unrelated.status == "ineligible" and #unrelated.candidates == 0,
+  "unrelated completed order is ineligible")
+local unreadable = a.objective_forgery_candidate(forgery_evidence({ busy_readable = false }))
+assert(unreadable.status == "unknown" and #unreadable.candidates == 0,
+  "unreadable forgery state invalidates provider without stale candidates")
 local empty_source_snapshots = a.objective_item_source_snapshots()
-assert(#empty_source_snapshots == 4 and empty_source_snapshots[1].provider == "placed"
+assert(type(a.objective_forgery_candidate) == "function", "forgery evidence resolver missing")
+assert(#empty_source_snapshots == 5 and empty_source_snapshots[1].provider == "placed"
   and empty_source_snapshots[2].provider == "chest" and empty_source_snapshots[3].provider == "loot"
   and empty_source_snapshots[1].status == "unknown"
   and empty_source_snapshots[1].complete == false
@@ -215,6 +247,12 @@ assert(#empty_source_snapshots == 4 and empty_source_snapshots[1].provider == "p
   and empty_source_snapshots[4].missing_evidence[4] == "execution_claim_state"
   and #empty_source_snapshots[4].candidates == 0
   and empty_source_snapshots[4].generation > 0
+  and empty_source_snapshots[5].provider == "forgery"
+  and empty_source_snapshots[5].status == "unknown"
+  and empty_source_snapshots[5].complete == false
+  and empty_source_snapshots[5].reason == "forgery_order_evidence_unproven"
+  and #empty_source_snapshots[5].missing_evidence == 4
+  and #empty_source_snapshots[5].candidates == 0
   and empty_source_snapshots[1].generation > 0
   and empty_source_snapshots[2].generation > 0 and empty_source_snapshots[3].generation > 0,
   "source envelopes initialize with separate positive generations")
@@ -3610,7 +3648,7 @@ do
     and owned[1].item_id ~= 9002,
     "objective task owner preserves delivery groups and does not flatten alternatives")
   local source_snapshots = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
-  assert(#source_snapshots == 4 and source_snapshots[1].provider == "placed"
+  assert(#source_snapshots == 5 and source_snapshots[1].provider == "placed"
     and source_snapshots[2].provider == "chest" and source_snapshots[3].provider == "loot"
     and source_snapshots[1].status == "unknown"
     and source_snapshots[1].complete == false
@@ -3625,6 +3663,11 @@ do
     and source_snapshots[4].missing_evidence[4] == "execution_claim_state"
     and #source_snapshots[4].candidates == 0
     and source_snapshots[4].generation == owned_snapshot.need_generation
+    and source_snapshots[5].provider == "forgery"
+    and source_snapshots[5].status == "unknown"
+    and source_snapshots[5].reason == "forgery_order_evidence_unproven"
+    and #source_snapshots[5].candidates == 0
+    and source_snapshots[5].generation == owned_snapshot.need_generation
     and source_snapshots[1].generation == owned_snapshot.need_generation
     and source_snapshots[1].catalog_version == 2
     and #source_snapshots[1].source_descriptors == 2
