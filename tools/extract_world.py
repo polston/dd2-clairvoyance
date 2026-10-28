@@ -9,6 +9,7 @@ import argparse
 import collections
 import glob
 import json
+import math
 import os
 import re
 import sys
@@ -25,6 +26,8 @@ KEY_MSG = "tools/pak_key.local.txt missing"
 PAK_NAME = "re_chunk_000.pak"
 PREFIX = "natives/STM/"
 GMDATA = "AppSystem/Gimmick/UserData/Gm80_001_GmData.user"
+PICKUP_GMDATA = "AppSystem/Gimmick/UserData/Gm82_000_GmData.user"
+PICKUP_GIMMICK_ID = 163
 MIN_FILES = 2000
 
 LIST_FIELDS = (("_NormalTableList", "normal"), ("_SubQuestTableList", "subquest"),
@@ -174,6 +177,26 @@ def chest_items(data, layouts):
     return params_of(_decode(data, layouts))
 
 
+def pickup_params_of(insts):
+    """Exact {ParamId: {item, count}} joins from Gm82_000Param only."""
+    params = {}
+    for inst in insts:
+        if inst.type != "app.Gm82_000Param":
+            continue
+        pid = inst.fields.get("ParamId")
+        item_id = inst.fields.get("ItemId")
+        count = inst.fields.get("ItemNum")
+        if type(pid) is not int or pid < 0 or type(item_id) is not int or type(count) is not int:
+            raise ExtractError("a placed-item param has an invalid identity or output")
+        if item_id <= 0 or count <= 0:
+            continue
+        entry = {"item": item_id, "count": count}
+        if pid in params and params[pid] != entry:
+            raise ExtractError("a placed-item ParamId has conflicting item outputs")
+        params[pid] = entry
+    return params
+
+
 QUEST_FLAG = "app.GenerateManager.QuestFlagInfos.QuestFlagInfo"
 QUEST_VAR = "app.GenerateManager.QuestFlagInfos.QuestVariableInfo"
 
@@ -234,7 +257,35 @@ def _round1(pos):
     return [round(float(v), 1) for v in pos]
 
 
-def collect_rows(decoded, params, conflicts, chara_names):
+def _placement_item_row(insts, row, src, params):
+    """Return a stable Gm82-backed placed-item row, or None without its exact join."""
+    cont = qnml_rsz.deref(insts, row.fields.get("_Container"))
+    gs = qnml_rsz.deref(insts, cont.fields.get("_GimmickSetting")) if cont else None
+    pid = gs.fields.get("_ParamId") if gs else None
+    param = params.get(pid)
+    if param is None:
+        return None
+    item_id, count = param["item"], param["count"]
+    uid = row.fields.get("_ManualSetGuid")
+    if not isinstance(uid, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", uid):
+        raise ExtractError("a placed-item row has an invalid uid")
+    if type(item_id) is not int or item_id <= 0 or type(count) is not int or count <= 0:
+        raise ExtractError("a placed-item row has an invalid item output")
+    position = row.fields.get("_ManualPos")
+    if not isinstance(position, (tuple, list)) or len(position) != 3 or any(
+            type(value) not in (int, float) or not math.isfinite(value) for value in position):
+        raise ExtractError("a placed-item row has an invalid position")
+    x, y, z = _round1(position)
+    result = {"k": "item", "uid": uid.lower(), "id": item_id, "n": count,
+              "x": x, "y": y, "z": z, "src": src}
+    gate = gate_of(insts, cont)
+    if gate:
+        result["gate"] = gate
+    return result
+
+
+def collect_rows(decoded, params, conflicts, chara_names, pickup_params=None):
     """Rows of the tracked kinds from decoded table files {rel: instances}.
 
     Returns (rows, count of chest rows without an item list, gimmick id counts,
@@ -260,9 +311,13 @@ def collect_rows(decoded, params, conflicts, chara_names):
             f = r.fields
             if kind == "enemy":
                 k, rid = "chara", f["_CharaID"] & 0xFFFFFFFF
-            elif kind == "gimmick" and f["_GimmickID"] in KIND_OF_GIMMICK:
+            elif kind == "gimmick":
                 rid = f["_GimmickID"]
-                k = KIND_OF_GIMMICK[rid]
+                k = KIND_OF_GIMMICK.get(rid)
+                if rid == PICKUP_GIMMICK_ID:
+                    k = "pickup"
+                elif k is None:
+                    continue
                 gimmick_ids[rid] += 1
             else:
                 continue
@@ -291,6 +346,15 @@ def collect_rows(decoded, params, conflicts, chara_names):
                 gate = gate_of(insts, cont)
                 if gate:
                     row["gate"] = gate
+            elif k == "pickup":
+                placement = _placement_item_row(insts, r, src, pickup_params or {})
+                if placement is not None:
+                    key = ("item", placement["uid"])
+                    if key in seen:
+                        raise ExtractError("an item placement guid appears in two rows")
+                    seen[key] = True
+                    rows.append(placement)
+                continue
             if k == "chara":
                 if src in ("subquest", "mainquest"):
                     row["table_qid"] = table_qid_of(rel)
@@ -336,6 +400,7 @@ def extract(game, key_hex, layouts):
     try:
         files, seed_hits, dangling = enumerate_files(pak, layouts)
         gm = pak.read(_full(GMDATA))
+        pickup_gm = pak.read(_full(PICKUP_GMDATA))
     except qnml_pak.PakError as e:
         raise ExtractError(str(e))
     finally:
@@ -348,17 +413,20 @@ def extract(game, key_hex, layouts):
         raise ExtractError("only %d generate files found (expected at least %d)" % (len(files), MIN_FILES))
     if gm is None:
         raise ExtractError("chest contents file missing from the archive")
+    if pickup_gm is None:
+        raise ExtractError("placed-item data file missing from the archive")
     params, conflicts = chest_items(gm, layouts)
+    pickup_params = pickup_params_of(_decode(pickup_gm, layouts))
     decoded = {rel: _decode(data, layouts) for rel, data in files.items()}
     rows, unjoined, gimmick_ids, kinds = collect_rows(
-        decoded, params, conflicts, layouts["enums"]["CharacterID"])
+        decoded, params, conflicts, layouts["enums"]["CharacterID"], pickup_params)
     by_k = collections.Counter(r["k"] for r in rows)
     for k in ("token", "beetle", "chest"):
         gid = FIRST_GIMMICK[k]
         if gimmick_ids[gid] == 0:
             raise ExtractError("no %s rows (gimmick %d) found" % (k, gid))
-    order = {"chest": 0, "token": 1, "beetle": 2, "chara": 3}
-    rows.sort(key=lambda r: (order[r["k"]], r["uid"]))
+    order = {"chest": 0, "item": 1, "token": 2, "beetle": 3, "chara": 4}
+    rows.sort(key=lambda r: (order[r["k"]], r["uid"], r.get("id", 0)))
     out = {"version": 2, "pak": "%d:%d" % (pak.total, pak.fingerprint), "rows": rows}
 
     chara = [r for r in rows if r["k"] == "chara"]
