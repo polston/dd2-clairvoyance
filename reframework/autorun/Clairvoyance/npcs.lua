@@ -277,7 +277,7 @@ end
 local function pos_int(v)
   if type(v) ~= "number" then return nil end
   local i = math.tointeger(v)
-  if i and i > 0 then return i end
+  if i and i > 0 and i <= 2147483647 then return i end
   return nil
 end
 
@@ -291,13 +291,16 @@ local function int_list(t)
   return out
 end
 
+local function legacy_uint(v)
+  if type(v) ~= "number" then return nil end
+  local i = math.tointeger(v)
+  if i and i > 0 and i <= 4294967295 then return i end
+  return nil
+end
+
 function M.parse_quests(t)
   local quests = {}
-  local info = { pak = nil, version = nil, kept = 0, dropped = 0, first = nil }
-  if type(t) ~= "table" then return quests, info end
-  if type(t.version) == "number" then info.version = t.version end
-  if type(t.pak) == "string" then info.pak = t.pak end
-  if type(t.quests) ~= "table" then return quests, info end
+  if type(t) ~= "table" or type(t.quests) ~= "table" then return quests end
   for k, q in pairs(t.quests) do
     local qid = pos_int(tonumber(k))
     if qid and type(q) == "table" then
@@ -305,21 +308,428 @@ function M.parse_quests(t)
       if type(q.dest) == "table" and not (#q.dest == 0 and next(q.dest) ~= nil) then
         for _, d in ipairs(q.dest) do
           if type(d) == "table" then
-            local cid, key = pos_int(d.cid), pos_int(d.key)
+            local cid, key = legacy_uint(d.cid), pos_int(d.key)
             if cid or key then dest[#dest + 1] = { cid = cid, key = key } end
           end
         end
       end
-      quests[qid] = { cast = int_list(q.cast), npcs = int_list(q.npcs),
+      local function legacy_list(values)
+        local out = {}
+        if type(values) == "table" and not (#values == 0 and next(values) ~= nil) then
+          for _, value in ipairs(values) do
+            local id = legacy_uint(value)
+            if id then out[#out + 1] = id end
+          end
+        end
+        return out
+      end
+      quests[qid] = { cast = legacy_list(q.cast), npcs = legacy_list(q.npcs),
         items = int_list(q.items), dest = dest, decoded = (q.decoded == true) }
-      info.kept = info.kept + 1
-    else
-      info.dropped = info.dropped + 1
-      local s = tostring(k)
-      if info.first == nil or s < info.first then info.first = s end
     end
   end
-  return quests, info
+  if t.version ~= 2 or type(t.quests) ~= "table" then return quests end
+
+  local diagnostics, catalog_quests = {}, {}
+  local function fail(message)
+    diagnostics[#diagnostics + 1] = message
+  end
+  local function is_integer(v, lo, hi)
+    return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+      and v == floor(v) and v >= lo and v <= hi
+  end
+  local function bool(v) return type(v) == "boolean" end
+  local function canonical_qid(k)
+    if type(k) ~= "string" or not k:match("^[1-9][0-9]*$") then return nil end
+    local n = tonumber(k)
+    if not n or n > 2147483647 or tostring(n) ~= k then return nil end
+    return n
+  end
+  local function dense_array(v)
+    if type(v) ~= "table" then return false end
+    local n, count = #v, 0
+    for k in pairs(v) do
+      if not is_integer(k, 1, n) then return false end
+      count = count + 1
+    end
+    return count == n
+  end
+  local function copy_array(v, convert)
+    if not dense_array(v) then return nil end
+    local out = {}
+    for i = 1, #v do
+      local item = convert(v[i], i - 1)
+      if item == nil then return nil end
+      out[i] = item
+    end
+    return out
+  end
+  local function position(p)
+    if type(p) ~= "table" or type(p.x) ~= "number" or type(p.y) ~= "number"
+        or type(p.z) ~= "number" then return nil end
+    for _, v in ipairs({ p.x, p.y, p.z }) do
+      if v ~= v or v == math.huge or v == -math.huge then return nil end
+    end
+    return { x = p.x, y = p.y, z = p.z }
+  end
+  local function copy_plain(value, seen, depth)
+    if type(value) == "string" or type(value) == "boolean" then return value end
+    if type(value) == "number" then
+      if value ~= value or value == math.huge or value == -math.huge then return nil end
+      return value
+    end
+    if type(value) ~= "table" or depth > 32 or seen[value] then return nil end
+    seen[value] = true
+    local out = {}
+    for k, v in pairs(value) do
+      if not (type(k) == "string" or is_integer(k, 1, 2147483647)) then seen[value] = nil; return nil end
+      local copy = copy_plain(v, seen, depth + 1)
+      if copy == nil then seen[value] = nil; return nil end
+      out[k] = copy
+    end
+    seen[value] = nil
+    return out
+  end
+  local function condition(c, depth)
+    if type(c) ~= "table" or depth > 32 or type(c.kind) ~= "string" then return nil end
+    local kind = c.kind
+    if kind == "quest_variable" then
+      if not bool(c.enabled) or not bool(c.is_not)
+          or not is_integer(c.qid, 1, 2147483647)
+          or not is_integer(c.name_hash, 0, 4294967295)
+          or not is_integer(c.value_type, -2147483648, 2147483647)
+          or not is_integer(c.compare_type, -2147483648, 2147483647)
+          or not bool(c.bool_value) or not is_integer(c.int_value, -2147483648, 2147483647) then return nil end
+      return { kind = kind, enabled = c.enabled, is_not = c.is_not, qid = c.qid,
+        name_hash = c.name_hash, value_type = c.value_type, compare_type = c.compare_type,
+        bool_value = c.bool_value, int_value = c.int_value }
+    elseif kind == "quest_log_condition" then
+      if not is_integer(c.qid, -2147483648, 2147483647)
+          or not is_integer(c.name_hash, 0, 4294967295)
+          or not is_integer(c.value_type, -2147483648, 2147483647)
+          or not is_integer(c.compare_type, -2147483648, 2147483647)
+          or not bool(c.bool_value) or not is_integer(c.int_value, -2147483648, 2147483647) then return nil end
+      return { kind = kind, qid = c.qid, name_hash = c.name_hash, value_type = c.value_type,
+        compare_type = c.compare_type, bool_value = c.bool_value, int_value = c.int_value }
+    elseif kind == "item" then
+      if not bool(c.enabled) or not bool(c.is_not)
+          or not is_integer(c.item_id, 1, 2147483647)
+          or not bool(c.set_num)
+          or not is_integer(c.num, -2147483648, 2147483647) then return nil end
+      return { kind = kind, enabled = c.enabled, is_not = c.is_not,
+        item_id = c.item_id, set_num = c.set_num, num = c.num }
+    elseif kind == "quest_variable_or" then
+      if not bool(c.enabled) or not bool(c.is_not) then return nil end
+      local children = copy_array(c.children, function(child) return condition(child, depth + 1) end)
+      if not children then return nil end
+      return { kind = kind, enabled = c.enabled, is_not = c.is_not, children = children }
+    elseif kind == "quest_log_reminder" then
+      local function reminder(r, reminder_depth)
+        if type(r) ~= "table" or r.kind ~= "quest_log_reminder" or reminder_depth > 32
+            or type(r.reminder_msg_id) ~= "string"
+            or not r.reminder_msg_id:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$")
+            or not bool(r.is_finished) or not bool(r.is_or) then return nil end
+        local children = copy_array(r.reminders, function(child)
+          return reminder(child, reminder_depth + 1)
+        end)
+        if not children then return nil end
+        return { kind = r.kind, reminder_msg_id = r.reminder_msg_id, is_finished = r.is_finished,
+          is_or = r.is_or, reminders = children }
+      end
+      if type(c.reminder_msg_id) ~= "string"
+          or not c.reminder_msg_id:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$")
+          or not bool(c.is_finished) or not bool(c.is_or) then return nil end
+      local reminders = copy_array(c.reminders, function(r)
+        return reminder(r, depth + 1)
+      end)
+      if not reminders then return nil end
+      return { kind = kind, reminder_msg_id = c.reminder_msg_id,
+        is_finished = c.is_finished, is_or = c.is_or, reminders = reminders }
+    end
+    return nil
+  end
+  local function place_target(v)
+    if type(v) ~= "table" then return nil end
+    if v.kind == "key_location" and is_integer(v.key, 1, 2147483647) then
+      return { kind = v.kind, key = v.key }
+    elseif v.kind == "local_area" and is_integer(v.local_area, 0, 2147483647) then
+      return { kind = v.kind, local_area = v.local_area }
+    end
+    return nil
+  end
+  local function destination(d)
+    if type(d) ~= "table" or not is_integer(d.index, 0, 2147483647)
+        or not bool(d.set_destination) or not is_integer(d.dest_type, -2147483648, 2147483647)
+        or not is_integer(d.area, -2147483648, 2147483647)
+        or not bool(d.has_show_conditions) or not bool(d.is_update_condition)
+        or not bool(d.has_display_conditions) then return nil end
+    if d.cid ~= nil and not is_integer(d.cid, 1, 4294967295) then return nil end
+    if d.key ~= nil and not is_integer(d.key, 1, 2147483647) then return nil end
+    if d.local_area ~= nil and not is_integer(d.local_area, 0, 4294967295) then return nil end
+    local shows = copy_array(d.show_conditions, function(c) return condition(c, 1) end)
+    local displays = copy_array(d.display_conditions, function(c) return condition(c, 1) end)
+    if not shows or not displays then return nil end
+    return { index = d.index, set_destination = d.set_destination, dest_type = d.dest_type,
+      cid = d.cid, key = d.key, area = d.area, local_area = d.local_area,
+      has_show_conditions = d.has_show_conditions, show_conditions = shows,
+      is_update_condition = d.is_update_condition,
+      has_display_conditions = d.has_display_conditions, display_conditions = displays }
+  end
+  local function task_array(raw, qid)
+    if not dense_array(raw) then return nil end
+    local out = {}
+    for i, task in ipairs(raw) do
+      local index = i - 1
+      if type(task) ~= "table" or task.index ~= index or not bool(task.has_destination)
+          or not dense_array(task.destinations) then
+        fail("quest " .. qid .. " tasks malformed")
+        return nil
+      end
+      local destinations = {}
+      for di, raw_dest in ipairs(task.destinations) do
+        local dest = destination(raw_dest)
+        if not dest or dest.index ~= di - 1 then
+          fail("quest " .. qid .. " task " .. index .. " destination " .. (di - 1) .. " malformed")
+          destinations[di] = false
+        else destinations[di] = dest end
+      end
+      out[i] = { index = index, has_destination = task.has_destination, destinations = destinations }
+    end
+    return out
+  end
+  local function delivery_array(raw)
+    if not dense_array(raw) then return nil end
+    local out, by_key, by_serial = {}, {}, {}
+    for i, d in ipairs(raw) do
+      local valid = type(d) == "table" and is_integer(d.key, 0, 2147483647)
+        and is_integer(d.serial, 0, 2147483647) and d.serial == d.key
+        and bool(d.incomplete_possible) and is_integer(d.operator, -2147483648, 2147483647)
+        and dense_array(d.groups)
+      local groups = {}
+      if valid then
+        for gi, g in ipairs(d.groups) do
+          local ids = type(g) == "table" and copy_array(g.item_ids, function(id)
+            if not is_integer(id, 1, 2147483647) then return nil end
+            return id
+          end) or nil
+          local ignored = type(g) == "table" and copy_array(g.ignore_restriction_items, function(id)
+            if not is_integer(id, 1, 2147483647) then return nil end
+            return id
+          end) or nil
+          if type(g) ~= "table" or g.index ~= gi - 1 or not ids or not ignored
+              or not is_integer(g.count, -2147483648, 2147483647)
+              or not bool(g.is_all_item) or not bool(g.is_infinite) then
+            valid = false; break
+          end
+          groups[gi] = { index = gi - 1, item_ids = ids, count = g.count,
+            is_all_item = g.is_all_item, is_infinite = g.is_infinite,
+            ignore_restriction_items = ignored }
+        end
+      end
+      if valid then
+        local key_seen, serial_seen = by_key[d.key], by_serial[d.serial]
+        if key_seen or serial_seen then
+          valid = false
+          if key_seen then out[key_seen] = false end
+          if serial_seen then out[serial_seen] = false end
+        else
+          by_key[d.key], by_serial[d.serial] = i, i
+        end
+      end
+      if valid then
+        out[i] = { key = d.key, serial = d.serial, incomplete_possible = d.incomplete_possible,
+          operator = d.operator, groups = groups }
+      else
+        out[i] = false
+      end
+    end
+    for i, d in ipairs(out) do if d == false then fail("delivery " .. i .. " malformed or duplicated") end end
+    return out
+  end
+  local function source_record(s)
+    if type(s) ~= "table" or type(s.id) ~= "string" or s.id == ""
+        or type(s.kind) ~= "string" or s.kind == ""
+        or type(s.evidence) ~= "table" or type(s.evidence.provider) ~= "string"
+        or type(s.evidence.ref) ~= "table" or not dense_array(s.item_ids)
+        or not dense_array(s.inputs) then return nil end
+    local ids = copy_array(s.item_ids, function(id)
+      if not is_integer(id, 1, 2147483647) then return nil end
+      return id
+    end)
+    local inputs = copy_array(s.inputs, function(input)
+      if type(input) ~= "table" or not is_integer(input.item_id, 1, 2147483647)
+          or not is_integer(input.count, 1, 2147483647) then return nil end
+      return { item_id = input.item_id, count = input.count }
+    end)
+    if not ids or #ids == 0 or not inputs then return nil end
+    local ref = copy_plain(s.evidence.ref, {}, 0)
+    if not ref then return nil end
+    local function source_place_target(v)
+      local place = place_target(v)
+      if place then return place end
+      if type(v) == "table" and v.kind == "position" then
+        local pos = position(v)
+        if pos then return { kind = "position", x = pos.x, y = pos.y, z = pos.z } end
+      end
+      return nil
+    end
+    local target = s.target
+    if type(target) ~= "table" or (target.cid == nil and target.place == nil)
+        or (target.cid ~= nil and target.place ~= nil)
+        or (target.cid ~= nil and not is_integer(target.cid, 1, 4294967295)) then return nil end
+    local place = target.place and source_place_target(target.place) or nil
+    if target.place ~= nil and not place then return nil end
+    return { id = s.id, kind = s.kind, item_ids = ids,
+      target = { cid = target.cid, place = place },
+      evidence = { provider = s.evidence.provider, ref = ref }, inputs = inputs }
+  end
+  local function same_value(a, b)
+    if type(a) ~= type(b) then return false end
+    if type(a) ~= "table" then return a == b end
+    for k, v in pairs(a) do if not same_value(v, b[k]) then return false end end
+    for k in pairs(b) do if a[k] == nil then return false end end
+    return true
+  end
+  local conflicts, source_seen = {}, {}
+  local function collect_sources(raw, label)
+    local out, local_seen = {}, {}
+    if raw == nil then return out end
+    if not dense_array(raw) then fail(label .. " malformed"); return out end
+    for i, value in ipairs(raw) do
+      local source = source_record(value)
+      if source then
+        local old = source_seen[source.id]
+        if old and not same_value(old, source) then conflicts[source.id] = true
+        elseif old == nil then source_seen[source.id] = source end
+        if not local_seen[source.id] then
+          local_seen[source.id] = true
+          out[#out + 1] = source
+        end
+      else fail(label .. " " .. i .. " malformed") end
+    end
+    return out
+  end
+  local catalog_sources = collect_sources(t.sources, "source")
+  local quest_sources = {}
+  for key, raw in pairs(t.quests) do
+    local qid = canonical_qid(key)
+    if qid and type(raw) == "table" then
+      quest_sources[qid] = collect_sources(raw.sources, "quest " .. qid .. " source")
+    end
+  end
+  for id in pairs(conflicts) do fail("source id conflicts: " .. id) end
+  local function without_conflicts(sources)
+    local out = {}
+    for _, source in ipairs(sources) do
+      if not conflicts[source.id] then out[#out + 1] = source end
+    end
+    return out
+  end
+  local filtered_sources = without_conflicts(catalog_sources)
+  for qid, sources in pairs(quest_sources) do
+    quest_sources[qid] = without_conflicts(sources)
+  end
+  for key, raw in pairs(t.quests) do
+    local qid = canonical_qid(key)
+    if qid and type(raw) == "table" then
+      local entry = { tasks = task_array(raw.tasks, qid), guidance = {}, deliveries = {},
+        sources = quest_sources[qid] or {} }
+      local deliveries = delivery_array(raw.deliveries)
+      if not deliveries then fail("quest " .. qid .. " deliveries malformed") else entry.deliveries = deliveries end
+      if not dense_array(raw.guidance) then
+        fail("quest " .. qid .. " guidance malformed")
+      else
+        local guidance = copy_array(raw.guidance, function(g, index)
+          if type(g) ~= "table" or g.index ~= index
+              or not is_integer(g.task_index, 0, 2147483647) or not dense_array(g.destinations) then
+            fail("quest " .. qid .. " concierge " .. index .. " malformed")
+            return false
+          end
+          local destinations = copy_array(g.destinations, function(d, di)
+            if type(d) ~= "table" or d.index ~= di
+                or not is_integer(d.concierge_type, 0, 2147483647)
+                or not is_integer(d.gimmick_id, -2147483648, 2147483647)
+                or not bool(d.is_chara_at_destination)
+                or not dense_array(d.register_conditions) or not dense_array(d.conditions)
+                or type(d.delivery) ~= "table" then
+              fail("quest " .. qid .. " concierge " .. index .. " destination " .. di .. " malformed")
+              return false
+            end
+            local target = place_target(d.target)
+            if d.target ~= nil and not target then return false end
+            if d.cid ~= nil and not is_integer(d.cid, 1, 4294967295) then return false end
+            local regs = copy_array(d.register_conditions, function(c) return condition(c, 1) end)
+            local conds = copy_array(d.conditions, function(c) return condition(c, 1) end)
+            if not regs or not conds then
+              fail("quest " .. qid .. " concierge " .. index .. " destination " .. di .. " conditions malformed")
+              return false
+            end
+            local delivery = d.delivery
+            if not bool(delivery.is_not) or not bool(delivery.check_storage)
+                or not is_integer(delivery.group_id, -2147483648, 2147483647)
+                or not dense_array(delivery.refs) then return false end
+            local refs = copy_array(delivery.refs, function(r)
+              if type(r) ~= "table" or not is_integer(r.qid, 1, 2147483647)
+                  or not is_integer(r.key, 0, 2147483647)
+                  or not is_integer(r.serial, 0, 2147483647) or r.key ~= r.serial then return nil end
+              return { qid = r.qid, key = r.key, serial = r.serial }
+            end)
+            if not refs then
+              fail("quest " .. qid .. " concierge " .. index .. " destination " .. di .. " delivery malformed")
+              return false
+            end
+            return { index = di, target = target, cid = d.cid,
+              concierge_type = d.concierge_type, gimmick_id = d.gimmick_id,
+              is_chara_at_destination = d.is_chara_at_destination,
+              register_conditions = regs, conditions = conds,
+              delivery = { is_not = delivery.is_not, check_storage = delivery.check_storage,
+                group_id = delivery.group_id, refs = refs } }
+          end)
+          if not destinations then return false end
+          if g.destination_index ~= nil and not is_integer(g.destination_index, 0, 2147483647) then
+            return false
+          end
+          return { index = index, task_index = g.task_index,
+            destination_index = g.destination_index, destinations = destinations }
+        end)
+        if not guidance then fail("quest " .. qid .. " guidance malformed") else entry.guidance = guidance end
+      end
+      if entry.tasks or #entry.guidance > 0 or #entry.deliveries > 0 or #entry.sources > 0 then
+        catalog_quests[qid] = entry
+      end
+    end
+  end
+  -- Concierge delivery references are exact (qid,key) joins. Array position is
+  -- never used as a fallback, and one bad association disables only its record.
+  for qid, entry in pairs(catalog_quests) do
+    for _, g in ipairs(entry.guidance) do
+      if type(g) == "table" then
+        for di, d in ipairs(g.destinations) do
+          if type(d) == "table" then
+            local valid = true
+            for _, ref in ipairs(d.delivery.refs) do
+              local owner = catalog_quests[ref.qid]
+              local match
+              for _, delivery in ipairs(owner and owner.deliveries or {}) do
+                if type(delivery) == "table" and delivery.key == ref.key then
+                  if match then valid = false end
+                  match = delivery
+                end
+              end
+              if not match or match.serial ~= ref.serial then valid = false end
+              local group = d.delivery.group_id
+              if group >= 0 and (not match or match.groups[group + 1] == nil) then valid = false end
+            end
+            if not valid then
+              g.destinations[di] = false
+              fail("quest " .. qid .. " concierge " .. g.index .. " destination " .. d.index .. " delivery reference unresolved")
+            end
+          end
+        end
+      end
+    end
+  end
+  return quests, { version = 2, pak = type(t.pak) == "string" and t.pak or nil,
+    quests = catalog_quests, sources = filtered_sources, diagnostics = diagnostics }
 end
 
 -- True when a parsed hints entry has any text to show (a quest hint or a step).

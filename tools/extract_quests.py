@@ -9,6 +9,7 @@ import argparse
 import collections
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -42,6 +43,30 @@ CONTEXT_TYPE = "app.QuestContextData.ContextData"
 DELIVER_TYPE = "app.QuestContextData.DeliverData"
 DEST_TYPE = "app.QuestLogResource.QuestLogTaskDestination"
 NOT_CHARA = ("Invalid", "ch000000_00")
+QUEST_LOG_TYPE = "app.QuestLogResource"
+TASK_TYPE = "app.QuestLogResource.QuestLogTaskData"
+CONCIERGE_TYPE = "app.QuestLogConciergeData"
+CONCIERGE_DEST_TYPE = "app.QuestLogConciergeData.Destination"
+GUIDANCE_KEY_TARGET_TYPE = "app.GuidanceKeyLocation"
+GUIDANCE_AREA_TARGET_TYPE = "app.GuidanceLocalArea"
+GUIDANCE_SELECTOR_TYPE = "app.ClassSelector`1<app.GuidanceData>"
+CONDITION_SELECTOR_TYPE = "app.ClassSelector`1<app.ConciergeConditionBase>"
+DELIVER_SELECT_TYPE = "app.QuestDeliverSelectData"
+DELIVER_DATA_TYPE = DELIVER_TYPE
+QUEST_DELIVER_TYPE = "app.QuestDeliver"
+ITEM_DATA_TYPE = "app.QuestDeliver.ItemData"
+ITEM_VALUE_TYPE = "app.QuestDeliver.ItemData.ValueInfo"
+REMINDER_TYPE = "app.ConciergeConditionQuestLogReminder"
+QUEST_VARIABLE_TYPE = "app.ConciergeConditionQuestVariable"
+ITEM_CONDITION_TYPE = "app.ConciergeConditionItem"
+QUEST_VARIABLE_OR_TYPE = "app.ConciergeConditionQuestVariableGroupOR"
+DELIVERY_CONDITION_TYPE = "app.ConciergeConditionDelivery"
+SUBSKILL_CONDITION_TYPE = "app.ConciergeConditionSubskill"
+DAYTIME_CONDITION_TYPE = "app.ConciergeConditionDayTime"
+TASK_CONDITION_TYPE = "app.QuestLogResource.QuestLogCondition"
+GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+S32_MIN, S32_MAX = -(2 ** 31), 2 ** 31 - 1
+U32_MAX = 2 ** 32 - 1
 
 
 def scene_path(qid):
@@ -54,6 +79,338 @@ def journal_path(qid):
 
 def _list(v):
     return v if isinstance(v, list) else [v]
+
+
+def _integer(value, label, low=S32_MIN, high=S32_MAX):
+    if type(value) is not int or value < low or value > high:
+        raise ew.ExtractError("invalid %s" % label)
+    return value
+
+
+def _boolean(value, label):
+    if type(value) is not bool:
+        raise ew.ExtractError("invalid %s" % label)
+    return value
+
+
+def _field(inst, name):
+    if inst is None or name not in inst.fields:
+        raise ew.ExtractError("missing required field %s" % name)
+    return inst.fields[name]
+
+
+def _ref_array(insts, value, label, expected=None):
+    if not isinstance(value, list):
+        raise ew.ExtractError("invalid %s array" % label)
+    result = []
+    for ref in value:
+        item = qnml_rsz.deref(insts, ref)
+        if item is None or (expected is not None and item.type != expected):
+            raise ew.ExtractError("invalid %s reference" % label)
+        result.append(item)
+    return result
+
+
+def decode_condition(inst, insts, depth=0):
+    """Decode the closed set of serialized concierge conditions without evaluating them."""
+    if depth > 64:
+        raise ew.ExtractError("condition nesting too deep")
+    if inst is None:
+        raise ew.ExtractError("missing condition")
+    if inst.type == CONDITION_SELECTOR_TYPE:
+        inst = qnml_rsz.deref(insts, _field(inst, "_Process"))
+        if inst is None:
+            raise ew.ExtractError("unresolved condition selector")
+    t = inst.type
+    if t == QUEST_VARIABLE_TYPE:
+        return {"kind": "quest_variable", "enabled": _boolean(_field(inst, "_IsEnabled"), "condition enabled"),
+                "is_not": _boolean(_field(inst, "_IsNot"), "condition negation"),
+                "qid": _integer(_field(inst, "_QuestID"), "condition quest id", 1),
+                "name_hash": _integer(_field(inst, "_NameHash"), "condition name hash", 0, U32_MAX),
+                "value_type": _integer(_field(inst, "_ValueType"), "condition value type"),
+                "compare_type": _integer(_field(inst, "_CompareType"), "condition compare type"),
+                "bool_value": _boolean(_field(inst, "_BoolValue"), "condition bool value"),
+                "int_value": _integer(_field(inst, "_IntValue"), "condition int value")}
+    if t == ITEM_CONDITION_TYPE:
+        return {"kind": "item", "enabled": _boolean(_field(inst, "_IsEnabled"), "condition enabled"),
+                "is_not": _boolean(_field(inst, "_IsNot"), "condition negation"),
+                "item_id": _integer(_field(inst, "_ItemID"), "condition item id", 1),
+                "set_num": _boolean(_field(inst, "_SetNum"), "condition set num"),
+                "num": _integer(_field(inst, "_Num"), "condition item count", 1)}
+    if t == QUEST_VARIABLE_OR_TYPE:
+        children = _ref_array(insts, _field(inst, "Conditions"), "OR conditions")
+        return {"kind": "quest_variable_or",
+                "enabled": _boolean(_field(inst, "_IsEnabled"), "condition enabled"),
+                "is_not": _boolean(_field(inst, "_IsNot"), "condition negation"),
+                "children": [decode_condition(child, insts, depth + 1) for child in children]}
+    if t == REMINDER_TYPE:
+        msg_id = _field(inst, "_ReminderMsgId")
+        if not isinstance(msg_id, str) or not GUID_RE.fullmatch(msg_id):
+            raise ew.ExtractError("invalid quest-log reminder message id")
+        reminders = _ref_array(insts, _field(inst, "_ReminderList"), "reminders", REMINDER_TYPE)
+        return {"kind": "quest_log_reminder", "reminder_msg_id": msg_id,
+                "is_finished": _boolean(_field(inst, "_IsFinished"), "reminder finished"),
+                "is_or": _boolean(_field(inst, "_IsOr"), "reminder OR flag"),
+                "reminders": [decode_condition(child, insts, depth + 1) for child in reminders]}
+    if t in (DELIVERY_CONDITION_TYPE, SUBSKILL_CONDITION_TYPE, DAYTIME_CONDITION_TYPE):
+        raise ew.ExtractError("unsupported active condition family: %s" % t)
+    raise ew.ExtractError("unknown active condition family: %s" % t)
+
+
+def _condition_array(insts, value, label):
+    return [decode_condition(item, insts) for item in _ref_array(insts, value, label)]
+
+
+def decode_task_condition(inst):
+    if inst is None or inst.type != TASK_CONDITION_TYPE:
+        raise ew.ExtractError("unknown active task condition family: %s" %
+                              (inst.type if inst is not None else "null"))
+    return {"kind": "quest_log_condition",
+            "qid": _integer(_field(inst, "_QuestID"), "task condition quest id"),
+            "name_hash": _integer(_field(inst, "_NameHash"), "task condition name hash", 0, U32_MAX),
+            "value_type": _integer(_field(inst, "_ValueType"), "task condition value type"),
+            "bool_value": _boolean(_field(inst, "_BoolValue"), "task condition bool value"),
+            "int_value": _integer(_field(inst, "_IntValue"), "task condition int value"),
+            "compare_type": _integer(_field(inst, "_CompareType"), "task condition compare type")}
+
+
+def _task_condition_array(insts, value, label):
+    return [decode_task_condition(item) for item in _ref_array(insts, value, label)]
+
+
+def _decode_task_destination(insts, destination, index):
+    if destination.type != DEST_TYPE:
+        raise ew.ExtractError("unknown task destination type: %s" % destination.type)
+    cid = _integer(_field(destination, "_CharaID"), "destination character id", 0, U32_MAX)
+    key = _integer(_field(destination, "_KeyLocation"), "destination key")
+    area = _integer(_field(destination, "_Area"), "destination area")
+    local_area = _integer(_field(destination, "_LocalArea"), "destination local area")
+    return {"index": index,
+            "set_destination": _boolean(_field(destination, "_SetDestination"), "set destination"),
+            "dest_type": _integer(_field(destination, "_DestType"), "destination type"),
+            "cid": None if cid in (0, INVALID_CHARA_ID, PLAYER_CHARA_ID) else cid,
+            "key": key if key > 0 else None,
+            "area": area if area >= 0 else None,
+            "local_area": local_area if local_area >= 0 else None,
+            "has_show_conditions": _boolean(_field(destination, "_HasShowConditions"), "show condition flag"),
+            "show_conditions": _task_condition_array(insts, _field(destination, "_ShowConditions"), "show conditions"),
+            "is_update_condition": _boolean(_field(destination, "_IsUpdateCondition"), "update condition flag"),
+            "has_display_conditions": _boolean(_field(destination, "_HasDisplayConditions"), "display condition flag"),
+            "display_conditions": _task_condition_array(insts, _field(destination, "_Conditions"), "display conditions")}
+
+
+INVALID_CHARA_ID = 1857826560
+PLAYER_CHARA_ID = 2891076981
+
+
+def _decode_item_delivery(insts, deliver, key, qid, diagnostics=None):
+    if deliver.type != QUEST_DELIVER_TYPE:
+        raise ew.ExtractError("unknown quest delivery type: %s" % deliver.type)
+    item = qnml_rsz.deref(insts, _field(deliver, "_Item"))
+    if item is None:
+        return None
+    if item.type != ITEM_DATA_TYPE:
+        raise ew.ExtractError("unknown quest item delivery type: %s" % item.type)
+    groups = []
+    values = _ref_array(insts, _field(item, "_Value"), "delivery groups", ITEM_VALUE_TYPE)
+    for index, value in enumerate(values):
+        raw_item_ids = _field(value, "_ItemID")
+        if not isinstance(raw_item_ids, list):
+            raise ew.ExtractError("invalid delivery item ids")
+        item_ids = []
+        for raw_id in raw_item_ids:
+            item_id = _integer(raw_id, "delivery item id", 0)
+            if item_id == 0:
+                if diagnostics is not None:
+                    diagnostics["delivery_item_id_zero_sentinels"] += 1
+                continue
+            item_ids.append(item_id)
+        if not item_ids:
+            raise ew.ExtractError("empty delivery item group")
+        ignore = [_integer(v, "ignored restriction item", 1)
+                  for v in _field(value, "_IgnoreRestrictionItem")]
+        groups.append({"index": index, "item_ids": item_ids,
+                       "count": _integer(_field(value, "_Count"), "delivery count", 1),
+                       "is_all_item": _boolean(_field(value, "_IsAllItem"), "all-item flag"),
+                       "is_infinite": _boolean(_field(value, "_IsInfinite"), "infinite flag"),
+                       "ignore_restriction_items": ignore})
+    return {"qid": qid, "key": key,
+            "serial": _integer(_field(deliver, "_SerialNum"), "delivery serial", 0),
+            "incomplete_possible": _boolean(_field(item, "_IncompletePossible"), "incomplete flag"),
+            "operator": _integer(_field(item, "_Operator"), "delivery operator"), "groups": groups}
+
+
+def decode_deliveries(insts, diagnostics=None):
+    """Index item delivery definitions by quest and QuestDeliver serial."""
+    result, lookup = {}, {}
+    serials, pairs = collections.defaultdict(set), set()
+    for data in insts:
+        if data.type != DELIVER_DATA_TYPE:
+            continue
+        raw_qid = _integer(_field(data, "_IDValue"), "delivery quest id")
+        if raw_qid <= 0:
+            if diagnostics is not None:
+                diagnostics["delivery_data_without_quest_id"] += 1
+            continue
+        qid = raw_qid
+        refs = _field(data, "_Delivers")
+        delivers = _ref_array(insts, refs, "quest deliveries", QUEST_DELIVER_TYPE)
+        result.setdefault(qid, [])
+        lookup.setdefault(qid, {})
+        for key, deliver in enumerate(delivers):
+            serial = _integer(_field(deliver, "_SerialNum"), "delivery serial", 0)
+            pair = (qid, serial)
+            if pair in pairs:
+                raise ew.ExtractError("duplicate quest delivery key")
+            pairs.add(pair)
+            if serial in serials[qid]:
+                raise ew.ExtractError("duplicate quest delivery serial")
+            serials[qid].add(serial)
+            row = _decode_item_delivery(insts, deliver, serial, qid, diagnostics)
+            if row is None:
+                if diagnostics is not None:
+                    diagnostics["delivery_records_without_item_data"] += 1
+                lookup[qid][serial] = {"serial": serial, "has_item_data": False}
+                continue
+            row["key"] = serial
+            result[qid].append({k: v for k, v in row.items() if k != "qid"})
+            lookup[qid][serial] = {"serial": serial, "has_item_data": True,
+                                   "group_count": len(row["groups"])}
+    return result, lookup
+
+
+def decode_delivery_refs(insts, refs, delivery_index, group_id=-1):
+    group_id = _integer(group_id, "delivery group id", -1)
+    output = []
+    for ref in refs:
+        selection = qnml_rsz.deref(insts, ref)
+        if selection is None or selection.type != DELIVER_SELECT_TYPE:
+            raise ew.ExtractError("unknown quest delivery reference type")
+        qid = _integer(_field(selection, "_QuestID"), "delivery reference quest id", 1)
+        key = _integer(_field(selection, "_Key"), "delivery reference key", 0)
+        target = delivery_index.get(qid, {}).get(key)
+        if target is None:
+            raise ew.ExtractError("unresolved quest delivery reference")
+        if not target["has_item_data"]:
+            raise ew.ExtractError("referenced quest delivery has no item data")
+        if group_id >= target["group_count"]:
+            raise ew.ExtractError("delivery group index out of range")
+        output.append({"qid": qid, "key": key, "serial": target["serial"]})
+    return output
+
+
+def decode_guidance_destination(insts, destination, index, delivery_index):
+    if destination.type != CONCIERGE_DEST_TYPE:
+        raise ew.ExtractError("unknown concierge destination type: %s" % destination.type)
+    target_obj = qnml_rsz.deref(insts, _field(destination, "_GuidancePos"))
+    if target_obj is None:
+        raise ew.ExtractError("unknown concierge target type")
+    if target_obj.type == GUIDANCE_SELECTOR_TYPE:
+        target_obj = qnml_rsz.deref(insts, _field(target_obj, "_Process"))
+        if target_obj is None:
+            raise ew.ExtractError("unresolved concierge target selector")
+    if target_obj.type == GUIDANCE_KEY_TARGET_TYPE:
+        key = _integer(_field(target_obj, "_KeyLocation"), "guidance key")
+        if key <= 0:
+            raise ew.ExtractError("invalid concierge key target")
+        target = {"kind": "key_location", "key": key}
+    elif target_obj.type == GUIDANCE_AREA_TARGET_TYPE:
+        local_area = _integer(_field(target_obj, "LocalArea"), "guidance local area", 0)
+        target = {"kind": "local_area", "local_area": local_area}
+    else:
+        raise ew.ExtractError("unknown concierge target type: %s" % target_obj.type)
+    cid = _integer(_field(destination, "_CharaID"), "guidance character id", 0, U32_MAX)
+    refs = _field(destination, "_DeliverData")
+    if not isinstance(refs, list):
+        raise ew.ExtractError("invalid delivery reference array")
+    group_id = _integer(_field(destination, "_DeliveryGroupID"), "delivery group id", -1)
+    delivery_refs = decode_delivery_refs(insts, refs, delivery_index, group_id)
+    return {"index": index, "target": target,
+            "cid": None if cid in (0, INVALID_CHARA_ID, PLAYER_CHARA_ID) else cid,
+            "concierge_type": _integer(_field(destination, "_ConciergeType"), "concierge type"),
+            "gimmick_id": _integer(_field(destination, "_GimmickID"), "gimmick id"),
+            "is_chara_at_destination": _boolean(_field(destination, "_IsCharaAtDestination"), "character-at-destination flag"),
+            "register_conditions": _condition_array(insts, _field(destination, "_RegisterConditions"), "register conditions"),
+            "conditions": _condition_array(insts, _field(destination, "_Conditions"), "conditions"),
+            "delivery": {"is_not": _boolean(_field(destination, "_DeliveryIsNot"), "delivery negation"),
+                         "check_storage": _boolean(_field(destination, "_DeliveryCheckStorage"), "delivery storage flag"),
+                         "group_id": group_id, "refs": delivery_refs}}
+
+
+def decode_journal_objectives(insts, delivery_index, kept=None):
+    """Produce source-ordered version-2 task and guidance arrays for one journal."""
+    roots = [item for item in insts if item.type == QUEST_LOG_TYPE]
+    if len(roots) != 1:
+        raise ew.ExtractError("quest journal root missing or duplicated")
+    root = roots[0]
+    tasks = []
+    task_rows = _ref_array(insts, _field(root, "_TaskList"), "quest tasks", TASK_TYPE)
+    for task_index, task in enumerate(task_rows):
+        dest_rows = _ref_array(insts, _field(task, "_Destinations"), "task destinations")
+        destinations = [_decode_task_destination(insts, row, index)
+                        for index, row in enumerate(dest_rows)]
+        tasks.append({"index": task_index,
+                      "has_destination": _boolean(_field(task, "_HasDestination"), "task has-destination flag"),
+                      "destinations": destinations})
+    guidance = []
+    concierge_rows = _ref_array(insts, _field(root, "_ConciergeList"), "concierge records", CONCIERGE_TYPE)
+    for concierge_index, concierge in enumerate(concierge_rows):
+        task_index = _integer(_field(concierge, "_TaskIndex"), "concierge task index", 0)
+        if task_index >= len(tasks):
+            raise ew.ExtractError("concierge task index out of range")
+        destinations = _ref_array(insts, _field(concierge, "_Destinations"), "concierge destinations")
+        guidance.append({"index": concierge_index, "task_index": task_index,
+                         "destinations": [decode_guidance_destination(insts, row, index, delivery_index)
+                                          for index, row in enumerate(destinations)]})
+    return {"tasks": tasks, "guidance": guidance}
+
+
+def archive_source_diagnostics(instances):
+    """Count unproven archive families; this deliberately emits no source descriptors."""
+    counts = collections.Counter()
+    reward_types = {"app.quest.action.QuestReward",
+                    "app.quest.action.QuestRewardParam",
+                    "app.quest.action.QuestRewardData.Data"}
+    for inst in instances:
+        name = inst.type.lower()
+        if inst.type in reward_types:
+            counts["reward_records"] += 1
+        if "gift" in name and name.startswith("app.quest.action."):
+            counts["gift_records"] += 1
+        if name.startswith("app.quest.action.") and any(
+                family in name for family in ("forgery", "craft", "ageing", "aging", "transform")):
+            counts["transform_records"] += 1
+    return counts
+
+
+def validate_delivery_integrity(quests):
+    """Fail before output replacement if any emitted reference loses its exact definition."""
+    by_quest = {}
+    for qid, quest in quests.items():
+        keys, serials = set(), set()
+        for delivery in quest["deliveries"]:
+            key = _integer(delivery.get("key"), "delivery key", 0)
+            serial = _integer(delivery.get("serial"), "delivery serial", 0)
+            if key in keys:
+                raise ew.ExtractError("duplicate quest delivery key")
+            if serial in serials:
+                raise ew.ExtractError("duplicate quest delivery serial")
+            keys.add(key)
+            serials.add(serial)
+        by_quest[int(qid)] = {delivery["key"]: delivery for delivery in quest["deliveries"]}
+    for quest in quests.values():
+        for guidance in quest["guidance"]:
+            for destination in guidance["destinations"]:
+                group_id = _integer(destination["delivery"].get("group_id", -1),
+                                    "delivery group id", -1)
+                for ref in destination["delivery"]["refs"]:
+                    target = by_quest.get(ref["qid"], {}).get(ref["key"])
+                    if target is None:
+                        raise ew.ExtractError("unresolved emitted quest delivery reference")
+                    if _integer(ref.get("serial"), "delivery reference serial", 0) != target["serial"]:
+                        raise ew.ExtractError("emitted quest delivery serial mismatch")
+                    if group_id >= len(target.get("groups", [])):
+                        raise ew.ExtractError("emitted delivery group index out of range")
 
 
 def kept_chara(chara_enum):
@@ -167,12 +524,20 @@ def extract(game, key_hex, layouts):
     finally:
         pak.close()
     kept = kept_chara(layouts["enums"]["CharacterID"])
-    ctx = context_relations(ew._decode(context, layouts), kept)
-    dests = {qid: journal_dest(ew._decode(data, layouts), kept) for qid, data in journals.items()}
-    relations, undecoded = {}, {}
+    context_insts = ew._decode(context, layouts)
+    ctx = context_relations(context_insts, kept)
+    extraction_diagnostics = collections.Counter()
+    deliveries, delivery_index = decode_deliveries(context_insts, extraction_diagnostics)
+    journal_insts = {qid: ew._decode(data, layouts) for qid, data in journals.items()}
+    dests = {qid: journal_dest(insts, kept) for qid, insts in journal_insts.items()}
+    objectives = {qid: decode_journal_objectives(insts, delivery_index, kept)
+                  for qid, insts in journal_insts.items()}
+    relations, undecoded, decoded_scene_insts = {}, {}, []
     for qid, data in scenes.items():
         try:
-            relations[qid] = scene_relations(qnml_rsz.decode(data, layouts), kept)
+            insts = qnml_rsz.decode(data, layouts)
+            decoded_scene_insts.extend(insts)
+            relations[qid] = scene_relations(insts, kept)
         except qnml_rsz.DecodeError as e:
             undecoded[qid] = str(e)
     if len(scenes) < MIN_SCENES:
@@ -180,19 +545,42 @@ def extract(game, key_hex, layouts):
                               % (len(scenes), MIN_SCENES))
     if len(relations) < MIN_DECODED:
         raise ew.ExtractError(ew.LAYOUT_MSG)
+    source_diagnostics = archive_source_diagnostics(
+        context_insts + decoded_scene_insts +
+        [inst for rows in journal_insts.values() for inst in rows])
     quests = {}
-    for qid in sorted(set(ctx) | set(scenes)):
-        quests[str(qid)] = quest_entry(ctx.get(qid), relations.get(qid), dests.get(qid, []))
-    out = {"version": 1, "pak": "%d:%d" % (total, fingerprint), "quests": quests}
+    for qid in sorted(set(ctx) | set(scenes) | set(journals) | set(deliveries)):
+        entry = quest_entry(ctx.get(qid), relations.get(qid), dests.get(qid, []))
+        entry.update(objectives.get(qid, {"tasks": [], "guidance": []}))
+        entry["deliveries"] = deliveries.get(qid, [])
+        quests[str(qid)] = entry
+    validate_delivery_integrity(quests)
+    out = {"version": 2, "pak": "%d:%d" % (total, fingerprint), "quests": quests}
     sums = collections.Counter()
     for q in quests.values():
         for name in ("cast", "npcs", "items", "dest"):
             sums[name] += len(q[name])
+        sums["tasks"] += len(q["tasks"])
+        sums["task_destinations"] += sum(len(t["destinations"]) for t in q["tasks"])
+        sums["guidance"] += len(q["guidance"])
+        sums["guidance_destinations"] += sum(len(g["destinations"]) for g in q["guidance"])
+        sums["deliveries"] += len(q["deliveries"])
+        sums["delivery_refs"] += sum(len(d["delivery"]["refs"])
+                                      for g in q["guidance"] for d in g["destinations"])
     lines = [
         "quests %d, scenes %d, decoded %d, journals %d" % (
             len(quests), len(scenes), len(relations), len(journals)),
         "entries: cast %d, npcs %d, items %d, dest %d" % (
             sums["cast"], sums["npcs"], sums["items"], sums["dest"]),
+        "objectives: tasks %d, task destinations %d, concierge records %d, guidance destinations %d, deliveries %d, delivery refs %d" % (
+            sums["tasks"], sums["task_destinations"], sums["guidance"],
+            sums["guidance_destinations"], sums["deliveries"], sums["delivery_refs"]),
+        "diagnostics: delivery item-id zero sentinels %d, records without quest id %d, records without item data %d, reward records %d, gift records %d, transformation records %d, eligible archive source descriptors 0" % (
+            extraction_diagnostics["delivery_item_id_zero_sentinels"],
+            extraction_diagnostics["delivery_data_without_quest_id"],
+            extraction_diagnostics["delivery_records_without_item_data"],
+            source_diagnostics["reward_records"], source_diagnostics["gift_records"],
+            source_diagnostics["transform_records"]),
     ]
     lines += ["undecoded %d: %s" % (qid, undecoded[qid]) for qid in sorted(undecoded)]
     return out, lines

@@ -2592,6 +2592,30 @@ do
     return t
   end
 
+  do
+    local f, d = nfix()
+    d.rows[2001] = { { start_hour = 0, end_hour = 24, area = 49, location = 1 } }
+    d.area_nodes[49] = { P(40, 0, 40) }
+    local member = { route_id = 2001, cid = 2001, place = 2001, qid = 30040,
+      kind = "npc", direct = false, target_key = core.target_key({ 30040, "issued_npc", 2001 }),
+      ordinal = 1, pos = P(40, 0, 40), item_ids = {}, objective_generation = 3 }
+    local w = f.new()
+    w:set_routes({ objective_generation = 3, members = { member } })
+    f.fail.schedule_now = true
+    w:refresh(0, true, on("search"))
+    local failed = route_in(w, 2001)
+    check("objective NPC route: metadata survives schedule-read error rendering",
+      failed ~= nil and failed.err ~= nil and failed.objective_generation == 3
+        and failed.target_key == member.target_key and failed.ordinal == member.ordinal)
+    f.fail.schedule_now = nil
+    w:poke()
+    w:refresh(1, true, on("search"))
+    local scheduled = route_in(w, 2001)
+    check("objective NPC route: metadata survives successful schedule rendering",
+      scheduled ~= nil and scheduled.err == nil and scheduled.objective_generation == 3
+        and scheduled.target_key == member.target_key and scheduled.ordinal == member.ordinal)
+  end
+
   -- names: 200 per round, rerun until done, generic and nil names skipped
   do
     local f, d = nfix()
@@ -3253,9 +3277,11 @@ do
       check("set_routes: name or order change neither pokes nor bumps", w.route_gen == g
         and r8 == false and cids(w) == "2004,2003,2001" and route_in(w, 2001).name == "Ax"
         and stub.calls.route_stops == b)
-      w:set_routes({ { cid = 2001 }, { cid = 2001 }, { cid = "x" }, { cid = 2003 } })
+      w:set_routes({ { cid = 2001 }, { cid = 2001, name = "Aa" }, { cid = 2003, name = "Cc" } })
       settle(w, 1)
-      check("set_routes: repeats and bad cids dropped", cids(w) == "2001,2003")
+      check("set_routes: duplicate legacy cids are deduplicated", cids(w) == "2001,2003")
+      w:set_routes({ { cid = 2001, name = "Aa" }, { cid = "x", name = "Bad" } })
+      check("set_routes: malformed legacy member rejects the whole publication", cids(w) == "")
     end
 
     -- 10: a failing member does not block the rest; failed members retry in turn
@@ -3559,28 +3585,41 @@ do
     do
       local f, d = sfix()
       local w = f.new()
-      local direct = { cid = -1099511747937, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = P(410.5, 73.5, -821.2) }
+      local function publication(members, generation)
+        return { objective_generation = generation or 1, members = members }
+      end
+      local function direct_member(kind, name, pos, ordinal, generation)
+        local key = kind == "item" and core.target_key({ "source", "seller:test" })
+          or core.target_key({ 30040, "task", 0, ordinal or 1, "place" })
+        return { route_id = core.objective_direct_route_id(ordinal or 1), place = 0,
+          direct = true, qid = 30040, kind = kind == "item" and "source" or "place",
+          target_key = key, ordinal = ordinal or 1, name = name, pos = pos,
+          item_ids = {}, objective_generation = generation or 1 }
+      end
+      local function objective_npc(cid, name, pos)
+        return { route_id = cid, cid = cid, place = cid, qid = 30040, kind = "npc",
+          direct = false, target_key = core.target_key({ 30040, "issued_npc", cid }),
+          ordinal = cid, name = name, pos = pos, item_ids = {}, objective_generation = 1 }
+      end
+      local direct = direct_member("place", "Objective: Hall", P(410.5, 73.5, -821.2))
       local tg = ptg(P(5, 1, 5), nil)
       local original = P(direct.pos.x, direct.pos.y, direct.pos.z)
-      local route_id_calls, old_route_id = 0, core.objective_route_id
-      core.objective_route_id = function(qid, kind)
+      local route_id_calls, old_route_id = 0, core.objective_direct_route_id
+      core.objective_direct_route_id = function(ordinal)
         route_id_calls = route_id_calls + 1
-        return old_route_id(qid, kind)
+        return old_route_id(ordinal)
       end
-      w:set_routes({ direct })
-      core.objective_route_id = old_route_id
+      w:set_routes(publication({ direct }))
+      core.objective_direct_route_id = old_route_id
       check("direct route: validation uses the shared objective route id helper",
-        route_id_calls == 1)
+        route_id_calls >= 1)
       local gen = w.route_gen
-      w:set_routes({ { cid = direct.cid, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = P(410.5, 73.5, -821.2) } })
+      w:set_routes(publication({ direct_member("place", "Objective: Hall", P(410.5, 73.5, -821.2)) }))
       check("direct route: unchanged position is idempotent", w.route_gen == gen)
       direct.pos.x = 999
       w:refresh(0, true, tg)
-      local e = route_in(w, -1099511747937)
+      local direct_id = core.objective_direct_route_id(1)
+      local e = route_in(w, direct_id)
       check("direct route: publishes two stops from player to copied target",
         e ~= nil and e.place == 0 and #e.stops == 2
         and e.stops[1].pos.x == 5 and e.stops[1].pos.y == 1 and e.stops[1].pos.z == 5
@@ -3601,13 +3640,11 @@ do
         kind = "place", name = "Objective: Hall" }
       local function replace(fields)
         for key, value in pairs(fields) do target_state[key] = value end
-        local cid = target_state.kind == "item" and -1099511747938 or direct.cid
-        local m = { cid = cid, place = 0, direct = true, objective = true,
-          qid = 30040, kind = target_state.kind, name = target_state.name,
-          pos = P(target_state.x, target_state.y, target_state.z) }
-        w:set_routes({ m })
+        local m = direct_member(target_state.kind, target_state.name,
+          P(target_state.x, target_state.y, target_state.z))
+        w:set_routes(publication({ m }))
         local changed = w:refresh(1, true, tg) == true
-        local got = route_in(w, cid)
+        local got = route_in(w, direct_id)
         return changed, got
       end
       local changed, got = replace({ x = 411.5 })
@@ -3635,82 +3672,78 @@ do
         end
         d2.area_nodes[49] = { P(1, 0, 1) }
         local w2 = n2.new()
-        w2:set_routes({ { cid = 2001, name = "Aa" }, { cid = 2002, name = "Bb" },
-          { cid = -1099511747937, place = 0, direct = true, objective = true,
-            qid = 30040, kind = "place", name = "Objective: Hall", pos = original } })
+        w2:set_routes(publication({ objective_npc(2001, "Aa", P(1, 0, 1)),
+          objective_npc(2002, "Bb", P(2, 0, 2)), direct_member("place", "Objective: Hall", original) }))
         local tg2 = ptg(P(5, 1, 5), nil)
         for tick = 0, 5 do
           w2:refresh(tick, true, tg2)
         end
-        local a, b, de = route_in(w2, 2001), route_in(w2, 2002), route_in(w2, -1099511747937)
+        local direct_id = core.objective_direct_route_id(1)
+        local a, b, de = route_in(w2, 2001), route_in(w2, 2002), route_in(w2, direct_id)
         check("direct route: pending NPC readiness keeps objective in slot three",
           a ~= nil and b ~= nil and de ~= nil and a.slot == 1 and b.slot == 2 and de.slot == 3)
-        w2:set_routes({ { cid = 2003, name = "Cc" }, { cid = 2004, name = "Dd" },
-          { cid = -1099511747937, place = 0, direct = true, objective = true,
-            qid = 30040, kind = "place", name = "Objective: Hall", pos = original } })
+        w2:set_routes(publication({ objective_npc(2003, "Cc", P(3, 0, 3)),
+          objective_npc(2004, "Dd", P(4, 0, 4)), direct_member("place", "Objective: Hall", original) }))
         w2:refresh(10, true, tg2)
-        de = route_in(w2, -1099511747937)
+        de = route_in(w2, direct_id)
         check("direct route: an assigned objective slot survives pending NPCs",
           de ~= nil and de.slot == 3)
       end
 
       local place = { cid = -77, place = 77, name = "Legacy place" }
-      w:set_routes({ place, { cid = -1099511747937, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = original } })
+      w:set_routes({ place })
+      w:set_routes(publication({ direct_member("place", "Objective: Hall", original, 2, 2) }, 2))
       local tboth = ptg(P(5, 1, 5), { 77 })
       d.keypos[77] = P(200, 0, 200)
       w:refresh(2, true, tboth)
-      local legacy, objective = route_in(w, -77), route_in(w, -1099511747937)
-      check("direct route: coexists with legacy place member",
-        legacy ~= nil and legacy.place == 77 and objective ~= nil and objective.place == 0
-        and objective.direct == true)
+      local legacy, objective = route_in(w, -77), route_in(w, core.objective_direct_route_id(2))
+      check("direct route: canonical ordinal id is disjoint from legacy place ids",
+        legacy == nil and objective ~= nil and objective.place == 0
+        and objective.direct == true and objective.cid ~= -77)
 
-      w.path_job = { cid = -1099511747937 }
-      w.rps[-1099511747937] = true
+      local direct2 = core.objective_direct_route_id(2)
+      w.path_job = { cid = direct2 }
+      w.rps[direct2] = true
       w:set_routes({ place })
       check("direct route: leaving clears its slot, path job and path cache",
-        w.path_job == nil and w.rps[-1099511747937] == nil
-        and route_in(w, -1099511747937) == nil)
+        w.path_job == nil and w.rps[direct2] == nil and route_in(w, direct2) == nil)
       w.near["5.0,1.0,5.0"] = 8
-      w:set_routes({ { cid = -1099511747937, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = original } })
+      w:set_routes(publication({ direct_member("place", "Objective: Hall", original) }))
       w:refresh(3, true, ptg(P(6, 1, 6), nil))
       check("direct route: leaving clears its place_from origin",
         w.near["5.0,1.0,5.0"] == 8)
 
       w:set_route(2001, "Aa")
-      w:set_routes({ { cid = -1099511747937, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = original } })
+      w:set_routes(publication({ direct_member("place", "Objective: Hall", original) }))
       local n = 0
       repeat n = n + 1 until not w:refresh(4, true, tg) or n > 20
       local routes = (w:input() or {}).routes or {}
       check("direct route: search target reservation and dedupe stay unchanged",
         #routes == 2 and routes[1].cid == 2001
-        and route_in(w, -1099511747937) ~= nil)
+        and route_in(w, core.objective_direct_route_id(1)) ~= nil)
     end
 
     -- 1c: direct routes require both a valid player and a valid copied target.
     do
       local f, d = sfix()
       local w = f.new()
-      local direct = { cid = -1099511747937, place = 0, direct = true,
-        objective = true, qid = 30040, kind = "place", name = "Objective: Hall",
-        pos = P(410.5, 73.5, -821.2) }
-      w:set_routes({ direct })
+      local direct = { route_id = core.objective_direct_route_id(1), place = 0,
+        direct = true, qid = 30040, kind = "place", name = "Objective: Hall",
+        target_key = core.target_key({ 30040, "task", 0, 1, "place" }), ordinal = 1,
+        item_ids = {}, objective_generation = 1, pos = P(410.5, 73.5, -821.2) }
+      local publication = function() return { objective_generation = 1, members = { direct } } end
+      w:set_routes(publication())
       w:refresh(0, true, ptg(nil, nil))
-      check("direct route: missing player publishes nothing", route_in(w, direct.cid) == nil)
+      check("direct route: missing player publishes nothing", route_in(w, direct.route_id) == nil)
       w:poke()
       w:refresh(1, true, ptg(P(5, 1, 5), nil))
       check("direct route: valid member publishes after player appears",
-        route_in(w, direct.cid) ~= nil)
+        route_in(w, direct.route_id) ~= nil)
       direct.pos = { x = "invalid", y = 0, z = 0 }
-      w:set_routes({ direct })
+      w:set_routes(publication())
       w:poke()
       w:refresh(2, true, ptg(P(5, 1, 5), nil))
-      check("direct route: invalid target publishes nothing", route_in(w, direct.cid) == nil)
+      check("direct route: invalid target publishes nothing", route_in(w, direct.route_id) == nil)
     end
 
     -- 2: no build, no signature read, no schedule_now failure
@@ -3783,17 +3816,17 @@ do
       w:set_routes({ { cid = 2001, name = "A" } })
       settle(w, 0)
       local g0 = w.route_gen
-      -- a kept member would be an add: it bumps route_gen
+      -- malformed legacy members reject the entire publication
       w:set_routes({ { cid = 2001, name = "A" }, { cid = 0, place = 0, name = "Z" },
         { cid = -1.5, place = 1.5, name = "Y" }, { cid = -9, place = 77, name = "X" },
         { cid = 2001, place = 77, name = "W" } })
-      check("place guards: place 0, 1.5 and a cid other than -place are dropped",
-        w.route_gen == g0 and cids(w) == "2001")
+      check("place guards: malformed legacy members clear the full publication",
+        w.route_gen == g0 + 1 and cids(w) == "")
       local g = w.route_gen
       w:set_route(-5, "Z")
       w:set_route(0, "Z")
       check("place guards: set_route ignores a cid at or below 0",
-        w.route_gen == g and cids(w) == "2001")
+        w.route_gen == g and cids(w) == "")
     end
 
     -- 5: moving the player drops the old near key
@@ -6064,6 +6097,378 @@ do
   w3:poke()
   w3:refresh(0, true, { treasure = true, focus_keys = { 2302 } })
   check("focus places: malformed position not cached", f3.reads_n.key_pos == 2)
+end
+
+-- 36. objective place/source snapshots and generation-atomic route handoff
+do
+  local f = fixture()
+  f.reads.key_pos = function(key)
+    f.reads_n.key_pos = (f.reads_n.key_pos or 0) + 1
+    if f.fail.key_pos then error("key position unreadable") end
+    return f.data.kpos and f.data.kpos[key]
+  end
+  f.reads.area_nodes = function(row)
+    f.reads_n.area_nodes = (f.reads_n.area_nodes or 0) + 1
+    f.data.area_rows_seen = f.data.area_rows_seen or {}
+    f.data.area_rows_seen[#f.data.area_rows_seen + 1] = row.area
+    f.data.last_area_row = row
+    if f.fail.area_nodes then error("area nodes unreadable") end
+    return f.data.area_nodes and f.data.area_nodes[row.area]
+  end
+  f.data.kpos = { [77] = P(10, 20, 30) }
+  f.data.area_nodes = { [0] = { P(40, 50, 60) }, [7] = { P(70, 80, 90) } }
+  local base_providers = {
+    { provider = "placed", generation = 4, status = "unknown",
+      reason = "objective_source_scan_not_performed", candidates = {} },
+    { provider = "chest", generation = 4, status = "unknown",
+      reason = "objective_source_scan_not_performed", candidates = {} },
+    { provider = "loot", generation = 4, status = "unknown",
+      reason = "objective_source_scan_not_performed", candidates = {} },
+  }
+  f.adapter.objective_item_source_snapshots = function()
+    f.adapter_n.objective_item_source_snapshots = (f.adapter_n.objective_item_source_snapshots or 0) + 1
+    return base_providers
+  end
+  local w = f.new()
+  local task = { need_generation = 4, journal_generation = 2, quests = { { qid = 30040, task_index = 0,
+    read_status = "ok", live_destination = nil, item_ownership = {},
+    task_destinations = {
+      { kind = "place", task_index = 0, destination_index = 2,
+        target = { place = { kind = "local_area", local_area = 0 } }, eligibility = "eligible" },
+      { kind = "place", task_index = 0, destination_index = 3,
+        target = { place = { kind = "key_location", key = 77 } }, eligibility = "eligible" },
+      { kind = "place", task_index = 0, destination_index = 4,
+        target = { place = { kind = "local_area", local_area = 7 } }, eligibility = "eligible" },
+    }, guidance = {} } } }
+  local resolved_places = w:objective_place_snapshot(task)
+  local resolved_generation = resolved_places.generation
+  check("objective places: local-area zero and key resolve through exact node readers",
+    resolved_places ~= nil and resolved_places.status == "ok" and #resolved_places.places == 3
+      and resolved_places.places[1].pos.x == 40 and resolved_places.places[2].pos.x == 10
+      and resolved_places.places[1].target.kind == "local_area"
+      and resolved_places.places[1].target.local_area == 0
+      and resolved_places.places[2].target.kind == "key_location"
+      and resolved_places.places[2].target.key == 77
+      and resolved_places.places[3].target.local_area == 7
+      and table.concat(f.data.area_rows_seen, ",") == "0,7"
+      and f.data.last_area_row.location == nil
+      and (f.reads_n.key_pos or 0) == 1 and (f.reads_n.area_nodes or 0) == 2)
+  task.journal_generation = 3
+  local identical_places = w:objective_place_snapshot(task)
+  check("objective places: identical observations keep an independent stable generation",
+    identical_places.status == "ok" and identical_places.generation == resolved_generation)
+  f.data.kpos[77] = P(11, 20, 30)
+  local moved_places = w:objective_place_snapshot(task)
+  check("objective places: a resolved position change advances observation generation",
+    moved_places.status == "ok" and moved_places.generation > identical_places.generation
+      and moved_places.places[2].pos.x == 11)
+  f.data.kpos[78] = P(12, 20, 30)
+  task.quests[1].task_destinations[#task.quests[1].task_destinations + 1] =
+    { kind = "place", task_index = 0, destination_index = 5,
+      target = { place = { kind = "key_location", key = 78 } }, eligibility = "eligible" }
+  local expanded_places = w:objective_place_snapshot(task)
+  check("objective places: resolved content changes advance observation generation",
+    expanded_places.status == "ok" and #expanded_places.places == 4
+      and expanded_places.generation > moved_places.generation)
+  f.fail.key_pos = true
+  local unreadable = w:objective_place_snapshot(task)
+  check("objective places: partial native failure is wholly unknown",
+    unreadable.status == "unknown" and unreadable.reason ~= nil and #unreadable.places == 0
+      and unreadable.generation > expanded_places.generation)
+  local repeated_unreadable = w:objective_place_snapshot(task)
+  check("objective places: identical failures keep the same observation generation",
+    repeated_unreadable.status == "unknown"
+      and repeated_unreadable.generation == unreadable.generation)
+  f.fail.key_pos = nil
+  local recovered_places = w:objective_place_snapshot(task)
+  check("objective places: recovery to successful evidence advances observation generation",
+    recovered_places.status == "ok" and recovered_places.generation > unreadable.generation)
+  f.data.kpos[77] = nil
+  local empty = w:objective_place_snapshot(task)
+  check("objective places: empty node result is unknown, not an empty success",
+    empty.status == "unknown" and empty.reason ~= nil and #empty.places == 0
+      and empty.generation > recovered_places.generation)
+
+  local source_task = { need_generation = 4, quests = {} }
+  local source_rows = w:objective_source_snapshots(nil, source_task)
+  check("objective sources: adapter diagnostic envelopes pass through as frozen unknown",
+    #source_rows >= 5 and source_rows[1].provider == "placed"
+      and source_rows[1].status == "unknown" and #source_rows[1].candidates == 0
+      and source_rows[1].reason ~= nil)
+  check("objective sources: missing snapshots cannot claim shop or seller availability",
+    source_rows[4].provider == "shop" and source_rows[4].status == "unknown"
+      and #source_rows[4].candidates == 0 and source_rows[4].reason ~= nil
+      and source_rows[5].provider == "seller" and source_rows[5].status == "unknown"
+      and #source_rows[5].candidates == 0 and source_rows[5].reason ~= nil)
+
+  local source_generation_before = source_rows[1].generation
+  source_task.need_generation = 5
+  local source_rows_next_need = w:objective_source_snapshots(nil, source_task)
+  check("objective sources: observation generation is independent of need_generation",
+    source_generation_before ~= 4
+      and source_rows_next_need[1].generation == source_generation_before)
+
+  local sf = fixture({ files = { [K.PLACES] = places({
+    prow("chara", "shop_npc", 5, 0, 0, { name = "ch220000_00" }) }) } })
+  sf.data.catalog, sf.data.cast = { 1 }, { [1] = { 2058 } }
+  sf.data.sched_ids, sf.data.shop = { 2058 }, { [2058] = 41 }
+  sf.data.sched, sf.data.shops = { [2058] = P(100, 0, 100) }, {
+    [41] = { { item = 378, release_qid = 0, sentiment_bit = 0,
+      total_pay = 0, flag = 0, var_cond = 0 } },
+  }
+  sf.data.needs, sf.data.locs = { [100] = { { id = 378, num = 1 } } }, {}
+  sf.adapter.objective_item_source_snapshots = function()
+    return base_providers
+  end
+  local sw = sf.new()
+  sw:refresh(0, true, { search = true, shops = true, sellers = true })
+  local available = sw:objective_source_snapshots(nil, source_task)
+  check("objective sources: static shop and seller rows remain unknown without purchase proof",
+    available[4].status == "unknown" and #available[4].candidates == 0
+      and available[5].status == "unknown" and #available[5].candidates == 0)
+  local source_generation = available[4].generation
+  sf.data.shops[41][1].flag = 5
+  sf.data.needs = { [100] = { { id = 379, num = 1 } } }
+  sw:poke()
+  sw:refresh(5, true, { search = true, shops = true, sellers = true })
+  local changed_source = sw:objective_source_snapshots(nil, source_task)
+  check("objective sources: locked static rows still cannot prove eligible shop or seller stock",
+    changed_source[4].status == "unknown" and #changed_source[4].candidates == 0
+      and changed_source[5].status == "unknown" and #changed_source[5].candidates == 0
+      and changed_source[4].generation > source_generation)
+  sf.fail.shops = true
+  sf.afail.item_needs = true
+  sw:poke()
+  sw:refresh(10, true, { search = true, shops = true, sellers = true })
+  local stale = sw:objective_source_snapshots(nil, source_task)
+  check("objective sources: failed seller refresh discards held candidates",
+    stale[4].status == "unknown" and #stale[4].candidates == 0
+      and stale[5].status == "unknown" and #stale[5].candidates == 0
+      and stale[5].generation > changed_source[5].generation)
+  sf.fail.shops, sf.afail.item_needs = nil, nil
+  sw:poke()
+  sw:refresh(20, true, { search = true, shops = true, sellers = true })
+  sw:input().shops[1].items[1].id = nil
+  local partial = sw:objective_source_snapshots(nil, source_task)
+  check("objective sources: partial shop rows fail closed without candidates",
+    partial[4].status == "unknown" and #partial[4].candidates == 0
+      and partial[4].reason ~= nil)
+
+  local observation_fixture = fixture()
+  local observed = {
+    { provider = "placed", generation = 0, status = "ok", candidates = {
+      { id = "p1", generation = 4, target = { cid = 2058 }, pos = P(1, 0, 1),
+        eligibility = "eligible" },
+    } },
+    { provider = "chest", generation = 4, status = "unknown", reason = "scan_pending", candidates = {} },
+    { provider = "loot", generation = 4, status = "unknown", reason = "scan_pending", candidates = {} },
+  }
+  observation_fixture.adapter.objective_item_source_snapshots = function() return observed end
+  local observation_world = observation_fixture.new()
+  local observations = observation_world:objective_source_snapshots(nil, source_task)
+  local placed_generation, chest_generation = observations[1].generation, observations[2].generation
+  check("objective sources: adapter generation zero fails closed and drops eligible candidates",
+    observations[1].status == "unknown" and #observations[1].candidates == 0
+      and placed_generation > 0 and placed_generation ~= 4)
+  observed[1].generation = 4
+  local normalized = observation_world:objective_source_snapshots(nil, source_task)
+  check("objective sources: provider observation generations advance independently on recovery",
+    normalized[1].generation > placed_generation and normalized[1].status == "ok"
+      and normalized[1].candidates[1].generation == normalized[1].generation
+      and normalized[2].generation == chest_generation)
+  observed[1].candidates[1].id = "p2"
+  local content_changed = observation_world:objective_source_snapshots(nil, source_task)
+  check("objective sources: candidate content changes advance only that provider generation",
+    content_changed[1].generation > normalized[1].generation
+      and content_changed[2].generation == chest_generation)
+  source_task.need_generation = 0
+  local invalid_need = observation_world:objective_source_snapshots(nil, source_task)
+  check("objective sources: invalid need generation advances normalized unknown observations",
+    invalid_need[1].status == "unknown" and #invalid_need[1].candidates == 0
+      and invalid_need[1].generation > content_changed[1].generation)
+  source_task.need_generation = 4
+
+  local envelope = { objective_generation = 9, members = {
+    { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
+      direct = false, target_key = core.target_key({ 30040, "issued_npc", 2001 }),
+      ordinal = 1, pos = P(1, 0, 1), item_ids = {}, objective_generation = 9 },
+    { route_id = core.objective_direct_route_id(1), qid = 30040, kind = "place", direct = true,
+      target_key = core.target_key({ 30040, "task", 0, 1, "place" }), ordinal = 1,
+      place = 0, pos = P(10, 20, 30), item_ids = {}, objective_generation = 9 },
+  } }
+  local route_tg = { search = true, player = P(0, 0, 0), focus_keys = {} }
+  w:set_routes(envelope)
+  local generation = w.route_gen
+  w:set_routes(envelope)
+  check("objective routes: same generation and membership is idempotent",
+    w.route_gen == generation)
+  local allocations, old_allocate = 0, core.target_registry_allocate
+  core.target_registry_allocate = function(...)
+    allocations = allocations + 1
+    return old_allocate(...)
+  end
+  collectgarbage("collect")
+  collectgarbage("stop")
+  local mem_before = collectgarbage("count")
+  for _ = 1, 500 do w:set_routes(envelope) end
+  local mem_growth = collectgarbage("count") - mem_before
+  collectgarbage("restart")
+  core.target_registry_allocate = old_allocate
+  check("objective routes: identical publication fast path avoids registry allocation",
+    allocations == 0 and mem_growth < 1)
+  local mixed = { objective_generation = 10, members = {
+    { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
+      direct = false, target_key = core.target_key({ 30040, "issued_npc", 2001 }),
+      ordinal = 1, pos = P(1, 0, 1), item_ids = {}, objective_generation = 9 },
+  } }
+  w:set_routes(mixed)
+  check("objective routes: mixed-generation envelopes clear old membership immediately",
+    (w:input() == nil or w:input().routes == nil) and w.route_gen > generation)
+  local malformed = { objective_generation = 11, members = {
+    { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
+      direct = false, target_key = "not-canonical", ordinal = 1, pos = P(1, 0, 1),
+      item_ids = {}, objective_generation = 11 },
+  } }
+  w:set_routes(malformed)
+  check("objective routes: malformed envelope cannot escape through legacy-list compatibility",
+    w:input() == nil or w:input().routes == nil)
+  w:set_routes({ [1] = { cid = 2001, name = "Dense prefix" },
+    [3] = { cid = 2003, place = 2003, qid = 30040, kind = "npc", direct = false,
+      target_key = core.target_key({ 30040, "issued_npc", 2003 }), ordinal = 3,
+      pos = P(3, 0, 3), item_ids = {}, objective_generation = 12 } })
+  w:refresh(0.5, true, route_tg)
+  check("objective routes: sparse mixed publication rejects instead of installing a legacy prefix",
+    w:input() == nil or w:input().routes == nil)
+  w:set_routes({ { cid = 2001, name = "Legacy prefix" } })
+  w:refresh(0.55, true, route_tg)
+  w:set_routes({ { cid = 2001, name = "Legacy prefix" }, keyed = true })
+  check("objective routes: keyed legacy table clears the prior publication",
+    w:input() == nil or w:input().routes == nil)
+  w:set_routes({ { cid = 2001, name = "Legacy prefix" },
+    { cid = 2002, name = "Objective shaped", objective_generation = 12 } })
+  check("objective routes: dense mixed legacy/objective array clears as a whole",
+    w:input() == nil or w:input().routes == nil)
+  w:set_routes({ objective_generation = 12, members = {
+    { route_id = core.objective_direct_route_id(3), qid = 30040, kind = "item", direct = true,
+      target_key = core.target_key({ "source", "seller:test" }), ordinal = 3, place = 0,
+      pos = P(3, 0, 3), item_ids = { 378 }, objective_generation = 12 },
+  } })
+  w:refresh(0.6, true, route_tg)
+  check("objective routes: unsupported item kind cannot enter the objective validator",
+    route_in(w, core.objective_direct_route_id(3)) == nil)
+  w:set_routes({ { cid = -77, place = 77, name = "Legacy place" } })
+  w:refresh(0, true, route_tg)
+  check("objective routes: bare legacy place list remains supported",
+    route_in(w, -77) == nil)
+  w:set_routes(envelope)
+  w:refresh(0, true, route_tg)
+  check("objective routes: valid direct publication carries its generation before stops",
+    route_in(w, core.objective_direct_route_id(1)) ~= nil
+      and route_in(w, core.objective_direct_route_id(1)).objective_generation == 9
+      and route_in(w, core.objective_direct_route_id(1)).target_key == envelope.members[2].target_key)
+
+  local sticky_world = fixture().new()
+  local sticky_npc, sticky_direct = {}, {}
+  for k, value in pairs(envelope.members[1]) do sticky_npc[k] = value end
+  for k, value in pairs(envelope.members[2]) do sticky_direct[k] = value end
+  sticky_npc.objective_generation, sticky_direct.objective_generation = 20, 20
+  sticky_world:set_routes({ objective_generation = 20, members = { sticky_npc, sticky_direct } })
+  sticky_world:refresh(0, true, route_tg)
+  local sticky_ids = { 2001, core.objective_direct_route_id(1) }
+  local sticky_before = { route_in(sticky_world, sticky_ids[1]).slot,
+    route_in(sticky_world, sticky_ids[2]).slot }
+  sticky_npc.objective_generation, sticky_direct.objective_generation = 21, 21
+  sticky_world:set_routes({ objective_generation = 21, members = { sticky_direct, sticky_npc } })
+  sticky_world:refresh(1, true, route_tg)
+  check("objective routes: generation change and reorder retain surviving identity color slots",
+    route_in(sticky_world, sticky_ids[1]).slot == sticky_before[1]
+      and route_in(sticky_world, sticky_ids[2]).slot == sticky_before[2])
+
+  local ancillary = { objective_generation = 12, members = {
+    { route_id = 2002, cid = 2002, qid = 30040, kind = "npc", direct = false,
+      item_ids = {}, objective_generation = 12 },
+  } }
+  local ancillary_world = fixture().new()
+  ancillary_world:set_routes(ancillary)
+  ancillary_world:refresh(0, true, route_tg)
+  local ancillary_entry = route_in(ancillary_world, 2002)
+  check("objective routes: ancillary render retains false objective status and CID-only identity",
+    ancillary_entry ~= nil and ancillary_entry.objective == false
+      and ancillary_entry.target_key == nil and ancillary_entry.ordinal == nil
+      and ancillary_entry.objective_generation == 12)
+
+  local startable_world = fixture().new()
+  startable_world:set_routes({ objective_generation = 13, members = {
+    { route_id = 2201, cid = 2201, qid = 40, kind = "npc", direct = false,
+      objective = true, name = "Quest giver", pos = P(2, 0, 2), item_ids = {},
+      objective_generation = 13 },
+  } })
+  startable_world:refresh(0, true, route_tg)
+  local startable_entry = route_in(startable_world, 2201)
+  check("objective routes: keyless startable giver remains objective, not ancillary",
+    startable_entry ~= nil and startable_entry.objective == true
+      and startable_entry.target_key == nil and startable_entry.ordinal == nil
+      and startable_entry.objective_generation == 13)
+  local startable_slot = startable_entry and startable_entry.slot
+  startable_world:set_routes({ objective_generation = 14, members = {
+    { route_id = 2201, cid = 2201, qid = 40, kind = "npc", direct = false,
+      objective = true, name = "Quest giver", pos = P(2, 0, 2), item_ids = {},
+      objective_generation = 14 },
+  } })
+  startable_world:refresh(1, true, route_tg)
+  check("objective routes: keyless startable giver keeps its objective color slot across generations",
+    route_in(startable_world, 2201).objective == true
+      and route_in(startable_world, 2201).slot == startable_slot)
+
+  local function objective_npc(cid, ordinal, generation)
+    return { route_id = cid, cid = cid, place = cid, qid = 30040, kind = "npc", direct = false,
+      target_key = core.target_key({ 30040, "issued_npc", cid }), ordinal = ordinal,
+      pos = P(cid, 0, cid), item_ids = {}, objective_generation = generation }
+  end
+  local ancillary_member = { route_id = 2102, cid = 2102, qid = 30040, kind = "npc",
+    direct = false, item_ids = {}, objective_generation = 30 }
+  local mixed_world = fixture().new()
+  mixed_world:set_routes({ objective_generation = 30, members = {
+    objective_npc(2101, 1, 30), ancillary_member, objective_npc(2103, 2, 30),
+  } })
+  mixed_world:refresh(0, true, route_tg)
+  local mixed_slots = { route_in(mixed_world, 2101).slot,
+    route_in(mixed_world, 2102).slot, route_in(mixed_world, 2103).slot }
+  mixed_world:set_routes({ objective_generation = 31, members = {
+    objective_npc(2101, 1, 31), objective_npc(2104, 3, 31),
+    objective_npc(2103, 2, 31),
+    { route_id = 2102, cid = 2102, qid = 30040, kind = "npc", direct = false,
+      item_ids = {}, objective_generation = 31 },
+  } })
+  mixed_world:refresh(1, true, route_tg)
+  check("objective routes: mixed reorder preserves objective identities and ancillary CID slot",
+    route_in(mixed_world, 2101).slot == mixed_slots[1]
+      and route_in(mixed_world, 2102).slot == mixed_slots[2]
+      and route_in(mixed_world, 2103).slot == mixed_slots[3]
+      and route_in(mixed_world, 2104).slot == 4)
+  check("objective routes: mixed render marks only canonical members as objectives",
+    route_in(mixed_world, 2101).objective == true
+      and route_in(mixed_world, 2102).objective == false
+      and route_in(mixed_world, 2104).objective == true)
+
+  w:set_routes(ancillary)
+  local ancillary_generation = w.route_gen
+  w:set_routes(ancillary)
+  check("objective routes: ancillary CID-only publication is accepted and idempotent",
+    w.route_gen == ancillary_generation)
+
+  w:set_routes(envelope)
+  w:refresh(1, true, route_tg)
+  local old_direct = core.objective_direct_route_id(1)
+  w.path_job, w.rps[old_direct] = { cid = old_direct }, true
+  w:set_routes({ objective_generation = 10, members = {
+    { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
+      direct = false, target_key = core.target_key({ 30040, "issued_npc", 2001 }),
+      ordinal = 1, pos = P(1, 0, 1), item_ids = {}, objective_generation = 10 },
+  } })
+  check("objective routes: generation change clears published stops and old path state immediately",
+    (w:input() == nil or w:input().routes == nil)
+      and w.path_job == nil and w.rps[old_direct] == nil)
 end
 
 if failures > 0 then os.exit(1) end

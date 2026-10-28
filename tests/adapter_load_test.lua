@@ -168,7 +168,8 @@ local contract = {
   "npc_alive", "npc_pos", "quest_name",
   "quest_state", "catalog_ids",
   "objective_cids", "objective_issued_cids", "objective_pos",
-  "refresh_objectives", "objective_stats",
+  "refresh_objectives", "objective_stats", "objective_task_snapshot",
+  "objective_item_source_snapshots",
   "refresh_gates", "gate_qids", "gate_stats", "invalidate_gates",
   "seen_quest_name", "quest_region",
   "refresh_tree_gates", "invalidate_tree_gates", "tree_gate_qids",
@@ -180,10 +181,17 @@ local contract = {
   "quest_step", "masquerade_door_closed",
   "overhead_block_reason",
 }
-assert(#contract == 51)
+assert(#contract == 53)
 for _, name in ipairs(contract) do
   assert(type(a[name]) == "function", "contract function missing: " .. name)
 end
+local empty_source_snapshots = a.objective_item_source_snapshots()
+assert(#empty_source_snapshots == 3 and empty_source_snapshots[1].provider == "placed"
+  and empty_source_snapshots[2].provider == "chest" and empty_source_snapshots[3].provider == "loot"
+  and empty_source_snapshots[1].status == "unknown"
+  and empty_source_snapshots[1].generation > 0
+  and empty_source_snapshots[2].generation > 0 and empty_source_snapshots[3].generation > 0,
+  "source envelopes initialize with separate positive generations")
 assert(type(a.reset_session_caches) == "function", "reset_session_caches missing")
 assert(a.objective_cids(1) == nil, "no walk committed yet")
 assert(a.objective_issued_cids(1) == nil, "no issued target before a walk")
@@ -785,10 +793,20 @@ do
   end
   local qm = new_qm()
   local prog_ids, prog_nil = { side_qid }, false
-  local qlm = { call = function(_, m)
-    if m == "getProgressingQuestIds" and not prog_nil then
-      return mcoll(prog_ids)
-    end
+  local issued_live_task = { call = function(_, m)
+    if m == "getActiveDestinations" then return mcoll({}) end
+  end }
+  local issued_live_info = { call = function(_, m)
+    if m == "get_CurrentTaskIndex" then return 0 end
+  end }
+  local issued_live_dict = { call = function(_, m, q)
+    if m == "get_Item" and q == side_qid then return issued_live_info end
+  end }
+  local qlm = { get_field = function(_, n)
+    if n == "_QuestLogInfoDict" then return issued_live_dict end
+  end, call = function(_, m, q)
+    if m == "getProgressingQuestIds" and not prog_nil then return mcoll(prog_ids) end
+    if m == "getCurrentTask" and q == side_qid then return issued_live_task end
   end }
   local prev_gms = sdk.get_managed_singleton
   local use_qm = true
@@ -825,6 +843,26 @@ do
   local issued = aw.objective_issued_cids(side_qid)
   assert(issued ~= nil and #issued == 1 and issued[1] == npc_cid,
     "exact true IsIssuedTask is exposed as an objective target")
+  local without_catalog = aw.objective_task_snapshot({ side_qid }, nil).quests[1]
+  local with_v1_catalog = aw.objective_task_snapshot({ side_qid }, { version = 1, quests = {} }).quests[1]
+  assert(without_catalog.read_status == "ok" and without_catalog.task_index == 0
+    and #without_catalog.issued_npcs == 1
+    and without_catalog.issued_npcs[1].target.cid == npc_cid
+    and with_v1_catalog.read_status == "ok" and with_v1_catalog.task_index == 0
+    and #with_v1_catalog.issued_npcs == 1,
+    "invalid and v1 catalogs leave independent issued NPC evidence intact")
+  local issued_core = require("Clairvoyance.core").objective_snapshot(
+    aw.objective_task_snapshot({ side_qid }, nil), { status = "unknown", places = {} }, {},
+    require("Clairvoyance.core").target_registry_new())
+  assert(issued_core ~= nil and #issued_core.targets == 1
+    and issued_core.targets[1].provider == "issued_npc",
+    "nil catalog preserves issued targets through the core boundary")
+  local issued_v1_core = require("Clairvoyance.core").objective_snapshot(
+    aw.objective_task_snapshot({ side_qid }, { version = 1, quests = {} }),
+    { status = "unknown", places = {} }, {}, require("Clairvoyance.core").target_registry_new())
+  assert(issued_v1_core ~= nil and #issued_v1_core.targets == 1
+    and issued_v1_core.targets[1].provider == "issued_npc",
+    "v1 catalog preserves issued targets through the core boundary")
   prog_ids = {}
   aw.refresh_objectives()
   assert(aw.objective_issued_cids(side_qid) == nil,
@@ -2604,6 +2642,28 @@ do
         qid = 0x1000000000005, place = nil, qids = { 0x1000000000005 } })
       == "51a1c0de-0000-4007-8000-000000000005",
       "MG objective destination has the 4007 prefix without a matched place and wraps 48 bits")
+    local obj_guid = A.map_marker_guid({ cat = "objective", objective_ordinal = 1 })
+    assert(obj_guid == "51a1c0de-0000-4008-8000-000000000001",
+      "MG dedicated objective marker uses its target ordinal in 4008")
+    assert(A.map_marker_guid({ cat = "objective", objective_ordinal = 1099511627775 })
+      == "51a1c0de-0000-4008-8000-00ffffffffff",
+      "MG 4008 accepts the complete 40-bit ordinal ceiling")
+    for _, ordinal in ipairs({ 0, -1, 1.5, 1099511627776 }) do
+      assert(A.map_marker_guid({ cat = "objective", objective_ordinal = ordinal }) == nil,
+        "MG rejects out-of-domain 4008 ordinal " .. tostring(ordinal))
+    end
+    assert(A.map_marker_guid({ cat = "objective" }) == nil,
+      "MG rejects a missing 4008 ordinal")
+    local same_suffix = {}
+    for _, cat in ipairs({ "in_progress", "quest_item", "chest", "route_stop",
+        "hint_pin", "focus_npc", "focus_place" }) do
+      local marker = { cat = cat, qids = { 1 }, item_id = 1, item_ord = 1,
+        world_ord = 1, cid = 0, stop = 1, num = 0, qid = 0, i = 1,
+        place = 1 }
+      same_suffix[cat] = A.map_marker_guid(marker)
+      assert(same_suffix[cat] ~= obj_guid,
+        "MG 4008 is disjoint from " .. cat .. " for the same numeric suffix")
+    end
   end
   A.guid_parse = real_gp
 
@@ -3181,6 +3241,120 @@ do
   ai.refresh_items()
   assert((IS.gets["app.GimmickManager"] or 0) > 0, "RN4 default mode still scans")
 
+  -- Seed a real adapter-produced current need for the objective task snapshot
+  -- tests; the snapshot must join this committed table, not invent ownership.
+  ifresh()
+  IS.prog = { 20040 }
+  IS.procs = { iproc(20040, { has_item({ { id = 9001, num = 2, lv = 4 } }) }) }
+  ai.refresh_items("needs")
+  assert(ai.item_needs()[20040] ~= nil and ai.item_needs()[20040][1].id == 9001,
+    "objective task fixture has one live unsatisfied item need")
+  local saved_task_gms = sdk.get_managed_singleton
+  local function nobj(fields, calls)
+    local o = { fields = fields or {}, calls = calls or {} }
+    function o.get_field(_, k) return o.fields[k] end
+    function o.get_address() return o.address end
+    function o.call(_, m, ...)
+      local v = o.calls[m]
+      if v == "RAISE" then error(m) end
+      if type(v) == "function" then return v(...) end
+      return v
+    end
+    return o
+  end
+  local od = nobj({}, { get_DestType = 3, get_CharaID = 101,
+    get_KeyLocation = 2308, get_LocalArea = 0, getDestination = { x = 1, y = 2, z = 3 } })
+  local ot = nobj({ _Destinations = mcoll({ od }) }, { getActiveDestinations = mcoll({ od }) })
+  local og = nobj({}, { evaluate = 0, evaluateRegisterCondition = true,
+    get_CharaID = 101, get_KeyLocation = 2308 })
+  local oc = nobj({ _TaskIndex = 0 }, { get_TaskIndex = 0,
+    get_Destinations = mcoll({ og }) })
+  local oi = nobj({}, { get_CurrentTaskIndex = 0, getCurrentTaskConciergeData = oc })
+  local own_resource = nobj({ _ConciergeList = mcoll({ oc }) }, { get_QuestId = 20040 })
+  local own_native_catalog = nobj({}, { getCount = 1,
+    getValues = arr({ own_resource }) })
+  local oq = nobj({ _QuestLogInfoDict = nobj({}, { get_Item = function(q)
+    if q == 20040 then return oi end
+  end }), _Catalog = own_native_catalog }, {
+    getCurrentTask = function(q) if q == 20040 then return ot end end })
+  oq.address = 0x202
+  sdk.get_managed_singleton = function(n)
+    if n == "app.QuestLogManager" then return oq end
+  end
+  local own_catalog = { version = 2, sources = {
+    { id = "global-source", kind = "placed" },
+  }, quests = {} }
+  own_catalog.quests[20040] = {
+    tasks = { { index = 0, has_destination = false, destinations = {
+      { index = 0, set_destination = false, dest_type = 3, cid = 101, key = 2308,
+        local_area = 0, has_show_conditions = false, show_conditions = {},
+        is_update_condition = false, has_display_conditions = false, display_conditions = {} },
+    } } }, guidance = { { index = 0, task_index = 0, destination_index = 0,
+      destinations = { { index = 0, cid = 101, target = { kind = "key_location", key = 2308 },
+        conditions = {
+          { kind = "item", enabled = true, is_not = false, item_id = 9001, set_num = true, num = 2 },
+          { kind = "quest_variable_or", enabled = true, is_not = false, children = {
+            { kind = "item", enabled = true, is_not = false, item_id = 9002, set_num = true, num = 1 },
+          } },
+        }, delivery = { is_not = false, check_storage = true, group_id = 3,
+          refs = { { qid = 777, key = 2, serial = 2 } } } } } } },
+    deliveries = {}, sources = { { id = "fixture-source", kind = "placed" } },
+  }
+  own_catalog.quests[777] = { deliveries = { { key = 2, serial = 2,
+    incomplete_possible = true, operator = 0, groups = { { index = 0,
+      item_ids = { 9002 }, count = 1, is_all_item = true, is_infinite = false,
+      ignore_restriction_items = {} } } } } }
+  local owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  local owned = owned_snapshot.quests[1].item_ownership
+  assert(#owned == 2 and owned[1].item_id == 9001 and owned[1].count == nil
+    and owned[1].proof_kind == "condition" and owned[1].eligibility == "unknown"
+    and owned[1].task_index == 0
+    and owned[1].concierge_index == 0 and owned[1].destination_index == 0,
+    "objective task owner reports item evidence unknown until a native leaf is proven")
+  assert(owned[2].proof_kind == "delivery" and owned[2].eligibility == "unknown"
+    and owned[2].delivery.group_id == 3 and owned[2].delivery.check_storage == true
+    and #owned[2].delivery.refs == 1 and #owned[2].delivery.groups == 1
+    and owned[2].delivery.groups[1].delivery.groups[1].item_ids[1] == 9002
+    and owned[1].item_id ~= 9002,
+    "objective task owner preserves delivery groups and does not flatten alternatives")
+  local source_snapshots = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
+  assert(#source_snapshots == 3 and source_snapshots[1].provider == "placed"
+    and source_snapshots[2].provider == "chest" and source_snapshots[3].provider == "loot"
+    and source_snapshots[1].status == "unknown"
+    and source_snapshots[1].generation == owned_snapshot.need_generation
+    and source_snapshots[1].catalog_version == 2
+    and #source_snapshots[1].source_descriptors == 2
+    and source_snapshots[1].source_descriptors[1].qid == nil
+    and source_snapshots[1].source_descriptors[1].source.id == "global-source"
+    and source_snapshots[1].source_descriptors[2].qid == 20040
+    and source_snapshots[1].source_descriptors[2].source.id == "fixture-source"
+    and source_snapshots[1].source_descriptors ~= source_snapshots[2].source_descriptors
+    and #source_snapshots[1].signal_evidence > 0
+    and #source_snapshots[1].guidance_delivery_refs > 0,
+    "objective item source snapshots are generation-tagged unknown envelopes with evidence")
+  local owned_repeat = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  assert(owned_repeat.focus_epoch == owned_snapshot.focus_epoch
+    and owned_repeat.journal_generation == owned_snapshot.journal_generation
+    and owned_repeat.need_generation == owned_snapshot.need_generation,
+    "objective task generations are stable for identical native and need input")
+  ai.item_needs()[20040][1].num = 3
+  local need_changed = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  assert(need_changed.journal_generation == owned_repeat.journal_generation
+    and need_changed.need_generation == owned_repeat.need_generation + 1,
+    "need input advances only need_generation, not journal_generation")
+  ai.item_needs()[20040][1].num = 2
+  local fresh_before_failure = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  IS.dict = nil
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  local failed_need_refresh = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  assert(ai.item_needs()[20040] ~= nil
+    and failed_need_refresh.need_generation == fresh_before_failure.need_generation + 1,
+    "objective need freshness advances on failed refresh while legacy need data is retained")
+  rel_world()
+  ai.refresh_items("needs")
+  sdk.get_managed_singleton = saved_task_gms
+
   sdk.get_managed_singleton, os.clock = prev_gms, prev_clock
 end
 
@@ -3620,6 +3794,395 @@ do
   assert(a.masquerade_door_closed() == nil, "DR15 reset returns unknown")
   gm = manager(396.075, true)
   assert(a.masquerade_door_closed() == true, "DR16 confirmed close restores")
+  sdk.get_managed_singleton = old_gms
+end
+
+-- General objective task snapshots: native membership and concierge status
+-- are authoritative; generated catalog rows only supply their exact indices.
+do
+  local function native(fields, calls, addr)
+    local o = { _fields = fields or {}, _calls = calls or {}, _addr = addr }
+    function o.get_field(_, k)
+      local v = o._fields[k]
+      if v == "RAISE" then error("field " .. k) end
+      return v
+    end
+    function o.get_address() return o._addr end
+    function o.call(_, method, ...)
+      local v = o._calls[method]
+      if v == "RAISE" then error("call " .. method) end
+      if type(v) == "function" then return v(...) end
+      return v
+    end
+    return o
+  end
+  local qid, cid, key = 20040, 101, 2308
+  local live_dest = native({}, {
+    get_DestType = 3, get_CharaID = cid, get_KeyLocation = key,
+    get_Area = 19, get_LocalArea = 2, getDestination = { x = 1, y = 2, z = 3 },
+    evaluateShow = false, evaluateHide = false, evaluateUpdateShow = false,
+  }, 0x101)
+  local stale_dest = native({}, { get_DestType = 3, get_CharaID = 999,
+    get_KeyLocation = 0, get_Area = 19, get_LocalArea = 2 }, 0x102)
+  local task = native({ _HasDestination = false, _Destinations = mcoll({ stale_dest, live_dest }) }, {
+    getActiveDestinations = mcoll({ live_dest }),
+  })
+  local concierge_dest = native({
+    _Conditions = mcoll({}), _DeliveryGroupID = 0,
+    _DeliveryCheckStorage = false, _DeliveryIsNot = false,
+  }, { evaluate = 0, evaluateRegisterCondition = true,
+    get_DeliverData = mcoll({}), get_CharaID = cid, get_KeyLocation = key,
+    get_LocalArea = 2, getDestination = { x = 1, y = 2, z = 3 } })
+  local concierge = native({ _TaskIndex = 0, _Destinations = mcoll({ concierge_dest }) }, {
+    get_TaskIndex = 0, get_Destinations = mcoll({ concierge_dest }),
+    getRegisterableDestinations = mcoll({ concierge_dest }),
+  })
+  local info = native({}, { get_CurrentTaskIndex = 0,
+    getCurrentTaskConciergeData = concierge })
+  local info_dict = native({}, { get_Item = function(q) if q == qid then return info end end })
+  local quest_resource = native({ _ConciergeList = mcoll({ concierge }) }, {
+    get_QuestId = qid })
+  local quest_catalog = native({}, { getCount = 1,
+    getValues = arr({ quest_resource }) })
+  local qlm = native({ _QuestLogInfoDict = info_dict, _Catalog = quest_catalog }, {
+    getCurrentTask = function(q) if q == qid then return task end end,
+  }, 0x201)
+  local old_gms = sdk.get_managed_singleton
+  sdk.get_managed_singleton = function(n)
+    if n == "app.QuestLogManager" then return qlm end
+  end
+  local catalog = { version = 2, quests = { [qid] = {
+    tasks = { { index = 0, has_destination = false, destinations = {
+      { index = 0, set_destination = false, dest_type = 3, cid = 999, key = nil,
+        area = 19, local_area = 2, has_show_conditions = true, show_conditions = {},
+        is_update_condition = true, has_display_conditions = true, display_conditions = {} },
+      { index = 1, set_destination = false, dest_type = 3, cid = cid, key = key,
+        area = 19, local_area = 2, has_show_conditions = false, show_conditions = {},
+        is_update_condition = false, has_display_conditions = false, display_conditions = {} },
+    } } }, guidance = { { index = 0, task_index = 0, destination_index = 0,
+      destinations = { { index = 0, target = { kind = "key_location", key = key }, cid = cid,
+        register_conditions = {}, conditions = {},
+        delivery = { is_not = false, check_storage = false, group_id = 0, refs = {} } } } } },
+    deliveries = {}, sources = {},
+  } } }
+  local oa = A.make()
+  local snap = oa.objective_task_snapshot({ qid }, catalog)
+  assert(type(snap) == "table" and #snap.quests == 1,
+    "OT1 returns the focused quest task snapshot")
+  local row = snap.quests[1]
+  assert(row.qid == qid and row.task_index == 0 and row.read_status == "ok",
+    "OT1 current task matches the live journal index")
+  assert(#row.task_destinations == 2 and row.task_destinations[1].destination_index == 1
+    and row.task_destinations[1].kind == "npc" and row.task_destinations[1].target.cid == cid
+    and row.task_destinations[2].kind == "place",
+    "OT2 exact active object emits independent NPC and place targets")
+  assert(row.live_destination == nil,
+    "OT2 generated task destinations are not copied into live-only evidence")
+  assert(snap.catalog_version == 2 and type(row.source_descriptors) == "table"
+    and #row.source_descriptors == 0
+    and type(row.task_destinations[1].evidence) == "table"
+    and type(row.guidance[1].delivery_refs) == "table"
+    and type(row.guidance[1].signals[1].evidence) == "table",
+    "OT2b validated catalog boundary carries version, descriptors, signal evidence, and delivery refs")
+  assert(#row.guidance == 1 and row.guidance[1].eligibility == "eligible"
+    and row.guidance[1].signals[1].target.cid == cid,
+    "OT3 concierge requires matching task and exact register/status success: "
+      .. tostring(row.guidance[1] and row.guidance[1].eligibility) .. "/"
+      .. tostring(row.guidance[1] and row.guidance[1].reason))
+  local same = oa.objective_task_snapshot({ qid }, catalog)
+  assert(same.focus_epoch == snap.focus_epoch
+    and same.journal_generation == snap.journal_generation
+    and same.need_generation == snap.need_generation,
+    "OT4 identical snapshot does not advance its component generations")
+  local original_guidance = catalog.quests[qid].guidance[1].destinations
+  local second_concierge_dest = native({}, { evaluate = 1,
+    evaluateRegisterCondition = true, get_CharaID = cid + 1, get_KeyLocation = key + 1,
+    get_LocalArea = 2, getDestination = { x = 4, y = 5, z = 6 } })
+  catalog.quests[qid].guidance[1].destinations = {
+    original_guidance[1], { index = 1, cid = cid + 1,
+      target = { kind = "key_location", key = key + 1 }, conditions = {},
+      delivery = { refs = {} } },
+  }
+  concierge._calls.get_Destinations = mcoll({ concierge_dest, second_concierge_dest })
+  local mixed = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance
+  assert(#mixed == 2 and mixed[1].destination_index == 0
+    and mixed[1].eligibility == "eligible" and #mixed[1].signals == 2
+    and mixed[1].signals[1].kind == "npc" and mixed[1].signals[1].target.pos.x == 1
+    and mixed[1].signals[1].target.place == nil
+    and mixed[1].signals[2].kind == "place" and mixed[1].signals[2].target.cid == nil
+    and mixed[2].destination_index == 1 and mixed[2].eligibility == "ineligible"
+    and #mixed[2].signals == 0,
+    "OT3b guidance keeps independent eligibility and emits both positioned targets")
+  catalog.quests[qid].guidance[1].destinations = original_guidance
+  concierge._calls.get_Destinations = mcoll({ concierge_dest })
+  local duplicate_native_zero = native({}, { evaluate = 2,
+    evaluateRegisterCondition = true, get_CharaID = cid, get_KeyLocation = key,
+    get_LocalArea = 2, getDestination = { x = 7, y = 8, z = 9 } })
+  local duplicate_native_one = native({}, { evaluate = 0,
+    evaluateRegisterCondition = true, get_CharaID = cid, get_KeyLocation = key,
+    get_LocalArea = 2, getDestination = { x = 10, y = 11, z = 12 } })
+  local record_zero = native({ _TaskIndex = 0, _Destinations = mcoll({ duplicate_native_zero }) },
+    { get_TaskIndex = 0, get_Destinations = mcoll({ duplicate_native_zero }) })
+  local record_one = native({ _TaskIndex = 0, _Destinations = mcoll({ duplicate_native_one }) },
+    { get_TaskIndex = 0, get_Destinations = mcoll({ duplicate_native_one }) })
+  quest_resource._fields._ConciergeList = mcoll({ record_zero, record_one })
+  catalog.quests[qid].guidance = { { index = 1, task_index = 0, destination_index = 0,
+    destinations = original_guidance } }
+  concierge._calls.get_Destinations = mcoll({ duplicate_native_zero, duplicate_native_one })
+  local indexed_native = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(indexed_native.concierge_index == 1 and indexed_native.eligibility == "eligible"
+    and indexed_native.signals[1].target.pos.x == 10,
+    "OT3e generated concierge record index selects its matching native record")
+  qlm._fields._Catalog = nil
+  local no_native_catalog = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(no_native_catalog.eligibility == "unknown"
+    and no_native_catalog.reason == "concierge_catalog_resource_unavailable"
+    and #no_native_catalog.signals == 0,
+    "OT3e unavailable catalog cannot reuse an indexed native resource")
+  assert(oa.reset_session_caches() == true, "OT3e session owner reset clears catalog index")
+  local reset_native_catalog = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(reset_native_catalog.eligibility == "unknown"
+    and reset_native_catalog.reason == "concierge_catalog_resource_unavailable"
+    and #reset_native_catalog.signals == 0,
+    "OT3e reset catalog index stays unknown without a current native resource")
+  qlm._fields._Catalog = quest_catalog
+  quest_resource._fields._ConciergeList = mcoll({ concierge })
+  catalog.quests[qid].guidance = { { index = 0, task_index = 0, destination_index = 0,
+    destinations = { original_guidance[1], { index = 1, cid = cid,
+      target = { kind = "key_location", key = key }, conditions = {}, delivery = { refs = {} } } } } }
+  concierge._calls.get_Destinations = mcoll({ duplicate_native_zero, duplicate_native_one })
+  local indexed_destination = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance
+  assert(#indexed_destination == 2 and indexed_destination[1].eligibility == "ineligible"
+    and indexed_destination[2].eligibility == "eligible"
+    and indexed_destination[2].destination_index == 1
+    and indexed_destination[2].signals[1].target.pos.x == 10,
+    "OT3f destination index selects the original native destination despite duplicate target values")
+  catalog.quests[qid].guidance = { { index = 0, task_index = 0, destination_index = 0,
+    destinations = original_guidance } }
+  concierge._calls.get_Destinations = mcoll({ concierge_dest })
+  catalog.quests[qid].guidance[2] = { index = 1, task_index = 0, destination_index = 0,
+    destinations = original_guidance }
+  local shared_native = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance
+  assert(#shared_native == 2 and shared_native[1].eligibility == "eligible"
+    and shared_native[2].eligibility == "unknown"
+    and shared_native[2].reason == "concierge_record_missing",
+    "OT3a one native concierge destination is not reused across same-task records")
+  catalog.quests[qid].guidance[2] = nil
+  local saved_guidance_target = original_guidance[1].target
+  local saved_guidance_cid = original_guidance[1].cid
+  local saved_concierge_cid = concierge_dest._calls.get_CharaID
+  original_guidance[1].cid = nil
+  concierge_dest._calls.get_CharaID = 0
+  local no_cid = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(no_cid.eligibility == "eligible" and #no_cid.signals == 1
+    and no_cid.signals[1].kind == "place" and no_cid.signals[1].target.cid == nil,
+    "OT3c native CID zero is normalized and place-only evidence remains usable")
+  original_guidance[1].cid = saved_guidance_cid
+  concierge_dest._calls.get_CharaID = saved_concierge_cid
+  original_guidance[1].target = { kind = "key_location", key = key + 1 }
+  local wrong_key = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(wrong_key.eligibility == "unknown"
+    and wrong_key.reason == "concierge_destination_mismatch",
+    "OT3c a matching CID with the wrong place key is not joined")
+  original_guidance[1].target = saved_guidance_target
+  local saved_delivery = original_guidance[1].delivery
+  original_guidance[1].delivery = false
+  local false_delivery = oa.objective_task_snapshot({ qid }, catalog).quests[1]
+  assert(false_delivery.read_status == "ok"
+    and #false_delivery.item_ownership == 0,
+    "OT3d false delivery placeholders are type-checked")
+  original_guidance[1].delivery = saved_delivery
+  -- Native destination membership survives contradicting archive flags and
+  -- follows object identity when source order changes. Duplicate active refs
+  -- deduplicate; an adjacent non-current task never contributes.
+  task._calls.getActiveDestinations = mcoll({ live_dest, stale_dest, live_dest })
+  local reordered = oa.objective_task_snapshot({ qid }, catalog)
+  assert(#reordered.quests[1].task_destinations == 4
+    and reordered.quests[1].task_destinations[1].destination_index == 0
+    and reordered.quests[1].task_destinations[2].destination_index == 0
+    and reordered.quests[1].task_destinations[3].destination_index == 1
+    and reordered.quests[1].task_destinations[4].destination_index == 1,
+    "OT5 exact destination identity handles reorder and duplicate active refs")
+  task._calls.getActiveDestinations = mcoll({ native({}, {}, 0x999) })
+  local mismatch = oa.objective_task_snapshot({ qid }, catalog)
+  assert(#mismatch.quests[1].task_destinations == 0
+    and mismatch.quests[1].read_status == "unknown",
+    "OT6 mismatched active object is unknown, never position- or flag-matched")
+  task._calls.getActiveDestinations = mcoll({})
+  local empty = oa.objective_task_snapshot({ qid }, catalog)
+  assert(empty.quests[1].read_status == "ok" and #empty.quests[1].task_destinations == 0,
+    "OT7 exact empty active destination set is known empty")
+  task._calls.getActiveDestinations = nil
+  local nil_active = oa.objective_task_snapshot({ qid }, catalog)
+  assert(nil_active.quests[1].read_status == "ok"
+    and #nil_active.quests[1].task_destinations == 0
+    and #nil_active.quests[1].guidance == 1,
+    "OT7b nil active destination collection is a known empty set")
+  task._calls.getActiveDestinations = "RAISE"
+  local unreadable = oa.objective_task_snapshot({ qid }, catalog)
+  assert(unreadable.quests[1].read_status == "unknown"
+    and unreadable.quests[1].reason == "destination_active_list_unreadable",
+    "OT8 raised active destination read preserves a structured reason")
+  local too_many = {}
+  for i = 1, 257 do too_many[i] = native({}, {}, 0x1000 + i) end
+  task._calls.getActiveDestinations = mcoll(too_many)
+  local truncated = oa.objective_task_snapshot({ qid }, catalog)
+  assert(truncated.quests[1].read_status == "unknown"
+    and truncated.quests[1].reason == "destination_active_list_truncated",
+    "OT8b active destination cap is explicit unknown")
+  task._fields._Destinations = nil
+  task._calls.getActiveDestinations = mcoll({})
+  local source_unknown = oa.objective_task_snapshot({ qid }, catalog)
+  assert(source_unknown.quests[1].read_status == "unknown"
+    and source_unknown.quests[1].reason == "destination_source_list_unreadable",
+    "OT8c missing source list is not mistaken for a known empty list")
+  local source_too_many = {}
+  for i = 1, 257 do source_too_many[i] = native({}, {}, 0x2000 + i) end
+  task._fields._Destinations = mcoll(source_too_many)
+  local source_truncated = oa.objective_task_snapshot({ qid }, catalog)
+  assert(source_truncated.quests[1].read_status == "unknown"
+    and source_truncated.quests[1].reason == "destination_source_list_truncated",
+    "OT8d source destination cap is explicit unknown")
+  task._fields._Destinations = mcoll({ live_dest, live_dest })
+  task._calls.getActiveDestinations = mcoll({ live_dest })
+  local source_duplicate = oa.objective_task_snapshot({ qid }, catalog)
+  assert(source_duplicate.quests[1].read_status == "unknown"
+    and source_duplicate.quests[1].reason == "destination_source_identity_ambiguous",
+    "OT8e duplicate source identities do not choose a nondeterministic ordinal")
+  task._fields._Destinations = mcoll({ stale_dest, live_dest })
+
+  -- Concierge native truth is independent of archive flags. Status codes and
+  -- evaluator failures stay visible as reasons, not guessed signals.
+  task._calls.getActiveDestinations = mcoll({ live_dest })
+  concierge_dest._calls.evaluate = 2
+  local blocked = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(blocked.eligibility == "ineligible" and blocked.reason == "concierge_status_time",
+    "OT9 nonzero status maps to its enum reason")
+  concierge_dest._calls.evaluate = nil
+  local status_unknown = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(status_unknown.eligibility == "unknown" and status_unknown.reason == "concierge_status_unreadable",
+    "OT10 nil status remains unknown")
+  concierge_dest._calls.evaluate = "RAISE"
+  local status_raise = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(status_raise.eligibility == "unknown" and status_raise.reason == "concierge_status_exception",
+    "OT11 raised status remains unknown")
+  concierge_dest._calls.evaluate = 99
+  local status_other = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(status_other.eligibility == "ineligible" and status_other.reason == "concierge_status_99",
+    "OT11b unknown numeric status is retained in the reason")
+  concierge_dest._calls.evaluate = 0
+  concierge_dest._calls.evaluateRegisterCondition = false
+  local disabled = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(disabled.eligibility == "ineligible" and disabled.reason == "concierge_register_condition_false",
+    "OT12 exact false register result disables concierge signal")
+  concierge_dest._calls.evaluateRegisterCondition = nil
+  local register_unknown = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(register_unknown.eligibility == "unknown" and register_unknown.reason == "concierge_register_condition_unreadable",
+    "OT13 nil register result remains unknown")
+  concierge_dest._calls.evaluateRegisterCondition = "RAISE"
+  local register_raise = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(register_raise.eligibility == "unknown"
+    and register_raise.reason == "concierge_register_condition_exception",
+    "OT13b raised register result remains unknown")
+  concierge_dest._calls.evaluateRegisterCondition = true
+  concierge._calls.get_Destinations = mcoll({})
+  local concierge_empty = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(concierge_empty.eligibility == "unknown"
+    and concierge_empty.reason == "concierge_no_current_destination"
+    and #concierge_empty.signals == 0,
+    "OT13c empty current concierge state is known empty")
+  concierge._calls.get_Destinations = mcoll({ concierge_dest })
+
+  -- A loaded target from another concierge task is never joined by ordinal.
+  concierge._fields._TaskIndex = 1
+  concierge._calls.get_TaskIndex = 1
+  local adjacent = oa.objective_task_snapshot({ qid }, catalog).quests[1]
+  assert(adjacent.guidance[1].eligibility == "ineligible"
+    and adjacent.guidance[1].reason == "concierge_task_mismatch",
+    "OT14 adjacent concierge task does not leak into the current task")
+
+  concierge._calls.get_TaskIndex = 0
+  info._calls.get_CurrentTaskIndex = 1
+  local task_adjacent = oa.objective_task_snapshot({ qid }, catalog).quests[1]
+  assert(task_adjacent.read_status == "unknown"
+    and task_adjacent.reason == "current_task_catalog_mismatch",
+    "OT14b adjacent journal task is not used as a fallback")
+  info._calls.get_CurrentTaskIndex = 0
+
+  local parser = dofile("reframework/autorun/Clairvoyance/npcs.lua")
+  local saved_task_destinations = task._fields._Destinations
+  local saved_active_destinations = task._calls.getActiveDestinations
+  task._fields._Destinations = mcoll({ live_dest })
+  task._calls.getActiveDestinations = mcoll({ live_dest })
+  local _, parser_catalog = parser.parse_quests({ version = 2, quests = {
+    [tostring(qid)] = { tasks = { { index = 0, has_destination = true, destinations = {
+      { index = 0, set_destination = false, dest_type = 3, cid = cid, key = key,
+        area = 19, local_area = 2, has_show_conditions = false, show_conditions = {},
+        is_update_condition = false, has_display_conditions = false, display_conditions = {} },
+    } } }, guidance = {}, deliveries = {}, sources = {} },
+  } })
+  local parser_task = oa.objective_task_snapshot({ qid }, parser_catalog)
+  local no_catalog = oa.objective_task_snapshot({ qid }, nil).quests[1]
+  local live_v1_catalog = oa.objective_task_snapshot({ qid }, { version = 1, quests = {} }).quests[1]
+  assert(no_catalog.read_status == "ok" and no_catalog.task_index == 0
+    and #no_catalog.task_destinations == 0
+    and no_catalog.live_destination ~= nil and no_catalog.live_destination.target.cid == cid
+    and live_v1_catalog.read_status == "ok" and live_v1_catalog.task_index == 0
+    and live_v1_catalog.live_destination ~= nil
+    and live_v1_catalog.live_destination.target.cid == cid,
+    "OT17a missing and v1 catalogs retain independent live-native destination evidence")
+  local integration_core = require("Clairvoyance.core")
+  local no_catalog_snapshot = oa.objective_task_snapshot({ qid }, nil)
+  local v1_catalog_snapshot = oa.objective_task_snapshot({ qid }, { version = 1, quests = {} })
+  local no_catalog_core = integration_core.objective_snapshot(no_catalog_snapshot,
+    { generation = 1, status = "unknown", places = {} }, {}, integration_core.target_registry_new())
+  local v1_catalog_core = integration_core.objective_snapshot(v1_catalog_snapshot,
+    { generation = 1, status = "unknown", places = {} }, {}, integration_core.target_registry_new())
+  assert(no_catalog_snapshot.catalog_version == 0 and v1_catalog_snapshot.catalog_version == 0
+    and no_catalog_core ~= nil and #no_catalog_core.targets == 1
+    and no_catalog_core.targets[1].provider == "live_destination"
+    and v1_catalog_core ~= nil and #v1_catalog_core.targets == 1
+    and v1_catalog_core.targets[1].provider == "live_destination",
+    "OT17b nil and v1 catalogs publish live targets through the core boundary")
+  local invalid_boundary = oa.objective_task_snapshot({ qid }, nil)
+  assert(invalid_boundary.catalog_version == 0
+    and type(invalid_boundary.quests[1].source_descriptors) == "table",
+    "OT17c no extension uses neutral catalog version and empty source descriptors")
+  local saved_current_task_index = info._calls.get_CurrentTaskIndex
+  info._calls.get_CurrentTaskIndex = nil
+  local index_unknown = oa.objective_task_snapshot({ qid }, nil).quests[1]
+  assert(index_unknown.read_status == "unknown" and index_unknown.task_index == nil,
+    "OT17d missing native task index stays unknown and is never invented")
+  info._calls.get_CurrentTaskIndex = saved_current_task_index
+  local integrated = integration_core.objective_snapshot(parser_task,
+    { generation = 1, status = "unknown", places = {} }, {}, integration_core.target_registry_new())
+  assert(parser_catalog.version == 2 and parser_task.quests[1].read_status == "ok"
+    and integrated ~= nil and #integrated.targets == 2
+    and integrated.targets[1].kind == "npc" and integrated.targets[2].kind == "place",
+    "OT17 generated parser catalog flows through adapter into core task targets")
+  task._fields._Destinations = saved_task_destinations
+  task._calls.getActiveDestinations = saved_active_destinations
+
+  -- Component generations advance independently, remain stable on repeats,
+  -- and reset when the QuestLogManager owner changes.
+  concierge._calls.get_TaskIndex = 0
+  local g0 = oa.objective_task_snapshot({ qid }, catalog)
+  local g1 = oa.objective_task_snapshot({ qid, 20050 }, catalog)
+  assert(g1.focus_epoch == g0.focus_epoch + 1,
+    "OT15 focus epoch advances only for a changed normalized focus set")
+  local g2 = oa.objective_task_snapshot({ 20050, qid }, catalog)
+  assert(g2.focus_epoch == g1.focus_epoch + 1,
+    "OT15 ordered focus change advances its component")
+  local owner_before = qlm
+  qlm = native({}, {}, 0x202)
+  sdk.get_managed_singleton = function(n)
+    if n == "app.QuestLogManager" then return qlm end
+  end
+  local reset = oa.objective_task_snapshot({ qid }, catalog)
+  assert(reset.focus_epoch == 1 and reset.journal_generation == 1
+    and reset.need_generation == 1,
+    "OT16 owner reset invalidates all three generation components")
+  qlm = owner_before
   sdk.get_managed_singleton = old_gms
 end
 

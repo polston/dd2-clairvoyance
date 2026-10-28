@@ -80,6 +80,16 @@ the world tracker as the `wt` upvalue of `D.state`.
    It prints the chunk's `CHK` lines, the `cmd ok=<true|false> <return value or error>`
    line, and any framework `[error]` line that mentions the mod. On TIMEOUT it
    clears the queued chunk and exits 1.
+   Probe chunks may only read engine-owned objects and invoke managed methods
+   through the harness's literal allowlisted `reviewed_call`,
+   `reviewed_try_call` and `reviewed_invoke` capabilities. The runner and
+   installed harness reject raw/dynamic/aliased managed dispatch, managed-object
+   construction, field mutation, reference retention/release, resource
+   creation, unreviewed secondary loading and indirect SDK/global access before `load`,
+   for both boot and command chunks. Never bypass that guard; an unavailable
+   boundary stays unknown. After a success line, the runner waits briefly and
+   fails if the framework reports an engine exception or writes/changes a crash
+   dump.
 4. Reset Scripts, after installing the harness and after each
    `scripts/deploy.ps1`, is the only step that needs the operator. Everything
    else (map, camera, menus, settings) you drive yourself.

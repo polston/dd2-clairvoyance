@@ -235,6 +235,10 @@ end
 -- whose step is the active one now (pins bypass the search and the cap).
 wt.hints, wt.hints_open, wt.hint_wrap = {}, {}, {}   -- hints; open step; text layout cache
 wt.quest_rel, wt.quest_pak, wt.focus_tracked_qid = nil, nil, nil   -- quest focus (SPEC 32)
+wt.quest_catalog = nil
+wt.objective_registry = core.target_registry_new()
+wt.objective_route_sig = nil
+wt.routes_n, wt.routes_total = 0, 0
 wt.hint_inputs = function()
   local qids, pins, needs_door = {}, {}, false
   local rb = snapshot ~= nil and snapshot.rec_by or nil
@@ -298,54 +302,6 @@ wt.focus_world = function(snap)
   table.sort(keys)
   if #keys == 0 then keys = nil end
   return f, keys
-end
--- Route members (SPEC 32.7.1, Contract 4): the focus NPCs the world walks
--- schedules for, capped so the search target and members total at most 8.
-wt.route_opt = { routes = 0, places = false, player = nil, prev = {} }   -- reused, refreshed per call
-wt.route_in, wt.route_nmap, wt.route_snap = nil, nil, nil
-wt.route_name_of = function(cid, place)
-  if place ~= nil then
-    local key = "f:" .. tostring(place)
-    local ms = wt.route_snap ~= nil and wt.route_snap.markers or nil
-    for _, m in ipairs(ms or {}) do
-      if m.key == key and type(m.label) == "string" and m.label ~= "" then return m.label end
-    end
-    return "Place " .. tostring(place)
-  end
-  if wt.route_nmap == nil then
-    wt.route_nmap = {}
-    local inp = wt.route_in
-    for _, n in ipairs(inp ~= nil and inp.npcs or {}) do wt.route_nmap[n.cid] = n.name end
-  end
-  local nm = wt.route_nmap[cid]
-  if nm == nil then
-    wt.route_names = wt.route_names or {}
-    nm = wt.route_names[cid]
-    if nm == nil then
-      local okn, v = pcall(adapter.npc_name, cid)
-      if okn and type(v) == "string" and v ~= "" then
-        nm = v
-        wt.route_names[cid] = nm
-      else
-        nm = "NPC " .. cid
-      end
-    end
-  end
-  return nm
-end
-wt.route_members = function(snap, input, origin)
-  wt.route_in, wt.route_nmap, wt.route_snap = input, nil, snap
-  local opt = wt.route_opt
-  opt.routes, opt.places = settings.focus_routes or 0, settings.focus_place_routes == true
-  opt.player = origin
-  for k in pairs(opt.prev) do opt.prev[k] = nil end
-  for _, r in ipairs((input or {}).routes or {}) do
-    if r.place ~= nil then opt.prev[r.place] = true end
-  end
-  local list, n, total = core.route_members(snap ~= nil and snap.focus or nil, wt.quest_rel,
-    (input or {}).focus_places, wt.route_cid, opt, wt.route_name_of)
-  wt.routes_n, wt.routes_total = n, total
-  return list
 end
 -- v14 (SPEC 10.3b): one failure guard per new frame layer, state in a table
 -- of its own. Log each distinct message once (16 cap); 30 failing frames in
@@ -1147,8 +1103,11 @@ re.on_frame(function()
       -- new save's quest lists are still unavailable.
       snapshot = nil
       committed = {}
+      wt.objective_route_sig = nil
+      wt.routes_n, wt.routes_total = 0, 0
       want_update = true
       pcall(wt.reset, wt)
+      core.target_registry_reset(wt.objective_registry)
       wt.world_origin = nil
       wt.kinds_seen = { large = {}, small = {} }
       wt.fam_names = { large = {}, small = {} }
@@ -1323,6 +1282,98 @@ re.on_frame(function()
         pcall(adapter.invalidate_items)
       end
     end
+    local progressing_seen = {}
+    local ok_progressing, progressing = pcall(adapter.progressing_ids)
+    if ok_progressing then
+      for _, qid in ipairs(type(progressing) == "table" and progressing or {}) do
+        if type(qid) == "number" then progressing_seen[qid] = true end
+      end
+    end
+    local objective_qids, objective_seen = {}, {}
+    for _, qid in ipairs(show.focus_qids or {}) do
+      if type(qid) == "number" and progressing_seen[qid] and not objective_seen[qid] then
+        objective_seen[qid] = true
+        objective_qids[#objective_qids + 1] = qid
+      end
+    end
+    local tracked = settings.focus_tracked and show.focus_tracked_qid or nil
+    if type(tracked) == "number" and progressing_seen[tracked] and not objective_seen[tracked] then
+      objective_qids[#objective_qids + 1] = tracked
+    end
+    local ok_objective, task_snapshot = pcall(adapter.objective_task_snapshot,
+      objective_qids, wt.quest_catalog)
+    if not ok_objective or type(task_snapshot) ~= "table"
+        or type(task_snapshot.quests) ~= "table" then task_snapshot = { quests = {} } end
+    local place_snapshot = wt.q("objective_place_snapshot",
+      { generation = 0, status = "unknown", places = {} }, task_snapshot)
+    local source_snapshots = wt.q("objective_source_snapshots", {}, wt.quest_catalog, task_snapshot)
+    show.objective_snapshot = core.objective_snapshot(task_snapshot, place_snapshot,
+      source_snapshots, wt.objective_registry)
+    local objective_names = { npcs = {}, targets = {} }
+    local named_npcs, named_targets, objective_quest_names = {}, {}, {}
+    for _, target in ipairs(show.objective_snapshot ~= nil
+        and show.objective_snapshot.targets or {}) do
+      for _, owner in ipairs(target.owners or {}) do
+        if objective_quest_names[owner.qid] == nil then
+          local ok_name, name = pcall(adapter.quest_name, owner.qid)
+          if ok_name and type(name) == "string" and name ~= "" then
+            objective_quest_names[owner.qid] = name
+          end
+        end
+      end
+      local owner = target.owners ~= nil and target.owners[1] or nil
+      if target.target ~= nil and target.target.cid ~= nil
+          and not named_npcs[target.target.cid] then
+        local ok_name, name = pcall(adapter.npc_name, target.target.cid)
+        if ok_name and type(name) == "string" and name ~= "" then
+          objective_names.npcs[#objective_names.npcs + 1] = {
+            cid = target.target.cid, name = name }
+          named_npcs[target.target.cid] = true
+        end
+      end
+      if target.key ~= nil and not named_targets[target.key] then
+        local name
+        if target.kind == "source" then
+          local item_id = target.item_ids ~= nil and target.item_ids[1] or nil
+          local ok_name, item_name = false, nil
+          if item_id ~= nil then ok_name, item_name = pcall(adapter.item_name, item_id) end
+          if type(item_name) == "string" and item_name ~= "" then name = item_name end
+          if name == nil then name = "Item " .. tostring(item_id or "?") end
+        elseif owner ~= nil then
+          name = objective_quest_names[owner.qid] or ("Quest " .. tostring(owner.qid))
+        end
+        if name ~= nil then
+          objective_names.targets[#objective_names.targets + 1] = { key = target.key, name = name }
+          named_targets[target.key] = true
+        end
+      end
+    end
+    local category_visibility = { startable = show.startable == true,
+      in_progress = show.in_progress == true, quest_items = show.quest_items == true,
+      completed = show.completed == true, unavailable = show.unavailable == true,
+      locked = show.locked == true }
+    for _, key in ipairs(su.WORLD_BOOLS) do category_visibility[key] = settings[key] == true end
+    for _, key in ipairs(su.WORLD_KIND_BOOLS) do category_visibility[key] = settings[key] == true end
+    local objective_policy = { npc_route_mode = settings.focus_routes or 0,
+      objective_places = settings.focus_place_routes == true, focus_order = objective_qids,
+      names = objective_names, quest_names = objective_quest_names,
+      category_visibility = category_visibility, search = show.search,
+      route_target = wt.route_cid, route_cap = 8, shown_ancillary = {} }
+    if wt.route_cid ~= nil then
+      for _, target in ipairs(show.objective_snapshot ~= nil
+          and show.objective_snapshot.targets or {}) do
+        if target.kind == "npc" and target.target ~= nil
+            and target.target.cid == wt.route_cid then
+          objective_policy.search_target = target
+          break
+        end
+      end
+    end
+    if wt.route_cid ~= nil and (objective_policy.search_target == nil
+        or (objective_policy.npc_route_mode or 0) < 1) then
+      objective_policy.route_cap = 7
+    end
+    show.objective_policy = objective_policy
     local result = core.compute(adapter, show)
     -- v7 (SPEC 14.3e): tree walk only while the Quest tree node is open;
     -- after compute so a reset tick's state cache is warm before the walk.
@@ -1337,13 +1388,138 @@ re.on_frame(function()
       wt.tick_n = ((wt.tick_n or 0) % 20) + 1
       wt.tick_ring[wt.tick_n] = last_tick_ms
     end
-    local route_on, has_pts, route_pts = core.route_point_state(result, show.routes,
-      wt.route_on, wt.has_pts, snapshot ~= nil and snapshot.route_pts or nil)
-    wt.route_on, wt.has_pts = route_on, has_pts
-    if result == nil then return end   -- game state unavailable: keep last snapshot
+    if result == nil then
+      wt.route_on, wt.has_pts = core.route_point_state(nil, show.routes,
+        wt.route_on, wt.has_pts, snapshot ~= nil and snapshot.route_pts or nil)
+      return   -- game state unavailable: keep last snapshot
+    end
     wt.focus_prune_related(result.focus ~= nil and result.focus.active or {})
-    wt.q("set_routes", nil, (wt.route_members(result, show.world, show.origin)))
-    result.route_pts = route_pts
+    if result.objective_snapshot ~= nil then
+      local policy = show.objective_policy
+      policy.focus_order = result.focus ~= nil and result.focus.active or objective_qids
+      policy.shown_ancillary = {}
+      if (policy.npc_route_mode or 0) >= 2 and result.focus ~= nil then
+        for _, qid in ipairs(result.focus.active or {}) do
+          local fq = result.focus.quests and result.focus.quests[qid]
+          for _, cid in ipairs(fq ~= nil and fq.route_related_npcs or {}) do
+            local name
+            for _, row in ipairs(policy.names.npcs) do
+              if row.cid == cid then name = row.name; break end
+            end
+            if name == nil then
+              local ok_name, found = pcall(adapter.npc_name, cid)
+              if ok_name and type(found) == "string" and found ~= "" then name = found end
+              if name ~= nil then policy.names.npcs[#policy.names.npcs + 1] = { cid = cid, name = name } end
+            end
+            if cid ~= wt.route_cid then
+              policy.shown_ancillary[#policy.shown_ancillary + 1] = {
+                qid = qid, cid = cid, name = name }
+            end
+          end
+        end
+      end
+      policy.startable_givers = {}
+      if (policy.npc_route_mode or 0) >= 1 and result.focus ~= nil then
+        for _, qid in ipairs(result.focus.active or {}) do
+          local fq = result.focus.quests and result.focus.quests[qid]
+          local objective = fq ~= nil and fq.objective or nil
+          if fq ~= nil and fq.progressing == false then
+            for _, cid in ipairs(objective ~= nil and objective.npcs or {}) do
+              local pos = objective.npc_positions and objective.npc_positions[cid] or nil
+              if cid ~= wt.route_cid and type(pos) == "table"
+                  and type(pos.x) == "number" and type(pos.y) == "number"
+                  and type(pos.z) == "number" then
+                local name
+                for _, row in ipairs(policy.names.npcs) do
+                  if row.cid == cid then name = row.name; break end
+                end
+                if name == nil then
+                  local ok_name, found = pcall(adapter.npc_name, cid)
+                  if ok_name and type(found) == "string" and found ~= "" then name = found end
+                end
+                policy.startable_givers[#policy.startable_givers + 1] = {
+                  qid = qid, cid = cid, pos = pos, name = name }
+              end
+            end
+          end
+        end
+      end
+      local route_publication, routes_n, routes_total = core.objective_routes(
+        result.objective_snapshot, show.origin, policy)
+      result.objective_routes = route_publication
+      local route_parts = { tostring(result.objective_routes.objective_generation or 0) }
+      for _, member in ipairs(result.objective_routes.members or {}) do
+        local pos = member.pos or {}
+        route_parts[#route_parts + 1] = table.concat({ tostring(member.route_id),
+          tostring(member.qid), tostring(member.kind), tostring(member.name),
+          tostring(member.target_key), tostring(member.ordinal),
+          tostring(pos.x), tostring(pos.y), tostring(pos.z) }, ":")
+      end
+      local route_sig = table.concat(route_parts, "|")
+      local route_changed = route_sig ~= wt.objective_route_sig
+      wt.objective_route_sig = route_sig
+      local includes_route_cid = false
+      for _, member in ipairs(route_publication.members or {}) do
+        if member.cid == wt.route_cid then includes_route_cid = true end
+      end
+      local reserved_search = wt.route_cid ~= nil and not includes_route_cid and 1 or 0
+      wt.routes_n = (routes_n or #(route_publication.members or {})) + reserved_search
+      wt.routes_total = (routes_total or wt.routes_n) + reserved_search
+      local expected_routes, routes_current = {}, true
+      for _, member in ipairs(route_publication.members or {}) do
+        expected_routes[member.route_id] = member
+      end
+      for _, route in ipairs(show.routes or {}) do
+        if route.objective_generation ~= nil then
+          local member = expected_routes[route.cid]
+          if member == nil or route.objective_generation ~= route_publication.objective_generation
+              or route.target_key ~= member.target_key or route.ordinal ~= member.ordinal
+              or route.name ~= member.name then
+            routes_current = false
+            break
+          end
+        end
+      end
+      if routes_current then
+        for route_id, member in pairs(expected_routes) do
+          local found = false
+          for _, route in ipairs(show.routes or {}) do
+            if (route.cid == route_id and route.objective_generation == route_publication.objective_generation
+                and route.target_key == member.target_key and route.ordinal == member.ordinal
+                and route.name == member.name)
+                or (route.cid == wt.route_cid and route.cid == member.cid
+                  and route.objective_generation == nil) then
+              found = true
+              break
+            end
+          end
+          if not found then routes_current = false; break end
+        end
+      end
+      if not routes_current then
+        local function without_stale_route_stops(list)
+          if type(list) ~= "table" then return list end
+          local kept = {}
+          for _, marker in ipairs(list or {}) do
+            if marker.cat ~= "route_stop" then kept[#kept + 1] = marker end
+          end
+          return kept
+        end
+        result.markers = without_stale_route_stops(result.markers)
+        result.fullmap_world = without_stale_route_stops(result.fullmap_world)
+      end
+      local route_on, has_pts, route_pts = core.route_point_state(result,
+        routes_current and show.routes or nil,
+        wt.route_on, wt.has_pts, snapshot ~= nil and snapshot.route_pts or nil)
+      if route_changed or not routes_current then route_on, has_pts = false, #route_pts > 0 end
+      result.route_pts = route_pts
+      wt.route_on, wt.has_pts = route_on, has_pts
+    else
+      local route_on, has_pts, route_pts = core.route_point_state(result, show.routes,
+        wt.route_on, wt.has_pts, snapshot ~= nil and snapshot.route_pts or nil)
+      wt.route_on, wt.has_pts = route_on, has_pts
+      result.route_pts = route_pts
+    end
     -- SPEC 20.12.2: one signature over the markers then the full-map world
     -- markers, so committed positions are kept for both
     local all = result.markers
@@ -1358,6 +1534,7 @@ re.on_frame(function()
     local changed = snapshot == nil or sig ~= snapshot.sig
     result.sig = sig
     snapshot = result   -- always replace: counts/unresolved stay fresh
+    wt.q("set_routes", nil, result.objective_routes)
     local wm = result.world and result.world.monster or nil
     for _, k in ipairs((wm and wm.kinds) or {}) do
       local seen = wt.kinds_seen[k.small and "small" or "large"]
@@ -2102,6 +2279,55 @@ local function install_debug()
         local out = { active = {}, quests = {}, counts = snapshot ~= nil and snapshot.focus_counts or nil,
           walks = wt.obj_walks or 0, focus_pokes = wt.focus_pokes or 0, routes = {},
           routes_total = wt.routes_total }
+        local objective_snapshot = snapshot ~= nil and snapshot.objective_snapshot or nil
+        if objective_snapshot ~= nil then
+          local targets = {}
+          for i, target in ipairs(objective_snapshot.targets or {}) do
+            local row = { key = target.key, ordinal = target.ordinal, kind = target.kind,
+              task_index = target.task_index, provider = target.provider,
+              source_id = target.source_id, eligibility = target.eligibility,
+              reason = target.reason, generation = target.generation, item_ids = {}, owners = {} }
+            for j, item_id in ipairs(target.item_ids or {}) do row.item_ids[j] = item_id end
+            for j, owner in ipairs(target.owners or {}) do
+              row.owners[j] = { qid = owner.qid, task_index = owner.task_index }
+            end
+            if type(target.target) == "table" then
+              row.target = { cid = target.target.cid }
+              if type(target.target.place) == "table" then
+                row.target.place = { kind = target.target.place.kind,
+                  key = target.target.place.key, local_area = target.target.place.local_area }
+              end
+              if type(target.target.pos) == "table" then
+                row.target.pos = { x = target.target.pos.x, y = target.target.pos.y,
+                  z = target.target.pos.z }
+              end
+            end
+            targets[i] = row
+          end
+          local diagnostics = {}
+          for i, diagnostic in ipairs(objective_snapshot.diagnostics or {}) do
+            diagnostics[i] = { provider = diagnostic.provider, reason = diagnostic.reason,
+              id = diagnostic.id }
+          end
+          local provider_generations = {}
+          for i, provider in ipairs(objective_snapshot.stamp
+              and objective_snapshot.stamp.providers or {}) do
+            provider_generations[i] = { provider = provider.provider,
+              generation = provider.generation }
+          end
+          local registry_diagnostics = {}
+          for i, diagnostic in ipairs(objective_snapshot.registry_diagnostics or {}) do
+            registry_diagnostics[i] = { reason = diagnostic.reason,
+              key_type = diagnostic.key_type, key = diagnostic.key,
+              ordinal = diagnostic.ordinal }
+          end
+          out.objective_snapshot = { generation = objective_snapshot.generation,
+            stamp = { focus_epoch = objective_snapshot.stamp and objective_snapshot.stamp.focus_epoch,
+              journal_generation = objective_snapshot.stamp and objective_snapshot.stamp.journal_generation,
+              need_generation = objective_snapshot.stamp and objective_snapshot.stamp.need_generation,
+              providers = provider_generations }, targets = targets,
+            diagnostics = diagnostics, registry_diagnostics = registry_diagnostics }
+        end
         for _, r in ipairs((wt.q("input", nil) or {}).routes or {}) do
           local e = { cid = r.cid, name = r.name, stops = #(r.stops or {}),
             slot = r.slot, current = r.current, place = r.place, lead = r.lead,
@@ -3594,13 +3820,19 @@ do
   local okq, why = pcall(function()
     local t = json.load_file("Clairvoyance_quests.json")
     if t == nil then error("quests file missing or unreadable", 0) end
-    local quests, info = require("Clairvoyance.npcs").parse_quests(t)
+    local npcs = require("Clairvoyance.npcs")
+    local quests, info = npcs.parse_quests(t)
     wt.quest_rel = quests
-    wt.quest_pak = info.pak
-    local line = string.format("quests: %d quests, pak %s, places pak %s", info.kept,
-      tostring(wt.quest_pak), tostring(((wt.q("stats", {}) or {}).places or {}).pak))
-    if info.dropped > 0 then
-      line = line .. string.format(", %d dropped, first: %s", info.dropped, tostring(info.first))
+    wt.quest_catalog = type(info) == "table" and info or nil
+    wt.quest_pak = wt.quest_catalog ~= nil and wt.quest_catalog.pak or nil
+    local count = 0
+    for _ in pairs(quests) do count = count + 1 end
+    local diagnostics = wt.quest_catalog ~= nil and wt.quest_catalog.diagnostics or {}
+    local line = string.format("quests: %d quests, pak %s, places pak %s",
+      count, tostring(wt.quest_pak), tostring(((wt.q("stats", {}) or {}).places or {}).pak))
+    if #diagnostics > 0 then
+      line = line .. string.format(", %d catalog diagnostics, first: %s",
+        #diagnostics, tostring(diagnostics[1]))
     end
     logmsg(line)
   end)

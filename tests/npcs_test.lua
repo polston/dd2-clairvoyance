@@ -595,7 +595,7 @@ do
 end
 
 do
-  local q, info = N.parse_quests({ version = 1, pak = "p7", quests = {
+  local q, catalog = N.parse_quests({ version = 1, pak = "p7", quests = {
     ["10010"] = { cast = { 5, 6.0, -1, 2.5, "7" }, npcs = { 8 }, items = { 300 },
       dest = { { cid = 9 }, { key = 44 }, { cid = 0, key = 0 }, "x", { cid = 10, key = 45 } },
       decoded = true },
@@ -611,15 +611,261 @@ do
   check("quests: bad fields become empty lists", b and #b.cast == 0 and #b.npcs == 0
     and #b.items == 0 and #b.dest == 0 and b.decoded == false)
   check("quests: bad keys and non-table entries dropped", q[10020] == nil
-    and info.kept == 2 and info.dropped == 4 and info.pak == "p7" and info.version == 1
-    and info.first == "-3")
-  q, info = N.parse_quests(nil)
-  check("quests: nil input", next(q) == nil and info.kept == 0 and info.pak == nil and info.first == nil)
-  q, info = N.parse_quests({ pak = 5 })
-  check("quests: no quests table, non-string pak", next(q) == nil and info.pak == nil)
-  q, info = N.parse_quests({ version = "1", quests = { ["5"] = { decoded = 1 } } })
+    and catalog == nil)
+  q, catalog = N.parse_quests(nil)
+  check("quests: nil input", next(q) == nil and catalog == nil)
+  q, catalog = N.parse_quests({ pak = 5 })
+  check("quests: no quests table, non-string pak", next(q) == nil and catalog == nil)
+  q, catalog = N.parse_quests({ version = "1", quests = { ["5"] = { decoded = 1 } } })
   check("quests: decoded only when true, version only when a number",
-    q[5] and q[5].decoded == false and info.version == nil)
+    q[5] and q[5].decoded == false and catalog == nil)
+end
+
+-- SPEC 40: v2 catalog is additive, validated, and isolated per quest.
+do
+  local legacy, catalog = N.parse_quests({ version = 2, quests = {
+    ["10"] = { cast = { 7 }, tasks = {
+      { index = 0, has_destination = false, destinations = {} },
+      { index = 1, has_destination = true, destinations = {
+        { index = 0, set_destination = true, dest_type = 1, cid = 4294967295,
+          key = nil, area = 0, local_area = nil, has_show_conditions = false,
+          show_conditions = {}, is_update_condition = false,
+          has_display_conditions = false, display_conditions = {} },
+      } },
+    }, guidance = {}, deliveries = {} },
+    ["11"] = { tasks = { { index = 1, has_destination = false, destinations = {} } } },
+  } })
+  check("quests v2: second return is objective catalog with stable zero based task indices",
+    legacy[10] and legacy[10].cast[1] == 7 and catalog and catalog.version == 2
+      and catalog.quests[10] and #catalog.quests[10].tasks == 2
+      and catalog.quests[10].tasks[1].index == 0
+      and catalog.quests[10].tasks[2].index == 1
+      and catalog.quests[10].tasks[2].destinations[1].cid == 4294967295)
+  check("quests v2: one malformed quest does not disable another",
+    catalog and catalog.quests[10] ~= nil and catalog.quests[11] == nil
+      and #catalog.diagnostics > 0)
+end
+do
+  local _, catalog = N.parse_quests({ version = 2, quests = {
+    ["20"] = { tasks = {}, guidance = {}, deliveries = {}, sources = {
+      { id = "same", kind = "placed_pickup", item_ids = { 5 },
+        target = { cid = 1, place = nil }, evidence = { provider = "pickup", ref = {} }, inputs = {} },
+      { id = "same", kind = "placed_pickup", item_ids = { 5 },
+        target = { cid = 2, place = nil }, evidence = { provider = "pickup", ref = {} }, inputs = {} },
+    } },
+    ["21"] = { tasks = {}, guidance = {}, deliveries = {} },
+  } })
+  check("quests v2: conflicting source ids suppress every occurrence only",
+    catalog and catalog.quests[20] and #catalog.quests[20].sources == 0
+      and catalog.quests[21] ~= nil)
+end
+do
+  for _, doc in ipairs({
+    { quests = { ["30"] = { cast = { 3 }, tasks = {}, guidance = {}, deliveries = {} } } },
+    { version = 1, quests = { ["30"] = { cast = { 3 }, tasks = {}, guidance = {}, deliveries = {} } } },
+    { version = 99, quests = { ["30"] = { cast = { 3 }, tasks = {}, guidance = {}, deliveries = {} } } },
+  }) do
+    local rel, cat = N.parse_quests(doc)
+    check("quests compatibility: legacy relations survive without v2 extension",
+      rel[30] and rel[30].cast[1] == 3 and cat == nil)
+  end
+end
+do
+  local _, cat = N.parse_quests({ version = 2, quests = {
+    ["40"] = { tasks = {
+      { index = 0, has_destination = false, destinations = {} },
+      { index = 2, has_destination = false, destinations = {} },
+    }, guidance = {}, deliveries = {} },
+  } })
+  check("quests v2: malformed task array disables extension without compaction",
+    cat and cat.quests[40] == nil and #cat.diagnostics > 0)
+end
+do
+  local _, cat = N.parse_quests({ version = 2, quests = {
+    ["50"] = { tasks = {
+      { index = 0, has_destination = false, destinations = {
+        { index = 0, set_destination = true, dest_type = 0, cid = 4294967296,
+          area = 0, has_show_conditions = false, show_conditions = {},
+          is_update_condition = false, has_display_conditions = false, display_conditions = {} },
+      } },
+      { index = 1, has_destination = true, destinations = {} },
+    }, guidance = {}, deliveries = {} },
+    ["051"] = { tasks = {}, guidance = {}, deliveries = {} },
+  } })
+  check("quests v2: malformed destination is isolated and later task index stays stable",
+    cat and cat.quests[50] and cat.quests[50].tasks[1].destinations[1] == false
+      and cat.quests[50].tasks[2].index == 1 and cat.quests[51] == nil)
+end
+do
+  local _, cat = N.parse_quests({ version = 2, quests = {
+    ["60"] = { tasks = { { index = 0, has_destination = false, destinations = {
+      { index = 0, set_destination = false, dest_type = 0, cid = 4294967295,
+        area = -2147483648, local_area = 0, has_show_conditions = true,
+        show_conditions = { { kind = "quest_variable", enabled = true, is_not = false,
+          qid = 2147483647, name_hash = 4294967295, value_type = 0,
+          compare_type = 0, bool_value = false, int_value = -2147483648 } },
+        is_update_condition = true, has_display_conditions = false, display_conditions = {} },
+    } } }, guidance = {}, deliveries = {} },
+    ["61"] = { tasks = { { index = 0, has_destination = false, destinations = {
+      { index = 0, set_destination = true, dest_type = 0, cid = 0, key = 0,
+        area = 0, local_area = 4294967296, has_show_conditions = false,
+        show_conditions = {}, is_update_condition = false,
+        has_display_conditions = false, display_conditions = {} },
+    } } }, guidance = {}, deliveries = {} },
+  } })
+  check("quests v2: signed and unsigned maximum boundaries are accepted",
+    cat and cat.quests[60] and cat.quests[60].tasks[1].destinations[1].cid == 4294967295
+      and cat.quests[60].tasks[1].destinations[1].area == -2147483648)
+  check("quests v2: zero sentinels and overflow values never become targets",
+    cat and cat.quests[61] and cat.quests[61].tasks[1].destinations[1] == false)
+end
+do
+  local _, cat = N.parse_quests({ version = 2, sources = {
+    { id = "source:1|é", kind = "placed_pickup", item_ids = { 5 },
+      target = { cid = nil, place = { kind = "local_area", local_area = 0 } },
+      evidence = { provider = "pickup", ref = { index = 1 } }, inputs = {} },
+    { id = "source:1|é", kind = "placed_pickup", item_ids = { 5 },
+      target = { cid = nil, place = { kind = "local_area", local_area = 0 } },
+      evidence = { provider = "pickup", ref = { index = 1 } }, inputs = {} },
+  }, quests = { ["70"] = { tasks = {}, guidance = {}, deliveries = {} } } })
+  check("quests v2: identical repeated source descriptors keep one stable id",
+    cat and #cat.sources == 1 and cat.sources[1].id == "source:1|é")
+end
+do
+  local _, cat = N.parse_quests({ version = 2, sources = {
+    { id = "global-position", kind = "placed_pickup", item_ids = { 5 },
+      target = { place = { kind = "position", x = 1.5, y = -2, z = 3 } },
+      evidence = { provider = "pickup", ref = { index = 1 } }, inputs = {} },
+  }, quests = { ["73"] = { tasks = {}, guidance = {}, deliveries = {}, sources = {
+    { id = "quest-position", kind = "quest_reward", item_ids = { 6 },
+      target = { place = { kind = "position", x = -4, y = 5.25, z = 6 } },
+      evidence = { provider = "reward", ref = { index = 2 } }, inputs = {} },
+  } } } })
+  check("quests v2: top-level and quest-local position sources stay connected",
+    cat and #cat.sources == 1 and cat.sources[1].target.place.kind == "position"
+      and cat.sources[1].target.place.x == 1.5
+      and cat.quests[73] and #cat.quests[73].sources == 1
+      and cat.quests[73].sources[1].id == "quest-position"
+      and cat.quests[73].sources[1].target.place.y == 5.25)
+end
+do
+  local _, cat = N.parse_quests({ version = 2, sources = {
+    { id = "cross-scope-conflict", kind = "placed_pickup", item_ids = { 5 },
+      target = { cid = 1 }, evidence = { provider = "pickup", ref = {} }, inputs = {} },
+  }, quests = { ["74"] = { tasks = {}, guidance = {}, deliveries = {}, sources = {
+    { id = "cross-scope-conflict", kind = "placed_pickup", item_ids = { 5 },
+      target = { cid = 2 }, evidence = { provider = "pickup", ref = {} }, inputs = {} },
+  } } } })
+  check("quests v2: conflicting source ids are removed across ownership scopes",
+    cat and #cat.sources == 0 and cat.quests[74] and #cat.quests[74].sources == 0
+      and #cat.diagnostics > 0)
+end
+do
+  local good_delivery = { key = 3, serial = 3, incomplete_possible = true, operator = 0,
+    groups = { { index = 0, item_ids = { 5, 6 }, count = 2, is_all_item = false,
+      is_infinite = false, ignore_restriction_items = {} } } }
+  local function guidance(index, group_id, ref_key)
+    return { index = index, task_index = 0, destinations = {
+      { index = 0, target = { kind = "key_location", key = 9 }, cid = nil,
+        concierge_type = 1, gimmick_id = 0, is_chara_at_destination = false,
+        register_conditions = {}, conditions = {}, delivery = { is_not = false,
+          check_storage = true, group_id = group_id,
+          refs = { { qid = 72, key = ref_key, serial = ref_key } } } },
+    } }
+  end
+  local _, cat = N.parse_quests({ version = 2, quests = {
+    ["71"] = { tasks = {}, guidance = { guidance(0, 0, 3), guidance(1, 1, 3) }, deliveries = {} },
+    ["72"] = { tasks = {}, guidance = {}, deliveries = { good_delivery } },
+  } })
+  check("quests v2: exact cross-quest delivery key joins and valid group index survive",
+    cat and cat.quests[71] and cat.quests[71].guidance[1].destinations[1].delivery.refs[1].serial == 3
+      and cat.quests[71].guidance[1].destinations[1].delivery.group_id == 0)
+  check("quests v2: invalid delivery group disables only its destination association",
+    cat and cat.quests[71] and cat.quests[71].guidance[2].destinations[1] == false
+      and cat.quests[72] ~= nil)
+end
+do
+  local _, cat = N.parse_quests({ version = 2, quests = {
+    ["80"] = { tasks = { { index = 0, has_destination = false, destinations = {} } },
+      guidance = {}, deliveries = {} },
+    ["081"] = { tasks = {}, guidance = {}, deliveries = {} },
+  } })
+  check("quests v2: quest ids require canonical positive signed-32-bit decimals",
+    cat and cat.quests[80] ~= nil and cat.quests[81] == nil)
+end
+do
+  local keep = { key = 7, serial = 7, incomplete_possible = false, operator = 1,
+    groups = { { index = 0, item_ids = { 12 }, count = 1, is_all_item = true,
+      is_infinite = false, ignore_restriction_items = {} } } }
+  local _, cat = N.parse_quests({ version = 2, quests = {
+    ["90"] = { tasks = {}, guidance = {}, deliveries = {
+      { key = 8, serial = 9, incomplete_possible = false, operator = 0, groups = {} }, keep,
+    } },
+  } })
+  check("quests v2: malformed delivery record is isolated from valid definitions",
+    cat and cat.quests[90] and #cat.quests[90].deliveries == 2
+      and cat.quests[90].deliveries[1] == false
+      and cat.quests[90].deliveries[2].key == 7)
+end
+do
+  local ref = { placement = { stable = "before" } }
+  local _, cat = N.parse_quests({ version = 2, sources = {
+    { id = "copy-check", kind = "placed_pickup", item_ids = { 1 },
+      target = { place = { kind = "key_location", key = 2 } },
+      evidence = { provider = "pickup", ref = ref }, inputs = {} },
+  }, quests = { ["91"] = { tasks = {}, guidance = {}, deliveries = {} } } })
+  ref.placement.stable = "after"
+  check("quests v2: normalized source evidence is a detached structural copy",
+    cat and cat.sources[1].evidence.ref.placement.stable == "before")
+end
+do
+  local reminder = { kind = "quest_log_reminder",
+    reminder_msg_id = "00000000-0000-0000-0000-000000000002",
+    is_finished = true, is_or = false, reminders = {} }
+  local artifact_shaped = { version = 2, quests = { ["100"] = {
+    cast = { 4294967295 }, npcs = { 4294967295 }, items = { 2147483647 },
+    dest = { { cid = 4294967295, key = 2147483647 } },
+    tasks = {}, deliveries = { { key = 0, serial = 0, incomplete_possible = false,
+      operator = 1, groups = { { index = 0, item_ids = { 1 }, count = 1,
+        is_all_item = false, is_infinite = false, ignore_restriction_items = {} } } } },
+    guidance = { { index = 0, task_index = 1, destination_index = 0, destinations = {
+      { index = 0, target = { kind = "local_area", local_area = 2147483647 }, cid = nil,
+        concierge_type = 1, gimmick_id = -2147483648, is_chara_at_destination = false,
+        register_conditions = { { kind = "item", enabled = true, is_not = false,
+          item_id = 1, set_num = true, num = 2 } },
+        conditions = { { kind = "quest_log_reminder",
+          reminder_msg_id = "00000000-0000-0000-0000-000000000001",
+          is_finished = false, is_or = true, reminders = { reminder } } },
+        delivery = { is_not = false, check_storage = true, group_id = 0,
+          refs = { { qid = 100, key = 0, serial = 0 } } } },
+    } } },
+  } } }
+  local rel, catalog = N.parse_quests(artifact_shaped)
+  local q = catalog and catalog.quests[100]
+  check("quests artifact shape: unsigned legacy NPC fields preserve U32 max",
+    rel[100] and rel[100].cast[1] == 4294967295 and rel[100].npcs[1] == 4294967295
+      and rel[100].dest[1].cid == 4294967295)
+  check("quests artifact shape: zero delivery key/serial resolves without rejection",
+    q and q.deliveries[1] and q.deliveries[1].key == 0 and q.guidance[1]
+      and type(q.guidance[1].destinations[1]) == "table"
+      and q.guidance[1].destinations[1].delivery.refs[1].serial == 0)
+  check("quests artifact shape: bool item set_num and recursive reminder records survive",
+    q and q.guidance[1] and type(q.guidance[1].destinations[1]) == "table"
+      and q.guidance[1].destinations[1].register_conditions[1].set_num == true
+      and q.guidance[1].destinations[1].conditions[1].reminders[1].is_finished == true
+      and q.guidance[1].destinations[1].conditions[1].reminders[1].kind == "quest_log_reminder"
+      and q.guidance[1].destinations[1].conditions[1].reminders[1].reminders ~= nil)
+  check("quests artifact shape: parent destination index and signed fields preserve wire values",
+    q and q.guidance[1] and type(q.guidance[1].destinations[1]) == "table"
+      and q.guidance[1].destination_index == 0
+      and q.guidance[1].destinations[1].gimmick_id == -2147483648
+      and q.guidance[1].destinations[1].target.local_area == 2147483647)
+  local wrong_reminder = { version = 2, quests = { ["100"] = artifact_shaped.quests["100"] } }
+  wrong_reminder.quests["100"].guidance[1].destinations[1].conditions[1].reminders[1].kind = "quest_log_condition"
+  local _, invalid_catalog = N.parse_quests(wrong_reminder)
+  check("quests artifact shape: recursive reminder record kind is validated",
+    invalid_catalog and invalid_catalog.quests[100]
+      and invalid_catalog.quests[100].guidance[1].destinations[1] == false)
 end
 
 if failures > 0 then

@@ -2355,7 +2355,8 @@ local focus_names_memo = {}   -- cid -> name, cached on the identity of world.np
 
 local function related_same(m, adapter, active, rel, places, needs, live, objs)
   if m == nil or m.adapter ~= adapter or m.rel ~= rel or m.places ~= places
-    or m.needs ~= needs or #m.active ~= #active then
+    or m.needs ~= needs or m.progressing_known ~= live.progressing_known
+    or #m.active ~= #active then
     return false
   end
   for i, qid in ipairs(active) do
@@ -2368,9 +2369,10 @@ local function related_same(m, adapter, active, rel, places, needs, live, objs)
 end
 
 function M.related_sets(adapter, active, rel, places, live)
+  local progressing_known = type(live) == "table" and type(live.prog) == "table"
   live = live or {}
   local givers, prog = live.givers or {}, live.prog or {}
-  live = { givers = givers, prog = prog }
+  live = { givers = givers, prog = prog, progressing_known = progressing_known }
   local needs = adapter.item_needs and adapter.item_needs() or nil
   local objs = {}
   for i, qid in ipairs(active) do
@@ -2431,7 +2433,10 @@ function M.related_sets(adapter, active, rel, places, live)
       end
       table.sort(pl)
     end
-    result[qid] = { npcs = npcs, step_npcs = step, items = items, places = pl }
+    local progressing
+    if progressing_known then progressing = prog[qid] == true end
+    result[qid] = { npcs = npcs, step_npcs = step, items = items, places = pl,
+      progressing = progressing }
   end
 
   local keep_active, keep_givers, keep_prog = {}, {}, {}
@@ -2441,7 +2446,8 @@ function M.related_sets(adapter, active, rel, places, live)
     keep_prog[i] = (prog[qid] == true)
   end
   related_memo = { adapter = adapter, active = keep_active, givers = keep_givers,
-    prog = keep_prog, rel = rel, places = places, needs = needs, objs = objs, result = result }
+    prog = keep_prog, progressing_known = progressing_known,
+    rel = rel, places = places, needs = needs, objs = objs, result = result }
   return result
 end
 
@@ -2854,7 +2860,7 @@ function M.compute(adapter, show)
       rec.name = adapter.quest_name(qid)
       local objective = { qid = qid, step = nil, npcs = {}, place = nil,
         npc_positions = {}, items = {}, item_sources = {}, known = false, resolved = false }
-      if cat == "in_progress" then
+      if cat == "in_progress" and show.objective_snapshot == nil then
         local j = focus_journal[qid]
         if type(j) == "table" and not j.missing then
           if type(j.step_index) == "number" and j.step_index >= 0
@@ -2929,7 +2935,8 @@ function M.compute(adapter, show)
   -- v8 (SPEC 15.3h): item markers, appended AFTER every quest marker
   local item_capped = 0
   local item_toggles = show.quest_items and show.in_progress
-  if (item_toggles or next(focus_inprog) ~= nil) and adapter.item_needs ~= nil then
+  if (item_toggles or (show.objective_snapshot == nil and next(focus_inprog) ~= nil))
+      and adapter.item_needs ~= nil then
     local ims
     ims, item_capped = M.item_markers(adapter, item_toggles and shown_inprog or {},
       show.origin, q, focus_inprog)
@@ -2937,7 +2944,7 @@ function M.compute(adapter, show)
   end
 
   -- Attach the chosen drawable current-item source to the objective snapshot.
-  if focus_result ~= nil then
+  if focus_result ~= nil and show.objective_snapshot == nil then
     for _, qid in ipairs(active) do
       local objective = focus_result.quests[qid].objective
       for _, id in ipairs(objective.items or {}) do
@@ -3072,8 +3079,7 @@ function M.compute(adapter, show)
       local f = focus_rec[qid]
       local objective = fq and fq.objective or nil
       if focus_cat[qid] == "startable" and f ~= nil
-        and type(f.key) == "string" and f.key:sub(1, 2) == "p:"
-        and objective ~= nil then
+        and type(f.key) == "string" and objective ~= nil then
         for _, cid in ipairs(objective.npcs or {}) do
           if valid_pos(objective.npc_positions and objective.npc_positions[cid]) then
             for _, m in ipairs(markers) do
@@ -3348,6 +3354,17 @@ function M.compute(adapter, show)
     end
     focus_result.related_counts = { shown = shown_n, hidden = hidden_n,
       per_quest = per_quest_counts }
+    -- SPEC 40: project one completed objective snapshot before focus hide/dim.
+    -- Version-1 callers omit it and retain the existing quest-wide item path.
+    local objective_route_publication
+    if type(show.objective_snapshot) == "table" then
+      local objective_policy = show.objective_policy or {}
+      markers, fullmap_world = M.objective_markers(markers, fullmap_world,
+        show.objective_snapshot, objective_policy)
+      objective_route_publication = M.objective_routes(show.objective_snapshot,
+        show.origin, objective_policy)
+    end
+
     -- 4. the hide / dim pass
     local dim = show.focus_unrelated == 1
     local function related(m)
@@ -3386,6 +3403,7 @@ function M.compute(adapter, show)
       ancillary_hidden = focus_result.related_counts and focus_result.related_counts.hidden or 0,
       per_quest = focus_result.related_counts and focus_result.related_counts.per_quest or {},
       objective = 0 }
+    focus_result.objective_routes = objective_route_publication
     pass(markers, focus_counts)
     if fullmap_world ~= nil then pass(fullmap_world) end
     for _, m in ipairs(markers) do
@@ -3414,6 +3432,8 @@ function M.compute(adapter, show)
     npc_rows = npc_rows,
     npc_match_cids = npc_match_cids,
     focus = focus_result,
+    objective_snapshot = show.objective_snapshot,
+    objective_routes = focus_result and focus_result.objective_routes or nil,
     focus_journal = focus_journal,
     focus_counts = focus_counts,
   }
@@ -3466,6 +3486,8 @@ function M.signature(markers, committed)
       (m.cat or "") .. (m.done and "|d" or "") .. (m.faded and "|f" or "") .. (m.dim and "|m" or "") .. (m.step and ("|s" .. m.step) or "")
         .. (m.slot and ("|k" .. m.slot) or "")
         .. (m.objective and "|o" or "")
+        .. (type(m.objective_key) == "string" and ("|ok" .. #m.objective_key .. ":" .. m.objective_key) or "")
+        .. (type(m.objective_ordinal) == "number" and ("|oi" .. tostring(m.objective_ordinal)) or "")
         .. (function()
           local qids = {}
           for _, qid in ipairs(m.objective_qids or {}) do qids[#qids + 1] = qid end
@@ -4060,6 +4082,753 @@ end
 function M.objective_issued_cids(table_, qid)
   return type(table_) == "table" and type(table_.issued) == "table"
     and table_.issued[qid] or nil
+end
+
+-- SPEC 40.10: typed netstring target identities. Lua strings are byte strings,
+-- so #s is the required UTF-8 byte length and string comparison is bytewise.
+local OBJECTIVE_ORDINAL_MAX = 1099511627775 -- 2^40 - 1
+local OBJECTIVE_DIRECT_BASE = 4398046511104 -- 2^42
+
+function M.byte_less(a, b)
+  if type(a) ~= "string" or type(b) ~= "string" then return false end
+  local n = math.min(#a, #b)
+  for i = 1, n do
+    local aa, bb = string.byte(a, i), string.byte(b, i)
+    if aa ~= bb then return aa < bb end
+  end
+  return #a < #b
+end
+
+local function canonical_integer(v)
+  return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+    and math.type(v) == "integer" and math.abs(v) <= 9007199254740991
+end
+
+local function valid_target_tuple(tuple, count)
+  local qid = tuple[1]
+  if count == 2 then return tuple[1] == "source" and type(tuple[2]) == "string" and tuple[2] ~= "" end
+  if type(qid) ~= "number" or not canonical_integer(qid) or qid < 1 or qid > 2147483647 then return false end
+  if count == 3 then
+    return tuple[2] == "live_destination" and tuple[3] == 0
+      or tuple[2] == "issued_npc" and canonical_integer(tuple[3])
+        and tuple[3] >= 1 and tuple[3] <= 4294967295
+  end
+  if count == 5 then
+    local kind = tuple[5]
+    if kind ~= "npc" and kind ~= "place" then return false end
+    if tuple[2] == "task" then
+      return canonical_integer(tuple[3]) and tuple[3] >= 0 and tuple[3] <= 2147483647
+        and canonical_integer(tuple[4]) and tuple[4] >= 0 and tuple[4] <= 2147483647
+    elseif tuple[2] == "guidance" then
+      return canonical_integer(tuple[3]) and tuple[3] >= 0 and tuple[3] <= 2147483647
+        and canonical_integer(tuple[4]) and tuple[4] >= 0 and tuple[4] <= 2147483647
+    end
+  end
+  return false
+end
+
+local function canonical_key_valid(key)
+  if type(key) ~= "string" or key:sub(1, 1) ~= "t" then return false end
+  local sep = key:find(":", 2, true)
+  if not sep then return false end
+  local count = tonumber(key:sub(2, sep - 1))
+  if not count or count < 1 or count > 5 or count ~= math.floor(count) then return false end
+  if key:sub(2, sep - 1) ~= tostring(count) then return false end
+  local tuple, at = {}, sep + 1
+  for i = 1, count do
+    local tag = key:sub(at, at)
+    if tag == "i" then
+      local end_at = key:find(";", at + 1, true)
+      if not end_at then return false end
+      local raw = key:sub(at + 1, end_at - 1)
+      local n = tonumber(raw)
+      if not n or not canonical_integer(n) or string.format("%.0f", n) ~= raw then return false end
+      tuple[i], at = n, end_at + 1
+    elseif tag == "s" then
+      local colon = key:find(":", at + 1, true)
+      if not colon then return false end
+      local size = tonumber(key:sub(at + 1, colon - 1))
+      if not size or size < 0 or size ~= math.floor(size) then return false end
+      if key:sub(at + 1, colon - 1) ~= tostring(size) then return false end
+      local start, finish = colon + 1, colon + size
+      if finish > #key then return false end
+      tuple[i], at = key:sub(start, finish), finish + 1
+    else return false end
+  end
+  return at == #key + 1 and valid_target_tuple(tuple, count)
+end
+
+function M.target_key(tuple)
+  if type(tuple) ~= "table" then return nil end
+  local count, maximum = 0, 0
+  for k in pairs(tuple) do
+    if not canonical_integer(k) or k < 1 then return nil end
+    count = count + 1
+    if k > maximum then maximum = k end
+  end
+  if count == 0 or count ~= maximum then return nil end
+  if not valid_target_tuple(tuple, count) then return nil end
+  local out = { "t", tostring(count), ":" }
+  for i = 1, count do
+    local v = tuple[i]
+    if canonical_integer(v) then
+      out[#out + 1] = "i" .. string.format("%.0f", v) .. ";"
+    elseif type(v) == "string" then
+      out[#out + 1] = "s" .. tostring(#v) .. ":" .. v
+    else
+      return nil
+    end
+  end
+  return table.concat(out)
+end
+
+function M.target_registry_new(next_ordinal)
+  if next_ordinal == nil then next_ordinal = 1 end
+  if not canonical_integer(next_ordinal) or next_ordinal < 1
+      or next_ordinal > OBJECTIVE_ORDINAL_MAX then next_ordinal = OBJECTIVE_ORDINAL_MAX + 1 end
+  return { by_key = {}, next_ordinal = next_ordinal, diagnostics = {} }
+end
+
+function M.target_registry_reset(registry)
+  if type(registry) ~= "table" then return M.target_registry_new() end
+  registry.by_key, registry.next_ordinal, registry.diagnostics = {}, 1, {}
+  return registry
+end
+
+function M.target_registry_allocate(registry, keys)
+  local out = {}
+  if type(registry) ~= "table" or type(registry.by_key) ~= "table"
+      or type(registry.diagnostics) ~= "table" or type(keys) ~= "table" then return out end
+  local unique, sorted = {}, {}
+  for _, key in ipairs(keys) do
+    if canonical_key_valid(key) then
+      if not unique[key] then unique[key] = true; sorted[#sorted + 1] = key end
+    else
+      registry.diagnostics[#registry.diagnostics + 1] = { reason = "target_key_invalid",
+        key_type = type(key) }
+    end
+  end
+  table.sort(sorted, M.byte_less)
+  for _, key in ipairs(sorted) do
+    local ordinal = registry.by_key[key]
+    if ordinal ~= nil and (not canonical_integer(ordinal) or ordinal < 1
+        or ordinal > OBJECTIVE_ORDINAL_MAX) then
+      registry.diagnostics[#registry.diagnostics + 1] = { key = key, reason = "ordinal_invalid" }
+      ordinal = nil
+    end
+    if ordinal == nil then
+      local next_ordinal = registry.next_ordinal
+      if canonical_integer(next_ordinal) and next_ordinal >= 1
+          and next_ordinal <= OBJECTIVE_ORDINAL_MAX then
+        ordinal = next_ordinal
+        registry.by_key[key] = ordinal
+        registry.next_ordinal = ordinal + 1
+      else
+        registry.diagnostics[#registry.diagnostics + 1] = { key = key, reason = "ordinal_exhausted" }
+      end
+    end
+    if ordinal ~= nil then out[key] = ordinal end
+  end
+  return out
+end
+
+function M.objective_direct_route_id(ordinal)
+  if not canonical_integer(ordinal) or ordinal < 1 or ordinal > OBJECTIVE_ORDINAL_MAX then return nil end
+  return -(OBJECTIVE_DIRECT_BASE + ordinal)
+end
+
+local function objective_place_key(place)
+  if type(place) ~= "table" then return nil end
+  if place.kind == "key_location" and canonical_integer(place.key) and place.key >= 1 then
+    return "key:" .. tostring(place.key)
+  elseif place.kind == "local_area" and canonical_integer(place.local_area) and place.local_area >= 0 then
+    return "area:" .. tostring(place.local_area)
+  end
+  return nil
+end
+
+local function objective_uint(v, maximum)
+  return type(v) == "number" and math.type(v) == "integer" and v >= 1 and v <= maximum
+end
+
+local function objective_index(v, maximum)
+  return type(v) == "number" and math.type(v) == "integer" and v >= 0 and v <= maximum
+end
+
+local function objective_generation(v)
+  return type(v) == "number" and math.type(v) == "integer" and v > 0
+end
+
+local function objective_copy_pos(p)
+  if not valid_pos(p) then return nil end
+  return { x = p.x, y = p.y, z = p.z }
+end
+
+local function objective_owner(owners, qid, task_index)
+  for _, owner in ipairs(owners) do
+    if owner.qid == qid and owner.task_index == task_index then return end
+  end
+  owners[#owners + 1] = { qid = qid, task_index = task_index }
+end
+
+local function objective_array(value)
+  if type(value) ~= "table" then return nil end
+  local n, count = #value, 0
+  for k in pairs(value) do
+    if type(k) ~= "number" or math.type(k) ~= "integer" or k < 1 or k > n then return nil end
+    count = count + 1
+  end
+  if count ~= n then return nil end
+  return value
+end
+
+local function objective_stamp(task_snapshot, place_snapshot, provider_snapshots)
+  local providers = {}
+  for _, p in ipairs(objective_array(provider_snapshots) or {}) do
+    if type(p) == "table" then providers[#providers + 1] = p end
+  end
+  table.sort(providers, function(a, b) return tostring(a.provider) < tostring(b.provider) end)
+  local parts = { task_snapshot.focus_epoch, task_snapshot.journal_generation,
+    task_snapshot.need_generation, place_snapshot.generation }
+  for _, p in ipairs(providers) do
+    parts[#parts + 1] = p.provider
+    parts[#parts + 1] = p.generation
+  end
+  local hash = 17
+  for _, part in ipairs(parts) do
+    local s = tostring(part or "")
+    for i = 1, #s do hash = (hash * 131 + s:byte(i)) % 2147483647 end
+    hash = (hash * 131 + 31) % 2147483647
+  end
+  return hash + 1
+end
+
+-- Purely normalize exact task/provider snapshots. No game reads or settings.
+function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots, registry)
+  if type(task_snapshot) ~= "table" or type(task_snapshot.quests) ~= "table"
+      or type(registry) ~= "table" then return nil end
+  place_snapshot = type(place_snapshot) == "table" and place_snapshot or { generation = 0, status = "unknown", places = {} }
+  local objective_gen = objective_stamp(task_snapshot, place_snapshot, provider_snapshots)
+  local places = {}
+  if place_snapshot.status == "ok" and type(place_snapshot.places) == "table" then
+    for _, p in ipairs(objective_array(place_snapshot.places) or {}) do
+      if type(p) == "table" and p.eligibility == "eligible" and valid_pos(p.pos) then
+        places[table.concat({ tostring(p.qid), tostring(p.task_index), tostring(p.owner_kind),
+          tostring(p.owner_index), tostring(p.signal_index) }, ":")] = { pos = p.pos, target = p.target }
+      end
+    end
+  end
+  local item_owners, targets, by_key = {}, {}, {}
+  local diagnostics = {}
+  local function diagnostic(provider, reason, id)
+    diagnostics[#diagnostics + 1] = { provider = provider, reason = reason, id = id }
+  end
+  local function add(qid, task_index, tuple, kind, target, provider, source_id,
+      item_ids, eligibility, reason)
+    if eligibility ~= "eligible" then
+      if reason ~= nil then diagnostic(provider, reason, source_id) end
+      return
+    end
+    local key = M.target_key(tuple)
+    if not key then return end
+    local pos = objective_copy_pos(target.pos)
+    local cid = target.cid
+    if cid ~= nil and (not objective_uint(cid, 4294967295) or target.place ~= nil) then return end
+    if target.place ~= nil and not objective_place_key(target.place) then return end
+    if not pos and not (type(cid) == "number" and cid > 0) then return end
+    local obj = by_key[key]
+    if not obj then
+      local route_order = provider == "issued_npc" and 1
+        or provider == "live_destination" and 2
+        or provider == "task" and 3
+        or provider == "guidance" and (kind == "npc" and 4 or 5) or 9
+      obj = { key = key, kind = kind, target = { cid = cid, place = target.place,
+          pos = pos }, owners = {}, item_ids = {}, provider = provider,
+        source_id = source_id, eligibility = eligibility, reason = reason,
+        route_order = route_order, sequence = #targets + 1,
+        generation = objective_gen }
+      by_key[key] = obj; targets[#targets + 1] = obj
+    end
+    objective_owner(obj.owners, qid, task_index)
+    for _, item_id in ipairs(item_ids or {}) do
+      local seen = false
+      for _, old in ipairs(obj.item_ids) do if old == item_id then seen = true; break end end
+      if not seen then obj.item_ids[#obj.item_ids + 1] = item_id end
+    end
+  end
+  for _, quest in ipairs(objective_array(task_snapshot.quests) or {}) do
+    local valid_qid = type(quest) == "table" and objective_uint(quest.qid, 2147483647)
+    local valid_task = valid_qid and objective_index(quest.task_index, 2147483647)
+      and quest.read_status == "ok"
+    if valid_qid and not valid_task then
+      for _, signal in ipairs(objective_array(quest.issued_npcs) or {}) do
+        if type(signal) == "table" and signal.task_index == nil then
+          local target = type(signal.target) == "table" and signal.target or {}
+          if signal.kind == "npc" and type(target.cid) == "number" then
+            add(quest.qid, nil, { quest.qid, "issued_npc", target.cid }, "npc", target,
+              "issued_npc", nil, nil, signal.eligibility, signal.reason)
+          end
+        end
+      end
+    end
+    if type(quest) == "table" and objective_uint(quest.qid, 2147483647)
+        and objective_index(quest.task_index, 2147483647)
+        and quest.read_status == "ok" then
+      local qid, task_index = quest.qid, quest.task_index
+      for _, owner in ipairs(objective_array(quest.item_ownership) or {}) do
+        if type(owner) == "table" and owner.eligibility == "eligible"
+            and objective_uint(owner.item_id, 2147483647)
+            and objective_uint(owner.count, 2147483647)
+            and (owner.proof_kind == "condition" or owner.proof_kind == "delivery") then
+          local set = item_owners[owner.item_id]
+          if not set then set = {}; item_owners[owner.item_id] = set end
+          set[qid] = task_index
+        end
+      end
+      for _, signal in ipairs(objective_array(quest.issued_npcs) or {}) do
+        if type(signal) == "table"
+            and (signal.task_index == nil or (objective_index(signal.task_index, 2147483647)
+              and signal.task_index == task_index)) then
+          local target = type(signal.target) == "table" and signal.target or {}
+          if signal.kind == "npc" and type(target.cid) == "number" then
+            add(qid, task_index, { qid, "issued_npc", target.cid }, "npc", target, "issued_npc", nil, nil,
+              signal.eligibility, signal.reason)
+          end
+        end
+      end
+      local live = quest.live_destination
+      if type(live) == "table" and (live.task_index == nil
+          or (objective_index(live.task_index, 2147483647) and live.task_index == task_index)) then
+        local target = type(live.target) == "table" and live.target or {}
+        if target.pos or target.cid then
+          add(qid, task_index, { qid, "live_destination", 0 }, target.cid and "npc" or "place", target,
+            "live_destination", nil, nil, live.eligibility, live.reason)
+        end
+      end
+      local function signal_list(list, owner_kind, owner_index, parent_destination_index)
+        for _, signal in ipairs(objective_array(list) or {}) do
+          if type(signal) == "table" and (signal.task_index == nil
+              or (objective_index(signal.task_index, 2147483647) and signal.task_index == task_index)) then
+            local signal_kind = signal.kind
+            local target = type(signal.target) == "table" and signal.target or {}
+            local index = parent_destination_index or signal.destination_index or signal.signal_index
+            local ti = task_index
+            local pos = objective_copy_pos(target.pos)
+            if not pos and target.place then
+              local pkey = table.concat({ tostring(qid), tostring(ti), tostring(owner_kind),
+                tostring(owner_kind == "task" and ti or owner_index or signal.concierge_index),
+                tostring(index) }, ":")
+              local resolved = places[pkey]
+              if resolved and objective_place_key(resolved.target) == objective_place_key(target.place) then
+                pos = objective_copy_pos(resolved.pos)
+              end
+            end
+            target = { cid = target.cid, place = target.place, pos = pos }
+            if signal_kind == "npc" and type(target.cid) == "number" then
+              local identity = owner_kind == "task"
+                and { qid, "task", ti, index, "npc" }
+                or { qid, "guidance", owner_index or signal.concierge_index, index, "npc" }
+              add(qid, task_index, identity,
+                "npc", target, owner_kind, nil, nil, signal.eligibility, signal.reason)
+            elseif signal_kind == "place" and pos then
+              local identity = owner_kind == "task"
+                and { qid, "task", ti, index, "place" }
+                or { qid, "guidance", owner_index or signal.concierge_index, index, "place" }
+              add(qid, task_index, identity,
+                "place", target, owner_kind, nil, nil, signal.eligibility, signal.reason)
+            end
+          end
+        end
+      end
+      signal_list(quest.task_destinations, "task", nil)
+      for _, guidance in ipairs(objective_array(quest.guidance) or {}) do
+        if type(guidance) == "table" and guidance.eligibility == "eligible"
+            and (guidance.task_index == nil or (objective_index(guidance.task_index, 2147483647)
+              and guidance.task_index == task_index)) then
+          signal_list(guidance.signals, "guidance", guidance.concierge_index,
+            guidance.destination_index)
+        end
+      end
+    elseif type(quest) == "table" then
+      diagnostic("task", quest.reason or (quest.read_status == "unknown"
+        and "task_snapshot_unknown" or "task_snapshot_status_invalid"), quest.qid)
+    end
+  end
+  local provider_generations = {}
+  for _, provider in ipairs(objective_array(provider_snapshots) or {}) do
+    if type(provider) == "table" then
+      provider_generations[#provider_generations + 1] = { provider = provider.provider,
+        generation = provider.generation }
+      if not objective_generation(provider.generation) then
+        diagnostic(provider.provider, "provider_generation_invalid")
+      elseif provider.status == "ok" and type(provider.candidates) == "table" then
+        for _, candidate in ipairs(provider.candidates) do
+          if type(candidate) == "table" and candidate.eligibility == "eligible"
+              and type(candidate.id) == "string" and candidate.id ~= ""
+              and objective_array(candidate.item_ids) ~= nil then
+            local owns = false
+            local valid_items = true
+            for _, id in ipairs(candidate.item_ids) do
+              if not objective_uint(id, 2147483647) then valid_items = false
+              elseif item_owners[id] then owns = true end
+            end
+            local target = type(candidate.target) == "table" and candidate.target or {}
+            local candidate_pos = candidate.pos or target.pos
+            local target_ok = (valid_pos(candidate_pos) or objective_uint(target.cid, 4294967295))
+              and (target.cid == nil or (objective_uint(target.cid, 4294967295) and target.place == nil))
+              and (target.place == nil or objective_place_key(target.place))
+            local generation_ok = candidate.generation == provider.generation
+            if owns and valid_items and target_ok and generation_ok then
+              local tuple = { "source", candidate.id }
+              local key = M.target_key(tuple)
+              local obj = key and by_key[key] or nil
+              if not obj and key then
+                obj = { key = key, kind = "source", target = { cid = target.cid,
+                    place = target.place, pos = objective_copy_pos(candidate_pos) },
+                  owners = {}, item_ids = {}, provider = provider.provider,
+                  source_id = candidate.id, eligibility = "eligible",
+                  reason = candidate.reason, route_order = 6,
+                  generation = objective_gen }
+              by_key[key] = obj; targets[#targets + 1] = obj
+              end
+              if obj then
+                for id in pairs(item_owners) do
+                  for _, candidate_id in ipairs(candidate.item_ids) do
+                    if id == candidate_id then
+                      for qid, task_index in pairs(item_owners[id]) do
+                        objective_owner(obj.owners, qid, task_index)
+                      end
+                    end
+                  end
+                end
+                for _, id in ipairs(candidate.item_ids) do
+                  local seen = false; for _, old in ipairs(obj.item_ids) do if old == id then seen = true end end
+                  if item_owners[id] and not seen then obj.item_ids[#obj.item_ids + 1] = id end
+                end
+              end
+            end
+            if not owns then diagnostic(provider.provider, "source_has_no_current_item_owner", candidate.id)
+            elseif not valid_items then diagnostic(provider.provider, "source_item_id_invalid", candidate.id)
+            elseif not target_ok then diagnostic(provider.provider, "source_target_unresolved", candidate.id)
+            elseif not generation_ok then diagnostic(provider.provider, "candidate_generation_mismatch", candidate.id) end
+          elseif type(candidate) == "table" then
+            diagnostic(provider.provider, candidate.reason or "candidate_ineligible_or_unknown", candidate.id)
+          end
+        end
+      elseif provider.status == "unknown" then
+        diagnostic(provider.provider, provider.reason or "provider_unknown")
+      end
+    end
+  end
+  local keys = {}
+  for key in pairs(by_key) do keys[#keys + 1] = key end
+  local ordinals = M.target_registry_allocate(registry, keys)
+  local kept = {}
+  for _, obj in ipairs(targets) do
+    local ordinal = ordinals[obj.key]
+    if ordinal then
+      obj.ordinal = ordinal
+      table.sort(obj.item_ids)
+      table.sort(obj.owners, function(a, b)
+        if a.qid ~= b.qid then return a.qid < b.qid end
+        return (a.task_index or -1) < (b.task_index or -1)
+      end)
+      kept[#kept + 1] = obj
+    end
+  end
+  return { generation = objective_gen,
+    stamp = { focus_epoch = task_snapshot.focus_epoch, journal_generation = task_snapshot.journal_generation,
+      need_generation = task_snapshot.need_generation, providers = provider_generations }, targets = kept,
+      diagnostics = diagnostics, registry_diagnostics = registry.diagnostics }
+end
+
+local function objective_name(policy, obj)
+  local names = policy.names or {}
+  local function lookup(rows, key, field)
+    if type(rows) ~= "table" then return nil end
+    local direct = rows[key]
+    if type(direct) == "string" then return direct end
+    for _, row in ipairs(objective_array(rows) or {}) do
+      if type(row) == "table" and row[field] == key and type(row.name) == "string" then return row.name end
+    end
+  end
+  if obj.source_id then
+    local name = lookup(names.targets, obj.key, "key")
+    if name then return name end
+  end
+  if obj.target.cid then
+    local name = lookup(names.npcs, obj.target.cid, "cid")
+    if name then return name end
+  end
+  return obj.source_id or (obj.target.cid and tostring(obj.target.cid)) or "Objective"
+end
+
+local function objective_record_valid(snapshot, obj)
+  if type(snapshot) ~= "table" or not objective_generation(snapshot.generation)
+      or type(obj) ~= "table" or obj.generation ~= snapshot.generation
+      or obj.eligibility ~= "eligible" or type(obj.key) ~= "string" or obj.key == ""
+      or not objective_generation(obj.ordinal) or type(obj.target) ~= "table" then return false end
+  local target = obj.target
+  if target.cid ~= nil and (not objective_uint(target.cid, 4294967295) or target.place ~= nil) then return false end
+  if target.place ~= nil and not objective_place_key(target.place) then return false end
+  if target.pos ~= nil and not valid_pos(target.pos) then return false end
+  local owners = objective_array(obj.owners)
+  if not owners or #owners == 0 then return false end
+  for _, owner in ipairs(owners) do
+    if type(owner) ~= "table" or not objective_uint(owner.qid, 2147483647)
+        or (owner.task_index ~= nil and not objective_index(owner.task_index, 2147483647)) then return false end
+  end
+  if obj.kind == "npc" then return target.cid ~= nil and target.place == nil end
+  if obj.kind == "place" then return target.cid == nil and (target.place ~= nil or target.pos ~= nil) end
+  if obj.kind == "source" then
+    local ids = objective_array(obj.item_ids)
+    if not ids or #ids == 0 then return false end
+    for _, id in ipairs(ids) do if not objective_uint(id, 2147483647) then return false end end
+    return target.cid ~= nil or target.place ~= nil or target.pos ~= nil
+  end
+  return false
+end
+
+function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
+  policy = type(policy) == "table" and policy or {}
+  local out, full = {}, {}
+  local want_full = fullmap_world ~= nil
+  local function clone_markers(source, target)
+    for _, original in ipairs(source or {}) do
+      local copy = {}
+      for k, v in pairs(original) do
+        if k == "qids" or k == "objective_qids" then
+          copy[k] = {}
+          for i, qid in ipairs(objective_array(v) or {}) do copy[k][i] = qid end
+        else copy[k] = v end
+      end
+      target[#target + 1] = copy
+    end
+  end
+  clone_markers(objective_array(base_markers) or {}, out)
+  if want_full then clone_markers(objective_array(fullmap_world) or {}, full) end
+  local function attach(list, obj)
+    local found = false
+    for _, m in ipairs(list) do
+      if type(m) ~= "table" then
+        -- Malformed markers are copied through but cannot cover an objective.
+      else
+      local cid = type(m.cid) == "number" and m.cid or M.marker_cid(m)
+      local source_match = obj.kind == "source"
+        and obj.source_id ~= nil
+        and (m.key == obj.source_id or m.source_id == obj.source_id)
+      local cid_match = obj.kind ~= "source" and obj.target.cid ~= nil
+        and cid ~= nil and cid == obj.target.cid
+      if m.objective_key == obj.key or source_match or cid_match then
+        m.objective, m.objective_key, m.objective_ordinal = true, obj.key, obj.ordinal
+        m.cid = m.cid or obj.target.cid
+        m.key = m.key or ("objective:" .. tostring(obj.ordinal))
+        m.qids = objective_array(m.qids) or {}
+        m.objective_qids = objective_array(m.objective_qids) or {}
+        local seen = {}
+        for _, qid in ipairs(m.qids) do seen[qid] = true end
+        for _, qid in ipairs(m.objective_qids) do seen[qid] = true end
+        local objective_seen = {}
+        for _, qid in ipairs(m.objective_qids) do objective_seen[qid] = true end
+        for _, owner in ipairs(objective_array(obj.owners) or {}) do
+          if not seen[owner.qid] then m.qids[#m.qids + 1] = owner.qid; seen[owner.qid] = true end
+          if not objective_seen[owner.qid] then
+            m.objective_qids[#m.objective_qids + 1] = owner.qid
+            objective_seen[owner.qid] = true
+          end
+        end
+        found = true
+      end
+      end
+    end
+    return found
+  end
+  for _, obj in ipairs(type(snapshot) == "table" and objective_array(snapshot.targets) or {}) do
+    if objective_record_valid(snapshot, obj) then
+      local visible = true
+      local found_base, found_full = attach(out, obj), false
+      if want_full then found_full = attach(full, obj) end
+      if visible and valid_pos(obj.target.pos) then
+        local function make_marker()
+          local marker = { key = "objective:" .. tostring(obj.ordinal), cat = "objective",
+            cid = obj.target.cid, qids = {},
+            pos = objective_copy_pos(obj.target.pos), label = "Objective: " .. objective_name(policy, obj),
+            objective = true, objective_key = obj.key, objective_ordinal = obj.ordinal,
+            objective_qids = {} }
+          for _, owner in ipairs(objective_array(obj.owners) or {}) do
+            marker.qids[#marker.qids + 1] = owner.qid
+            marker.objective_qids[#marker.objective_qids + 1] = owner.qid
+          end
+          return marker
+        end
+        if not found_base then out[#out + 1] = make_marker() end
+        if want_full and not found_full then full[#full + 1] = make_marker() end
+      end
+    end
+  end
+  return out, want_full and full or nil
+end
+
+function M.objective_routes(snapshot, player_origin, policy)
+  policy = type(policy) == "table" and policy or {}
+  local members, by_endpoint = {}, {}
+  if type(snapshot) ~= "table" or not objective_generation(snapshot.generation)
+      or objective_array(snapshot.targets) == nil then
+    return { objective_generation = 0, members = members }, 0, 0
+  end
+  local generation = snapshot.generation
+  local focus_rank = {}
+  for i, qid in ipairs(objective_array(policy.focus_order) or {}) do focus_rank[qid] = i end
+  local function owner_order(obj)
+    local best, best_rank = nil, math.huge
+    for _, owner in ipairs(objective_array(obj.owners) or {}) do
+      if type(owner) == "table" and objective_uint(owner.qid, 2147483647) then
+        local rank = focus_rank[owner.qid] or math.huge
+        if rank < best_rank or (rank == best_rank and (best == nil or owner.qid < best.qid)) then
+          best, best_rank = owner, rank
+        end
+      end
+    end
+    return best, best_rank
+  end
+  local items = {}
+  for _, obj in ipairs(snapshot.targets) do
+    if objective_record_valid(snapshot, obj) and obj.kind == "source" then
+      for _, item_id in ipairs(objective_array(obj.item_ids) or {}) do
+        local prev = items[item_id]
+        local d2 = valid_pos(player_origin) and valid_pos(obj.target.pos)
+          and ((obj.target.pos.x-player_origin.x)^2+(obj.target.pos.y-player_origin.y)^2+(obj.target.pos.z-player_origin.z)^2) or math.huge
+        if not prev or d2 < prev.d2 or (d2 == prev.d2 and M.byte_less(obj.source_id, prev.obj.source_id)) then
+          items[item_id] = { obj = obj, d2 = d2 }
+        end
+      end
+    end
+  end
+  local ordered = {}
+  for _, obj in ipairs(snapshot.targets) do
+    if objective_record_valid(snapshot, obj) and obj.kind ~= "source" then
+      ordered[#ordered + 1] = obj
+    end
+  end
+  table.sort(ordered, function(a, b)
+    local _, ar = owner_order(a)
+    local _, br = owner_order(b)
+    if ar ~= br then return ar < br end
+    local ak, bk = a.route_order or 9, b.route_order or 9
+    if ak ~= bk then return ak < bk end
+    if (a.sequence or math.huge) ~= (b.sequence or math.huge) then
+      return (a.sequence or math.huge) < (b.sequence or math.huge)
+    end
+    return M.byte_less(a.key, b.key)
+  end)
+  local function add(obj)
+    if not objective_record_valid(snapshot, obj) then return end
+    if obj.kind == "source" and policy.objective_places ~= true then return end
+    local direct = obj.kind ~= "npc"
+    if direct and policy.objective_places ~= true then return end
+    if obj.kind == "source" then
+      if policy.objective_places ~= true then return end
+    elseif not direct and (policy.npc_route_mode or 0) < 1 then return end
+    local pos = objective_copy_pos(obj.target.pos)
+    local cid = obj.target.cid
+    if direct and not pos then return end
+    if not direct and (not cid or not pos) then return end
+    local route_id = direct and M.objective_direct_route_id(obj.ordinal) or cid
+    if not route_id then return end
+    local endpoint = direct and ("d:" .. tostring(obj.ordinal)) or ("n:" .. tostring(cid))
+    if by_endpoint[endpoint] then return end
+    local first = owner_order(obj)
+    local member = { route_id = route_id, qid = first and first.qid, target_key = obj.key,
+      ordinal = obj.ordinal, kind = obj.kind, direct = direct, pos = pos, item_ids = obj.item_ids,
+      objective = true, objective_generation = generation }
+    if obj.kind == "npc" then
+      member.name = objective_name(policy, obj)
+    elseif obj.kind == "place" then
+      local caption = objective_name(policy, obj)
+      if caption == "Objective" and first ~= nil then
+        caption = (policy.quest_names or {})[first.qid] or ("Quest " .. tostring(first.qid))
+      end
+      member.name = caption:sub(1, 11) == "Objective: " and caption or ("Objective: " .. caption)
+    else
+      local item = objective_name(policy, obj)
+      if item == obj.source_id then
+        item = "Item " .. tostring((objective_array(obj.item_ids) or {})[1] or "?")
+      end
+      local quest = first ~= nil and (policy.quest_names or {})[first.qid] or nil
+      if type(quest) ~= "string" or quest == "" then
+        quest = "Quest " .. tostring(first and first.qid or "?")
+      end
+      member.name = "Objective: " .. item .. " (for " .. quest .. ")"
+    end
+    if direct then member.place = 0 else member.cid, member.place = cid, cid end
+    by_endpoint[endpoint] = true; members[#members + 1] = member
+  end
+  if policy.search_target then add(policy.search_target) end
+  -- SPEC 39 compatibility: startable givers are outside the progressing-only
+  -- objective snapshot; merge them into focus order before the next quest.
+  local startable_givers, next_startable = {}, 1
+  if (policy.npc_route_mode or 0) >= 1 then
+    for _, row in ipairs(objective_array(policy.startable_givers) or {}) do
+      if type(row) == "table" and objective_uint(row.qid, 2147483647)
+          and objective_uint(row.cid, 4294967295) and valid_pos(row.pos) then
+        startable_givers[#startable_givers + 1] = row
+      end
+    end
+    table.sort(startable_givers, function(a, b)
+      local ar, br = focus_rank[a.qid] or math.huge, focus_rank[b.qid] or math.huge
+      if ar ~= br then return ar < br end
+      if a.qid ~= b.qid then return a.qid < b.qid end
+      return a.cid < b.cid
+    end)
+  end
+  local function add_startable(row)
+    if type(row) == "table" and objective_uint(row.qid, 2147483647)
+        and objective_uint(row.cid, 4294967295) and valid_pos(row.pos) then
+      local endpoint = "n:" .. tostring(row.cid)
+      if not by_endpoint[endpoint] then
+        by_endpoint[endpoint] = true
+        members[#members + 1] = { route_id = row.cid, cid = row.cid,
+          name = row.name or objective_name(policy, { target = { cid = row.cid } }),
+          item_ids = {}, qid = row.qid, kind = "npc", direct = false,
+          pos = objective_copy_pos(row.pos), objective = true,
+          objective_generation = generation }
+      end
+    end
+  end
+  for _, obj in ipairs(ordered) do
+    local _, rank = owner_order(obj)
+    while startable_givers[next_startable] ~= nil do
+      local row = startable_givers[next_startable]
+      local giver_rank = focus_rank[row.qid] or math.huge
+      if giver_rank > rank then break end
+      add_startable(row)
+      next_startable = next_startable + 1
+    end
+    add(obj)
+  end
+  while startable_givers[next_startable] ~= nil do
+    add_startable(startable_givers[next_startable])
+    next_startable = next_startable + 1
+  end
+  local ids = {}; for id in pairs(items) do ids[#ids + 1] = id end; table.sort(ids)
+  for _, id in ipairs(ids) do add(items[id].obj) end
+  if (policy.npc_route_mode or 0) >= 2 then
+  for _, row in ipairs(objective_array(policy.shown_ancillary) or {}) do
+    if type(row) == "table" and objective_uint(row.cid, 4294967295)
+        and objective_uint(row.qid, 2147483647) then
+      local seen = false
+      for _, member in ipairs(members) do if member.cid == row.cid then seen = true end end
+      if not seen then members[#members + 1] = { route_id = row.cid, cid = row.cid,
+        name = row.name or objective_name(policy, { target = { cid = row.cid } }), item_ids = {},
+        qid = row.qid, kind = "npc", direct = false, pos = objective_copy_pos(row.pos),
+        objective = false, objective_generation = generation } end
+    end
+  end
+  end
+  local cap = math.min(8, math.max(0, policy.route_cap or 8))
+  local total = #members
+  while #members > cap do members[#members] = nil end
+  return { objective_generation = generation, members = members }, #members, total
 end
 
 return M

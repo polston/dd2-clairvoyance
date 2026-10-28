@@ -5530,6 +5530,620 @@ do
       objective = true, objective_qids = { 10 } } }, {})
       ~= core.signature({ { key = "ownership", pos = pos(1), qids = {}, cat = "x",
         objective = true, objective_qids = { 11 } } }, {}))
+
+  -- SPEC 40: typed canonical identities and objective projection model.
+  ;(function()
+  check("objective identities: public pure APIs exist",
+    type(core.target_key) == "function" and type(core.byte_less) == "function"
+      and type(core.target_registry_new) == "function"
+      and type(core.target_registry_reset) == "function"
+      and type(core.target_registry_allocate) == "function"
+      and type(core.objective_snapshot) == "function"
+      and type(core.objective_markers) == "function"
+      and type(core.objective_routes) == "function")
+  if type(core.target_key) == "function" and type(core.target_registry_new) == "function"
+      and type(core.objective_snapshot) == "function" then
+    local tk = core.target_key
+    check("objective key: typed netstring separates delimiters and decimal text",
+      tk({ "source", "a:1|2" }) ~= tk({ "source", "a|1:2" })
+        and tk({ "source", "2" }) ~= tk({ 2, "issued_npc", 7 }))
+    check("objective key: UTF-8 string length is bytes", tk({ "source", "é" }) == "t2:s6:sources2:é")
+    check("objective key: canonical tuple variants use the specified component order",
+      tk({ 10, "issued_npc", 77 }) == "t3:i10;s10:issued_npci77;"
+        and tk({ 10, "task", 2, 3, "place" }) == "t5:i10;s4:taski2;i3;s5:place"
+        and tk({ 10, "guidance", 1, 4, "npc" }) == "t5:i10;s8:guidancei1;i4;s3:npc")
+    check("objective key: rejects booleans, floats and empty tuples",
+      tk({ true }) == nil and tk({ 1.5 }) == nil and tk({ 10.0, "issued_npc", 7 }) == nil
+        and tk({ 10, "task", 0, 1, true }) == nil
+        and tk({}) == nil)
+    local reg = core.target_registry_new()
+    local allocated = core.target_registry_allocate(reg, { tk({ "source", "z" }), tk({ "source", "é" }), tk({ "source", "a" }) })
+    check("objective registry: allocates new keys in unsigned byte order",
+      allocated[tk({ "source", "a" })] == 1 and allocated[tk({ "source", "z" })] == 2
+        and allocated[tk({ "source", "é" })] == 3)
+    local retained = core.target_registry_allocate(reg, { tk({ "source", "z" }), tk({ "source", "a" }) })
+    check("objective registry: reorder and disappearance preserve ordinals",
+      retained[tk({ "source", "z" })] == 2 and retained[tk({ "source", "a" })] == 1 and reg.next_ordinal == 4)
+    local invalid_keys = core.target_registry_allocate(reg, { "not-a-canonical-target", tk({ "source", "kept" }) })
+    check("objective registry: malformed key failure is isolated and diagnosed",
+      invalid_keys[tk({ "source", "kept" })] == 4 and #reg.diagnostics == 1
+        and reg.diagnostics[1].reason == "target_key_invalid")
+    core.target_registry_reset(reg)
+    check("objective registry: cache-coupled session reset restarts ordinal allocation",
+      reg.next_ordinal == 1 and next(reg.by_key) == nil
+        and core.target_registry_allocate(reg, { tk({ "source", "a" }) })[tk({ "source", "a" })] == 1)
+    local limited = core.target_registry_new(1099511627775)
+    local lim = core.target_registry_allocate(limited, { tk({ "source", "last" }), tk({ "source", "overflow" }) })
+    check("objective registry: maximum ordinal accepted and exhaustion diagnosed",
+      lim[tk({ "source", "last" })] == 1099511627775 and lim[tk({ "source", "overflow" })] == nil
+        and #limited.diagnostics == 1)
+    check("objective direct route id uses only ordinal",
+      core.objective_direct_route_id(1) == -4398046511105
+        and core.objective_direct_route_id(1099511627775) == -5497558138879
+        and core.objective_direct_route_id(0) == nil and core.objective_direct_route_id(1.5) == nil)
+    check("objective direct route namespace avoids legacy ids and NPC ids",
+      core.objective_direct_route_id(1) < -2147483648
+        and core.objective_direct_route_id(1099511627775) < core.objective_direct_route_id(1)
+        and core.objective_direct_route_id(1) ~= -1
+        and core.objective_direct_route_id(1) ~= 4294967295
+        and core.objective_direct_route_id(1) ~= -2147483648
+        and core.objective_direct_route_id(1) ~= core.objective_route_id(2147483647, "place")
+        and core.objective_direct_route_id(1) ~= core.objective_route_id(2147483647, "item")
+        and core.objective_direct_route_id(1) - core.objective_direct_route_id(2) == 1)
+    local snap = core.objective_snapshot({ generation = 4, quests = {
+        { qid = 10, task_index = 2, read_status = "ok", issued_npcs = {
+          { kind = "npc", target = { cid = 77 }, eligibility = "eligible" },
+        }, task_destinations = {}, guidance = {}, item_ownership = {
+          { item_id = 5, count = 1, proof_kind = "condition", eligibility = "eligible" },
+        } },
+      } }, { generation = 9, status = "ok", places = {} }, {
+        { provider = "pickup", generation = 3, status = "ok", candidates = {
+          { id = "pickup:5", kind = "placed_pickup", item_ids = { 5 },
+            target = { pos = pos(8) }, eligibility = "eligible", generation = 3 },
+          { id = "pickup:future", kind = "placed_pickup", item_ids = { 6 },
+            target = { pos = pos(9) }, eligibility = "eligible", generation = 3 },
+        } },
+      }, core.target_registry_new())
+    check("objective snapshot: item proof gates source and normalizes targets",
+      snap and #snap.targets == 2 and snap.targets[1].kind == "npc"
+        and snap.targets[2].kind == "source" and snap.targets[2].source_id == "pickup:5"
+        and snap.targets[2].item_ids[1] == 5 and snap.targets[2].ordinal ~= nil)
+    local routes = core.objective_routes(snap, pos(0), { npc_route_mode = 1,
+      objective_places = true, focus_order = { 10 }, category_visibility = {} })
+    check("objective routes: direct source member carries target identity",
+      #routes.members == 1 and routes.members[1].direct == true
+        and routes.members[1].ordinal == snap.targets[2].ordinal
+        and routes.members[1].route_id == core.objective_direct_route_id(snap.targets[2].ordinal))
+    local named_marker = core.objective_markers({}, nil, snap, { names = {
+      npcs = {}, targets = { { key = snap.targets[2].key, name = "Wakestone" } } },
+      category_visibility = {} })
+    local named_routes, named_shown, named_total = core.objective_routes(snap, pos(0), {
+      npc_route_mode = 1, objective_places = true, focus_order = { 10 },
+      names = { npcs = {}, targets = { { key = snap.targets[2].key, name = "Wakestone" } } },
+      quest_names = { [10] = "The Stolen Throne" }, route_cap = 1 })
+    check("objective marker and route names use structured target names",
+      named_marker[1].label == "Objective: Wakestone"
+        and named_routes.members[1].name == "Objective: Wakestone (for The Stolen Throne)"
+        and named_shown == 1 and named_total == 1)
+    local named_npc_snapshot = { generation = 91, targets = { {
+      key = tk({ 10, "issued_npc", 78 }), ordinal = 1, kind = "npc", generation = 91,
+      target = { cid = 78, pos = pos(1) }, owners = { { qid = 10, task_index = 0 } },
+      item_ids = {}, eligibility = "eligible" } } }
+    local named_npc_routes = core.objective_routes(named_npc_snapshot, pos(0), {
+      npc_route_mode = 1, names = { npcs = { { cid = 78, name = "Captain Brant" } },
+        targets = {} }, category_visibility = {} })
+    check("objective NPC routes use the structured name policy",
+      named_npc_routes.members[1].name == "Captain Brant")
+
+    local snapshots = core.objective_snapshot({ generation = 5, quests = {
+        { qid = 11, task_index = 1, read_status = "ok", issued_npcs = {},
+          task_destinations = {}, guidance = {}, item_ownership = {
+            { item_id = 2, count = 1, proof_kind = "condition", eligibility = "eligible" },
+          } },
+        { qid = 10, task_index = 0, read_status = "ok", issued_npcs = {},
+          task_destinations = {}, guidance = {}, item_ownership = {
+            { item_id = 1, count = 1, proof_kind = "delivery", eligibility = "eligible" },
+          } },
+        { qid = 12, task_index = 1, read_status = "unknown", reason = "journal unavailable",
+          issued_npcs = {}, task_destinations = {}, guidance = {}, item_ownership = {
+            { item_id = 3, count = 1, proof_kind = "condition", eligibility = "eligible" },
+          } },
+      } }, { generation = 2, status = "unknown", places = {} }, {
+        { provider = "pickup", generation = 8, status = "ok", candidates = {
+          { id = "pickup:one", kind = "placed_pickup", item_ids = { 2 }, target = {}, pos = pos(5),
+            eligibility = "eligible", generation = 8 },
+          { id = "pickup:two", kind = "placed_pickup", item_ids = { 1 }, target = {}, pos = pos(5),
+            eligibility = "eligible", generation = 8 },
+          { id = "pickup:unknown-task", kind = "placed_pickup", item_ids = { 3 }, target = {}, pos = pos(1),
+            eligibility = "eligible", generation = 8 },
+        } },
+      }, core.target_registry_new())
+    check("objective snapshot: same-position sources retain distinct ids and owners",
+      #snapshots.targets == 2 and snapshots.targets[1].key ~= snapshots.targets[2].key
+        and snapshots.targets[1].target.pos.x == snapshots.targets[2].target.pos.x
+        and snapshots.targets[1].owners[1].qid ~= snapshots.targets[2].owners[1].qid)
+    local two_item_routes = core.objective_routes(snapshots, nil, { npc_route_mode = 1,
+      objective_places = true, focus_order = { 11, 10 }, route_cap = 8 })
+    check("objective routes: generic item sources follow ascending item id",
+      #two_item_routes.members == 2 and two_item_routes.members[1].qid == 10
+        and two_item_routes.members[1].item_ids[1] == 1
+        and two_item_routes.members[2].qid == 11
+        and two_item_routes.members[2].item_ids[1] == 2
+        and two_item_routes.members[1].ordinal ~= two_item_routes.members[2].ordinal)
+    local capped_routes, capped_shown, capped_total = core.objective_routes(snapshots, nil,
+      { npc_route_mode = 1, objective_places = true, focus_order = { 11, 10 }, route_cap = 1 })
+    check("objective route counts report the publication cap and full eligible total",
+      #capped_routes.members == 1 and capped_shown == 1 and capped_total == 2)
+    local unchanged = pos(5)
+    local only_unknown = core.objective_snapshot({ generation = 6, quests = {
+        { qid = 12, task_index = 1, read_status = "unknown", reason = "journal unavailable",
+          issued_npcs = {
+            { kind = "npc", target = { cid = 120, pos = pos(12) }, eligibility = "eligible" },
+          }, task_destinations = {
+            { kind = "npc", task_index = 1, destination_index = 1,
+              target = { cid = 121, pos = pos(13) }, eligibility = "eligible" },
+          }, guidance = {}, item_ownership = {
+            { item_id = 3, count = 1, proof_kind = "condition", eligibility = "eligible" },
+          } },
+      } }, { generation = 3, status = "unknown", places = {} }, {
+        { provider = "chest", generation = 9, status = "unknown", reason = "open state unreadable",
+          candidates = { { id = "must-ignore", item_ids = { 3 }, target = {}, pos = pos(1), eligibility = "eligible" } } },
+      }, core.target_registry_new())
+    check("objective snapshot: unknown task keeps independent issued NPCs but rejects task and item evidence",
+      #only_unknown.targets == 1 and only_unknown.targets[1].provider == "issued_npc"
+        and only_unknown.targets[1].target.cid == 120
+        and only_unknown.targets[1].owners[1].task_index == nil
+        and #only_unknown.diagnostics >= 2
+        and unchanged.x == 5)
+    local base = { { key = "c:77", cat = "quest", qids = { 10 }, cid = 77, pos = pos(1) } }
+    local fullmap = { { key = "c:77", cat = "quest", qids = { 10 }, cid = 77, pos = pos(1) } }
+    local projected, projected_full = core.objective_markers(base, fullmap, snap,
+      { objective_places = true, category_visibility = { quest = false }, names = { npcs = { [77] = "Target" } } })
+    check("objective markers: category-off NPC objectives appear on both maps without mutating inputs",
+      projected[1].objective == true and projected_full[1].objective == true
+        and projected[1].objective_key == projected_full[1].objective_key
+        and base[1].objective == nil and fullmap[1].objective == nil)
+    local wired_snapshot = { generation = 12, targets = { { key = tk({ 10, "issued_npc", 77 }), generation = 12,
+      ordinal = 24, kind = "npc", target = { cid = 77, pos = pos(9) },
+      owners = { { qid = 10 } }, item_ids = {}, provider = "issued_npc", eligibility = "eligible" } } }
+    local wired = core.compute(objadapter(), { focus_qids = { 10 }, focus_related_qids = {}, now = 0,
+      objective_snapshot = wired_snapshot,
+      objective_policy = { npc_route_mode = 1, objective_places = true, focus_order = { 10 } } })
+    local wired_marker
+    for _, marker in ipairs(wired.markers) do if marker.objective_key == wired_snapshot.targets[1].key then wired_marker = marker end end
+    check("objective compute: snapshot projects before focus filtering and publishes matching routes",
+      wired_marker ~= nil and wired_marker.objective == true
+        and wired.objective_routes.objective_generation == 12
+        and wired.objective_routes.generation == nil
+        and wired.objective_routes.members[1].target_key == wired_snapshot.targets[1].key)
+    local startable_pos = pos(55)
+    local startable_adapter = fake_adapter({ acceptable = { 40 }, hints = { [40] = 55 },
+      names = { [40] = "Forty" }, npc_pos = { [55] = startable_pos } })
+    local startable_snapshot = core.compute(startable_adapter, { focus_qids = { 40 },
+      focus_related_qids = {}, now = 0,
+      objective_snapshot = { generation = 15, targets = {} },
+      objective_policy = { npc_route_mode = 1, focus_order = { 40 },
+        startable_givers = { { qid = 40, cid = 55, pos = startable_pos, name = "Giver" } } } })
+    local startable_marker, startable_route
+    for _, marker in ipairs(startable_snapshot.markers) do
+      if marker.cid == 55 and marker.objective == true then startable_marker = marker end
+    end
+    for _, member in ipairs(startable_snapshot.objective_routes.members) do
+      if member.cid == 55 then startable_route = member end
+    end
+    check("objective compute: v2 progress snapshot preserves startable giver marker and route",
+      startable_marker ~= nil and startable_marker.cat == "startable"
+        and startable_route ~= nil and startable_route.qid == 40
+        and startable_route.kind == "npc" and startable_route.target_key == nil
+        and startable_route.place == nil and startable_route.objective == true)
+    local ancillary_result = core.compute(fake_adapter({ progressing = { 41 },
+      hints = { [41] = 96 }, names = { [41] = "Forty One" }, npc_pos = { [96] = pos(96) } }), {
+      focus_qids = { 41 }, focus_related_qids = { 41 }, now = 0,
+      objective_snapshot = { generation = 16, targets = {} },
+      objective_policy = { npc_route_mode = 2, focus_order = { 41 } } })
+    local ancillary_ids = ancillary_result.focus.quests[41].route_related_npcs or {}
+    local ancillary_rows = {}
+    for _, cid in ipairs(ancillary_ids) do ancillary_rows[#ancillary_rows + 1] = { qid = 41, cid = cid } end
+    local ancillary_publication = core.objective_routes(ancillary_result.objective_snapshot,
+      nil, { npc_route_mode = 2, shown_ancillary = ancillary_rows })
+    check("objective compute: shown ancillary route can have no route member position",
+      #ancillary_ids == 1 and ancillary_ids[1] == 96
+        and #ancillary_publication.members == 1
+        and ancillary_publication.members[1].cid == 96
+        and ancillary_publication.members[1].pos == nil)
+    local isolated = core.objective_snapshot({ generation = 7, quests = {
+        { qid = 1, task_index = 0, read_status = "ok", issued_npcs = {},
+          task_destinations = {}, guidance = {}, item_ownership = {
+            { item_id = 4, count = 1, proof_kind = "condition", eligibility = "eligible" },
+          } },
+      } }, { generation = 1, status = "unknown", places = {} }, {
+        { provider = "pickup", generation = 1, status = "ok", candidates = {
+          { id = "shared", item_ids = { 4 }, target = {}, pos = pos(3), eligibility = "eligible", generation = 1 },
+        } },
+        { provider = "pickup", generation = 2, status = "ok", candidates = {
+          { id = "other", item_ids = { 4 }, target = {}, pos = pos(3), eligibility = "eligible", generation = 2 },
+        } },
+      }, core.target_registry_new())
+    check("objective snapshot: shared-source evidence merges by id, same-place source stays distinct",
+      #isolated.targets == 2 and isolated.targets[1].key ~= isolated.targets[2].key
+        and isolated.targets[1].target.pos.x == isolated.targets[2].target.pos.x)
+    local place_task = { generation = 8, quests = { { qid = 30, task_index = 0,
+      read_status = "ok", issued_npcs = {}, task_destinations = {
+        { kind = "place", task_index = 0, destination_index = 4,
+          target = { place = { kind = "key_location", key = 11 } }, eligibility = "eligible" },
+      }, guidance = {}, item_ownership = {} } } }
+    local wrong_place = core.objective_snapshot(place_task, { generation = 2, status = "ok", places = {
+      { qid = 30, task_index = 0, owner_kind = "task", owner_index = 0, signal_index = 4,
+        target = { kind = "key_location", key = 12 }, pos = pos(4), eligibility = "eligible" },
+    } }, {}, core.target_registry_new())
+    check("objective places: index match with different place identity is rejected", #wrong_place.targets == 0)
+    local exact_place = core.objective_snapshot(place_task, { generation = 2, status = "ok", places = {
+      { qid = 30, task_index = 0, owner_kind = "task", owner_index = 0, signal_index = 4,
+        target = { kind = "key_location", key = 11 }, pos = pos(4), eligibility = "eligible" },
+    } }, {}, core.target_registry_new())
+    check("objective places: exact owner and target identity resolves its position",
+      #exact_place.targets == 1 and exact_place.targets[1].target.pos.x == 4)
+    local owner_snapshot = { generation = 9, quests = {
+      { qid = 11, task_index = 2, read_status = "ok", issued_npcs = {}, task_destinations = {}, guidance = {},
+        item_ownership = { { item_id = 7, count = 1, proof_kind = "condition", eligibility = "eligible" } } },
+      { qid = 10, task_index = 1, read_status = "ok", issued_npcs = {}, task_destinations = {}, guidance = {},
+        item_ownership = { { item_id = 7, count = 1, proof_kind = "delivery", eligibility = "eligible" } } },
+    } }
+    local owner_registry = core.target_registry_new()
+    local shared = core.objective_snapshot(owner_snapshot, { status = "unknown", places = {} }, {
+      { provider = "pickup", generation = 1, status = "ok", candidates = {
+        { id = "shared-source", item_ids = { 7 }, target = {}, pos = pos(6), eligibility = "eligible", generation = 1 },
+      } },
+      { provider = "pickup", generation = 2, status = "ok", candidates = {
+        { id = "shared-source", item_ids = { 7 }, target = {}, pos = pos(6), eligibility = "eligible", generation = 2 },
+      } },
+    }, owner_registry)
+    check("objective snapshot: repeated source id unions sorted owners and keeps task indices",
+      #shared.targets == 1 and #shared.targets[1].owners == 2
+        and shared.targets[1].owners[1].qid == 10 and shared.targets[1].owners[1].task_index == 1
+        and shared.targets[1].owners[2].qid == 11 and shared.targets[1].owners[2].task_index == 2)
+    local owner_removed = core.objective_snapshot({ generation = 10, quests = { owner_snapshot.quests[1] } },
+      { status = "unknown", places = {} }, {
+      { provider = "pickup", generation = 3, status = "ok", candidates = {
+        { id = "shared-source", item_ids = { 7 }, target = {}, pos = pos(6), eligibility = "eligible", generation = 3 },
+        } },
+      }, owner_registry)
+    check("objective snapshot: losing one owner removes only that owner and retains key ordinal",
+      #owner_removed.targets == 1 and #owner_removed.targets[1].owners == 1
+        and owner_removed.targets[1].owners[1].qid == 11
+        and owner_removed.targets[1].ordinal == shared.targets[1].ordinal)
+    local depleted = core.objective_snapshot({ generation = 11, quests = { owner_snapshot.quests[1] } },
+      { status = "unknown", places = {} }, {
+        { provider = "pickup", generation = 4, status = "ok", candidates = {} },
+      }, owner_registry)
+    check("objective snapshot: source depletion removes the prior source target",
+      #depleted.targets == 0)
+    local nearest = core.objective_snapshot({ generation = 12, quests = { owner_snapshot.quests[1] } },
+      { status = "unknown", places = {} }, {
+        { provider = "pickup", generation = 5, status = "ok", candidates = {
+          { id = "z-far", item_ids = { 7 }, target = {}, pos = pos(9), eligibility = "eligible", generation = 5 },
+          { id = "b-near", item_ids = { 7 }, target = {}, pos = pos(3), eligibility = "eligible", generation = 5 },
+          { id = "a-near", item_ids = { 7 }, target = {}, pos = pos(-3), eligibility = "eligible", generation = 5 },
+          { id = "ineligible", item_ids = { 7 }, target = {}, pos = pos(0), eligibility = "ineligible",
+            reason = "not currently released" },
+        } },
+      }, core.target_registry_new())
+    local nearest_route = core.objective_routes(nearest, pos(0),
+      { npc_route_mode = 1, objective_places = true, focus_order = { 11 } })
+    local no_origin_route = core.objective_routes(nearest, nil,
+      { npc_route_mode = 1, objective_places = true, focus_order = { 11 } })
+    check("objective routes: nearest source wins and ties use bytewise source id",
+      #nearest_route.members == 1 and nearest_route.members[1].target_key == tk({ "source", "a-near" })
+        and no_origin_route.members[1].target_key == tk({ "source", "a-near" }))
+    check("objective routes: objective-place toggle suppresses item sources",
+      #core.objective_routes(nearest, pos(0), { npc_route_mode = 1, objective_places = false }).members == 0)
+    local bad_position = core.objective_snapshot({ generation = 13, quests = { owner_snapshot.quests[1] } },
+      { status = "unknown", places = {} }, {
+        { provider = "pickup", generation = 6, status = "ok", candidates = {
+          { id = "nonfinite", item_ids = { 7 }, target = {}, pos = { x = 0 / 0, y = 0, z = 0 },
+            eligibility = "eligible", generation = 6 },
+        } },
+      }, core.target_registry_new())
+    check("objective snapshot: nonfinite source positions fail closed with a reason",
+      #bad_position.targets == 0 and bad_position.diagnostics[1].reason == "source_target_unresolved")
+    local search = { key = tk({ 10, "issued_npc", 77 }), ordinal = 30, kind = "npc", generation = snap.generation,
+      target = { cid = 77, pos = pos(2) }, owners = { { qid = 10 } }, item_ids = {}, eligibility = "eligible" }
+    local reserved = core.objective_routes(snap, pos(0), { npc_route_mode = 1, objective_places = true,
+      focus_order = { 10 }, search_target = search, route_cap = 1 })
+    check("objective routes: search target is reserved ahead of the route cap",
+      #reserved.members == 1 and reserved.members[1].target_key == search.key)
+    local cap_snapshot = { generation = 19, targets = {} }
+    for i = 1, 8 do
+      cap_snapshot.targets[i] = { key = "cap:" .. i, ordinal = i, kind = "npc",
+        generation = 19, target = { cid = 5000 + i, pos = pos(i) },
+        owners = { { qid = 50 } }, item_ids = {}, eligibility = "eligible" }
+    end
+    local capped_with_search_slot, cap_shown, cap_total = core.objective_routes(
+      cap_snapshot, pos(0), { npc_route_mode = 1, focus_order = { 50 }, route_cap = 7 })
+    check("objective routes: seven published members plus one reserved world target equal the eight-route cap",
+      #capped_with_search_slot.members == cap_shown and cap_shown == 7
+        and cap_total == 8 and cap_shown + 1 == 8)
+    local order_snapshot = core.objective_snapshot({ generation = 14, focus_epoch = 2,
+      journal_generation = 4, need_generation = 5, quests = {
+        { qid = 10, task_index = 0, read_status = "ok", issued_npcs = {
+          { kind = "npc", target = { cid = 100, pos = pos(10) }, eligibility = "eligible" },
+        }, live_destination = { target = { pos = pos(10) }, eligibility = "eligible" },
+          task_destinations = { { kind = "npc", task_index = 0, destination_index = 0,
+            target = { cid = 101, pos = pos(11) }, eligibility = "eligible" } },
+          guidance = { { concierge_index = 3, eligibility = "eligible", signals = {
+            { kind = "npc", concierge_index = 3, destination_index = 1,
+              target = { cid = 102, pos = pos(12) }, eligibility = "eligible" },
+            { kind = "place", concierge_index = 3, destination_index = 1,
+              target = { place = { kind = "key_location", key = 8 }, pos = pos(13) }, eligibility = "eligible" },
+          } } }, item_ownership = {} },
+        { qid = 11, task_index = 1, read_status = "ok", issued_npcs = {
+          { kind = "npc", target = { cid = 110, pos = pos(20) }, eligibility = "eligible" },
+        }, live_destination = { target = { pos = pos(20) }, eligibility = "eligible" },
+          task_destinations = {}, guidance = {}, item_ownership = {} },
+      } }, { status = "unknown", places = {} }, {}, core.target_registry_new())
+    local ordered_publication = core.objective_routes(order_snapshot, pos(0),
+      { npc_route_mode = 1, objective_places = true, focus_order = { 11, 10 } })
+    check("objective routes: active focus and per-quest target classes define publication order",
+      #ordered_publication.members == 7 and ordered_publication.members[1].qid == 11
+        and ordered_publication.members[1].cid == 110
+        and ordered_publication.members[2].qid == 11 and ordered_publication.members[2].direct == true
+        and ordered_publication.members[3].qid == 10 and ordered_publication.members[3].cid == 100
+        and ordered_publication.members[4].qid == 10 and ordered_publication.members[4].direct == true
+        and ordered_publication.members[5].cid == 101 and ordered_publication.members[6].cid == 102
+        and ordered_publication.members[7].direct == true)
+    local interleaved, interleaved_shown, interleaved_total = core.objective_routes(
+      order_snapshot, pos(0), { npc_route_mode = 1, objective_places = true,
+        focus_order = { 11, 10 }, route_cap = 2, startable_givers = {
+          { qid = 10, cid = 910, pos = pos(30), name = "Ten giver" },
+          { qid = 11, cid = 911, pos = pos(31), name = "Eleven giver" },
+        } })
+    check("objective routes: startable givers interleave by focus rank before the eight-member cap",
+      interleaved_shown == 2 and #interleaved.members == 2 and interleaved_total > 2
+        and interleaved.members[1].cid == 911 and interleaved.members[1].qid == 11
+        and interleaved.members[2].cid == 110 and interleaved.members[2].target_key ~= nil)
+    local malformed_startables_ok = pcall(core.objective_routes, order_snapshot, pos(0), {
+      npc_route_mode = 1, focus_order = { 11, 10 }, startable_givers = {
+        false, { qid = "bad", cid = 912, pos = pos(32) },
+        { qid = 10, cid = 912, pos = pos(32), name = "Valid" },
+      } })
+    check("objective routes: malformed startable rows are filtered before rank sorting",
+      malformed_startables_ok)
+    check("objective publication stamp preserves task and need generations",
+      order_snapshot.stamp.focus_epoch == 2 and order_snapshot.stamp.journal_generation == 4
+        and order_snapshot.stamp.need_generation == 5)
+    local place_marker, place_full = core.objective_markers({}, {}, { generation = 3, targets = {
+      { key = tk({ 10, "task", 0, 1, "place" }), ordinal = 31, kind = "place", generation = 3,
+        target = { place = { kind = "local_area", local_area = 0 }, pos = pos(3) },
+        owners = { { qid = 10, task_index = 0 } }, item_ids = {},
+        provider = "task", eligibility = "eligible" },
+    } }, { objective_places = true, category_visibility = { world = false } })
+    check("objective markers: local-area zero gets a dedicated marker despite category off",
+      #place_marker == 1 and #place_full == 1 and place_marker[1].objective_ordinal == 31
+        and place_marker[1].pos.x == 3)
+    local dedicated, signature_ok = core.objective_markers({}, nil, { generation = 7, targets = {
+      { key = tk({ 20, "issued_npc", 4294967295 }), ordinal = 1, kind = "npc",
+        target = { cid = 4294967295, pos = pos(2) }, owners = { { qid = 20 } }, item_ids = {},
+        provider = "issued_npc", eligibility = "eligible", generation = 7 },
+    } }, { names = { npcs = { { cid = 4294967295, name = "U32 NPC" } } } })
+    local signature_call = pcall(core.signature, dedicated, {})
+    check("objective markers: dedicated markers satisfy legacy signature and NPC consumers",
+      #dedicated == 1 and dedicated[1].cid == 4294967295
+        and table.concat(dedicated[1].qids, ",") == "20" and signature_call)
+    check("objective markers: SPEC name arrays supply NPC labels",
+      dedicated[1].label == "Objective: U32 NPC")
+
+    local current_task = { catalog_version = 2, focus_epoch = 3, journal_generation = 4,
+      need_generation = 5, quests = { { qid = 40, task_index = 2, read_status = "ok",
+        issued_npcs = "malformed", task_destinations = {}, item_ownership = {}, guidance = {
+          { concierge_index = 6, destination_index = 9, eligibility = "eligible", signals = {
+            { kind = "npc", task_index = 2, target = { cid = 70, pos = pos(7) }, eligibility = "eligible" },
+          } },
+        } } } }
+    local task_registry = core.target_registry_new()
+    local guidance_ok, guidance = pcall(core.objective_snapshot, current_task,
+      { generation = 1, status = "unknown", places = {} }, {}, task_registry)
+    local guidance_obj = guidance_ok and guidance.targets[1] or nil
+    check("objective guidance: parent index and current quest task own child target key",
+      guidance_obj and guidance_obj.key == tk({ 40, "guidance", 6, 9, "npc" })
+        and guidance_obj.owners[1].task_index == 2)
+    local stale_task_snapshot = { catalog_version = 2, focus_epoch = 3, journal_generation = 4,
+      need_generation = 5, quests = { { qid = 40, task_index = 2, read_status = "ok",
+        issued_npcs = {}, item_ownership = {}, task_destinations = {
+          { kind = "npc", task_index = 3, destination_index = 1,
+            target = { cid = 71, pos = pos(8) }, eligibility = "eligible" },
+          { kind = "npc", task_index = -1, destination_index = 2,
+            target = { cid = 72, pos = pos(9) }, eligibility = "eligible" },
+        }, guidance = { { concierge_index = 6, destination_index = 9, task_index = 3,
+          eligibility = "eligible", signals = {
+            { kind = "npc", task_index = 3, target = { cid = 73, pos = pos(10) }, eligibility = "eligible" },
+          } } } } } }
+    local stale_task = core.objective_snapshot(stale_task_snapshot, nil, {}, core.target_registry_new())
+    check("objective guidance: future and sentinel task evidence is rejected, not relabeled current",
+      #stale_task.targets == 0)
+    local missing_parent_snapshot = { catalog_version = 2, focus_epoch = 3, journal_generation = 4,
+      need_generation = 5, quests = { { qid = 40, task_index = 2, read_status = "ok",
+        issued_npcs = {}, item_ownership = {}, task_destinations = {}, guidance = {
+          { concierge_index = 6, destination_index = 9, signals = {
+            { kind = "npc", target = { cid = 74, pos = pos(4) }, eligibility = "eligible" },
+          } },
+        } } } }
+    local missing_parent = core.objective_snapshot(missing_parent_snapshot, nil, {}, core.target_registry_new())
+    check("objective guidance: absent parent eligibility is rejected",
+      #missing_parent.targets == 0)
+    current_task.quests[1].guidance[1].eligibility = "unknown"
+    local unknown_parent = core.objective_snapshot(current_task, nil, {}, core.target_registry_new())
+    check("objective guidance: unknown parent suppresses all child signals",
+      #unknown_parent.targets == 0)
+    local malformed_issued_ok = pcall(core.objective_snapshot, { catalog_version = 2,
+      focus_epoch = 1, journal_generation = 1, need_generation = 1,
+      quests = { { qid = 40, task_index = 0, read_status = "ok", issued_npcs = "bad",
+        item_ownership = "bad", task_destinations = "bad", guidance = "bad" } } },
+      nil, "bad", core.target_registry_new())
+    check("objective snapshot: malformed issued/provider arrays fail closed without throwing",
+      malformed_issued_ok)
+
+    local source_task = { catalog_version = 2, focus_epoch = 1, journal_generation = 1,
+      need_generation = 1, quests = { { qid = 50, task_index = 0, read_status = "ok",
+        issued_npcs = {}, task_destinations = {}, guidance = {}, item_ownership = {
+          { item_id = 5, count = 1, proof_kind = "condition", eligibility = "eligible" },
+        } } } }
+    local source_registry = core.target_registry_new()
+    local mismatch = core.objective_snapshot(source_task, nil, {
+      { provider = "seller", generation = 2, status = "ok", candidates = {
+        { id = "w:sell:1:5", kind = "shop_stock", item_ids = { 5 }, target = { cid = 88 },
+          eligibility = "eligible", pos = pos(8), generation = 1 },
+      } },
+    }, source_registry)
+    check("objective generation: stale candidate generation is rejected",
+      #mismatch.targets == 0 and type(mismatch.generation) == "number" and mismatch.generation > 0)
+    local no_candidate_generation = core.objective_snapshot(source_task, nil, {
+      { provider = "seller", generation = 2, status = "ok", candidates = {
+        { id = "w:sell:1:5", kind = "shop_stock", item_ids = { 5 }, target = { cid = 88 },
+          eligibility = "eligible", pos = pos(8) },
+      } },
+    }, core.target_registry_new())
+    check("objective generation: missing candidate generation is rejected",
+      #no_candidate_generation.targets == 0)
+    local matched = core.objective_snapshot(source_task, nil, {
+      { provider = "seller", generation = 2, status = "ok", candidates = {
+        { id = "w:sell:1:5", kind = "shop_stock", item_ids = { 5, 6 }, target = { cid = 88 },
+          eligibility = "eligible", pos = pos(8), generation = 2 },
+      } },
+    }, source_registry)
+    local stable = core.objective_snapshot(source_task, nil, {
+      { provider = "seller", generation = 2, status = "ok", candidates = {
+        { id = "w:sell:1:5", kind = "shop_stock", item_ids = { 5 }, target = { cid = 88 },
+          eligibility = "eligible", pos = pos(8), generation = 2 },
+      } },
+    }, source_registry)
+    check("objective generation: positive generation derives from declared snapshots and is stable",
+      type(matched.generation) == "number" and matched.generation > 0
+        and stable.generation == matched.generation
+        and matched.targets[1].generation == matched.generation)
+    check("objective sources: only current needed item ids receive ownership",
+      matched.targets[1] ~= nil and #matched.targets[1].item_ids == 1 and matched.targets[1].item_ids[1] == 5)
+    local source_routes = core.objective_routes(matched, nil,
+      { npc_route_mode = 0, objective_places = true, focus_order = { 50 } })
+    check("objective route publication preserves the objective snapshot generation",
+      source_routes.objective_generation == matched.generation
+        and source_routes.generation == nil
+        and source_routes.members[1].objective_generation == matched.generation
+        and source_routes.members[1].generation == nil)
+
+    local sellers = {
+      { key = "w:sell:1:5", cat = "seller", cid = 88, qids = { 50 }, pos = pos(8) },
+      { key = "w:sell:2:5", cat = "seller", cid = 88, qids = {}, pos = pos(8) },
+    }
+    local source_marker, source_full = core.objective_markers(sellers, sellers, matched,
+      { names = { targets = { { key = matched.targets[1].key, name = "Offer" } } }, objective_places = false })
+    check("objective markers: source reuses only its exact marker identity, never a same-CID sibling",
+      #source_marker == 2 and #source_full == 2
+        and source_marker[1].key == "w:sell:1:5" and source_marker[1].objective == true
+        and source_marker[2].key == "w:sell:2:5" and source_marker[2].objective == nil
+        and source_full[1].objective == true and source_full[2].objective == nil
+        and source_marker[1].label ~= "Objective: w:sell:1:5")
+    check("objective markers: every covering target owner is unioned",
+      source_marker[1] ~= nil and type(source_marker[1].objective_qids) == "table"
+        and table.concat(source_marker[1].objective_qids, ",") == "50")
+    local multi_cover_input = { { key = "n:70", cat = "quest", cid = 70, qids = {} } }
+    local multi_cover = core.objective_markers(multi_cover_input, nil,
+      { generation = 3, targets = {
+        { key = tk({ 40, "issued_npc", 70 }), ordinal = 1, kind = "npc", target = { cid = 70 },
+          owners = { { qid = 40 } }, item_ids = {}, eligibility = "eligible", generation = 3 },
+        { key = tk({ 41, "issued_npc", 70 }), ordinal = 2, kind = "npc", target = { cid = 70 },
+          owners = { { qid = 41 } }, item_ids = {}, eligibility = "eligible", generation = 3 },
+      } }, {})
+    check("objective markers: shared covering marker unions owner qids",
+      multi_cover[1] ~= nil and type(multi_cover[1].objective_qids) == "table"
+        and table.concat(multi_cover[1].objective_qids, ",") == "40,41"
+        and #multi_cover_input[1].qids == 0)
+
+    local route_cid_source = core.objective_routes(matched, nil,
+      { npc_route_mode = 0, objective_places = true, focus_order = { 50 },
+        names = { npcs = { { cid = 88, name = "Seller" } } } })
+    check("objective routes: seller source uses direct ordinal id and copied position",
+      #route_cid_source.members == 1 and route_cid_source.members[1].direct == true
+        and route_cid_source.members[1].route_id == core.objective_direct_route_id(matched.targets[1].ordinal)
+        and route_cid_source.members[1].cid == nil and route_cid_source.members[1].pos.x == 8
+        and route_cid_source.members[1].pos ~= matched.targets[1].target.pos)
+    local ancillary = core.objective_routes({ generation = 9, targets = {} }, nil,
+      { npc_route_mode = 2, objective_places = false, shown_ancillary = { { qid = 50, cid = 99, name = "Ally" } } })
+    check("objective routes: SPEC ancillary row does not need an undocumented position",
+      #ancillary.members == 1 and ancillary.members[1].qid == 50
+        and ancillary.members[1].cid == 99 and ancillary.members[1].pos == nil
+        and ancillary.members[1].route_id == 99 and ancillary.members[1].kind == "npc"
+        and ancillary.members[1].direct == false
+        and type(ancillary.members[1].item_ids) == "table" and #ancillary.members[1].item_ids == 0
+        and ancillary.members[1].objective_generation == 9
+        and ancillary.members[1].generation == nil
+        and ancillary.members[1].target_key == nil
+        and ancillary.members[1].ordinal == nil and ancillary.members[1].place == nil)
+
+    local marker_toggle_off = core.objective_markers({}, nil, { generation = 4, targets = {
+      { key = tk({ 40, "task", 0, 1, "place" }), ordinal = 4, kind = "place",
+        target = { place = { kind = "key_location", key = 7 }, pos = pos(7) },
+        owners = { { qid = 40, task_index = 0 } }, item_ids = {}, eligibility = "eligible", generation = 4 },
+    } }, { objective_places = false })
+    check("objective markers: objective route toggle does not hide eligible places",
+      #marker_toggle_off == 1 and marker_toggle_off[1].objective == true)
+
+    local invalid_coverage_input = {
+      { key = "w:place", cat = "world", qids = {} },
+      { key = "n:88", cat = "quest", cid = 88, qids = {} },
+      { key = "n:70", cat = "quest", cid = 70, qids = {} },
+      { key = "n:0", cat = "quest", cid = 0, qids = {} },
+      { key = "n:89", cat = "quest", cid = 89, qids = {} },
+    }
+    local invalid_coverage = core.objective_markers(invalid_coverage_input, nil, { generation = 4, targets = {
+      { key = "place-without-id", ordinal = 5, kind = "place", generation = 4,
+        target = { place = { kind = "key_location", key = 8 } }, owners = { { qid = 40 } }, item_ids = {}, eligibility = "eligible" },
+      { key = "stale-npc", ordinal = 6, kind = "npc", generation = 3,
+        target = { cid = 88 }, owners = { { qid = 40 } }, item_ids = {}, eligibility = "eligible" },
+      { key = "ineligible-npc", ordinal = 7, kind = "npc", generation = 4,
+        target = { cid = 70 }, owners = { { qid = 40 } }, item_ids = {}, eligibility = "unknown" },
+      { key = "invalid-npc", ordinal = 8, kind = "npc", generation = 4,
+        target = { cid = 0 }, owners = { { qid = 40 } }, item_ids = {}, eligibility = "eligible" },
+      { key = "missing-generation-npc", ordinal = 9, kind = "npc",
+        target = { cid = 89 }, owners = { { qid = 40 } }, item_ids = {}, eligibility = "eligible" },
+    } }, {})
+    check("objective markers: generation, eligibility, and target domain gate attachment",
+      invalid_coverage[1].objective == nil and invalid_coverage[2].objective == nil
+        and invalid_coverage[3].objective == nil and invalid_coverage[4].objective == nil
+        and invalid_coverage[5].objective == nil)
+
+    local negative_place_task = { focus_epoch = 1, journal_generation = 1, need_generation = 1,
+      quests = { { qid = 40, task_index = 0, read_status = "ok", issued_npcs = {},
+        item_ownership = {}, guidance = {}, task_destinations = {
+          { kind = "place", task_index = 0, destination_index = 0,
+            target = { place = { kind = "key_location", key = -1 }, pos = pos(1) },
+            eligibility = "eligible" },
+        } } } }
+    local negative_place_snapshot = core.objective_snapshot(negative_place_task, nil, {}, core.target_registry_new())
+    local negative_place_record = { key = tk({ 40, "task", 0, 0, "place" }), ordinal = 1,
+      kind = "place", generation = negative_place_snapshot.generation,
+      target = { place = { kind = "key_location", key = -1 }, pos = pos(1) },
+      owners = { { qid = 40, task_index = 0 } }, item_ids = {}, eligibility = "eligible" }
+    local negative_place_view = { generation = negative_place_snapshot.generation,
+      targets = { negative_place_record } }
+    local negative_place_markers = core.objective_markers({}, nil, negative_place_view, {})
+    local negative_place_routes = core.objective_routes(negative_place_view, nil,
+      { npc_route_mode = 1, objective_places = true })
+    check("objective place domain: negative key_location is rejected by snapshot, markers, and routes",
+      #negative_place_snapshot.targets == 0 and #negative_place_markers == 0
+        and #negative_place_routes.members == 0)
+
+    local legacy_only = core.compute(objadapter(), { focus_qids = { 10 }, focus_related_qids = {}, now = 0,
+      objective_snapshot = { generation = 2, stamp = {}, targets = {} },
+      objective_policy = { npc_route_mode = 1, objective_places = true, focus_order = { 10 } } })
+    local stale_legacy = false
+    for _, marker in ipairs(legacy_only.markers) do if marker.objective == true then stale_legacy = true end end
+    check("objective compute: supplied empty snapshot suppresses legacy issued/live/item objectives",
+      not stale_legacy and #legacy_only.objective_routes.members == 0
+        and #(legacy_only.focus.quests[10].objective.npcs or {}) == 0
+        and legacy_only.focus.quests[10].objective.place == nil
+        and #(legacy_only.focus.quests[10].objective.items or {}) == 0)
+  end
+  end)()
 end
 
 if failures > 0 then os.exit(1) end
