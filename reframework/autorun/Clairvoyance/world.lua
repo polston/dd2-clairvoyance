@@ -38,7 +38,7 @@ M.K = {
 }
 
 local ATLAS_KINDS = { chest = true, token = true, beetle = true, monster = true, giver = true }
-local PLACES_KINDS = { chest = true, token = true, beetle = true, chara = true }
+local PLACES_KINDS = { chest = true, token = true, beetle = true, chara = true, item = true }
 local PLACE_SOURCES = { normal = true, random = true, subquest = true, mainquest = true }
 local PLACE_PHASES = { beforeseason4 = true, season4 = true }
 
@@ -67,6 +67,30 @@ end
 local function to_int(v)
   if type(v) ~= "number" then return nil end
   return math.tointeger(v)
+end
+
+-- Public objective catalog values are recursively detached read-only proxies.
+-- The backing tables stay closure-private even when a caller keeps a snapshot.
+local function readonly(value, cache)
+  if type(value) ~= "table" then return value end
+  cache = cache or {}
+  if cache[value] ~= nil then return cache[value] end
+  local proxy = {}
+  cache[value] = proxy
+  local mt = {
+    __index = function(_, key) return readonly(value[key], cache) end,
+    __newindex = function() error("immutable objective catalog", 2) end,
+    __len = function() return #value end,
+    __pairs = function()
+      local function iter(_, key)
+        local next_key, next_value = next(value, key)
+        if next_key ~= nil then return next_key, readonly(next_value, cache) end
+      end
+      return iter, proxy, nil
+    end,
+    __metatable = false,
+  }
+  return setmetatable(proxy, mt)
 end
 
 -- Tokens and beetles share one round branch: the output list, the item that
@@ -226,6 +250,9 @@ function M.new(a, reads, io)
   local places = { state = "missing", rows = 0, dropped = 0, load_ms = 0,
     slow = false, pak = nil }
   local static = {}        -- uid -> file entry (chest, token, beetle)
+  local objective_catalog = readonly({ version = M.K.PLACES_VERSION, status = "unknown",
+    complete = false, generation = 1, reason = "places_unavailable",
+    placements = {}, chests = {} })
   local chara_rows = {}    -- raw places chara rows
   local places_uids = {}   -- every valid places row uid
   local conditional_uids = {} -- conditional file chara UIDs, including givers
@@ -263,7 +290,7 @@ function M.new(a, reads, io)
       npc_list = {}, npc_ms = 0, npc_next = 1, npc_done = false, npc_sig = "",
       target_member = nil, members = {}, member_of = {}, objective_generation = nil,
       objective_publication = nil, objective_place_observation = nil,
-      objective_source_observations = {}, route_cache = {},
+      objective_source_observations = {}, objective_live_source_cache = {}, route_cache = {},
       route_fail = {}, fail_seq = 0,
       -- SPEC 32.14: sticky route colour slots; slot_of (cid -> slot) and
       -- slot_cid (slot -> cid) together are the spec's S.slots
@@ -283,6 +310,8 @@ function M.new(a, reads, io)
   local function parse_places(v)
     local rows, dropped = 0, 0
     local new_static, new_chara, new_uids, new_names, new_conditional = {}, {}, {}, {}, {}
+    local new_placements, new_chests, source_uids = {}, {}, { item = {}, chest = {} }
+    local source_catalog_bad = nil
     local function dense_array(t)
       local n, max = 0, 0
       for k in pairs(t) do
@@ -345,21 +374,41 @@ function M.new(a, reads, io)
             or r.table_qid < 0 then error("invalid quest table owner") end
         elseif r.table_qid ~= nil then error("stray quest table owner") end
       elseif r.table_qid ~= nil then error("quest table owner on non-monster row") end
-      if r.gate ~= nil and (r.k ~= "chara" and r.k ~= "chest" or not valid_gate(r.gate)) then
+      if r.gate ~= nil and (r.k ~= "chara" and r.k ~= "chest" and r.k ~= "item"
+          or not valid_gate(r.gate)) then
         error("invalid places gate")
       end
       local ok = type(r) == "table" and PLACES_KINDS[r.k] == true
         and type(r.uid) == "string" and r.uid ~= ""
         and to_int(r.id) ~= nil and finite(r.x) and finite(r.y) and finite(r.z)
       if not ok then
+        if type(r) == "table" and (r.k == "item" or r.k == "chest") then
+          source_catalog_bad = source_catalog_bad or "malformed_source_identity_or_position"
+        end
         dropped = dropped + 1
       else
         rows = rows + 1
         local uid = r.uid:lower()
+        if r.k == "item" or r.k == "chest" then
+          if source_uids[r.k][uid] then source_catalog_bad = "duplicate_source_identity" end
+          source_uids[r.k][uid] = true
+        end
         new_uids[uid] = true
         local x, y, z = round1(r.x), round1(r.y), round1(r.z)
         local id = to_int(r.id)
-        if r.k == "chara" then
+        if r.k == "item" then
+          local item_id, count = to_int(r.item or r.id), to_int(r.n or r.count)
+          if item_id == nil or item_id <= 0 or count == nil or count <= 0
+            or type(r.src) ~= "string" or not normal_src(r.src) then
+            source_catalog_bad = source_catalog_bad or "malformed_placement"
+          else
+            new_placements[#new_placements + 1] = { uid = uid,
+              source_id = { "source", "placed", uid },
+              capacity_pool_id = { "capacity", "placed", uid },
+              outputs = { { item_id = item_id, count = count } },
+              pos = { x = x, y = y, z = z }, gate = r.gate }
+          end
+        elseif r.k == "chara" then
           if type(r.name) == "string" and r.name ~= "" then new_names[id] = r.name end
           new_chara[#new_chara + 1] = { uid = uid, id = id, name = r.name,
             x = x, y = y, z = z, src = r.src, phase = r.phase,
@@ -370,13 +419,22 @@ function M.new(a, reads, io)
         elseif normal_src(r.src) then
           local e = { k = r.k, id = id, x = x, y = y, z = z, src = "file" }
           if r.k == "chest" and type(r.items) == "table" then
+            if not dense_array(r.items) or #r.items == 0 then
+              source_catalog_bad = source_catalog_bad or "malformed_chest_contents"
+            end
             local items = {}
             for _, it in ipairs(r.items) do
-              if type(it) == "table" and to_int(it.id) ~= nil then
-                items[#items + 1] = { id = to_int(it.id), n = to_int(it.n) or 1 }
+              local item_id = type(it) == "table" and to_int(it.id) or nil
+              local count = type(it) == "table" and to_int(it.n) or nil
+              if item_id ~= nil and item_id > 0 and count ~= nil and count > 0 then
+                items[#items + 1] = { id = item_id, n = count }
+              else
+                source_catalog_bad = source_catalog_bad or "malformed_chest_output"
               end
             end
             if #items > 0 then e.items = items end
+          elseif r.k == "chest" then
+            source_catalog_bad = source_catalog_bad or "chest_contents_missing"
           end
           if r.k == "chest" then
             local q = r.quest
@@ -392,14 +450,34 @@ function M.new(a, reads, io)
             if r.trap == true then e.trap = true end
             if r.pawn == true then e.pawn = true end
           end
-          if r.k == "chest" then e.quest = chest_quest(r.gate) or e.quest end
-          new_static[uid] = e
+          if r.k == "chest" then
+            e.quest = chest_quest(r.gate) or e.quest
+            if e.items ~= nil then
+              local outputs = {}
+              for _, item in ipairs(e.items) do
+                outputs[#outputs + 1] = { item_id = item.id, count = item.n }
+              end
+              new_chests[#new_chests + 1] = { uid = uid,
+                source_id = { "source", "chest", uid },
+                capacity_pool_id = { "capacity", "chest", uid }, outputs = outputs,
+                pos = { x = x, y = y, z = z }, gate = r.gate }
+            end
+          end
+          if r.k ~= "item" then new_static[uid] = e end
         end
       end
     end
     for id, name in pairs(new_names) do names[id] = name end
     static, chara_rows, places_uids, conditional_uids = new_static, new_chara, new_uids,
       new_conditional
+    if source_catalog_bad == nil then
+      objective_catalog = readonly({ version = M.K.PLACES_VERSION, status = "ok",
+        complete = true, generation = 1, placements = new_placements, chests = new_chests })
+    else
+      objective_catalog = readonly({ version = M.K.PLACES_VERSION, status = "unknown",
+        complete = false, generation = 1, reason = source_catalog_bad,
+        placements = {}, chests = {} })
+    end
     places.rows, places.dropped = rows, dropped
   end
 
@@ -410,11 +488,15 @@ function M.new(a, reads, io)
     places.slow = places.load_ms > M.K.PLACES_SLOW_MS
     if not ok then
       places.state = "bad"
+      objective_catalog = readonly({ version = M.K.PLACES_VERSION, status = "unknown",
+        complete = false, generation = 1, reason = "places_invalid", placements = {}, chests = {} })
     elseif v == nil then
       places.state = "missing"
     elseif type(v) ~= "table" or v.version ~= M.K.PLACES_VERSION
       or type(v.rows) ~= "table" then
       places.state = "bad"
+      objective_catalog = readonly({ version = M.K.PLACES_VERSION, status = "unknown",
+        complete = false, generation = 1, reason = "places_invalid", placements = {}, chests = {} })
     else
       local okp = pcall(parse_places, v)
       if okp then
@@ -422,6 +504,9 @@ function M.new(a, reads, io)
         if type(v.pak) == "string" then places.pak = v.pak end
       else
         places.state = "bad"
+        objective_catalog = readonly({ version = M.K.PLACES_VERSION, status = "unknown",
+          complete = false, generation = 1, reason = "places_invalid",
+          placements = {}, chests = {} })
         static, chara_rows, places_uids, conditional_uids = {}, {}, {}, {}
         places.rows, places.dropped = 0, 0
       end
@@ -2629,26 +2714,162 @@ function M.new(a, reads, io)
       end
       providers[#providers + 1] = out
     end
-    for _, name in ipairs({ "shop", "seller" }) do
-      local status = type(input_tbl) == "table" and type(input_tbl.objective_source_status) == "table"
-        and input_tbl.objective_source_status[name] or nil
-      local rows = type(input_tbl) == "table" and input_tbl[name == "shop" and "shops" or "sellers"] or nil
-      local reason = type(input_tbl) == "table" and input_tbl.objective_source_status
-        and input_tbl.objective_source_status[name .. "_reason"] or nil
-      if not valid_task then reason = "task_snapshot_unavailable"
-      elseif status == "ok" and array(rows) ~= nil then reason = name .. "_eligibility_unproven"
-      else reason = type(reason) == "string" and reason or name .. "_snapshot_unreadable" end
-      local evidence = { task_valid = valid_task and true or false, read_status = status,
-        reason = reason,
-        rows = type(rows) == "table" and objective_clone(rows) or rows }
-      local out = observe(name, "unknown", reason, evidence)
-      providers[#providers + 1] = out
-    end
+    local shop = w:objective_shop_observations(valid_task and task_snapshot or nil)
+    local monster = w:objective_monster_observations(valid_task and task_snapshot or nil)
+    providers[#providers + 1] = shop
+    providers[#providers + 1] = monster
     return providers
   end
 
+  -- World-owned live source readers are optional until their managed gates are
+  -- proven. Missing or partial reads publish unknown and never retain rows.
+  local function objective_live_sources(provider, read_name, normalize, task_snapshot)
+    local need_generation = type(task_snapshot) == "table"
+      and to_int(task_snapshot.need_generation) or nil
+    local cached = S.objective_live_source_cache[provider]
+    if cached ~= nil and cached.round == last_round
+      and cached.need_generation == need_generation then return objective_clone(cached.value) end
+    local ok, raw = call(read_name, task_snapshot, objective_catalog)
+    local rows = type(raw) == "table" and raw.rows or nil
+    local dense, n = type(rows) == "table", type(rows) == "table" and #rows or 0
+    if dense then
+      local count = 0
+      for k in pairs(rows) do
+        if type(k) ~= "number" or math.type(k) ~= "integer" or k < 1 or k > n then
+          dense = false; break
+        end
+        count = count + 1
+      end
+      dense = dense and count == n
+    end
+    local candidates, reason, status = {}, nil, "unknown"
+    if not ok or type(raw) ~= "table" then
+      reason = provider .. "_live_state_unavailable"
+    elseif raw.complete ~= true or not dense then
+      reason = provider .. "_scan_incomplete"
+    else
+      local seen, seen_end = {}, {}
+      local function already_seen(tuple)
+        local node = seen
+        for i, part in ipairs(tuple) do
+          if i == #tuple then
+            if node[part] == nil then node[part] = {} end
+            node = node[part]
+            if node[seen_end] then return true end
+            node[seen_end] = true
+          else
+            if node[part] == nil then node[part] = {} end
+            node = node[part]
+          end
+        end
+        return false
+      end
+      local valid = true
+      for _, row in ipairs(rows) do
+        local candidate, row_reason = normalize(row)
+        if row_reason ~= nil then reason, valid = row_reason, false; break end
+        if candidate ~= nil and candidate ~= false then
+          if already_seen(candidate.source_id) then
+            reason, valid = "duplicate_source_identity", false; break
+          end
+          candidates[#candidates + 1] = candidate
+        end
+      end
+      if valid then status = "ok" else candidates = {} end
+    end
+    local evidence = { status = status, reason = reason, raw = raw }
+    local key = "world-" .. provider
+    local state = S.objective_source_observations[key]
+    local generation = state and state.generation or 1
+    if state ~= nil and not objective_same(state.value, evidence) then
+      generation = math.min(2147483647, generation + 1)
+    end
+    S.objective_source_observations[key] = { generation = generation,
+      value = objective_clone(evidence) }
+    for _, candidate in ipairs(candidates) do candidate.generation = generation end
+    local result = { provider = provider, status = status, complete = status == "ok",
+      generation = generation, reason = reason, candidates = candidates }
+    S.objective_live_source_cache[provider] = { round = last_round,
+      need_generation = need_generation,
+      value = objective_clone(result) }
+    return result
+  end
+
+  function w:objective_shop_observations(task_snapshot)
+    return objective_live_sources("shop", "objective_shop_rows", function(row)
+      if type(row) ~= "table" then return nil, "shop_row_malformed" end
+      local sid, ordinal, cid = to_int(row.shop_id), to_int(row.offer_ordinal), to_int(row.seller_cid)
+      local item_id, count = to_int(row.item_id), to_int(row.count)
+      if sid == nil or sid <= 0 or ordinal == nil or ordinal <= 0 or cid == nil or cid <= 0
+        or item_id == nil or item_id <= 0 or count == nil or count <= 0
+        or not valid_pos(row.pos) or near_zero(row.pos) then
+        return nil, "shop_identity_output_or_position_invalid"
+      end
+      if type(row.released) ~= "boolean" or type(row.talk_available) ~= "boolean"
+        or type(row.interactable) ~= "boolean" or type(row.restock_readable) ~= "boolean" then
+        return nil, "shop_gate_unreadable"
+      end
+      local capacity_kind, available
+      if row.capacity_kind == "unlimited" and row.unlimited == true then
+        capacity_kind = "unlimited"
+      elseif row.capacity_kind == "finite" and row.unlimited == false
+        and row.restock_readable and to_int(row.stock) ~= nil and row.stock >= 0 then
+        capacity_kind, available = "finite", row.stock
+      else
+        return nil, "shop_stock_unreadable"
+      end
+      if not row.released or not row.talk_available or not row.interactable
+        or (capacity_kind == "finite" and available == 0) then return false end
+      local source_id = { "source", "shop_offer", sid, ordinal, cid }
+      local pool_id = { "capacity", "shop_offer", sid, ordinal }
+      return { source_id = source_id, provider = "shop",
+        target = { kind = "seller", shop_id = sid, offer_ordinal = ordinal,
+          seller_cid = cid, pos = { x = row.pos.x, y = row.pos.y, z = row.pos.z } },
+        outputs = { { item_id = item_id, count = count } },
+        capacity_pool_id = pool_id, capacity_kind = capacity_kind,
+        available_acquisitions = available, certainty = "guaranteed",
+        eligibility = "eligible", evidence = { released = true, talk_available = true,
+          interactable = true, restock_readable = true } }
+    end, task_snapshot)
+  end
+
+  function w:objective_monster_observations(task_snapshot)
+    return objective_live_sources("monster", "objective_monster_rows", function(row)
+      if type(row) ~= "table" then return nil, "monster_row_malformed" end
+      local drop_id = row.drop_row_id
+      local valid_drop_id = (type(drop_id) == "string" and drop_id ~= "")
+        or (to_int(drop_id) ~= nil and drop_id > 0)
+      if type(row.uid) ~= "string" or row.uid == "" or not valid_drop_id
+        or type(row.alive) ~= "boolean"
+        or type(row.accessible) ~= "boolean" then
+        return nil, "monster_identity_or_gate_unreadable"
+      end
+      if not row.alive or not row.accessible then return false end
+      if row.drop_table_readable ~= true then return nil, "monster_drop_table_unreadable" end
+      local item_id, count = to_int(row.item_id), to_int(row.count)
+      if item_id == nil or item_id <= 0 or count == nil or count <= 0
+        or not valid_pos(row.pos) or near_zero(row.pos)
+        or not finite(row.chance) or row.chance < 0 then
+        return nil, "monster_drop_evidence_invalid"
+      end
+      if row.chance == 0 then return false end
+      local source_id = { "source", "monster_drop", row.uid, drop_id }
+      return { source_id = source_id, provider = "monster",
+        target = { kind = "monster", uid = row.uid, pos = { x = row.pos.x,
+          y = row.pos.y, z = row.pos.z } },
+        outputs = { { item_id = item_id, count = count } },
+        capacity_pool_id = { "capacity", "monster_drop", row.uid, drop_id },
+        available_acquisitions = 1, certainty = "probabilistic",
+        probability = row.chance, eligibility = "eligible",
+        evidence = { alive = true, accessible = true, drop_table_readable = true } }
+    end, task_snapshot)
+  end
+
   -- the next refresh runs a round even inside the throttle window
-  function w:poke() last_round = nil end
+  function w:poke()
+    last_round = nil
+    S.objective_live_source_cache = {}
+  end
 
   -- SPEC 22.8: the route NPC; the next refresh builds it
   function w:set_route(cid, name)
@@ -2662,6 +2883,7 @@ function M.new(a, reads, io)
     S.route_cache[cid] = nil
     S.route_fail[cid] = nil
     last_round = nil
+    S.objective_live_source_cache = {}
   end
 
   -- Remove every published member before replacing an objective generation.
@@ -3100,6 +3322,12 @@ function M.new(a, reads, io)
 
   function w:places_state()
     return { state = places.state, stale = unlisted > M.K.UNLISTED_STALE }
+  end
+
+  -- Shared with adapter-owned live joins; the generated artifact was parsed
+  -- during construction and this immutable snapshot is never reloaded.
+  function w:objective_static_source_catalog()
+    return objective_catalog
   end
 
   function w:reset()

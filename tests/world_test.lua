@@ -34,7 +34,7 @@ local function P(x, y, z) return { x = x, y = y, z = z } end
 -- One fixture = fake reads + adapter + io, each call counted by name.
 local function fixture(o)
   o = o or {}
-  local f = { files = o.files or {}, dumps = {}, clock_t = 0, load_cost = 0,
+  local f = { files = o.files or {}, dumps = {}, clock_t = 0, load_cost = 0, load_n = 0,
     load_raises = {}, reads_n = {}, adapter_n = {}, fail = {}, afail = {},
     data = {
       reserved = {}, loaded = {}, sched = {}, icons = {}, msgs = {},
@@ -114,8 +114,12 @@ local function fixture(o)
 
   f.io = {
     load = function(path)
+      f.load_n = f.load_n + 1
       if f.load_raises[path] then error("fake load failure") end
-      if path == K.PLACES then f.clock_t = f.clock_t + f.load_cost end
+      if path == K.PLACES then
+        f.places_load_n = (f.places_load_n or 0) + 1
+        f.clock_t = f.clock_t + f.load_cost
+      end
       return f.files[path]
     end,
     dump = function(path, t)
@@ -6198,7 +6202,7 @@ do
   check("objective sources: missing snapshots cannot claim shop or seller availability",
     source_rows[4].provider == "shop" and source_rows[4].status == "unknown"
       and #source_rows[4].candidates == 0 and source_rows[4].reason ~= nil
-      and source_rows[5].provider == "seller" and source_rows[5].status == "unknown"
+      and source_rows[5].provider == "monster" and source_rows[5].status == "unknown"
       and #source_rows[5].candidates == 0 and source_rows[5].reason ~= nil)
 
   local source_generation_before = source_rows[1].generation
@@ -6223,34 +6227,30 @@ do
   local sw = sf.new()
   sw:refresh(0, true, { search = true, shops = true, sellers = true })
   local available = sw:objective_source_snapshots(nil, source_task)
-  check("objective sources: static shop and seller rows remain unknown without purchase proof",
-    available[4].status == "unknown" and #available[4].candidates == 0
-      and available[5].status == "unknown" and #available[5].candidates == 0)
+  check("objective sources: legacy shop and seller display rows remain unknown",
+    available[4].status == "unknown" and #available[4].candidates == 0)
   local source_generation = available[4].generation
   sf.data.shops[41][1].flag = 5
   sf.data.needs = { [100] = { { id = 379, num = 1 } } }
   sw:poke()
   sw:refresh(5, true, { search = true, shops = true, sellers = true })
   local changed_source = sw:objective_source_snapshots(nil, source_task)
-  check("objective sources: locked static rows still cannot prove eligible shop or seller stock",
+  check("objective sources: locked legacy display rows still cannot prove offer stock",
     changed_source[4].status == "unknown" and #changed_source[4].candidates == 0
-      and changed_source[5].status == "unknown" and #changed_source[5].candidates == 0
-      and changed_source[4].generation > source_generation)
+      and changed_source[4].generation == source_generation)
   sf.fail.shops = true
   sf.afail.item_needs = true
   sw:poke()
   sw:refresh(10, true, { search = true, shops = true, sellers = true })
   local stale = sw:objective_source_snapshots(nil, source_task)
-  check("objective sources: failed seller refresh discards held candidates",
-    stale[4].status == "unknown" and #stale[4].candidates == 0
-      and stale[5].status == "unknown" and #stale[5].candidates == 0
-      and stale[5].generation > changed_source[5].generation)
+  check("objective sources: failed legacy seller refresh cannot create candidates",
+    stale[4].status == "unknown" and #stale[4].candidates == 0)
   sf.fail.shops, sf.afail.item_needs = nil, nil
   sw:poke()
   sw:refresh(20, true, { search = true, shops = true, sellers = true })
   sw:input().shops[1].items[1].id = nil
   local partial = sw:objective_source_snapshots(nil, source_task)
-  check("objective sources: partial shop rows fail closed without candidates",
+  check("objective sources: partial legacy shop rows cannot create candidates",
     partial[4].status == "unknown" and #partial[4].candidates == 0
       and partial[4].reason ~= nil)
 
@@ -6469,6 +6469,192 @@ do
   check("objective routes: generation change clears published stops and old path state immediately",
     (w:input() == nil or w:input().routes == nil)
       and w.path_job == nil and w.rps[old_direct] == nil)
+end
+
+-- 40. static objective source catalog boundary
+do
+  local source_rows = {
+    { k = "item", uid = "pickup-1", id = 501, n = 2, x = 1, y = 2, z = 3,
+      src = "normal", gate = { check = 0, conditions = {
+        { kind = "quest", qid = 1234, finish = true } } } },
+    { k = "chest", uid = "chest-1", id = 10, x = 4, y = 5, z = 6,
+      items = { { id = 501, n = 3 }, { id = 502, n = 1 } }, src = "normal" },
+  }
+  local f = fixture({ files = { [K.PLACES] = places(source_rows) } })
+  local w = f.new()
+  local catalog = w:objective_static_source_catalog()
+  local same_catalog = w:objective_static_source_catalog()
+  check("static catalog: parses once and reuses immutable snapshot",
+    f.places_load_n == 1 and catalog == same_catalog and catalog.status == "ok"
+      and catalog.complete == true and catalog.generation == 1)
+  check("static catalog: typed placement and multi-output chest are exposed",
+    catalog.placements[1].uid == "pickup-1"
+      and catalog.placements[1].source_id[1] == "source"
+      and catalog.placements[1].source_id[2] == "placed"
+      and catalog.placements[1].capacity_pool_id[2] == "placed"
+      and catalog.placements[1].outputs[1].item_id == 501
+      and catalog.placements[1].outputs[1].count == 2 and catalog.placements[1].pos.x == 1
+      and catalog.placements[1].gate.conditions[1].qid == 1234
+      and catalog.chests[1].uid == "chest-1" and #catalog.chests[1].outputs == 2
+      and catalog.chests[1].source_id[2] == "chest"
+      and catalog.chests[1].outputs[2].item_id == 502)
+  local mutation_ok = pcall(function() catalog.placements[1].outputs[1].count = 900 end)
+  local nested_mutation_ok = pcall(function() catalog.chests[1].outputs[1].count = 900 end)
+  check("static catalog: returned values cannot mutate private closure catalog",
+    not mutation_ok and not nested_mutation_ok
+      and w:objective_static_source_catalog().placements[1].outputs[1].count == 2)
+  local malformed = fixture({ files = { [K.PLACES] = places({
+    { k = "item", uid = "dup", id = 501, n = 1, x = 0, y = 0, z = 0, src = "normal" },
+    { k = "item", uid = "dup", id = 502, n = 1, x = 1, y = 0, z = 1, src = "normal" },
+  }) } }):new():objective_static_source_catalog()
+  check("static catalog: duplicate identity invalidates catalog atomically",
+    malformed.status == "unknown" and malformed.complete == false
+      and #malformed.placements == 0 and #malformed.chests == 0)
+  local missing = fixture():new():objective_static_source_catalog()
+  check("static catalog: missing data is unknown and empty",
+    missing.status == "unknown" and missing.complete == false
+      and #missing.placements == 0 and #missing.chests == 0)
+  local malformed_content = fixture({ files = { [K.PLACES] = places({
+    { k = "item", uid = "bad-count", id = 501, n = 0, x = 0, y = 0, z = 0,
+      src = "normal" },
+  }) } }):new():objective_static_source_catalog()
+  check("static catalog: malformed placement quantity fails closed",
+    malformed_content.status == "unknown" and malformed_content.complete == false
+      and #malformed_content.placements == 0)
+  local malformed_chest = fixture({ files = { [K.PLACES] = places({
+    { k = "chest", uid = "bad-chest", id = 10, x = 0, y = 1, z = 2,
+      src = "normal", items = { { id = 501, n = 0 } } },
+  }) } }):new():objective_static_source_catalog()
+  check("static catalog: malformed chest output fails closed",
+    malformed_chest.status == "unknown" and malformed_chest.complete == false
+      and #malformed_chest.chests == 0)
+
+  local sf = fixture()
+  local shop_rows = { complete = true, rows = {
+    { shop_id = 7, offer_ordinal = 2, seller_cid = 20, item_id = 501, count = 1,
+      capacity_kind = "finite", unlimited = false, stock = 2, restock_readable = true,
+      released = true, talk_available = true, interactable = true, pos = P(10, 0, 20) },
+    { shop_id = 7, offer_ordinal = 2, seller_cid = 21, item_id = 501, count = 1,
+      capacity_kind = "finite", unlimited = false, stock = 2, restock_readable = true,
+      released = true, talk_available = true, interactable = true, pos = P(11, 0, 20) },
+    { shop_id = 7, offer_ordinal = 3, seller_cid = 20, item_id = 501, count = 1,
+      capacity_kind = "finite", unlimited = false, stock = 1, restock_readable = true,
+      released = true, talk_available = true, interactable = true, pos = P(10, 0, 20) },
+    { shop_id = 8, offer_ordinal = 1, seller_cid = 22, item_id = 502, count = 1,
+      capacity_kind = "unlimited", unlimited = true, restock_readable = true,
+      released = true, talk_available = true, interactable = true, pos = P(12, 0, 20) },
+    { shop_id = 8, offer_ordinal = 2, seller_cid = 22, item_id = 502, count = 1,
+      capacity_kind = "finite", unlimited = false, stock = 0, restock_readable = true,
+      released = true, talk_available = true, interactable = true, pos = P(12, 0, 20) },
+  } }
+  sf.shop_reads = 0
+  sf.reads.objective_shop_rows = function() sf.shop_reads = sf.shop_reads + 1; return shop_rows end
+  local sw = sf.new()
+  local shops = sw:objective_shop_observations()
+  local shops_reused = sw:objective_shop_observations()
+  check("shop objectives: finite and unlimited offers publish gated seller targets",
+    shops.status == "ok" and shops.complete and #shops.candidates == 4
+      and shops.candidates[1].certainty == "guaranteed"
+      and shops.candidates[1].capacity_kind == "finite"
+      and shops.candidates[4].capacity_kind == "unlimited"
+      and shops_reused.generation == shops.generation and sf.shop_reads == 1)
+  check("shop objectives: multiple sellers share one offer capacity",
+    shops.candidates[1].source_id[1] == "source"
+      and shops.candidates[1].source_id[2] == "shop_offer"
+      and shops.candidates[1].source_id[5] ~= shops.candidates[2].source_id[5]
+      and shops.candidates[1].capacity_pool_id[1] == "capacity"
+      and shops.candidates[1].capacity_pool_id[3] == shops.candidates[2].capacity_pool_id[3]
+      and shops.candidates[1].capacity_pool_id[4] == shops.candidates[2].capacity_pool_id[4]
+      and shops.candidates[1].source_id[4] ~= shops.candidates[3].source_id[4]
+      and shops.candidates[1].capacity_pool_id[4] ~= shops.candidates[3].capacity_pool_id[4]
+      and shops.candidates[1].available_acquisitions == 2
+      and shops.candidates[2].available_acquisitions == 2)
+    shop_rows.rows[1].released = false
+  shop_rows.rows[2].talk_available = false
+  shop_rows.rows[3].interactable = false
+  sw:refresh(0, true, { chests = true })
+  local interaction_gated = sw:objective_shop_observations()
+  check("shop objectives: disabled interaction excludes seller target",
+    interaction_gated.status == "ok" and #interaction_gated.candidates == 1
+      and interaction_gated.candidates[1].capacity_kind == "unlimited")
+  shop_rows.rows[3].interactable = true
+  sw:refresh(10, true, { chests = true })
+  local gated = sw:objective_shop_observations()
+  check("shop objectives: release and talk gates exclude unavailable sellers",
+    gated.status == "ok" and #gated.candidates == 2
+      and gated.candidates[2].capacity_kind == "unlimited")
+  table.remove(shop_rows.rows, 2)
+  sw:refresh(20, true, { chests = true })
+  local seller_gone = sw:objective_shop_observations()
+  check("shop objectives: disappeared seller drops only its target",
+    seller_gone.status == "ok" and #seller_gone.candidates == 2
+      and seller_gone.generation > gated.generation)
+  shop_rows.rows[2].stock = 0
+  sw:refresh(30, true, { chests = true })
+  local depleted = sw:objective_shop_observations()
+  check("shop objectives: exhausted finite offer disappears while unlimited remains",
+    depleted.status == "ok" and #depleted.candidates == 1
+      and depleted.candidates[1].capacity_kind == "unlimited")
+  shop_rows.rows[2].stock = 1
+  shop_rows.rows[2].restock_readable = false
+  sw:refresh(40, true, { chests = true })
+  local stock_unknown = sw:objective_shop_observations()
+  check("shop objectives: unreadable restock evidence invalidates all candidates",
+    stock_unknown.status == "unknown" and #stock_unknown.candidates == 0
+      and stock_unknown.generation > depleted.generation)
+  shop_rows.complete = false
+  sw:refresh(50, true, { chests = true })
+  local partial_shop = sw:objective_shop_observations()
+  check("shop objectives: partial scan invalidates all seller targets",
+    partial_shop.status == "unknown" and partial_shop.complete == false
+      and #partial_shop.candidates == 0 and partial_shop.generation > stock_unknown.generation)
+
+  local mf = fixture()
+  local monster_rows = { complete = true, rows = {
+    { uid = "live-a", drop_row_id = "drop-a", item_id = 501, count = 2, chance = 0.25,
+      alive = true, accessible = true, drop_table_readable = true, pos = P(30, 0, 40) },
+    { uid = "live-b", drop_row_id = "drop-a", item_id = 501, count = 2, chance = 0.5,
+      alive = true, accessible = true, drop_table_readable = true, pos = P(31, 0, 40) },
+    { uid = "dead", drop_row_id = "drop-a", item_id = 501, count = 2, chance = 1,
+      alive = false, accessible = true, drop_table_readable = true, pos = P(32, 0, 40) },
+    { uid = "blocked", drop_row_id = "drop-a", item_id = 501, count = 2, chance = 1,
+      alive = true, accessible = false, drop_table_readable = true, pos = P(32, 0, 40) },
+    { uid = "zero", drop_row_id = "drop-a", item_id = 501, count = 2, chance = 0,
+      alive = true, accessible = true, drop_table_readable = true, pos = P(33, 0, 40) },
+  } }
+  mf.reads.objective_monster_rows = function() return monster_rows end
+  local mw = mf.new()
+  local monsters = mw:objective_monster_observations()
+  check("monster objectives: live instances publish probabilistic drops with stable identities",
+    monsters.status == "ok" and #monsters.candidates == 2
+      and monsters.candidates[1].certainty == "probabilistic"
+      and monsters.candidates[1].probability == 0.25
+      and monsters.candidates[1].source_id[3] ~= monsters.candidates[2].source_id[3])
+  monster_rows.rows[2].drop_table_readable = false
+  mw:refresh(0, true, { chests = true })
+  local partial_monsters = mw:objective_monster_observations()
+  check("monster objectives: unreadable drop table clears whole snapshot",
+    partial_monsters.status == "unknown" and #partial_monsters.candidates == 0
+      and partial_monsters.generation > monsters.generation)
+
+  local integrated = fixture()
+  integrated.reads.objective_shop_rows = function() return { complete = true, rows = {
+    { shop_id = 9, offer_ordinal = 4, seller_cid = 30, item_id = 501, count = 1,
+      capacity_kind = "finite", unlimited = false, stock = 1, restock_readable = true,
+      released = true, talk_available = true, interactable = true, pos = P(50, 0, 60) },
+  } } end
+  integrated.reads.objective_monster_rows = function() return { complete = true, rows = {
+    { uid = "live-c", drop_row_id = "drop-c", item_id = 502, count = 1, chance = 0.3,
+      alive = true, accessible = true, drop_table_readable = true, pos = P(70, 0, 80) },
+  } } end
+  local integrated_world = integrated.new()
+  local joined = integrated_world:objective_source_snapshots(nil,
+    { need_generation = 44, quests = {} })
+  check("objective source snapshot: world-owned shop and monster rows use shared provider contract",
+    joined[4].provider == "shop" and joined[4].status == "ok"
+      and joined[4].candidates[1].source_id[2] == "shop_offer"
+      and joined[5].provider == "monster" and joined[5].status == "ok"
+      and joined[5].candidates[1].certainty == "probabilistic")
 end
 
 if failures > 0 then os.exit(1) end
