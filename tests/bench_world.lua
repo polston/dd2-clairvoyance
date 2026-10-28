@@ -280,13 +280,15 @@ local function source_bench(label, count, task)
     shop_reads - reads_before))
 end
 source_bench("no focused need", 60,
-  { need_generation = 1, focused_item_ids = {}, expected_rows = 0 })
+  { need_generation = 1, focused_item_ids = {}, quests = { { qid = 1, task_index = 1 } },
+    expected_rows = 0 })
 local focused_items = {}
 for i = 100, 109 do focused_items[i] = true end
 local expected_rows = 0
 for i = 1, 60 do if focused_items[100 + (i % 40)] then expected_rows = expected_rows + 1 end end
 source_bench("representative focused needs", 60,
-  { need_generation = 2, focused_item_ids = focused_items, expected_rows = expected_rows })
+  { need_generation = 2, focused_item_ids = focused_items,
+    quests = { { qid = 1, task_index = 1 } }, expected_rows = expected_rows })
 
 local monster_rows, monster_reads = {}, 0
 for i = 1, 100 do
@@ -331,11 +333,13 @@ local function monster_bench(label, task)
     label, #monster_rows, task.expected_rows, median(provider_samples), maximum,
     median(samples), monster_reads - reads_before))
 end
-local monster_empty = { need_generation = 3, focused_item_ids = {}, expected_rows = 0 }
+local monster_empty = { need_generation = 3, focused_item_ids = {},
+  quests = { { qid = 1, task_index = 1 } }, expected_rows = 0 }
 monster_bench("no focused need", monster_empty)
 local monster_expected = 0
 for _, row in ipairs(monster_rows) do
   if focused_items[row.item_id] then monster_expected = monster_expected + 1 end
 end
 monster_bench("representative focused needs", { need_generation = 4,
-  focused_item_ids = focused_items, expected_rows = monster_expected })
+  focused_item_ids = focused_items, quests = { { qid = 1, task_index = 1 } },
+  expected_rows = monster_expected })

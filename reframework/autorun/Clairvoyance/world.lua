@@ -416,7 +416,8 @@ function M.new(a, reads, io)
           if r.src == "subquest" or r.src == "mainquest" or r.phase ~= nil or r.gate ~= nil then
             new_conditional[uid] = true
           end
-        elseif normal_src(r.src) then
+        elseif r.k == "chest" or normal_src(r.src) then
+          local legacy_visible = normal_src(r.src)
           local e = { k = r.k, id = id, x = x, y = y, z = z, src = "file" }
           if r.k == "chest" and type(r.items) == "table" then
             if not dense_array(r.items) or #r.items == 0 then
@@ -463,7 +464,7 @@ function M.new(a, reads, io)
                 pos = { x = x, y = y, z = z }, gate = r.gate }
             end
           end
-          if r.k ~= "item" then new_static[uid] = e end
+          if legacy_visible and r.k ~= "item" then new_static[uid] = e end
         end
       end
     end
@@ -2649,7 +2650,7 @@ function M.new(a, reads, io)
     local generation = type(task_snapshot) == "table" and task_snapshot.need_generation or nil
     local valid_task = type(generation) == "number" and math.type(generation) == "integer"
       and generation > 0 and type(task_snapshot.quests) == "table"
-      and array(task_snapshot.quests) ~= nil
+      and array(task_snapshot.quests) ~= nil and #task_snapshot.quests > 0
     local providers, rows_by_provider = {}, {}
     local ok, base = false, nil
     if valid_task and type(a.objective_item_source_snapshots) == "function" then
@@ -2726,6 +2727,33 @@ function M.new(a, reads, io)
   local function objective_live_sources(provider, read_name, normalize, task_snapshot)
     local need_generation = type(task_snapshot) == "table"
       and to_int(task_snapshot.need_generation) or nil
+    local task_quests = type(task_snapshot) == "table" and task_snapshot.quests or nil
+    local owns_current_work = need_generation ~= nil and need_generation > 0
+      and type(task_quests) == "table" and #task_quests > 0
+    if owns_current_work then
+      local count = 0
+      for k in pairs(task_quests) do
+        if type(k) ~= "number" or math.type(k) ~= "integer" or k < 1 or k > #task_quests then
+          owns_current_work = false; break
+        end
+        count = count + 1
+      end
+      owns_current_work = owns_current_work and count == #task_quests
+    end
+    if not owns_current_work then
+      S.objective_live_source_cache[provider] = nil
+      local evidence = { status = "unknown", reason = "current_work_unavailable" }
+      local key = "world-" .. provider
+      local state = S.objective_source_observations[key]
+      local generation = state and state.generation or 1
+      if state ~= nil and not objective_same(state.value, evidence) then
+        generation = math.min(2147483647, generation + 1)
+      end
+      S.objective_source_observations[key] = { generation = generation,
+        value = objective_clone(evidence) }
+      return { provider = provider, status = "unknown", complete = false,
+        generation = generation, reason = evidence.reason, candidates = {} }
+    end
     local cached = S.objective_live_source_cache[provider]
     if cached ~= nil and cached.round == last_round
       and cached.need_generation == need_generation then return objective_clone(cached.value) end
@@ -2796,6 +2824,7 @@ function M.new(a, reads, io)
   end
 
   function w:objective_shop_observations(task_snapshot)
+    local offers = {}
     return objective_live_sources("shop", "objective_shop_rows", function(row)
       if type(row) ~= "table" then return nil, "shop_row_malformed" end
       local sid, ordinal, cid = to_int(row.shop_id), to_int(row.offer_ordinal), to_int(row.seller_cid)
@@ -2809,6 +2838,7 @@ function M.new(a, reads, io)
         or type(row.interactable) ~= "boolean" or type(row.restock_readable) ~= "boolean" then
         return nil, "shop_gate_unreadable"
       end
+      if not row.restock_readable then return nil, "shop_stock_unreadable" end
       local capacity_kind, available
       if row.capacity_kind == "unlimited" and row.unlimited == true then
         capacity_kind = "unlimited"
@@ -2817,6 +2847,18 @@ function M.new(a, reads, io)
         capacity_kind, available = "finite", row.stock
       else
         return nil, "shop_stock_unreadable"
+      end
+      local by_ordinal = offers[sid]
+      if by_ordinal == nil then by_ordinal = {}; offers[sid] = by_ordinal end
+      local signature = { item_id, count, capacity_kind, row.unlimited,
+        row.restock_readable, available }
+      local prior = by_ordinal[ordinal]
+      if prior ~= nil then
+        for i, value in ipairs(signature) do
+          if prior[i] ~= value then return nil, "shop_offer_capacity_conflict" end
+        end
+      else
+        by_ordinal[ordinal] = signature
       end
       if not row.released or not row.talk_available or not row.interactable
         or (capacity_kind == "finite" and available == 0) then return false end
@@ -2829,7 +2871,7 @@ function M.new(a, reads, io)
         capacity_pool_id = pool_id, capacity_kind = capacity_kind,
         available_acquisitions = available, certainty = "guaranteed",
         eligibility = "eligible", evidence = { released = true, talk_available = true,
-          interactable = true, restock_readable = true } }
+          interactable = true, restock_readable = row.restock_readable } }
     end, task_snapshot)
   end
 
@@ -2859,7 +2901,7 @@ function M.new(a, reads, io)
           y = row.pos.y, z = row.pos.z } },
         outputs = { { item_id = item_id, count = count } },
         capacity_pool_id = { "capacity", "monster_drop", row.uid, drop_id },
-        available_acquisitions = 1, certainty = "probabilistic",
+        capacity_kind = "finite", available_acquisitions = 1, certainty = "probabilistic",
         probability = row.chance, eligibility = "eligible",
         evidence = { alive = true, accessible = true, drop_table_readable = true } }
     end, task_snapshot)
