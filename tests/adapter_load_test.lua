@@ -374,18 +374,18 @@ do
   local aux = { talk_grant = talk_observation, forgery = forgery_observation }
   local first = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, aux)
   local repeated = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, aux)
-  assert(first[4].reason == "talk_grant_reachable_state_unproven"
-    and first[5].reason == "forgery_mapping_enablement_unproven"
-    and repeated[4].generation == first[4].generation
-    and repeated[5].generation == first[5].generation,
+  assert(first[5].reason == "talk_grant_reachable_state_unproven"
+    and first[6].reason == "forgery_mapping_enablement_unproven"
+    and repeated[5].generation == first[5].generation
+    and repeated[6].generation == first[6].generation,
     "identical production observations keep independent provider generations stable")
   local changed_aux = { talk_grant = {
       complete = true, wanted = { 29 }, events = {} },
     forgery = forgery_observation }
   local changed = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, changed_aux)
-  assert(changed[4].generation == first[4].generation + 1
-    and changed[4].status == "ok" and #changed[4].candidates == 0
-    and changed[5].generation == first[5].generation,
+  assert(changed[5].generation == first[5].generation + 1
+    and changed[5].status == "ok" and #changed[5].candidates == 0
+    and changed[6].generation == first[6].generation,
     "a changed talk observation advances only talk generation and leaves no stale candidate")
 end
 
@@ -593,27 +593,38 @@ end
 local empty_source_snapshots = a.objective_item_source_snapshots()
 assert(type(a.objective_forgery_evidence) == "function"
   and a.objective_forgery_candidate == nil, "forgery helper must be evidence-only")
-assert(#empty_source_snapshots == 5 and empty_source_snapshots[1].provider == "placed"
+assert(#empty_source_snapshots == 6 and empty_source_snapshots[1].provider == "placed"
   and empty_source_snapshots[2].provider == "chest" and empty_source_snapshots[3].provider == "loot"
   and empty_source_snapshots[1].status == "unknown"
   and empty_source_snapshots[1].complete == false
   and empty_source_snapshots[1].reason == "source_catalog_unavailable"
   and empty_source_snapshots[2].complete == false
   and empty_source_snapshots[2].reason == "source_catalog_unavailable"
-  and empty_source_snapshots[4].provider == "talk_grant"
+  and empty_source_snapshots[4].provider == "reward"
   and empty_source_snapshots[4].status == "unknown"
   and empty_source_snapshots[4].complete == false
-  and empty_source_snapshots[4].reason == "objective_need_snapshot_incomplete"
+  and empty_source_snapshots[4].reason == "reward_snapshot_refresh_pending"
   and #empty_source_snapshots[4].candidates == 0
-  and empty_source_snapshots[4].generation > 0
-  and empty_source_snapshots[5].provider == "forgery"
+  and empty_source_snapshots[5].provider == "talk_grant"
   and empty_source_snapshots[5].status == "unknown"
   and empty_source_snapshots[5].complete == false
   and empty_source_snapshots[5].reason == "objective_need_snapshot_incomplete"
   and #empty_source_snapshots[5].candidates == 0
+  and empty_source_snapshots[5].generation > 0
+  and empty_source_snapshots[6].provider == "forgery"
+  and empty_source_snapshots[6].status == "unknown"
+  and empty_source_snapshots[6].complete == false
+  and empty_source_snapshots[6].reason == "objective_need_snapshot_incomplete"
+  and #empty_source_snapshots[6].candidates == 0
+  and empty_source_snapshots[6].generation > 0
   and empty_source_snapshots[1].generation > 0
   and empty_source_snapshots[2].generation > 0 and empty_source_snapshots[3].generation > 0,
-  "source envelopes initialize with separate positive generations")
+  "source envelopes initialize with separate positive generations: "
+    .. tostring(#empty_source_snapshots) .. "/"
+    .. tostring(empty_source_snapshots[2] and empty_source_snapshots[2].reason) .. "/"
+    .. tostring(empty_source_snapshots[4] and empty_source_snapshots[4].reason) .. "/"
+    .. tostring(empty_source_snapshots[5] and empty_source_snapshots[5].reason) .. "/"
+    .. tostring(empty_source_snapshots[6] and empty_source_snapshots[6].reason))
 
 -- Pickup/chest classification is pure over one complete static catalog and
 -- one atomic adapter observation.  The live reader feeds this same contract.
@@ -4281,7 +4292,53 @@ do
     incomplete_possible = true, operator = 0, groups = { { index = 0,
       item_ids = { 9002 }, count = 1, is_all_item = true, is_infinite = false,
       ignore_restriction_items = {} } } } } }
+  local reward_fixture = {}
+  reward_fixture.diagnostic = function(qid, proc_id, hash)
+    return { family = "quest_reward", quest_id = qid,
+      source_identity = { quest_id = qid, processor_id = proc_id, action_ordinal = 0 },
+      reward_rows = { { ordinal = 0, name_hash = hash } }, branch_status = "unverified",
+      task_endpoint_join = { status = "unproven",
+        reason = "journal_task_to_drawable_reward_endpoint_unverified" },
+      unresolved_joins = { "journal_task_to_reward_endpoint", "reward_action_to_drawable_target",
+        "current_branch_truth", "claim_state", "runtime_reward_hash_to_item_count" } }
+  end
+  own_catalog.quests[888] = { reward_diagnostics = { reward_fixture.diagnostic(888, 40, 77) } }
+  own_catalog.quests[889] = { reward_diagnostics = { reward_fixture.diagnostic(889, 41, 78) } }
+  reward_fixture.scans = { entries = 0, processors = 0 }
+  reward_fixture.sequence = function(rows, scan_name)
+    return { get_elements = function()
+      if scan_name then reward_fixture.scans[scan_name] = reward_fixture.scans[scan_name] + 1 end
+      return rows
+    end }
+  end
+  reward_fixture.managed = function(fields, calls)
+    return { get_field = function(_, name) return fields[name] end,
+      call = function(_, name) return calls and calls[name] end }
+  end
+  reward_fixture.entries = reward_fixture.sequence({
+    reward_fixture.managed({ key = 77, value = reward_fixture.managed({ _ItemList = reward_fixture.sequence({
+      reward_fixture.managed({ _ItemId = 9001, _Num = 2 }) }) }), next = -1 }),
+    reward_fixture.managed({ next = -2 }),
+    reward_fixture.managed({ key = 78, value = reward_fixture.managed({ _ItemList = reward_fixture.sequence({
+      reward_fixture.managed({ _ItemId = 9999, _Num = 1 }) }) }), next = -1 }),
+  }, "entries")
+  reward_fixture.previous_singleton = sdk.get_managed_singleton
+  reward_fixture.calls = { get_Count = 2 }
+  sdk.get_managed_singleton = function(name)
+    if name == "app.QuestManager" then return reward_fixture.managed({
+      RewardDict = reward_fixture.managed({ _entries = reward_fixture.entries,
+        _count = 3, _freeCount = 1 }, reward_fixture.calls),
+      DistributedQuestProcessors = reward_fixture.sequence({
+        reward_fixture.managed({ ProcID = 40 }), reward_fixture.managed({ ProcID = 41 }) }, "processors") }) end
+    return reward_fixture.previous_singleton(name)
+  end
+  reward_fixture.previous_need_groups = ai.objective_need_groups
+  ai.objective_need_groups = function()
+    return { status = "ok", complete = true, groups = { { options = { { item_id = 9001 } } } } }
+  end
+  own_catalog.quests[890] = { reward_diagnostics = { false } }
   local owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  reward_fixture.original_need_generation = owned_snapshot.need_generation
   local owned = owned_snapshot.quests[1].item_ownership
   assert(#owned == 2 and owned[1].item_id == 9001 and owned[1].count == nil
     and owned[1].proof_kind == "condition" and owned[1].eligibility == "unknown"
@@ -4295,24 +4352,81 @@ do
     and owned[1].item_id ~= 9002,
     "objective task owner preserves delivery groups and does not flatten alternatives")
   local source_snapshots = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
-  assert(#source_snapshots == 5 and source_snapshots[1].provider == "placed"
+  assert(source_snapshots[4].provider == "reward" and source_snapshots[4].status == "unknown"
+    and source_snapshots[4].reward_runtime_complete == true
+    and #source_snapshots[4].candidates == 0 and #source_snapshots[4].diagnostic_rows == 1
+    and source_snapshots[4].diagnostic_rows[1].qid == 888
+    and source_snapshots[4].diagnostic_rows[1].processor_present == true
+    and source_snapshots[4].diagnostic_rows[1].outputs[1].item_id == 9001
+    and source_snapshots[4].diagnostic_rows[1].outputs[1].count == 2,
+    "reward diagnostics join matching nonfocused reward output and runtime processor without eligibility")
+  reward_fixture.first_generation = source_snapshots[4].generation
+  reward_fixture.reads_after_first = reward_fixture.scans.entries + reward_fixture.scans.processors
+  assert(#ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].diagnostic_rows == 1
+    and reward_fixture.scans.entries + reward_fixture.scans.processors == reward_fixture.reads_after_first
+    and ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].generation
+      == reward_fixture.first_generation,
+    "same-task reward snapshot reuses cached diagnostics inside the half-second window")
+  owned_snapshot.quests[1].task_index = owned_snapshot.quests[1].task_index + 1
+  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
+      == "reward_snapshot_refresh_pending"
+    and #ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].diagnostic_rows == 0
+    and reward_fixture.scans.entries == 1 and reward_fixture.scans.processors == 1,
+    "task change invalidates old reward diagnostics and respects scan cadence")
+  iclk = iclk + 0.6
+  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].generation
+      > source_snapshots[4].generation
+    and reward_fixture.scans.entries == 2 and reward_fixture.scans.processors == 2,
+    "task change refreshes reward diagnostics after the cadence window")
+  owned_snapshot.quests[1].task_index = owned_snapshot.quests[1].task_index - 1
+  owned_snapshot.need_generation = owned_snapshot.need_generation + 1
+  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
+      == "reward_snapshot_refresh_pending"
+    and #ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].diagnostic_rows == 0,
+    "need change does not reuse stale reward diagnostics")
+  iclk = iclk + 0.6
+  ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
+  assert(reward_fixture.scans.entries == 3 and reward_fixture.scans.processors == 3,
+    "need change refreshes reward diagnostics after the cadence window")
+  reward_fixture.calls.get_Count = 1
+  owned_snapshot.need_generation = owned_snapshot.need_generation + 1
+  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
+      == "reward_snapshot_refresh_pending",
+    "changed need set waits for the bounded runtime scan")
+  iclk = iclk + 0.6
+  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
+      == "reward_runtime_scan_incomplete"
+    and #ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].candidates == 0,
+    "inconsistent RewardDict count fails closed")
+  assert(reward_fixture.scans.entries == 4 and reward_fixture.scans.processors == 4,
+    "incomplete runtime observation is cached inside the half-second window")
+  owned_snapshot.need_generation = reward_fixture.original_need_generation
+  ai.objective_need_groups = reward_fixture.previous_need_groups
+  sdk.get_managed_singleton = reward_fixture.previous_singleton
+  assert(#source_snapshots == 6 and source_snapshots[1].provider == "placed"
     and source_snapshots[2].provider == "chest" and source_snapshots[3].provider == "loot"
     and source_snapshots[1].status == "unknown"
     and source_snapshots[1].complete == false
     and source_snapshots[1].reason == "source_catalog_unavailable"
     and source_snapshots[2].complete == false
     and source_snapshots[2].reason == "source_catalog_unavailable"
-    and source_snapshots[4].provider == "talk_grant"
+    and source_snapshots[4].provider == "reward"
     and source_snapshots[4].status == "unknown"
     and source_snapshots[4].complete == false
-    and source_snapshots[4].reason == "objective_need_snapshot_incomplete"
+    and source_snapshots[4].reason == "reward_task_branch_and_claim_gates_unproven"
     and #source_snapshots[4].candidates == 0
     and source_snapshots[4].generation > 0
-    and source_snapshots[5].provider == "forgery"
+    and source_snapshots[5].provider == "talk_grant"
     and source_snapshots[5].status == "unknown"
-    and source_snapshots[5].reason == "objective_need_snapshot_incomplete"
+    and source_snapshots[5].complete == false
+    and source_snapshots[5].reason == "talk_grant_catalog_unreadable"
     and #source_snapshots[5].candidates == 0
     and source_snapshots[5].generation > 0
+    and source_snapshots[6].provider == "forgery"
+    and source_snapshots[6].status == "unknown"
+    and source_snapshots[6].reason == "forgery_service_catalog_unreadable"
+    and #source_snapshots[6].candidates == 0
+    and source_snapshots[6].generation > 0
     and source_snapshots[1].generation > 0
     and source_snapshots[1].catalog_version == 2
     and #source_snapshots[1].source_descriptors == 2

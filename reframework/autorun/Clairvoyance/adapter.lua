@@ -5032,7 +5032,7 @@ function A.make()
     source_generation = 1, source_catalog = nil, source_observation = nil,
     source_at = -math.huge, talk_generation = 1, talk_observation = nil,
     talk_at = -math.huge, forgery_generation = 1, forgery_observation = nil,
-    forgery_at = -math.huge }
+    forgery_at = -math.huge, reward_observation = nil }
   local LOC_KINDS = { "placed", "box", "drop" }   -- item_locations order
   a.overhead_block_reason = A.overhead_block_reason
   function a.acceptable_ids()
@@ -5668,6 +5668,11 @@ function A.make()
       objective_task_state.talk_at, objective_task_state.forgery_at = -math.huge, -math.huge
       objective_task_state.talk_generation = objective_task_state.talk_generation + 1
       objective_task_state.forgery_generation = objective_task_state.forgery_generation + 1
+      if objective_task_state.reward_observation ~= nil then
+        objective_task_state.reward_observation.owner = nil
+        objective_task_state.reward_observation.signature = nil
+        objective_task_state.reward_observation.data = nil
+      end
     end
     local focus, focus_seen = {}, {}
     for _, qid in ipairs(type(focus_qids) == "table" and focus_qids or {}) do
@@ -5885,6 +5890,194 @@ function A.make()
     local forgery_observation, forgery_generation = provider_observation("forgery")
     local talk = A.objective_talk_grant_provider_snapshot(talk_observation, talk_generation)
     local forgery = A.objective_forgery_provider_snapshot(forgery_observation, forgery_generation)
+    -- Quest reward diagnostics are joined to the live RewardDict and processor
+    -- list only to explain possible outputs. The task endpoint, branch truth,
+    -- and claim state are not observable here, so this provider never emits a
+    -- candidate (SPEC 22.9.5). Cache this bounded join so the map path cannot
+    -- walk hundreds of managed rows every frame.
+    local signature_parts = { tostring(type(task_snapshot) == "table" and task_snapshot.focus_epoch or 0),
+      tostring(type(task_snapshot) == "table" and task_snapshot.need_generation or 0),
+      tostring(version), tostring(extension) }
+    for _, quest in ipairs(type(task_snapshot) == "table" and task_snapshot.quests or {}) do
+      if type(quest) == "table" then
+        signature_parts[#signature_parts + 1] = tostring(quest.qid) .. ":"
+          .. tostring(quest.task_index) .. ":" .. tostring(quest.read_status)
+      end
+    end
+    local wanted_ids = {}
+    for item_id in pairs(wanted or {}) do wanted_ids[#wanted_ids + 1] = item_id end
+    table.sort(wanted_ids)
+    for _, item_id in ipairs(wanted_ids) do signature_parts[#signature_parts + 1] = tostring(item_id) end
+    local reward_signature = table.concat(signature_parts, "|")
+    local function same_plain(left, right)
+      if type(left) ~= type(right) then return false end
+      if type(left) ~= "table" then return left == right end
+      for key, value in pairs(left) do if not same_plain(value, right[key]) then return false end end
+      for key in pairs(right) do if left[key] == nil then return false end end
+      return true
+    end
+    local reward_observation = objective_task_state.reward_observation
+    local reward_now = os.clock()
+    local reward_key_changed = reward_observation ~= nil
+      and (reward_observation.owner ~= objective_task_state.owner
+        or reward_observation.signature ~= reward_signature)
+    local reward_refresh_due = reward_observation == nil or reward_now - reward_observation.at >= 0.5
+    local reward_refresh_pending = reward_key_changed and not reward_refresh_due
+    if reward_refresh_due then
+      local function scan_reward_sources()
+        local reward_outputs, reward_runtime, reward_rows = {}, {}, {}
+        local reward_complete = true
+        local function bounded_elements(array, cap)
+          local ok, values = pcall(function() return array:get_elements() end)
+          if not ok or values == nil then return nil end
+          local count_ok, count = pcall(function() return #values end)
+          if not count_ok or type(count) ~= "number" or count < 0 or count > cap then return nil end
+          local out = {}
+          for i = 1, count do
+            local row_ok, row = pcall(function() return values[i] end)
+            if not row_ok or row == nil then return nil end
+            out[i] = row
+          end
+          return out
+        end
+        local qm = nil
+        pcall(function() qm = sdk.get_managed_singleton("app.QuestManager") end)
+        local reward_dict = safe_field(qm, "RewardDict")
+        local dict_entries = bounded_elements(safe_field(reward_dict, "_entries"), 512)
+        local dict_count = A.count_of(int_value(safe_call(reward_dict, "get_Count")))
+        local dict_used = A.count_of(int_value(safe_field(reward_dict, "_count")))
+        local dict_free = A.count_of(int_value(safe_field(reward_dict, "_freeCount")))
+        if dict_entries == nil or dict_count == nil or dict_used == nil or dict_free == nil
+            or dict_used > #dict_entries or dict_used > 512
+            or dict_count + dict_free ~= dict_used then
+          reward_complete = false
+        else
+          local active, free = 0, 0
+          for i = 1, dict_used do
+            local entry = dict_entries[i]
+            local next_slot = int_value(safe_field(entry, "next") or safe_field(entry, "Next"))
+            if next_slot == nil or math.tointeger(next_slot) ~= next_slot then
+              reward_complete = false
+            elseif next_slot < -1 then
+              free = free + 1
+            else
+              active = active + 1
+              local hash = int_value(safe_field(entry, "key") or safe_field(entry, "Key"))
+              local reward = safe_field(entry, "value") or safe_field(entry, "Value")
+              local rows = bounded_elements(safe_field(reward, "_ItemList"), 32)
+            if type(hash) ~= "number" or math.tointeger(hash) ~= hash
+                or hash < 0 or hash > 4294967295 or rows == nil
+                or reward_outputs[hash] ~= nil then
+                reward_complete = false
+              else
+                local outputs = {}
+                for _, row in ipairs(rows) do
+                  local item_id, count = int_value(safe_field(row, "_ItemId")),
+                    int_value(safe_field(row, "_Num"))
+                  if type(item_id) ~= "number" or math.tointeger(item_id) ~= item_id or item_id <= 0
+                      or type(count) ~= "number" or math.tointeger(count) ~= count or count <= 0 then
+                    reward_complete = false
+                  else
+                    outputs[#outputs + 1] = { item_id = item_id, count = count }
+                  end
+                end
+                reward_outputs[hash] = outputs
+              end
+            end
+          end
+          if active ~= dict_count or free ~= dict_free then reward_complete = false end
+        end
+        local processors = bounded_elements(safe_field(qm, "DistributedQuestProcessors"), 512)
+        if processors == nil then reward_complete = false else
+          for _, processor in ipairs(processors) do
+            local proc_id = int_value(safe_field(processor, "ProcID"))
+            if proc_id ~= nil and math.tointeger(proc_id) == proc_id
+                and proc_id >= 0 and proc_id <= 4294967295 and reward_runtime[proc_id] == nil then
+              local process = safe_field(processor, "Process")
+              local action = safe_field(process, "QuestAction")
+              local action_type = nil
+              pcall(function()
+                local definition = action and action:get_type_definition() or nil
+                action_type = definition and definition:get_full_name() or nil
+              end)
+              reward_runtime[proc_id] = { qid = int_value(safe_call(process, "get_QuestID")),
+                action_type = action_type, executed = safe_call(process, "get_Executed"),
+                canceled = safe_call(process, "get_Canceled") }
+            else
+              reward_complete = false
+            end
+          end
+        end
+        local focus_qids = {}
+        for _, quest in ipairs(type(task_snapshot) == "table" and task_snapshot.quests or {}) do
+          if type(quest) == "table" and type(quest.qid) == "number" then focus_qids[quest.qid] = true end
+        end
+        local reward_catalog = type(extension) == "table" and extension.quests or nil
+        if type(reward_catalog) == "table" then
+          for qid, quest in pairs(reward_catalog) do
+            for _, diagnostic in ipairs(type(quest) == "table" and quest.reward_diagnostics or {}) do
+              if type(diagnostic) == "table" then
+                local identity = diagnostic.source_identity
+                local proc_id = type(identity) == "table" and identity.processor_id or nil
+                local runtime = type(proc_id) == "number" and reward_runtime[proc_id] or nil
+                local relevant, mapped = false, {}
+                for _, reward_row in ipairs(type(diagnostic.reward_rows) == "table"
+                    and diagnostic.reward_rows or {}) do
+                  local outputs = type(reward_row) == "table"
+                    and reward_outputs[reward_row.name_hash] or nil
+                  for _, output in ipairs(outputs or {}) do
+                    if wanted and wanted[output.item_id] then
+                      relevant = true
+                      mapped[#mapped + 1] = { item_id = output.item_id, count = output.count }
+                    end
+                  end
+                end
+                if focus_qids[qid] or relevant then
+                  local detail = { qid = qid, action_ordinal = identity
+                    and identity.action_ordinal or nil, processor_id = proc_id,
+                    processor_present = runtime ~= nil,
+                    runtime_qid = runtime and runtime.qid or nil,
+                    runtime_action_type = runtime and runtime.action_type or nil,
+                    focused_quest = focus_qids[qid] == true,
+                    outputs = mapped, branch_status = diagnostic.branch_status,
+                    task_endpoint_join = copy(diagnostic.task_endpoint_join),
+                    unresolved_joins = copy(diagnostic.unresolved_joins), eligibility = "unknown" }
+                  if runtime ~= nil then
+                    detail.runtime_executed, detail.runtime_canceled = runtime.executed, runtime.canceled
+                  end
+                  reward_rows[#reward_rows + 1] = detail
+                end
+              end
+            end
+          end
+        end
+        return { complete = reward_complete, rows = reward_rows }
+      end
+      local observed = scan_reward_sources()
+      local observed_at = os.clock()
+      local changed = reward_observation == nil or reward_observation.owner ~= objective_task_state.owner
+        or reward_observation.signature ~= reward_signature
+        or not same_plain(reward_observation.data, observed)
+      reward_observation = { owner = objective_task_state.owner, signature = reward_signature,
+        at = observed_at, generation = changed and ((reward_observation and reward_observation.generation or 0) + 1)
+          or reward_observation.generation, data = observed }
+      objective_task_state.reward_observation = reward_observation
+    end
+    local reward_data = reward_refresh_pending and { complete = false, rows = {} }
+      or (reward_observation and reward_observation.data or { complete = false, rows = {} })
+    providers[#providers + 1] = { provider = "reward", generation = reward_observation.generation,
+      status = "unknown", complete = false,
+      reason = reward_refresh_pending and "reward_snapshot_refresh_pending"
+        or (not reward_data.complete and "reward_runtime_scan_incomplete")
+        or (wanted == nil and "reward_current_need_set_unproven"
+          or "reward_task_branch_and_claim_gates_unproven"),
+      missing_evidence = { "journal_task_to_reward_endpoint", "current_branch_truth",
+        "claim_state", "reward_action_to_drawable_target" },
+      candidates = {}, diagnostic_rows = copy(reward_data.rows),
+      reward_runtime_complete = reward_data.complete,
+      focused_item_count = wanted and (function()
+        local count = 0; for _ in pairs(wanted) do count = count + 1 end; return count
+      end)() or 0, catalog_version = version }
     for _, provider in ipairs({ talk, forgery }) do
       provider.catalog_version = version
       provider.source_descriptors = copy(descriptors)
@@ -6001,6 +6194,11 @@ function A.make()
       objective_task_state.talk_at, objective_task_state.forgery_at = -math.huge, -math.huge
       objective_task_state.talk_generation = objective_task_state.talk_generation + 1
       objective_task_state.forgery_generation = objective_task_state.forgery_generation + 1
+      if objective_task_state.reward_observation ~= nil then
+        objective_task_state.reward_observation.owner = nil
+        objective_task_state.reward_observation.signature = nil
+        objective_task_state.reward_observation.data = nil
+      end
       return true
     end
     return false
