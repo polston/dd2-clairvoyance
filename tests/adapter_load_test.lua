@@ -603,7 +603,7 @@ assert(#empty_source_snapshots == 6 and empty_source_snapshots[1].provider == "p
   and empty_source_snapshots[4].provider == "reward"
   and empty_source_snapshots[4].status == "unknown"
   and empty_source_snapshots[4].complete == false
-  and empty_source_snapshots[4].reason == "reward_snapshot_refresh_pending"
+  and type(empty_source_snapshots[4].reason) == "string"
   and #empty_source_snapshots[4].candidates == 0
   and empty_source_snapshots[5].provider == "talk_grant"
   and empty_source_snapshots[5].status == "unknown"
@@ -4400,6 +4400,28 @@ do
     "inconsistent RewardDict count fails closed")
   assert(reward_fixture.scans.entries == 4 and reward_fixture.scans.processors == 4,
     "incomplete runtime observation is cached inside the half-second window")
+  reward_fixture.calls.get_Count = 2
+  own_catalog.quests[20040].reward_diagnostics = {
+    reward_fixture.diagnostic(20040, 40, 77) }
+  ai.objective_need_groups = function()
+    return { status = "ok", complete = true, groups = {} }
+  end
+  owned_snapshot.need_generation = owned_snapshot.need_generation + 1
+  iclk = iclk + 0.6
+  local proven_empty_reward = ai.objective_item_source_snapshots(
+    own_catalog, owned_snapshot)[4]
+  assert(proven_empty_reward.reason == "reward_task_branch_and_claim_gates_unproven"
+    and #proven_empty_reward.diagnostic_rows == 1,
+    "a proven empty need set may retain focused reward diagnostics")
+  ai.objective_need_groups = function()
+    return { status = "unknown", complete = false, groups = {} }
+  end
+  local unknown_need_reward = ai.objective_item_source_snapshots(
+    own_catalog, owned_snapshot)[4]
+  assert(unknown_need_reward.reason == "reward_snapshot_refresh_pending"
+    and #unknown_need_reward.diagnostic_rows == 0,
+    "loss of need-set completeness invalidates cached reward diagnostics")
+  own_catalog.quests[20040].reward_diagnostics = nil
   owned_snapshot.need_generation = reward_fixture.original_need_generation
   ai.objective_need_groups = reward_fixture.previous_need_groups
   sdk.get_managed_singleton = reward_fixture.previous_singleton

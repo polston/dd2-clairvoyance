@@ -5897,7 +5897,7 @@ function A.make()
     -- walk hundreds of managed rows every frame.
     local signature_parts = { tostring(type(task_snapshot) == "table" and task_snapshot.focus_epoch or 0),
       tostring(type(task_snapshot) == "table" and task_snapshot.need_generation or 0),
-      tostring(version), tostring(extension) }
+      tostring(version), tostring(extension), wanted == nil and "needs:unknown" or "needs:complete" }
     for _, quest in ipairs(type(task_snapshot) == "table" and task_snapshot.quests or {}) do
       if type(quest) == "table" then
         signature_parts[#signature_parts + 1] = tostring(quest.qid) .. ":"
