@@ -5798,6 +5798,7 @@ function A.make()
     end
     local now = os.clock()
     local observation = supplied_source_observation
+    local source_scanned = false
     if observation == nil and type(source_catalog) == "table" then
       if objective_task_state.source_catalog == source_catalog
           and objective_task_state.source_observation ~= nil
@@ -5805,6 +5806,7 @@ function A.make()
         observation = objective_task_state.source_observation
       else
         observation = A.read_objective_source_observation(source_catalog)
+        source_scanned = true
       end
     end
     if objective_task_state.source_catalog ~= source_catalog
@@ -5817,7 +5819,7 @@ function A.make()
       objective_task_state.source_catalog = source_catalog
       objective_task_state.source_observation = copy(observation)
     end
-    objective_task_state.source_at = now
+    if source_scanned then objective_task_state.source_at = now end
     local providers = A.objective_source_provider_snapshots(source_catalog, observation,
       objective_task_state.source_generation)
     for _, provider in ipairs(providers) do

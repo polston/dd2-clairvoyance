@@ -808,6 +808,35 @@ do
     and chest.reason == "chest_access_domain_unmodeled",
     "future keyed chest access stays unknown")
 
+  local world_mod = require("Clairvoyance.world")
+  local integrated_rows = {
+    { k = "item", uid = "11111111-1111-1111-1111-111111111111", index = 0,
+      table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
+      id = 501, n = 2, x = 1, y = 2, z = 3, src = "normal" },
+    { k = "chest", uid = "22222222-2222-2222-2222-222222222222", index = 0,
+      table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", layer = 0,
+      id = 10, x = 4, y = 5, z = 6, src = "normal",
+      unlock_item = 0, is_seal = false, fake_unlock_item = 0, quest_override = false,
+      items = { { id = 601, n = 1 }, { id = 602, n = 3 } } },
+  }
+  local integrated_world = world_mod.new(a, {}, {
+    load = function(path)
+      if path == world_mod.K.PLACES then
+        return { version = 2, pak = "1:1", rows = integrated_rows }
+      end
+    end,
+    dump = function() return true end,
+    clock = function() return 0 end,
+  })
+  local integrated_catalog = integrated_world:objective_static_source_catalog()
+  local integrated_placed, integrated_chest = classify(integrated_catalog, base_observation(), 12)
+  assert(integrated_catalog.status == "ok" and integrated_placed.status == "ok"
+    and integrated_chest.status == "ok" and #integrated_placed.candidates == 1
+    and #integrated_chest.candidates == 1
+    and integrated_placed.candidates[1].source_id[4] == 0
+    and integrated_chest.candidates[1].outputs[2].item_id == 602,
+    "generated world metadata reaches the real pickup/chest classifier")
+
   local wired_catalog, wired_observation = base_catalog(), base_observation()
   local wired = a.objective_item_source_snapshots(nil, { need_generation = 11 },
     wired_catalog, wired_observation)
@@ -824,6 +853,23 @@ do
   assert(wired_changed[1].generation == wired[1].generation + 1
     and #wired_changed[1].candidates == 0 and #wired_changed[2].candidates == 1,
     "a changed atomic source observation advances generation and removes stale pickup")
+
+  local saved_source_reader, saved_source_clock = A.read_objective_source_observation, os.clock
+  local scan_count, fake_now = 0, 100
+  A.read_objective_source_observation = function()
+    scan_count = scan_count + 1
+    return base_observation()
+  end
+  os.clock = function() return fake_now end
+  local cache_adapter, cache_catalog = A.make(), base_catalog()
+  cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
+  fake_now = 100.4
+  cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
+  fake_now = 100.8
+  cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
+  A.read_objective_source_observation, os.clock = saved_source_reader, saved_source_clock
+  assert(scan_count == 2,
+    "cached frame calls cannot move the fresh-scan timestamp and suppress a required rescan")
 
   -- The native reader reconciles sparse persisted records and exact loaded
   -- identities before the pure classifier sees them.
