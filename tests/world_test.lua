@@ -1862,7 +1862,8 @@ do
     local function install_shop_fake(holders, stock, remaining, opts)
       opts = opts or {}
       local shop_id, cid, item_id = 7, 30, opts.item_id or 501
-      local buy = obj({ _ItemId = item_id }, {
+      local buy_fields = { _ItemId = item_id }
+      local buy = obj(buy_fields, {
         get_IsStock = function() return stock end,
         IsRelease = function(pay, rank) return pay == 5 and rank == 4 and opts.released ~= false end,
       })
@@ -1908,13 +1909,17 @@ do
       singletons["app.NPCManager"] = npc_manager
       singletons["app.TalkEventManager"] = talk_manager
       singletons["app.ItemManager"] = item_manager
-      return buy, function() return holder_reads end, function() return catalog_reads end
+      return buy, function() return holder_reads end, function() return catalog_reads end,
+        function(value) buy_fields._ItemId = value end
     end
-    local function seller_holder(cid, dead, has_position)
+    local function seller_holder(cid, dead, has_position, live_pos)
       if has_position == nil then has_position = true end
+      live_pos = live_pos or P(50, 0, 60)
       local chara = obj(nil, {
         get_Transform = function() return has_position and obj(nil, {
-          get_UniversalPosition = function() return P(50, 0, 60) end,
+          get_UniversalPosition = function()
+            return type(live_pos) == "function" and live_pos() or live_pos
+          end,
         }) or nil end,
         get_AIBlackBoardController = function() return {} end,
         get_IsDead = function() return dead == true end,
@@ -1953,6 +1958,21 @@ do
     check("reads: objective shop uses current seller transform position over schedule position",
       live_position.complete and #live_position.rows == 1
         and live_position.rows[1].pos.x == 50 and live_position.rows[1].pos.z == 60)
+    local moving_pos = P(50, 0, 60)
+    local moving_holder = seller_holder(30, false, true, function() return moving_pos end)
+    local static_holder = seller_holder(31, false, true, P(80, 0, 90))
+    install_shop_fake({ moving_holder, static_holder }, true, 1, { shop_by_cid = { [30] = 7, [31] = 7 } })
+    local moving_reader = world.game_reads()
+    local moving_result
+    for i = 1, 20 do
+      moving_result = moving_reader.objective_shop_rows(focused_task, nil, focused_need)
+      moving_pos = P(50 + i, 0, 60)
+      if moving_result.complete then break end
+    end
+    check("reads: moving seller does not block static seller publication or two-pass completion",
+      moving_result.complete and #moving_result.rows == 2
+        and moving_result.rows[1].pos.x == 51
+        and moving_result.rows[2].pos.x == 80)
     install_shop_fake({ seller_holder(30) }, true, 1, { slot_error = 0 })
     local unreadable_slot = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
     check("reads: objective shop fails closed on an unreadable holder slot",
@@ -2041,20 +2061,38 @@ do
       { shop_by_cid = shop_by_cid })
     local cached_reader = world.game_reads()
     for _ = 1, 4 do cached_reader.objective_shop_rows(focused_task, nil, focused_need) end
-    check("reads: objective shop catalog index builds once across bounded slices and verification",
-      catalog_reads() == 1)
+    check("reads: objective shop builds once and validates once across bounded slices",
+      catalog_reads() == 2)
     local changed_need = { status = "ok", complete = true, generation = 1,
       source_generation = 1, groups = { { qid = 1001, task_index = 0, remaining = 1,
         options = { { item_id = 999, accepted_count = 1 } }, complete = true,
         generation = 1, status = "eligible" } } }
     cached_reader.objective_shop_rows(focused_task, nil, changed_need)
     check("reads: objective shop rebuilds the catalog index after need invalidation",
-      catalog_reads() == 2)
+      catalog_reads() == 3)
     local _, _, replacement_catalog_reads = install_shop_fake(many_holders, true, 1,
       { shop_by_cid = shop_by_cid })
     cached_reader.objective_shop_rows(focused_task, nil, focused_need)
     check("reads: objective shop rebuilds the catalog index after catalog identity changes",
       replacement_catalog_reads() == 1)
+    local _, _, _, set_item_id = install_shop_fake({ seller_holder(30) }, true, 1,
+      { item_id = 999 })
+    local promote_reader = world.game_reads()
+    local before_promotion = read_shop_snapshot(promote_reader, focused_task, focused_need)
+    set_item_id(501)
+    local after_promotion = read_shop_snapshot(promote_reader, focused_task, focused_need)
+    check("reads: in-place nonfocused-to-focused offer mutation rebuilds the catalog index",
+      before_promotion.complete and #before_promotion.rows == 0
+        and after_promotion.complete and #after_promotion.rows == 1
+        and after_promotion.rows[1].item_id == 501)
+    local _, _, _, set_item_id_back = install_shop_fake({ seller_holder(30) }, true, 1)
+    local demote_reader = world.game_reads()
+    local before_demotion = read_shop_snapshot(demote_reader, focused_task, focused_need)
+    set_item_id_back(999)
+    local after_demotion = read_shop_snapshot(demote_reader, focused_task, focused_need)
+    check("reads: in-place focused-to-nonfocused offer mutation rebuilds the catalog index",
+      before_demotion.complete and #before_demotion.rows == 1
+        and after_demotion.complete and #after_demotion.rows == 0)
     local mutable_holders = { seller_holder(201) }
     local mutable_map = { [201] = 0, [202] = 0 }
     install_shop_fake(mutable_holders, true, 1, { shop_by_cid = mutable_map })

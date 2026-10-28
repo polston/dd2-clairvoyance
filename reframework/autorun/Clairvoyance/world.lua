@@ -4800,13 +4800,12 @@ function M.game_reads()
       return complete_empty("shop_catalog_unreadable")
     end
     local catalog_key = table.concat({ tostring(table_address), tostring(logical_count), need_key }, "#")
-    if shop_catalog_state == nil or shop_catalog_state.key ~= catalog_key then
+    local function read_catalog()
       local slots = elems(G(table_value, "_entries"))
       if slots == nil or #slots > SHOP_CATALOG_SLOTS then
-        shop_scan_state, shop_catalog_state = nil, nil
-        return complete_empty("shop_catalog_unreadable")
+        return nil, nil, "shop_catalog_unreadable"
       end
-      local entry_count, seen_shop, focused, unsupported_stock = 0, {}, {}, false
+      local entry_count, seen_shop, focused, unsupported_stock, parts = 0, {}, {}, false, {}
       for _, entry in ipairs(slots) do
         local param = G(entry, "value")
         if param == nil then param = G(entry, "Value") end
@@ -4814,27 +4813,26 @@ function M.game_reads()
           entry_count = entry_count + 1
           local shop_id = int_value(G(entry, "key"))
           if not integer(shop_id, 1) or seen_shop[shop_id] then
-            shop_scan_state, shop_catalog_state = nil, nil
-            return complete_empty("shop_catalog_identity_invalid")
+            return nil, nil, "shop_catalog_identity_invalid"
           end
           seen_shop[shop_id] = true
           local buys, buy_count = sequence(G(param, "_BuyParams"), SHOP_OFFER_MAX)
           if buys == nil or buy_count ~= #buys then
-            shop_scan_state, shop_catalog_state = nil, nil
-            return complete_empty("shop_buy_rows_unreadable")
+            return nil, nil, "shop_buy_rows_unreadable"
           end
+          parts[#parts + 1] = "shop:" .. tostring(shop_id) .. ":" .. tostring(buy_count)
           for ordinal, buy in ipairs(buys) do
             local item_id = int_value(G(buy, "_ItemId"))
             if not integer(item_id, 1) then
-              shop_scan_state, shop_catalog_state = nil, nil
-              return complete_empty("shop_buy_item_unreadable")
+              return nil, nil, "shop_buy_item_unreadable"
             end
+            local stock_flag = C(buy, "get_IsStock")
+            if type(stock_flag) ~= "boolean" then
+              return nil, nil, "shop_stock_kind_unreadable"
+            end
+            parts[#parts + 1] = table.concat({ tostring(shop_id), tostring(ordinal),
+              tostring(item_id), tostring(stock_flag) }, ":")
             if wanted[item_id] then
-              local stock_flag = C(buy, "get_IsStock")
-              if type(stock_flag) ~= "boolean" then
-                shop_scan_state, shop_catalog_state = nil, nil
-                return complete_empty("shop_stock_kind_unreadable")
-              end
               if stock_flag ~= true then unsupported_stock = true
               else
                 local bucket = focused[shop_id]
@@ -4847,36 +4845,45 @@ function M.game_reads()
         end
       end
       if entry_count ~= logical_count or unsupported_stock then
-        shop_scan_state, shop_catalog_state = nil, nil
-        return complete_empty(unsupported_stock and "non_stock_semantics_unverified"
-          or "shop_catalog_incomplete")
+        return nil, nil, unsupported_stock and "non_stock_semantics_unverified"
+          or "shop_catalog_incomplete"
       end
-      shop_catalog_state = { key = catalog_key, offers_by_shop = focused }
+      table.sort(parts)
+      return focused, table.concat(parts, "|"), nil
+    end
+    if shop_catalog_state == nil or shop_catalog_state.key ~= catalog_key then
+      local focused, fingerprint, reason = read_catalog()
+      if focused == nil then
+        shop_scan_state, shop_catalog_state = nil, nil
+        return complete_empty(reason)
+      end
+      shop_catalog_state = { key = catalog_key, fingerprint = fingerprint,
+        offers_by_shop = focused }
       shop_scan_state = nil
     end
     local indexed_by_shop, offers_by_shop, offers = shop_catalog_state.offers_by_shop, {}, {}
     for shop_id, indexed in pairs(indexed_by_shop) do
       local param = C(table_value, "get_Item", shop_id)
       if param == nil then
-        shop_scan_state = nil
+        shop_scan_state, shop_catalog_state = nil, nil
         return complete_empty("shop_buy_rows_unreadable")
       end
       local buys = sequence(G(param, "_BuyParams"), SHOP_OFFER_MAX)
       if buys == nil then
-        shop_scan_state = nil
+        shop_scan_state, shop_catalog_state = nil, nil
         return complete_empty("shop_buy_rows_unreadable")
       end
       for _, indexed_offer in ipairs(indexed) do
         local buy = buys[indexed_offer.offer_ordinal]
         if buy == nil or int_value(G(buy, "_ItemId")) ~= indexed_offer.item_id
             or C(buy, "get_IsStock") ~= true then
-          shop_scan_state = nil
+          shop_scan_state, shop_catalog_state = nil, nil
           return complete_empty("shop_catalog_changed")
         end
         local stock = int_value(C(im, "getItemStockNum", shop_id, buy))
         local pay = int_value(C(im, "getItemShopTotalPay", shop_id))
         if not integer(stock, 0) or not integer(pay, 0) then
-          shop_scan_state = nil
+          shop_scan_state, shop_catalog_state = nil, nil
           return complete_empty("shop_restock_or_pay_unreadable")
         end
         local offer = { shop_id = shop_id,
@@ -4893,17 +4900,19 @@ function M.game_reads()
       if a.shop_id ~= b.shop_id then return a.shop_id < b.shop_id end
       return a.offer_ordinal < b.offer_ordinal
     end)
-    local catalog_parts = {}
+    local offer_signature_parts = {}
     for _, offer in ipairs(offers) do
-      catalog_parts[#catalog_parts + 1] = table.concat({ tostring(offer.shop_id),
+      offer_signature_parts[#offer_signature_parts + 1] = table.concat({ tostring(offer.shop_id),
         tostring(offer.offer_ordinal), tostring(offer.item_id), tostring(offer.stock),
         tostring(offer.total_pay) }, ":")
     end
-    local catalog_key = table.concat(catalog_parts, "|")
+    local offer_signature = table.concat(offer_signature_parts, "|")
     if #offers == 0 then
+      local fingerprint = shop_catalog_state.fingerprint
       shop_scan_state = nil
+      shop_catalog_state = nil
       return { complete = true, rows = {}, holder_count = 0,
-        fingerprint = "no_matching_shop_offers", catalog_fingerprint = catalog_key }
+        fingerprint = "no_matching_shop_offers", catalog_fingerprint = fingerprint }
     end
 
     local holder_count = R.holder_count()
@@ -4919,10 +4928,10 @@ function M.game_reads()
       return complete_empty("shop_holder_identity_unreadable")
     end
     local scan_key = table.concat({ tostring(holder_address), tostring(holder_count),
-      need_key, catalog_key }, "#")
+      need_key, offer_signature }, "#")
     if shop_scan_state == nil or shop_scan_state.key ~= scan_key then
       shop_scan_state = { key = scan_key, count = holder_count, phase = "collect",
-        index = 0, rows = {}, parts = {}, seen = {}, first_rows = nil, first_parts = nil }
+        index = 0, rows = {}, parts = {}, seen = {}, first_parts = nil }
     end
     local scan = shop_scan_state
     local slice_end = math.min(scan.count, scan.index + SHOP_HOLDER_SLICE)
@@ -4983,8 +4992,10 @@ function M.game_reads()
               shop_scan_state = nil
               return complete_empty("shop_seller_interaction_gate_unreadable")
             end
-            part = table.concat({ part, tostring(pos.x), tostring(pos.y), tostring(pos.z),
-              tostring(rank), tostring(talk_available), tostring(interact_disabled) }, ":")
+            -- Position is validated and published, but is intentionally omitted
+            -- from two-pass equality because ordinary movement is expected.
+            part = table.concat({ part, tostring(rank), tostring(talk_available),
+              tostring(interact_disabled) }, ":")
             for _, offer in ipairs(seller_offers) do
               local released = C(offer.buy, "IsRelease", offer.total_pay, rank)
               if type(released) ~= "boolean" then
@@ -5020,19 +5031,30 @@ function M.game_reads()
     end
     local fingerprint_parts = table.concat(scan.parts, "|")
     if scan.phase == "collect" then
-      scan.first_rows, scan.first_parts = scan.rows, fingerprint_parts
+      scan.first_parts = fingerprint_parts
       scan.phase, scan.index, scan.rows, scan.parts, scan.seen = "verify", 0, {}, {}, {}
       return { complete = false, rows = {}, holder_count = holder_count,
         reason = "shop_holder_scan_verifying" }
     end
     if fingerprint_parts == scan.first_parts then
-      local result = { complete = true, rows = scan.first_rows, holder_count = holder_count,
+      local refreshed_offers, refreshed_fingerprint, catalog_reason = read_catalog()
+      if refreshed_offers == nil then
+        shop_scan_state, shop_catalog_state = nil, nil
+        return complete_empty(catalog_reason)
+      end
+      if refreshed_fingerprint ~= shop_catalog_state.fingerprint then
+        shop_catalog_state = { key = catalog_key, fingerprint = refreshed_fingerprint,
+          offers_by_shop = refreshed_offers }
+        shop_scan_state = nil
+        return complete_empty("shop_catalog_changed")
+      end
+      local result = { complete = true, rows = scan.rows, holder_count = holder_count,
         fingerprint = string.format("%08x", fingerprint_add(2166136261, fingerprint_parts)),
-        catalog_fingerprint = catalog_key }
+        catalog_fingerprint = shop_catalog_state.fingerprint }
       shop_scan_state = nil
       return result
     end
-    scan.first_rows, scan.first_parts = scan.rows, fingerprint_parts
+    scan.first_parts = fingerprint_parts
     scan.index, scan.rows, scan.parts, scan.seen = 0, {}, {}, {}
     return { complete = false, rows = {}, holder_count = holder_count,
       reason = "shop_holder_snapshot_changed" }
