@@ -5673,7 +5673,8 @@ do
     local capped_routes, capped_shown, capped_total = core.objective_routes(snapshots, nil,
       { npc_route_mode = 1, objective_places = true, focus_order = { 11, 10 }, route_cap = 1 })
     check("objective route counts report the publication cap and full eligible total",
-      #capped_routes.members == 1 and capped_shown == 1 and capped_total == 2)
+      #capped_routes.members == 1 and capped_shown == 1 and capped_total == 2
+        and capped_routes.total == 2 and capped_routes.omitted == 1)
     local unchanged = pos(5)
     local only_unknown = core.objective_snapshot({ generation = 6, quests = {
         { qid = 12, task_index = 1, read_status = "unknown", reason = "journal unavailable",
@@ -6142,6 +6143,282 @@ do
         and #(legacy_only.focus.quests[10].objective.npcs or {}) == 0
         and legacy_only.focus.quests[10].objective.place == nil
         and #(legacy_only.focus.quests[10].objective.items or {}) == 0)
+
+    -- ROADMAP 93 / SPEC 40: grouped current needs and quantity-aware sources.
+    local source_tuple = { "source", "shop|offer", 2, "01", "é" }
+    local capacity_tuple = { "capacity", "shop|offer", 2, "01" }
+    local need_tuple = { "need", 60, 700, 0, 1 }
+    check("objective grouped identities: generic source capacity and need tuples encode collision-free",
+      tk(source_tuple) ~= nil and tk(capacity_tuple) ~= nil and tk(need_tuple) ~= nil
+        and tk(source_tuple) ~= tk({ "source", "shop", "offer|2", "01", "é" })
+        and tk(source_tuple) ~= tk(capacity_tuple) and tk(capacity_tuple) ~= tk(need_tuple))
+
+    local function grouped_task(groups, need_generation, source_generation)
+      need_generation = need_generation or 10
+      return { focus_epoch = 1, journal_generation = 2, need_generation = need_generation,
+        objective_needs = { status = "ok", complete = true, generation = need_generation,
+          source_generation = source_generation or 20, groups = groups },
+        quests = {
+          { qid = 60, task_index = 0, read_status = "ok", issued_npcs = {},
+            task_destinations = {}, guidance = {}, item_ownership = {
+              { item_id = 999, count = 1, proof_kind = "condition", eligibility = "eligible" },
+            } },
+          { qid = 61, task_index = 1, read_status = "ok", issued_npcs = {},
+            task_destinations = {}, guidance = {}, item_ownership = {} },
+        } }
+    end
+    local grouped_needs = {
+      { id = { "need", 60, 700, 0, 1 }, qid = 60, task_index = 0, remaining = 2,
+        options = { { item_id = 5, accepted_count = 2 }, { item_id = 6, accepted_count = 2 } },
+        status = "eligible", complete = true, generation = 10 },
+      { id = { "need", 61, 701, 0, 1 }, qid = 61, task_index = 1, remaining = 1,
+        options = { { item_id = 5, accepted_count = 1 } },
+        status = "eligible", complete = true, generation = 10 },
+    }
+    local grouped_providers = {
+      { provider = "shop", generation = 30, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "shop_offer", 1, 1, 88 },
+          provider = "shop",
+          capacity_pool_id = { "capacity", "shop_offer", 1, 1 },
+          outputs = { { item_id = 5, count = 1 }, { item_id = 99, count = 4 } },
+          capacity_kind = "finite", available_acquisitions = 1,
+          certainty = "guaranteed", target = { kind = "seller", pos = pos(8) },
+          eligibility = "eligible", generation = 30 },
+        { source_id = { "source", "shop_offer", 1, 1, 89 },
+          provider = "shop",
+          capacity_pool_id = { "capacity", "shop_offer", 1, 1 },
+          outputs = { { item_id = 5, count = 1 }, { item_id = 99, count = 4 } },
+          capacity_kind = "finite", available_acquisitions = 1,
+          certainty = "guaranteed", target = { kind = "seller", pos = pos(3) },
+          eligibility = "eligible", generation = 30 },
+        { id = "legacy-must-not-own", item_ids = { 999 }, target = { pos = pos(1) },
+          eligibility = "eligible", generation = 30 },
+        { source_id = { "source", "shop_offer", 1, 2, 90 },
+          provider = "shop",
+          capacity_pool_id = { "capacity", "shop_offer", 1, 2 },
+          outputs = { { item_id = 6, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "guaranteed", target = { pos = pos(4) },
+          eligibility = "unknown", generation = 30 },
+      } },
+    }
+    local grouped = core.objective_snapshot(grouped_task(grouped_needs), nil,
+      grouped_providers, core.target_registry_new())
+    local grouped_sources = {}
+    for _, target in ipairs(grouped and grouped.targets or {}) do
+      if target.kind == "source" then grouped_sources[#grouped_sources + 1] = target end
+    end
+    check("objective grouped snapshot: intersects outputs and preserves independent group ownership",
+      grouped and #grouped_sources == 2 and #grouped_sources[1].item_ids == 1
+        and grouped_sources[1].item_ids[1] == 5 and #grouped_sources[1].groups == 2
+        and grouped_sources[1].capacity_key == grouped_sources[2].capacity_key)
+    check("objective grouped snapshot: legacy item ownership cannot admit raw-contract fallbacks",
+      grouped and #grouped_sources == 2)
+
+    local grouped_routes = core.objective_routes(grouped, pos(0), {
+      npc_route_mode = 0, objective_places = true, focus_order = { 60, 61 }, route_cap = 8 })
+    check("objective grouped routes: shared seller capacity is counted once at nearest target",
+      #grouped_routes.members == 1
+        and grouped_routes.members[1].target_key == grouped_sources[2].key)
+
+    local mixed_groups = {
+      { id = { "need", 60, 710, 0, 1 }, qid = 60, task_index = 0, remaining = 1,
+        options = { { item_id = 5, accepted_count = 1 } }, status = "eligible",
+        complete = true, generation = 11 },
+      { id = { "need", 61, 711, 0, 1 }, qid = 61, task_index = 1, remaining = 1,
+        options = { { item_id = 6, accepted_count = 1 } }, status = "eligible",
+        complete = true, generation = 11 },
+    }
+    local mixed_snapshot = core.objective_snapshot(grouped_task(mixed_groups, 11, 21), nil, {
+      { provider = "chest", generation = 31, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "chest", "mixed" },
+          provider = "chest",
+          capacity_pool_id = { "capacity", "chest", "mixed" },
+          outputs = { { item_id = 5, count = 1 }, { item_id = 6, count = 1 } },
+          capacity_kind = "finite", available_acquisitions = 1,
+          certainty = "guaranteed", target = { pos = pos(2) },
+          eligibility = "eligible", generation = 31 },
+      } },
+      { provider = "shop", generation = 32, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "shop_offer", 2, 1, 91 },
+          provider = "shop",
+          capacity_pool_id = { "capacity", "shop_offer", 2, 1 },
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "unlimited",
+          available_acquisitions = nil, certainty = "guaranteed", target = { pos = pos(6) },
+          eligibility = "eligible", generation = 32 },
+      } },
+      { provider = "monster", generation = 33, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "monster_drop", "m1", 1 },
+          provider = "monster",
+          capacity_pool_id = { "capacity", "monster_drop", "m1", 1 },
+          outputs = { { item_id = 5, count = 9 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "probabilistic", probability = 0.5,
+          target = { pos = pos(1) }, eligibility = "eligible", generation = 33 },
+      } },
+    }, core.target_registry_new())
+    local mixed_routes = core.objective_routes(mixed_snapshot, pos(0), {
+      npc_route_mode = 0, objective_places = true, focus_order = { 60, 61 }, route_cap = 8 })
+    check("objective grouped routes: mixed one-shot covers both groups once and probabilistic follows",
+      #mixed_routes.members == 2
+        and mixed_routes.members[1].item_ids[1] == 5 and mixed_routes.members[1].item_ids[2] == 6
+        and mixed_routes.members[2].certainty == "probabilistic")
+
+    local capped_markers, _, marker_projection = core.objective_markers({}, nil,
+      mixed_snapshot, { marker_cap = 1, focus_order = { 60, 61 } })
+    local capped_source_routes, capped_source_shown, capped_source_total = core.objective_routes(
+      mixed_snapshot, pos(0), { npc_route_mode = 0, objective_places = true,
+        focus_order = { 60, 61 }, route_cap = 8,
+        visible_objective_keys = marker_projection and marker_projection.visible_keys })
+    check("objective marker cap: diagnostics report omitted sources and routes use only visible identities",
+      #capped_markers == 1 and marker_projection ~= nil
+        and marker_projection.omitted.objective_sources == 2
+        and capped_source_shown == 1 and capped_source_total == 1
+        and capped_source_routes.members[1].target_key == capped_markers[1].objective_key)
+
+    local changed_groups = {
+      { id = { "need", 60, 710, 0, 1 }, qid = 60, task_index = 0, remaining = 2,
+        options = { { item_id = 5, accepted_count = 2 } }, status = "eligible",
+        complete = true, generation = 11 },
+    }
+    local changed_snapshot = core.objective_snapshot(grouped_task(changed_groups, 11, 22), nil,
+      {}, core.target_registry_new())
+    check("objective grouped freshness: source generation and canonical need content change snapshot generation",
+      changed_snapshot.generation ~= mixed_snapshot.generation)
+    local malformed_grouped = core.objective_snapshot(grouped_task({
+      { id = { "need", 60, 720, 0, 1 }, qid = 60, task_index = 0, remaining = 0,
+        options = { { item_id = 5, accepted_count = 1 } }, status = "eligible",
+        complete = true, generation = 10 },
+    }), nil, grouped_providers, core.target_registry_new())
+    check("objective grouped validation: malformed need fails closed",
+      malformed_grouped and #malformed_grouped.targets == 0)
+
+    local invalid_sources = core.objective_snapshot(grouped_task(grouped_needs), nil, {
+      { provider = "bad", generation = 40, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "bad", "empty" }, capacity_pool_id = { "capacity", "bad", "empty" },
+          provider = "bad",
+          outputs = {}, capacity_kind = "finite", available_acquisitions = 1,
+          certainty = "guaranteed", target = { pos = pos(1) }, eligibility = "eligible", generation = 40 },
+        { source_id = { "source", "bad", "count" }, capacity_pool_id = { "capacity", "bad", "count" },
+          provider = "bad",
+          outputs = { { item_id = 5, count = 0 } }, capacity_kind = "finite", available_acquisitions = 1,
+          certainty = "guaranteed", target = { pos = pos(1) }, eligibility = "eligible", generation = 40 },
+        { source_id = { "source", "bad", "zero" }, capacity_pool_id = { "capacity", "bad", "zero" },
+          provider = "bad",
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite", available_acquisitions = 0,
+          certainty = "guaranteed", target = { pos = pos(1) }, eligibility = "eligible", generation = 40 },
+        { source_id = { "source", "bad", "unlimited" }, capacity_pool_id = { "capacity", "bad", "unlimited" },
+          provider = "bad",
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "unlimited", available_acquisitions = 1,
+          certainty = "guaranteed", target = { pos = pos(1) }, eligibility = "eligible", generation = 40 },
+        { source_id = { "source", "bad", "chance" }, capacity_pool_id = { "capacity", "bad", "chance" },
+          provider = "bad",
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite", available_acquisitions = 1,
+          certainty = "probabilistic", target = { pos = pos(1) }, eligibility = "eligible", generation = 40 },
+        { source_id = { "source", "bad", "stale" }, capacity_pool_id = { "capacity", "bad", "stale" },
+          provider = "bad",
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite", available_acquisitions = 1,
+          certainty = "guaranteed", target = { pos = pos(1) }, eligibility = "eligible", generation = 39 },
+      } },
+    }, core.target_registry_new())
+    check("objective grouped validation: malformed source domains and generations fail closed",
+      invalid_sources and #invalid_sources.targets == 0 and #invalid_sources.diagnostics == 6)
+
+    local conflict_snapshot = core.objective_snapshot(grouped_task(grouped_needs), nil, {
+      { provider = "shop", generation = 41, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "shop_offer", 4, 1, 80 },
+          provider = "shop",
+          capacity_pool_id = { "capacity", "shop_offer", 4, 1 },
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 2, certainty = "guaranteed", target = { pos = pos(2) },
+          eligibility = "eligible", generation = 41 },
+        { source_id = { "source", "shop_offer", 4, 1, 81 },
+          provider = "shop",
+          capacity_pool_id = { "capacity", "shop_offer", 4, 1 },
+          outputs = { { item_id = 5, count = 2 } }, capacity_kind = "finite",
+          available_acquisitions = 2, certainty = "guaranteed", target = { pos = pos(3) },
+          eligibility = "eligible", generation = 41 },
+      } },
+    }, core.target_registry_new())
+    check("objective grouped validation: conflicting shared capacity removes every target in the pool",
+      conflict_snapshot and #conflict_snapshot.targets == 0)
+
+    local quantity_group = {
+      { id = { "need", 60, 730, 0, 1 }, qid = 60, task_index = 0, remaining = 3,
+        options = { { item_id = 5, accepted_count = 3 } }, status = "eligible",
+        complete = true, generation = 12 },
+    }
+    local quantity_snapshot = core.objective_snapshot(grouped_task(quantity_group, 12, 23), nil, {
+      { provider = "pickup", generation = 42, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "pickup", "z-near" },
+          provider = "pickup",
+          capacity_pool_id = { "capacity", "pickup", "z-near" },
+          outputs = { { item_id = 5, count = 2 } }, capacity_kind = "finite",
+          available_acquisitions = 2, certainty = "guaranteed", target = { pos = pos(1) },
+          eligibility = "eligible", generation = 42 },
+        { source_id = { "source", "pickup", "a-far" },
+          provider = "pickup",
+          capacity_pool_id = { "capacity", "pickup", "a-far" },
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 2, certainty = "guaranteed", target = { pos = pos(9) },
+          eligibility = "eligible", generation = 42 },
+      } },
+    }, core.target_registry_new())
+    local quantity_near = core.objective_routes(quantity_snapshot, pos(0), {
+      npc_route_mode = 0, objective_places = true, focus_order = { 60 }, route_cap = 8 })
+    local quantity_canonical = core.objective_routes(quantity_snapshot, nil, {
+      npc_route_mode = 0, objective_places = true, focus_order = { 60 }, route_cap = 8 })
+    check("objective grouped capacity: finite acquisitions multiply output and stop after coverage",
+      #quantity_near.members == 1 and quantity_near.members[1].item_ids[1] == 5)
+    check("objective grouped ordering: distance wins with origin and canonical source wins without it",
+      quantity_near.members[1].target_key == tk({ "source", "pickup", "z-near" })
+        and quantity_canonical.members[1].target_key == tk({ "source", "pickup", "a-far" }))
+
+    local probability_snapshot = core.objective_snapshot(grouped_task(quantity_group, 12, 24), nil, {
+      { provider = "monster", generation = 43, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "monster", "near-low" },
+          provider = "monster",
+          capacity_pool_id = { "capacity", "monster", "near-low" },
+          outputs = { { item_id = 5, count = 99 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "probabilistic", probability = 0.1,
+          target = { pos = pos(1) }, eligibility = "eligible", generation = 43 },
+        { source_id = { "source", "monster", "far-high" },
+          provider = "monster",
+          capacity_pool_id = { "capacity", "monster", "far-high" },
+          outputs = { { item_id = 5, count = 99 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "probabilistic", probability = 0.9,
+          target = { pos = pos(9) }, eligibility = "eligible", generation = 43 },
+      } },
+    }, core.target_registry_new())
+    local probability_routes = core.objective_routes(probability_snapshot, pos(0), {
+      npc_route_mode = 0, objective_places = true, focus_order = { 60 }, route_cap = 8 })
+    check("objective grouped probability: chance orders before distance and never claims coverage",
+      #probability_routes.members == 2 and probability_routes.members[1].probability == 0.9
+        and probability_routes.members[2].probability == 0.1)
+
+    local priority_markers, _, priority_projection = core.objective_markers({
+      { key = "ordinary", cat = "world", qids = {}, pos = pos(20) },
+      { key = "ancillary", cat = "focus_npc", qids = {}, pos = pos(21), ancillary = true },
+      { key = "search", cat = "world", qids = {}, pos = pos(22), related_search = true },
+    }, nil, mixed_snapshot, { marker_cap = 3, focus_order = { 60, 61 }, origin = pos(0) })
+    check("objective marker cap: search and objective sources precede ordinary and ancillary markers",
+      #priority_markers == 3 and priority_markers[1].key == "search"
+        and priority_markers[2].objective_kind == "source"
+        and priority_markers[3].objective_kind == "source"
+        and priority_projection.omitted.ordinary == 1
+        and priority_projection.omitted.ancillary == 1)
+
+    local provider_lost = core.objective_snapshot(grouped_task(grouped_needs, 10, 25), nil, {
+      { provider = "shop", generation = 44, status = "unknown", complete = false,
+        reason = "stock_refresh_failed", candidates = grouped_providers[1].candidates },
+    }, core.target_registry_new())
+    local task_changed = grouped_task(grouped_needs, 10, 26)
+    task_changed.quests[1].task_index = 9
+    local ownership_lost = core.objective_snapshot(task_changed, nil, grouped_providers,
+      core.target_registry_new())
+    check("objective grouped state loss: provider failure and task mismatch remove markers and routes",
+      #provider_lost.targets == 0 and #ownership_lost.targets == 0
+        and #core.objective_markers({}, nil, provider_lost, {}) == 0
+        and #core.objective_routes(provider_lost, pos(0), {
+          npc_route_mode = 0, objective_places = true, focus_order = { 60 } }).members == 0)
   end
   end)()
 end
