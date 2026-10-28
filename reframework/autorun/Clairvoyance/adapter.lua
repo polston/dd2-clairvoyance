@@ -4570,9 +4570,13 @@ function A.make()
       end
     end
     local providers = {}
+    local unresolved = {
+      placed = "pickup_persisted_uid_state_join_unavailable",
+      chest = "chest_generation_access_gate_unproven",
+    }
     for _, name in ipairs({ "placed", "chest" }) do
       providers[#providers + 1] = { provider = name, generation = generation,
-        status = "unknown", reason = "objective_source_scan_not_performed", candidates = {},
+        status = "unknown", complete = false, reason = unresolved[name], candidates = {},
         catalog_version = version, source_descriptors = copy(descriptors),
         signal_evidence = copy(signals), guidance_delivery_refs = copy(deliveries) }
     end
