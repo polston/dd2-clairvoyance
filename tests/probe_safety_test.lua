@@ -133,6 +133,32 @@ return reviewed_call(o, "get_Count")
 check("reviewed managed call capability allows its fixed read set",
   reviewed_call_ok:find("cmd ok=true get_Count", 1, true) ~= nil)
 
+local talk_methods_ok = run_case('', [[
+local tem = { call = function(_, name, arg) return name .. ":" .. tostring(arg) end }
+local id = "talk-event-id"
+local character = "engine-character"
+local initial = reviewed_call(tem, "getTalkEventInitialSpeaker", id)
+local playable = reviewed_try_call(tem, "isEventPlayable", id)
+local interact = reviewed_call(tem, "canTalkEventInteract", character)
+local history = reviewed_call(tem, "getHistory", id)
+return initial .. "|" .. tostring(playable) .. "|" .. interact .. "|" .. history
+]], 150)
+check("talk-event read calls accept only their literal allowlist entries",
+  talk_methods_ok:find("cmd ok=true getTalkEventInitialSpeaker:talk-event-id|true|canTalkEventInteract:engine-character|getHistory:talk-event-id", 1, true) ~= nil)
+
+local talk_method_near_miss = run_case('', [[
+return reviewed_call({}, "getTalkEventInitialSpeakerExtra", "id")
+]], 150)
+check("talk-event near-miss method remains rejected",
+  talk_method_near_miss:find("cmd ok=false unsafe probe call: unreviewed managed method", 1, true) ~= nil)
+
+local talk_method_dynamic = run_case('', [[
+local method = "getHistory"
+return reviewed_call({}, method, "id")
+]], 150)
+check("talk-event dynamic method remains rejected",
+  talk_method_dynamic:find("cmd ok=false unsafe probe call: unreviewed managed method", 1, true) ~= nil)
+
 local reviewed_try_ok = run_case('', [[
 local o = { call = function(_, name) return name end }
 local ok, value = reviewed_try_call(o, "get_Count")
