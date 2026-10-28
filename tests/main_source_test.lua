@@ -138,6 +138,8 @@ ordered("objective inputs flow through one snapshot before compute", tick_body, 
   "pcall(adapter.refresh_objectives)",
   "pcall(adapter.refresh_items, mode)",
   "adapter.objective_task_snapshot,",
+  "pcall(adapter.objective_need_groups, task_snapshot)",
+  "task_snapshot.objective_needs = need_snapshot",
   'wt.q("objective_place_snapshot",',
   'wt.q("objective_source_snapshots",',
   "core.objective_snapshot(",
@@ -145,6 +147,9 @@ ordered("objective inputs flow through one snapshot before compute", tick_body, 
   "category_visibility =",
   "local result = core.compute(adapter, show)",
 })
+check("objective need grouping fails closed before provider and core processing",
+  tick_body:find('local need_snapshot = { status = "unknown", complete = false,', 1, true) ~= nil
+    and tick_body:find('reason = "need_snapshot_failed"', 1, true) ~= nil)
 local compute_at = tick_body:find("local result = core.compute(adapter, show)", 1, true)
 local route_at = tick_body:find('wt.q("set_routes", nil, result.objective_routes)', 1, true)
 local success_at = tick_body:find("if result == nil then", 1, true)
