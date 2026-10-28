@@ -1797,6 +1797,31 @@ end
 -- v10 world tracker, which added none), so helpers are fields of this table
 -- or do-block locals, never new chunk-level locals.
 local items = {}
+items.observed_task_indices = {}
+items.task_observation_generation = 0
+
+-- Count observed changes to the live quest-log task, including a task that
+-- moves away and later returns to the same zero-based index.
+function items.observe_task_index(qid, task_index)
+    local previous = items.observed_task_indices[qid]
+    if task_index == nil then
+        if previous ~= false then
+            items.task_observation_generation = items.task_observation_generation + 1
+        end
+        items.observed_task_indices[qid] = false
+    elseif previous ~= nil and previous ~= task_index then
+        items.task_observation_generation = items.task_observation_generation + 1
+        items.observed_task_indices[qid] = task_index
+    else
+        items.observed_task_indices[qid] = task_index
+    end
+    return items.task_observation_generation
+end
+
+function items.reset_task_observations()
+    items.observed_task_indices = {}
+    items.task_observation_generation = items.task_observation_generation + 1
+end
 
 -- get_elements() returns a sol vector USERDATA in-game, not a Lua table
 -- (probe P17c, 2026-10-19): # and 1-based [i] work, type() is "userdata".
@@ -1839,7 +1864,8 @@ local ITEM_FAILED_STREAK = 0
 local ITEM_STATS = items.new_stats()
 local ITEM_LAST_AT = -math.huge
 items.objective_group_state = { status = "unknown", complete = false,
-    generation = 0, groups = {}, task_index = {} }
+    generation = 0, task_generation = items.task_observation_generation,
+    groups = {}, task_index = {} }
 items.objective_loot_state = { status = "unknown", complete = false,
     generation = 0, at = -math.huge, candidates = {} }
 
@@ -3074,18 +3100,23 @@ local function read_held(ids)
     local en = safe_field(dict, "_entries")
     local entries = items.elements(en)
     if entries == nil then return nil end
-    local held, skipped = {}, 0
+    local held, skipped, complete = {}, 0, true
     for i = 1, #entries do
         local ok = pcall(function()
             local e = entries[i]
             local list = safe_field(e, "value")
             if list == nil then return end          -- free slot: uncounted
             local key = int_value(safe_field(e, "key"))
-            if key == nil then skipped = skipped + 1 return end
+            if key == nil then skipped = skipped + 1; complete = false; return end
             if key == K.STORAGE_BOX_KEY then return end
             local cnt = safe_call(list, "get_Count")
-            if type(cnt) ~= "number" then skipped = skipped + 1 return end
-            if cnt > K.HELD_OWNER_CAP then cnt = K.HELD_OWNER_CAP end
+            if type(cnt) ~= "number" or cnt < 0 or cnt ~= math.floor(cnt) then
+                skipped = skipped + 1; complete = false; return
+            end
+            if cnt > K.HELD_OWNER_CAP then
+                complete = false
+                cnt = K.HELD_OWNER_CAP
+            end
             for k = 0, cnt - 1 do
                 local okd = pcall(function()
                     local sd = safe_call(list, "get_Item", k)
@@ -3093,16 +3124,17 @@ local function read_held(ids)
                     local num = int_value(safe_field(sd, "_Num"))
                     if id == nil or num == nil then
                         skipped = skipped + 1
+                        complete = false
                         return
                     end
                     if ids[id] then held[id] = (held[id] or 0) + num end
                 end)
-                if not okd then skipped = skipped + 1 end
+                if not okd then skipped = skipped + 1; complete = false end
             end
         end)
-        if not ok then skipped = skipped + 1 end
+        if not ok then skipped = skipped + 1; complete = false end
     end
-    return held, skipped
+    return held, skipped, complete
 end
 
 -- Installs a need table and derives ITEM_WANTED. An empty table clears
@@ -3516,7 +3548,7 @@ local function item_round_needs(now)
     local records, skipped, objective_records, objective_complete =
         with_index_retry(list, n, pass, item_round_failed)
     if records == nil then return end
-    local held, ids = {}, {}
+    local held, ids, held_complete = {}, {}, true
     for _, r in ipairs(records) do
         if r.op == "more" or r.op == "morethan" then ids[r.id] = true end
     end
@@ -3524,10 +3556,11 @@ local function item_round_needs(now)
         for _, option in ipairs(group.options) do ids[option.item_id] = true end
     end
     if next(ids) ~= nil then
-        local h, hsk = read_held(ids)
+        local h, hsk, hcomplete = read_held(ids)
         if h == nil then item_round_failed() return end
         held = h
         skipped = skipped + hsk
+        held_complete = hcomplete == true
     end
     -- v14: quest-related items from the same records, before the need table
     -- a raise here must not fail the need round: keep the previous map
@@ -3547,11 +3580,15 @@ local function item_round_needs(now)
                 ti = int_value(safe_field(info, "<CurrentTaskIndex>k__BackingField"))
             end
             if ti == nil or ti < 0 then tasks_complete = false
-            else task_index[qid] = ti end
+            else
+                task_index[qid] = ti
+                items.observe_task_index(qid, ti)
+            end
         end
     end
     local objective_groups, groups_complete = {}, false
     local group_generation = ITEM_STATS.rounds
+    objective_complete = objective_complete and skipped == 0 and held_complete
     if objective_complete and tasks_complete then
         objective_groups, groups_complete = A.objective_need_builder.build(objective_records,
             held, { generation = group_generation, task_generation = group_generation,
@@ -3559,7 +3596,8 @@ local function item_round_needs(now)
     end
     items.objective_group_state = { status = groups_complete and "ok" or "unknown",
         complete = groups_complete, generation = group_generation,
-        groups = groups_complete and objective_groups or {}, task_index = task_index }
+            task_generation = items.task_observation_generation,
+            groups = groups_complete and objective_groups or {}, task_index = task_index }
     commit_item_needs(t)
     if type(rel) == "table" then items.related = rel end
     ITEM_FAILED_STREAK = 0
@@ -3860,6 +3898,11 @@ function A.make()
         qseen[row.qid] = true
       end
     end
+    if state.task_generation ~= items.task_observation_generation then
+      return { status = "unknown", complete = false, groups = {},
+        generation = task_snapshot.need_generation,
+        source_generation = state.generation, reason = "task_observation_changed" }
+    end
     for _, group in ipairs(state.groups) do
       if qseen[group.qid] then
         local row = qrows[group.qid]
@@ -3873,7 +3916,8 @@ function A.make()
       end
     end
     return { status = "ok", complete = true, groups = groups,
-      generation = task_snapshot.need_generation, source_generation = state.generation }
+      generation = task_snapshot.need_generation, source_generation = state.generation,
+      task_generation = state.task_generation }
   end
   -- v14 (SPEC 22.10.1): { [item_id] = { quest title, ... } }, cached until
   -- the next commit
@@ -4400,6 +4444,7 @@ function A.make()
     end
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")
     if qlm ~= objective_task_state.owner then
+      items.reset_task_observations()
       objective_task_state.owner = qlm
       objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
@@ -4438,12 +4483,15 @@ function A.make()
           task_destinations = {}, guidance = {}, item_ownership = {},
           live_destination = live.live_destination }
       end
+      items.observe_task_index(qid,
+        row.read_status == "ok" and type(row.task_index) == "number" and row.task_index or nil)
       quests[#quests + 1] = row
       local journal_row = clone(row)
       journal_row.item_ownership = {}
       journal_rows[#journal_rows + 1] = journal_row
       local objective_groups, objective_status = {}, "unknown"
       if ITEM_STATS.needs_fresh and items.objective_group_state.complete
+          and items.objective_group_state.task_generation == items.task_observation_generation
           and row.read_status == "ok"
           and row.task_index == items.objective_group_state.task_index[qid] then
         objective_status = "ok"
@@ -4544,6 +4592,7 @@ function A.make()
     if qlm ~= QUEST_SESSION_OWNER then
       QUEST_SESSION_OWNER = qlm
       reset_runtime_caches()
+      items.reset_task_observations()
       objective_task_state.owner = qlm
       objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
       objective_task_state.focus_epoch, objective_task_state.journal_generation,

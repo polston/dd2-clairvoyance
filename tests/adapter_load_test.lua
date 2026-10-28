@@ -2363,6 +2363,7 @@ do
       end
       if n == "<IsStarted>k__BackingField" then
         IS.started_reads = IS.started_reads + 1
+        if o.unread_started then return nil end
         if o.started == nil then return true end
         return o.started
       end
@@ -2407,7 +2408,10 @@ do
         return { call = function(_, method, qid)
           if method == "get_Item" then
             return { call = function(_, method_name)
-              if method_name == "get_CurrentTaskIndex" then return IS.task_index or 0 end
+              if method_name == "get_CurrentTaskIndex" then
+                if IS.task_index_unreadable then return nil end
+                return IS.task_index or 0
+              end
             end }
           end
         end }
@@ -2808,6 +2812,67 @@ do
   local invalidated = ai.objective_need_groups(changed_task)
   assert(invalidated.status == "unknown" and not invalidated.complete
     and #invalidated.groups == 0, "IW1 task change immediately invalidates old groups")
+  -- A skipped processor row makes the current-objective walk incomplete even
+  -- when other rows produced usable groups.
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }),
+    iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }, { unread_started = true }) }
+  ai.refresh_items()
+  local skipped_group_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(skipped_group_snapshot.status == "unknown" and not skipped_group_snapshot.complete
+    and #skipped_group_snapshot.groups == 0,
+    "IW1 skipped processor row empties objective groups")
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+  local exact_held = {}
+  for i = 1, 512 do exact_held[i] = sd(900 + i, 1) end
+  IS.dict = storage({ { key = PL, value = ilist(exact_held) } })
+  ai.refresh_items()
+  assert(ai.objective_need_groups(ai.objective_task_snapshot({ 20090 })).status == "ok",
+    "IW1 exact held-owner cap remains complete")
+  local over_held = {}
+  for i = 1, 513 do over_held[i] = sd(900 + i, 1) end
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+  IS.dict = storage({ { key = PL, value = ilist(over_held) } })
+  ai.refresh_items()
+  local over_held_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(over_held_snapshot.status == "unknown" and #over_held_snapshot.groups == 0
+    and #needs_of(ai, 20090) == 1, "IW1 over-cap held list only invalidates objective groups")
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+  IS.dict = storage({ { key = PL, value = ilist({ sd(300, 1), sd(false, 1) }) } })
+  ai.refresh_items()
+  local unreadable_held_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(unreadable_held_snapshot.status == "unknown" and #unreadable_held_snapshot.groups == 0,
+    "IW1 unreadable held entry invalidates objective groups")
+  ifresh()
+  ai.refresh_items()
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  IS.task_index = 1
+  ai.objective_task_snapshot({ 20090 })
+  IS.task_index = 0
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  local returned_task_groups = ai.objective_need_groups(task_snapshot)
+  assert(returned_task_groups.status == "unknown" and #returned_task_groups.groups == 0,
+    "IW1 task change away and back invalidates groups until a fresh item scan")
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  assert(ai.objective_need_groups(task_snapshot).status == "ok",
+    "IW1 fresh item scan republishes groups for the observed current task")
+  IS.task_index_unreadable = true
+  ai.objective_task_snapshot({ 20090 })
+  IS.task_index_unreadable = false
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  local recovered_task_groups = ai.objective_need_groups(task_snapshot)
+  assert(recovered_task_groups.status == "unknown" and #recovered_task_groups.groups == 0,
+    "IW1 unreadable task observation invalidates groups until a fresh item scan")
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  assert(ai.objective_need_groups(task_snapshot).status == "ok",
+    "IW1 fresh item scan recovers after unreadable task observation")
   IS.task_index = 0
   ifresh()
   IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }),
