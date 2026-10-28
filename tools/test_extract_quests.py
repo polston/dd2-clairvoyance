@@ -75,6 +75,91 @@ class RelationTests(unittest.TestCase):
                  inst(2, "app.quest.condition.CheckJobMasterItemParam", _ItemID=207)]
         self.assertEqual(eq.scene_relations(insts, kept), ({107}, {207}))
 
+    def test_reward_sources_follow_param_owner_and_typed_branch_tree(self):
+        insts = [
+            inst(1, "app.quest.action.QuestReward", _Param=[R(2)], _Data=R(3)),
+            inst(2, "app.quest.action.QuestRewardParam", _DataList=[R(4)]),
+            # Serialized _Data is a separate, empty parameter and must not shadow _Param.
+            inst(3, "app.quest.action.QuestRewardParam", _DataList=[]),
+            inst(4, "app.quest.action.QuestRewardData.Data", _NameHash=2357399725),
+            inst(5, "app.QuestProcessor.ProcessEntity", QuestAction=R(1)),
+            inst(6, "app.QuestProcessor", ProcID=209900992,
+                 PrevProcCondition=R(7), Process=R(5)),
+            inst(7, "app.QuestProcessor.ProcCondition", _ElementArray=[R(8)]),
+            inst(8, "app.QuestProcessor.ProcCondition.Element", _Operator=1,
+                 _ParamArray=[R(9)], _ElementArray=[R(10)]),
+            inst(9, "app.QuestProcessor.ProcCondition.ElementParam",
+                 _ProcID=3952043607, _ResultNo=2),
+            inst(10, "app.QuestProcessor.ProcCondition.Element", _Operator=3,
+                 _ParamArray=[R(11)], _ElementArray=[]),
+            inst(11, "app.QuestProcessor.ProcCondition.ElementParam",
+                 _ProcID=3952043610, _ResultNo=0),
+            inst(12, "app.quest.action.Trigger"),
+            inst(13, "app.QuestProcessor.ProcessEntity", QuestAction=R(12)),
+            inst(14, "app.QuestProcessor", ProcID=3952043607,
+                 PrevProcCondition=R(7), Process=R(13)),
+            inst(15, "app.quest.action.PlayEvent"),
+            inst(16, "app.QuestProcessor.ProcessEntity", QuestAction=R(15)),
+            inst(17, "app.QuestProcessor", ProcID=3952043610,
+                 PrevProcCondition=R(7), Process=R(16)),
+        ]
+
+        result = eq.decode_reward_sources(insts, 10030)
+
+        self.assertEqual(result, [{
+            "family": "quest_reward", "quest_id": 10030, "action_ordinal": 0,
+            "processor_id": 209900992, "precondition": [{
+                "operator": 1,
+                "parameters": [{"kind": "processor_result", "proc_id": 3952043607,
+                                "result_no": 2, "action_type": "app.quest.action.Trigger"}],
+                "children": [{"operator": 3, "parameters": [
+                    {"kind": "processor_result", "proc_id": 3952043610,
+                     "result_no": 0, "action_type": "app.quest.action.PlayEvent"}],
+                    "children": []}],
+            }], "reward_hashes": [2357399725],
+        }])
+
+    def test_reward_sources_reject_malformed_duplicate_and_unsupported_joins(self):
+        reward = inst(1, "app.quest.action.QuestReward", _Param=[R(2)], _Data=R(3))
+        param = inst(2, "app.quest.action.QuestRewardParam", _DataList=[R(4)])
+        empty_data = inst(3, "app.quest.action.QuestRewardParam", _DataList=[])
+        row = inst(4, "app.quest.action.QuestRewardData.Data", _NameHash=7)
+        owner = inst(5, "app.QuestProcessor.ProcessEntity", QuestAction=R(1))
+        proc = inst(6, "app.QuestProcessor", ProcID=9, PrevProcCondition=R(7), Process=R(5))
+        condition = inst(7, "app.QuestProcessor.ProcCondition", _ElementArray=[R(8)])
+        element = inst(8, "app.QuestProcessor.ProcCondition.Element", _Operator=1,
+                       _ParamArray=[R(9)], _ElementArray=[])
+        predecessor = inst(9, "app.QuestProcessor.ProcCondition.ElementParam",
+                           _ProcID=10, _ResultNo=0)
+        base = [reward, param, empty_data, row, owner, proc, condition, element, predecessor]
+
+        cases = [
+            (base[:-1] + [inst(9, "app.QuestProcessor.ProcCondition.ElementParam",
+                               _ProcID="10", _ResultNo=0)], "invalid reward predecessor"),
+            (base + [inst(10, "app.QuestProcessor", ProcID=11,
+                          PrevProcCondition=R(7), Process=R(5))], "ambiguous reward processor owner"),
+            (base[:-1] + [inst(9, "app.UnknownCondition", _ProcID=10)],
+             "invalid reward predecessor parameter type"),
+            (base[:7] + [inst(8, "app.QuestProcessor.ProcCondition.Element",
+                              _Operator=1, _ParamArray=[R(9), R(10)], _ElementArray=[]),
+                         inst(9, "app.QuestProcessor.ProcCondition.ElementParam",
+                              _ProcID=3952043607, _ResultNo=2),
+                         inst(10, "app.QuestProcessor.ProcCondition.ElementParam",
+                                           _ProcID=3952043607, _ResultNo=2),
+                         inst(11, "app.quest.action.Trigger"),
+                         inst(12, "app.QuestProcessor.ProcessEntity", QuestAction=R(11)),
+                         inst(13, "app.QuestProcessor", ProcID=3952043607,
+                              PrevProcCondition=R(7), Process=R(12))],
+             "duplicate reward predecessor relation"),
+            (base[:1] + [inst(2, "app.quest.action.QuestRewardParam",
+                               _DataList=[R(4), R(10)])] + base[2:]
+             + [inst(10, "app.quest.action.QuestRewardData.Data", _NameHash=7)],
+             "duplicate reward hash join"),
+        ]
+        for fixture, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ew.ExtractError, message):
+                eq.decode_reward_sources(fixture, 10030)
+
     def test_context_cast_and_deliveries(self):
         kept = eq.kept_chara(CHARA)
         insts = [
@@ -460,13 +545,13 @@ def e2e_files():
 
 E2E_OUT = {"version": 2, "pak": "7:9", "quests": {
     "10040": {"cast": [], "npcs": [], "items": [], "dest": [], "decoded": False,
-              "tasks": [], "guidance": [], "deliveries": []},
+              "tasks": [], "guidance": [], "deliveries": [], "sources": []},
     "30010": {"cast": [], "npcs": [], "items": [], "dest": [{"cid": 104, "key": 2400}],
-              "decoded": False, "tasks": [], "guidance": [], "deliveries": []},
+              "decoded": False, "tasks": [], "guidance": [], "deliveries": [], "sources": []},
     "20090": {"cast": [101], "npcs": [103], "items": [201], "dest": [{"cid": 101, "key": 2308}],
-              "decoded": True, "tasks": [], "guidance": [], "deliveries": []},
+              "decoded": True, "tasks": [], "guidance": [], "deliveries": [], "sources": []},
     "20141": {"cast": [102], "npcs": [], "items": [], "dest": [], "decoded": False,
-              "tasks": [], "guidance": [], "deliveries": []}}}
+              "tasks": [], "guidance": [], "deliveries": [], "sources": []}}}
 
 
 class ExtractTests(unittest.TestCase):
@@ -491,7 +576,7 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(lines[0], "quests 4, scenes 2, decoded 1, journals 2")
         self.assertEqual(lines[1], "entries: cast 2, npcs 1, items 1, dest 2")
         self.assertEqual(lines[2], "objectives: tasks 0, task destinations 0, concierge records 0, guidance destinations 0, deliveries 0, delivery refs 0")
-        self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 0, records without quest id 0, records without item data 1, reward records 0, gift records 0, transformation records 0, eligible archive source descriptors 0")
+        self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 0, records without quest id 0, records without item data 1, reward records 0, gift records 0, transformation records 0, quest reward relations 0, catalog item joins 0, eligible archive source descriptors 0")
         self.assertTrue(lines[4].startswith("undecoded 10040: "))
         self.assertEqual(len(lines), 5)
         self.assertEqual(FakePak.closed, 1)
@@ -554,6 +639,25 @@ class ExtractTests(unittest.TestCase):
             self.assertEqual(json.load(f), E2E_OUT)
         self.assertEqual(buf.getvalue().splitlines()[-1], "quests written: 4")
 
+    def test_main_preserves_existing_output_when_reward_validation_fails(self):
+        out_path = os.path.join(self.game, "quests.json")
+        original = b"preserve previous artifact"
+        with open(out_path, "wb") as f:
+            f.write(original)
+        key = os.path.join(self.game, "k.txt")
+        with open(key, "w") as f:
+            f.write("00")
+        buf = io.StringIO()
+        with mock.patch.object(eq, "load_layouts", return_value=QLAYOUTS), \
+                mock.patch.object(eq, "decode_reward_sources",
+                                  side_effect=ew.ExtractError("duplicate reward processor id")), \
+                contextlib.redirect_stdout(buf):
+            code = eq.main(["--game", self.game, "--out", out_path, "--key", key])
+        self.assertEqual(code, 1)
+        self.assertEqual(buf.getvalue(), "duplicate reward processor id\n")
+        with open(out_path, "rb") as f:
+            self.assertEqual(f.read(), original)
+
     def _run_real_archive_oracle(self):
         game = os.path.join(chr(67) + chr(58) + chr(92), "Program Files (x86)",
                             "Steam", "steamapps", "common", "Dragons Dogma 2")
@@ -567,7 +671,7 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(out["pak"], "318966:1887616979")
         self.assertEqual(lines[0], "quests 122, scenes 114, decoded 105, journals 86")
         self.assertEqual(lines[2], "objectives: tasks 298, task destinations 341, concierge records 246, guidance destinations 240, deliveries 184, delivery refs 77")
-        self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 15, records without quest id 1, records without item data 0, reward records 496, gift records 0, transformation records 0, eligible archive source descriptors 0")
+        self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 15, records without quest id 1, records without item data 0, reward records 496, gift records 0, transformation records 0, quest reward relations 124, catalog item joins 0, eligible archive source descriptors 0")
         quests = out["quests"]
         legacy_fields = ("cast", "npcs", "items", "dest", "decoded")
         fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
@@ -659,8 +763,12 @@ class ExtractTests(unittest.TestCase):
             "quest_log_reminder": 53, "quest_variable": 103, "item": 10,
             "quest_variable_or": 6}))
         self.assertEqual(negative_task_condition_qids, 260)
-        self.assertNotIn("sources", out)
-        self.assertTrue(all("sources" not in quest for quest in quests.values()))
+        self.assertEqual(sum(len(quest["sources"]) for quest in quests.values()), 124)
+        reward_sources = [source for quest in quests.values() for source in quest["sources"]]
+        self.assertEqual(sum(source["family"] == "quest_reward" for source in reward_sources), 124)
+        self.assertTrue(all(set(source) == {"family", "quest_id", "action_ordinal",
+                                             "processor_id", "precondition", "reward_hashes"}
+                            for source in reward_sources))
 
         spellbound = quests["30150"]
         self.assertEqual([task["index"] for task in spellbound["tasks"]],

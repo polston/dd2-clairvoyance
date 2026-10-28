@@ -61,6 +61,14 @@ QUEST_VARIABLE_TYPE = "app.ConciergeConditionQuestVariable"
 ITEM_CONDITION_TYPE = "app.ConciergeConditionItem"
 QUEST_VARIABLE_OR_TYPE = "app.ConciergeConditionQuestVariableGroupOR"
 DELIVERY_CONDITION_TYPE = "app.ConciergeConditionDelivery"
+REWARD_TYPE = "app.quest.action.QuestReward"
+REWARD_PARAM_TYPE = "app.quest.action.QuestRewardParam"
+REWARD_DATA_TYPE = "app.quest.action.QuestRewardData.Data"
+PROCESSOR_TYPE = "app.QuestProcessor"
+PROCESSOR_ENTITY_TYPE = "app.QuestProcessor.ProcessEntity"
+PROC_CONDITION_TYPE = "app.QuestProcessor.ProcCondition"
+PROC_ELEMENT_TYPE = "app.QuestProcessor.ProcCondition.Element"
+PROC_ELEMENT_PARAM_TYPE = "app.QuestProcessor.ProcCondition.ElementParam"
 SUBSKILL_CONDITION_TYPE = "app.ConciergeConditionSubskill"
 DAYTIME_CONDITION_TYPE = "app.ConciergeConditionDayTime"
 TASK_CONDITION_TYPE = "app.QuestLogResource.QuestLogCondition"
@@ -366,11 +374,9 @@ def decode_journal_objectives(insts, delivery_index, kept=None):
 
 
 def archive_source_diagnostics(instances):
-    """Count unproven archive families; this deliberately emits no source descriptors."""
+    """Count archive source-family records for extraction diagnostics."""
     counts = collections.Counter()
-    reward_types = {"app.quest.action.QuestReward",
-                    "app.quest.action.QuestRewardParam",
-                    "app.quest.action.QuestRewardData.Data"}
+    reward_types = {REWARD_TYPE, REWARD_PARAM_TYPE, REWARD_DATA_TYPE}
     for inst in instances:
         name = inst.type.lower()
         if inst.type in reward_types:
@@ -381,6 +387,128 @@ def archive_source_diagnostics(instances):
                 family in name for family in ("forgery", "craft", "ageing", "aging", "transform")):
             counts["transform_records"] += 1
     return counts
+
+
+def _required_array(value, label):
+    if not isinstance(value, list):
+        raise ew.ExtractError("invalid %s array" % label)
+    return value
+
+
+def _reward_ref(insts, value, expected, label):
+    target = qnml_rsz.deref(insts, value)
+    if target is None or target.type != expected:
+        raise ew.ExtractError("invalid %s type" % label)
+    return target
+
+
+def decode_reward_sources(insts, qid):
+    """Decode exact static reward-action relations, without runtime eligibility inference."""
+    qid = _integer(qid, "reward quest id", 1, U32_MAX)
+    processors = {}
+    owners = collections.defaultdict(list)
+    for processor in insts:
+        if processor.type != PROCESSOR_TYPE:
+            continue
+        proc_id = _integer(_field(processor, "ProcID"), "reward processor id", 0, U32_MAX)
+        if proc_id in processors:
+            raise ew.ExtractError("duplicate reward processor id")
+        processors[proc_id] = processor
+        process = _reward_ref(insts, _field(processor, "Process"),
+                              PROCESSOR_ENTITY_TYPE, "reward processor process")
+        action = qnml_rsz.deref(insts, _field(process, "QuestAction"))
+        if action is not None:
+            owners[action.idx].append(processor)
+
+    def decode_condition(condition, active, seen_relations):
+        if condition is None or condition.type != PROC_CONDITION_TYPE:
+            raise ew.ExtractError("invalid reward predecessor condition")
+        roots = _required_array(_field(condition, "_ElementArray"),
+                               "reward predecessor roots")
+        if not roots:
+            raise ew.ExtractError("empty reward predecessor roots")
+        seen_elements = set()
+
+        def decode_element(ref):
+            element = _reward_ref(insts, ref, PROC_ELEMENT_TYPE,
+                                  "reward predecessor element")
+            if element.idx in active:
+                raise ew.ExtractError("cyclic reward predecessor tree")
+            if element.idx in seen_elements:
+                raise ew.ExtractError("duplicate reward predecessor element")
+            seen_elements.add(element.idx)
+            active.add(element.idx)
+            try:
+                operator = _integer(_field(element, "_Operator"),
+                                    "reward predecessor operator")
+                params = _required_array(_field(element, "_ParamArray"),
+                                        "reward predecessor parameters")
+                children = _required_array(_field(element, "_ElementArray"),
+                                           "reward predecessor children")
+                if not params and not children:
+                    raise ew.ExtractError("empty reward predecessor element")
+                decoded_params = []
+                for param_ref in params:
+                    param = _reward_ref(insts, param_ref, PROC_ELEMENT_PARAM_TYPE,
+                                        "reward predecessor parameter")
+                    predecessor_id = _integer(_field(param, "_ProcID"),
+                                              "reward predecessor processor id", 0, U32_MAX)
+                    result_no = _integer(_field(param, "_ResultNo"),
+                                         "reward predecessor result number")
+                    relation = (predecessor_id, result_no)
+                    if relation in seen_relations:
+                        raise ew.ExtractError("duplicate reward predecessor relation")
+                    seen_relations.add(relation)
+                    predecessor = processors.get(predecessor_id)
+                    if predecessor is None:
+                        raise ew.ExtractError("unresolved reward predecessor processor")
+                    predecessor_process = _reward_ref(
+                        insts, _field(predecessor, "Process"), PROCESSOR_ENTITY_TYPE,
+                        "reward predecessor process")
+                    predecessor_action = qnml_rsz.deref(
+                        insts, _field(predecessor_process, "QuestAction"))
+                    if predecessor_action is None:
+                        raise ew.ExtractError("unresolved reward predecessor action")
+                    decoded_params.append({"kind": "processor_result",
+                                           "proc_id": predecessor_id,
+                                           "result_no": result_no,
+                                           "action_type": predecessor_action.type})
+                return {"operator": operator, "parameters": decoded_params,
+                        "children": [decode_element(child) for child in children]}
+            finally:
+                active.remove(element.idx)
+
+        return [decode_element(root) for root in roots]
+
+    reward_actions = [item for item in insts if item.type == REWARD_TYPE]
+    result = []
+    for ordinal, action in enumerate(reward_actions):
+        action_owners = owners.get(action.idx, [])
+        if len(action_owners) != 1:
+            raise ew.ExtractError("ambiguous reward processor owner")
+        processor = action_owners[0]
+        processor_id = _integer(_field(processor, "ProcID"),
+                                "reward processor id", 0, U32_MAX)
+        params = _required_array(_field(action, "_Param"), "reward action parameters")
+        reward_hashes = []
+        for param_ref in params:
+            param = _reward_ref(insts, param_ref, REWARD_PARAM_TYPE,
+                                "reward action parameter")
+            rows = _required_array(_field(param, "_DataList"), "reward hash rows")
+            for row_ref in rows:
+                row = _reward_ref(insts, row_ref, REWARD_DATA_TYPE, "reward hash row")
+                reward_hash = _integer(_field(row, "_NameHash"), "reward hash", 0, U32_MAX)
+                if reward_hash in reward_hashes:
+                    raise ew.ExtractError("duplicate reward hash join")
+                reward_hashes.append(reward_hash)
+        if not reward_hashes:
+            raise ew.ExtractError("reward action has no reward hashes")
+        previous = qnml_rsz.deref(insts, _field(processor, "PrevProcCondition"))
+        result.append({"family": "quest_reward", "quest_id": qid,
+                       "action_ordinal": ordinal, "processor_id": processor_id,
+                       "precondition": decode_condition(previous, set(), set()),
+                       "reward_hashes": reward_hashes})
+    return result
 
 
 def validate_delivery_integrity(quests):
@@ -532,12 +660,13 @@ def extract(game, key_hex, layouts):
     dests = {qid: journal_dest(insts, kept) for qid, insts in journal_insts.items()}
     objectives = {qid: decode_journal_objectives(insts, delivery_index, kept)
                   for qid, insts in journal_insts.items()}
-    relations, undecoded, decoded_scene_insts = {}, {}, []
+    relations, reward_sources, undecoded, decoded_scene_insts = {}, {}, {}, []
     for qid, data in scenes.items():
         try:
             insts = qnml_rsz.decode(data, layouts)
             decoded_scene_insts.extend(insts)
             relations[qid] = scene_relations(insts, kept)
+            reward_sources[qid] = decode_reward_sources(insts, qid)
         except qnml_rsz.DecodeError as e:
             undecoded[qid] = str(e)
     if len(scenes) < MIN_SCENES:
@@ -553,6 +682,7 @@ def extract(game, key_hex, layouts):
         entry = quest_entry(ctx.get(qid), relations.get(qid), dests.get(qid, []))
         entry.update(objectives.get(qid, {"tasks": [], "guidance": []}))
         entry["deliveries"] = deliveries.get(qid, [])
+        entry["sources"] = reward_sources.get(qid, [])
         quests[str(qid)] = entry
     validate_delivery_integrity(quests)
     out = {"version": 2, "pak": "%d:%d" % (total, fingerprint), "quests": quests}
@@ -565,6 +695,7 @@ def extract(game, key_hex, layouts):
         sums["guidance"] += len(q["guidance"])
         sums["guidance_destinations"] += sum(len(g["destinations"]) for g in q["guidance"])
         sums["deliveries"] += len(q["deliveries"])
+        sums["sources"] += len(q["sources"])
         sums["delivery_refs"] += sum(len(d["delivery"]["refs"])
                                       for g in q["guidance"] for d in g["destinations"])
     lines = [
@@ -575,12 +706,12 @@ def extract(game, key_hex, layouts):
         "objectives: tasks %d, task destinations %d, concierge records %d, guidance destinations %d, deliveries %d, delivery refs %d" % (
             sums["tasks"], sums["task_destinations"], sums["guidance"],
             sums["guidance_destinations"], sums["deliveries"], sums["delivery_refs"]),
-        "diagnostics: delivery item-id zero sentinels %d, records without quest id %d, records without item data %d, reward records %d, gift records %d, transformation records %d, eligible archive source descriptors 0" % (
+        "diagnostics: delivery item-id zero sentinels %d, records without quest id %d, records without item data %d, reward records %d, gift records %d, transformation records %d, quest reward relations %d, catalog item joins 0, eligible archive source descriptors 0" % (
             extraction_diagnostics["delivery_item_id_zero_sentinels"],
             extraction_diagnostics["delivery_data_without_quest_id"],
             extraction_diagnostics["delivery_records_without_item_data"],
             source_diagnostics["reward_records"], source_diagnostics["gift_records"],
-            source_diagnostics["transform_records"]),
+            source_diagnostics["transform_records"], sums["sources"]),
     ]
     lines += ["undecoded %d: %s" % (qid, undecoded[qid]) for qid in sorted(undecoded)]
     return out, lines
