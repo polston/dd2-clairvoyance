@@ -186,9 +186,10 @@ def pickup_params_of(insts):
         pid = inst.fields.get("ParamId")
         item_id = inst.fields.get("ItemId")
         count = inst.fields.get("ItemNum")
-        if type(pid) is not int or pid < 0 or type(item_id) is not int or item_id <= 0 or \
-                type(count) is not int or count <= 0:
+        if type(pid) is not int or pid < 0 or type(item_id) is not int or type(count) is not int:
             raise ExtractError("a placed-item param has an invalid identity or output")
+        if item_id <= 0 or count <= 0:
+            continue
         entry = {"item": item_id, "count": count}
         if pid in params and params[pid] != entry:
             raise ExtractError("a placed-item ParamId has conflicting item outputs")
@@ -353,7 +354,7 @@ def collect_rows(decoded, params, conflicts, chara_names, pickup_params=None):
                         raise ExtractError("an item placement guid appears in two rows")
                     seen[key] = True
                     rows.append(placement)
-                    continue
+                continue
             if k == "chara":
                 if src in ("subquest", "mainquest"):
                     row["table_qid"] = table_qid_of(rel)

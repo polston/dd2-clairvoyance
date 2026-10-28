@@ -180,8 +180,7 @@ class RowTests(unittest.TestCase):
                         _SubQuestTableList=[], _MainQuestTableList=[], _RandomNormalTableList=[])]
         rows, *_ = ew.collect_rows({"normal.user": table, "list.user": listing},
                                    {7: {"items": [(500, 2)], "trap": False, "pawn": False}}, set(), {})
-        self.assertFalse(any(row["k"] == "item" for row in rows))
-        self.assertFalse(any(row["k"] == "gimmick" for row in rows))
+        self.assertEqual(rows, [])
 
     def test_unknown_gimmick_is_skipped(self):
         rows, *_ = self._one_unrecognized_gimmick()
@@ -212,6 +211,26 @@ class RowTests(unittest.TestCase):
                 inst(2, "app.Gm82_000Param", ParamId=7, ItemId=501, ItemNum=1)]
         with self.assertRaises(ew.ExtractError):
             ew.pickup_params_of(data)
+
+    def test_pickup_params_ignore_nonpositive_outputs(self):
+        def inst(i, **fields):
+            n = qnml_rsz.Inst(i, "app.Gm82_000Param")
+            n.fields = fields
+            return n
+        data = [inst(1, ParamId=7, ItemId=500, ItemNum=2)]
+        for i, (item_id, count) in enumerate(((0, 1), (-1, 1), (500, 0), (500, -1)), 2):
+            data.append(inst(i, ParamId=7, ItemId=item_id, ItemNum=count))
+        self.assertEqual(ew.pickup_params_of(data), {7: {"item": 500, "count": 2}})
+
+    def test_pickup_params_reject_malformed_types(self):
+        for field in ("ParamId", "ItemId", "ItemNum"):
+            for value in (None, True, 1.5, "1"):
+                with self.subTest(field=field, value=value):
+                    n = qnml_rsz.Inst(1, "app.Gm82_000Param")
+                    n.fields = {"ParamId": 7, "ItemId": 500, "ItemNum": 2}
+                    n.fields[field] = value
+                    with self.assertRaises(ew.ExtractError):
+                        ew.pickup_params_of([n])
 
     def test_non_chest_item_placement_rejects_bad_identity_output_or_position(self):
         def inst(i, t, path=None, **fields):
