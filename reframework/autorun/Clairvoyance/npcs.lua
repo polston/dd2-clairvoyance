@@ -545,6 +545,101 @@ function M.parse_quests(t)
     for i, d in ipairs(out) do if d == false then fail("delivery " .. i .. " malformed or duplicated") end end
     return out
   end
+  local function reward_diagnostic_array(raw, qid)
+    if raw == nil then return {} end
+    if not dense_array(raw) then fail("quest " .. qid .. " reward diagnostics malformed"); return {} end
+    local ownership = { exact = true, missing_owner = true, ambiguous_owner = true,
+      duplicate_processor_id = true }
+    local branch_status = { unverified = true, unsupported = true }
+    local result_status = { observed = true, unsupported = true }
+    local unresolved = { "journal_task_to_reward_endpoint", "reward_action_to_drawable_target",
+      "current_branch_truth", "claim_state", "runtime_reward_hash_to_item_count" }
+    local function strings(values)
+      return copy_array(values, function(value)
+        if type(value) ~= "string" or value == "" then return nil end
+        return value
+      end)
+    end
+    local reward_element
+    reward_element = function(element, depth)
+      if type(element) ~= "table" or depth > 32
+          or (element.operator ~= nil and element.operator ~= "and" and element.operator ~= "or")
+          or not is_integer(element.operator_value, -2147483648, 2147483647)
+          or not dense_array(element.parameters) or not dense_array(element.children) then return nil end
+      local parameters = copy_array(element.parameters, function(parameter)
+        if type(parameter) ~= "table" or parameter.kind ~= "processor_result"
+            or not is_integer(parameter.proc_id, 0, 4294967295)
+            or not is_integer(parameter.result_no, -2147483648, 2147483647)
+            or (parameter.action_type ~= nil and (type(parameter.action_type) ~= "string"
+              or not parameter.action_type:match("^app%.quest%.action%.")))
+            or not result_status[parameter.result_status] then return nil end
+        return { kind = parameter.kind, proc_id = parameter.proc_id,
+          result_no = parameter.result_no, action_type = parameter.action_type,
+          result_status = parameter.result_status }
+      end)
+      local children = copy_array(element.children, function(child)
+        return reward_element(child, depth + 1)
+      end)
+      if not parameters or not children then return nil end
+      return { operator = element.operator, operator_value = element.operator_value,
+        parameters = parameters, children = children }
+    end
+    local out = {}
+    for i, row in ipairs(raw) do
+      local valid = type(row) == "table" and row.family == "quest_reward"
+        and row.quest_id == qid and row.action_type == "app.quest.action.QuestReward"
+        and ownership[row.ownership_status] and branch_status[row.branch_status]
+        and (row.reward_payload_status == "complete" or row.reward_payload_status == "empty")
+        and row.eligibility == "unknown" and type(row.source_identity) == "table"
+        and row.source_identity.quest_id == qid
+        and row.source_identity.action_ordinal == i - 1
+        and is_integer(row.source_identity.action_ordinal, 0, 2147483647)
+      local processor_id = valid and row.source_identity.processor_id or nil
+      valid = valid and ((row.ownership_status == "exact"
+          and is_integer(processor_id, 0, 4294967295))
+        or (row.ownership_status ~= "exact" and processor_id == nil))
+      local branch_diagnostics = valid and strings(row.branch_diagnostics) or nil
+      local precondition = nil
+      if valid and row.precondition ~= nil then
+        precondition = copy_array(row.precondition, function(element)
+          return reward_element(element, 1)
+        end)
+        valid = precondition ~= nil
+      end
+      local reward_rows = valid and copy_array(row.reward_rows, function(reward, ordinal)
+        if type(reward) ~= "table" or reward.ordinal ~= ordinal
+            or not is_integer(reward.name_hash, 0, 4294967295) then return nil end
+        return { ordinal = ordinal, name_hash = reward.name_hash }
+      end) or nil
+      local joins = valid and strings(row.unresolved_joins) or nil
+      if valid then
+        valid = branch_diagnostics ~= nil and reward_rows ~= nil and joins ~= nil
+          and #joins == #unresolved and type(row.task_endpoint_join) == "table"
+          and row.task_endpoint_join.status == "unproven"
+          and row.task_endpoint_join.reason == "journal_task_to_drawable_reward_endpoint_unverified"
+        if valid then
+          for ji, expected in ipairs(unresolved) do
+            if joins[ji] ~= expected then valid = false; break end
+          end
+        end
+      end
+      if valid then
+        out[i] = { family = row.family, quest_id = qid,
+          source_identity = { quest_id = qid, action_ordinal = i - 1,
+            processor_id = processor_id }, action_type = row.action_type,
+          ownership_status = row.ownership_status, branch_status = row.branch_status,
+          branch_diagnostics = branch_diagnostics, precondition = precondition,
+          reward_rows = reward_rows, reward_payload_status = row.reward_payload_status,
+          task_endpoint_join = { status = row.task_endpoint_join.status,
+            reason = row.task_endpoint_join.reason }, unresolved_joins = joins,
+          eligibility = row.eligibility }
+      else
+        out[i] = false
+        fail("quest " .. qid .. " reward diagnostic " .. (i - 1) .. " malformed")
+      end
+    end
+    return out
+  end
   local function source_record(s)
     if type(s) ~= "table" or type(s.id) ~= "string" or s.id == ""
         or type(s.kind) ~= "string" or s.kind == ""
@@ -632,7 +727,8 @@ function M.parse_quests(t)
     local qid = canonical_qid(key)
     if qid and type(raw) == "table" then
       local entry = { tasks = task_array(raw.tasks, qid), guidance = {}, deliveries = {},
-        sources = quest_sources[qid] or {} }
+        sources = quest_sources[qid] or {},
+        reward_diagnostics = reward_diagnostic_array(raw.reward_diagnostics, qid) }
       local deliveries = delivery_array(raw.deliveries)
       if not deliveries then fail("quest " .. qid .. " deliveries malformed") else entry.deliveries = deliveries end
       if not dense_array(raw.guidance) then
@@ -693,7 +789,8 @@ function M.parse_quests(t)
         end)
         if not guidance then fail("quest " .. qid .. " guidance malformed") else entry.guidance = guidance end
       end
-      if entry.tasks or #entry.guidance > 0 or #entry.deliveries > 0 or #entry.sources > 0 then
+      if entry.tasks or #entry.guidance > 0 or #entry.deliveries > 0 or #entry.sources > 0
+          or #entry.reward_diagnostics > 0 then
         catalog_quests[qid] = entry
       end
     end
