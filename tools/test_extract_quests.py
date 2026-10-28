@@ -75,13 +75,13 @@ class RelationTests(unittest.TestCase):
                  inst(2, "app.quest.condition.CheckJobMasterItemParam", _ItemID=207)]
         self.assertEqual(eq.scene_relations(insts, kept), ({107}, {207}))
 
-    def test_reward_sources_follow_param_owner_and_typed_branch_tree(self):
+    def test_reward_diagnostics_preserve_exact_branch_and_raw_hash(self):
         insts = [
             inst(1, "app.quest.action.QuestReward", _Param=[R(2)], _Data=R(3)),
             inst(2, "app.quest.action.QuestRewardParam", _DataList=[R(4)]),
             # Serialized _Data is a separate, empty parameter and must not shadow _Param.
             inst(3, "app.quest.action.QuestRewardParam", _DataList=[]),
-            inst(4, "app.quest.action.QuestRewardData.Data", _NameHash=2357399725),
+            inst(4, "app.quest.action.QuestRewardData.Data", _NameHash=801888944),
             inst(5, "app.QuestProcessor.ProcessEntity", QuestAction=R(1)),
             inst(6, "app.QuestProcessor", ProcID=209900992,
                  PrevProcCondition=R(7), Process=R(5)),
@@ -89,8 +89,8 @@ class RelationTests(unittest.TestCase):
             inst(8, "app.QuestProcessor.ProcCondition.Element", _Operator=1,
                  _ParamArray=[R(9)], _ElementArray=[R(10)]),
             inst(9, "app.QuestProcessor.ProcCondition.ElementParam",
-                 _ProcID=3952043607, _ResultNo=2),
-            inst(10, "app.QuestProcessor.ProcCondition.Element", _Operator=3,
+                 _ProcID=3952043607, _ResultNo=0),
+            inst(10, "app.QuestProcessor.ProcCondition.Element", _Operator=0,
                  _ParamArray=[R(11)], _ElementArray=[]),
             inst(11, "app.QuestProcessor.ProcCondition.ElementParam",
                  _ProcID=3952043610, _ResultNo=0),
@@ -104,22 +104,66 @@ class RelationTests(unittest.TestCase):
                  PrevProcCondition=R(7), Process=R(16)),
         ]
 
-        result = eq.decode_reward_sources(insts, 10030)
+        result = eq.decode_reward_diagnostics(insts, 10030)
 
         self.assertEqual(result, [{
-            "family": "quest_reward", "quest_id": 10030, "action_ordinal": 0,
-            "processor_id": 209900992, "precondition": [{
-                "operator": 1,
+            "family": "quest_reward", "quest_id": 10030,
+            "source_identity": {"quest_id": 10030, "processor_id": 209900992,
+                                "action_ordinal": 0},
+            "action_type": "app.quest.action.QuestReward",
+            "ownership_status": "exact", "branch_status": "unverified",
+            "branch_diagnostics": ["predecessor_action_semantics_unverified"],
+            "precondition": [{
+                "operator": "or", "operator_value": 1,
                 "parameters": [{"kind": "processor_result", "proc_id": 3952043607,
-                                "result_no": 2, "action_type": "app.quest.action.Trigger"}],
-                "children": [{"operator": 3, "parameters": [
+                                "result_no": 0, "action_type": "app.quest.action.Trigger",
+                                "result_status": "observed"}],
+                "children": [{"operator": "and", "operator_value": 0,
+                              "parameters": [
                     {"kind": "processor_result", "proc_id": 3952043610,
-                     "result_no": 0, "action_type": "app.quest.action.PlayEvent"}],
+                     "result_no": 0, "action_type": "app.quest.action.PlayEvent",
+                     "result_status": "observed"}],
                     "children": []}],
-            }], "reward_hashes": [2357399725],
+            }],
+            "reward_rows": [{"ordinal": 0, "name_hash": 801888944}],
+            "task_endpoint_join": {"status": "unproven",
+                                   "reason": "journal_task_to_drawable_reward_endpoint_unverified"},
+            "reward_payload_status": "complete",
+            "unresolved_joins": ["journal_task_to_reward_endpoint",
+                                 "reward_action_to_drawable_target",
+                                 "current_branch_truth", "claim_state",
+                                 "runtime_reward_hash_to_item_count"],
+            "eligibility": "unknown",
         }])
 
-    def test_reward_sources_reject_malformed_duplicate_and_unsupported_joins(self):
+    def test_reward_diagnostics_preserve_hash_rows_and_unknown_endpoint(self):
+        insts = [
+            inst(1, "app.quest.action.QuestReward", _Param=[R(2)], _Data=R(3)),
+            inst(2, "app.quest.action.QuestRewardParam", _DataList=[R(4), R(5)]),
+            inst(3, "app.quest.action.QuestRewardParam", _DataList=[]),
+            inst(4, "app.quest.action.QuestRewardData.Data", _NameHash=3741130030),
+            inst(5, "app.quest.action.QuestRewardData.Data", _NameHash=2856910244),
+            inst(6, "app.QuestProcessor.ProcessEntity", QuestAction=R(1)),
+            inst(7, "app.QuestProcessor", ProcID=9, PrevProcCondition=R(8), Process=R(6)),
+            inst(8, "app.QuestProcessor.ProcCondition", _ElementArray=[R(9)]),
+            inst(9, "app.QuestProcessor.ProcCondition.Element", _Operator=1,
+                 _ParamArray=[R(10)], _ElementArray=[]),
+            inst(10, "app.QuestProcessor.ProcCondition.ElementParam", _ProcID=10, _ResultNo=0),
+            inst(11, "app.quest.action.Trigger"),
+            inst(12, "app.QuestProcessor.ProcessEntity", QuestAction=R(11)),
+            inst(13, "app.QuestProcessor", ProcID=10, PrevProcCondition=R(8), Process=R(12)),
+        ]
+        result = eq.decode_reward_diagnostics(insts, 30150)
+        self.assertEqual(result[0]["eligibility"], "unknown")
+        self.assertEqual(result[0]["task_endpoint_join"]["status"], "unproven")
+        self.assertEqual([row["name_hash"] for row in result[0]["reward_rows"]],
+                         [3741130030, 2856910244])
+        self.assertTrue(all(set(row) == {"ordinal", "name_hash"}
+                            for row in result[0]["reward_rows"]))
+        self.assertNotIn("source_id", result[0])
+        self.assertNotIn("sources", result[0])
+
+    def test_reward_diagnostics_reject_malformed_and_report_unsupported_domains(self):
         reward = inst(1, "app.quest.action.QuestReward", _Param=[R(2)], _Data=R(3))
         param = inst(2, "app.quest.action.QuestRewardParam", _DataList=[R(4)])
         empty_data = inst(3, "app.quest.action.QuestRewardParam", _DataList=[])
@@ -133,32 +177,56 @@ class RelationTests(unittest.TestCase):
                            _ProcID=10, _ResultNo=0)
         base = [reward, param, empty_data, row, owner, proc, condition, element, predecessor]
 
-        cases = [
-            (base[:-1] + [inst(9, "app.QuestProcessor.ProcCondition.ElementParam",
-                               _ProcID="10", _ResultNo=0)], "invalid reward predecessor"),
-            (base + [inst(10, "app.QuestProcessor", ProcID=11,
-                          PrevProcCondition=R(7), Process=R(5))], "ambiguous reward processor owner"),
-            (base[:-1] + [inst(9, "app.UnknownCondition", _ProcID=10)],
-             "invalid reward predecessor parameter type"),
-            (base[:7] + [inst(8, "app.QuestProcessor.ProcCondition.Element",
-                              _Operator=1, _ParamArray=[R(9), R(10)], _ElementArray=[]),
-                         inst(9, "app.QuestProcessor.ProcCondition.ElementParam",
-                              _ProcID=3952043607, _ResultNo=2),
-                         inst(10, "app.QuestProcessor.ProcCondition.ElementParam",
-                                           _ProcID=3952043607, _ResultNo=2),
-                         inst(11, "app.quest.action.Trigger"),
-                         inst(12, "app.QuestProcessor.ProcessEntity", QuestAction=R(11)),
-                         inst(13, "app.QuestProcessor", ProcID=3952043607,
-                              PrevProcCondition=R(7), Process=R(12))],
-             "duplicate reward predecessor relation"),
-            (base[:1] + [inst(2, "app.quest.action.QuestRewardParam",
-                               _DataList=[R(4), R(10)])] + base[2:]
-             + [inst(10, "app.quest.action.QuestRewardData.Data", _NameHash=7)],
-             "duplicate reward hash join"),
+        malformed = base[:-1] + [inst(9, "app.QuestProcessor.ProcCondition.ElementParam",
+                                       _ProcID="10", _ResultNo=0)]
+        with self.assertRaisesRegex(ew.ExtractError, "invalid reward predecessor processor id"):
+            eq.decode_reward_diagnostics(malformed, 10030)
+
+        unsupported_operator = list(base)
+        unsupported_operator[7] = inst(8, "app.QuestProcessor.ProcCondition.Element",
+                                       _Operator=2, _ParamArray=[R(9)], _ElementArray=[])
+        row = eq.decode_reward_diagnostics(unsupported_operator, 10030)[0]
+        self.assertEqual(row["branch_status"], "unsupported")
+        self.assertIn("unsupported_operator", row["branch_diagnostics"])
+        self.assertEqual(row["eligibility"], "unknown")
+
+        unsupported_result = list(base)
+        unsupported_result[8] = inst(9, "app.QuestProcessor.ProcCondition.ElementParam",
+                                     _ProcID=10, _ResultNo=2)
+        row = eq.decode_reward_diagnostics(unsupported_result, 10030)[0]
+        self.assertEqual(row["branch_status"], "unsupported")
+        self.assertIn("unsupported_result_no", row["branch_diagnostics"])
+
+        unsupported_action = list(base)
+        unsupported_action.extend([
+            inst(10, "app.QuestProcessor.ProcessEntity", QuestAction=R(11)),
+            inst(11, "app.UnknownAction"),
+            inst(12, "app.QuestProcessor", ProcID=10,
+                 PrevProcCondition=R(7), Process=R(10)),
+        ])
+        row = eq.decode_reward_diagnostics(unsupported_action, 10030)[0]
+        self.assertIn("unsupported_predecessor_action_type", row["branch_diagnostics"])
+
+        no_owner = base[:4] + base[6:]
+        row = eq.decode_reward_diagnostics(no_owner, 10030)[0]
+        self.assertEqual(row["ownership_status"], "missing_owner")
+        self.assertEqual(row["eligibility"], "unknown")
+
+        ambiguous_owner = base + [inst(10, "app.QuestProcessor", ProcID=11,
+                                       PrevProcCondition=R(7), Process=R(5))]
+        row = eq.decode_reward_diagnostics(ambiguous_owner, 10030)[0]
+        self.assertEqual(row["ownership_status"], "ambiguous_owner")
+        self.assertNotIn("processor_id", row["source_identity"])
+
+        duplicate_processor = base + [
+            inst(10, "app.quest.action.Trigger"),
+            inst(11, "app.QuestProcessor.ProcessEntity", QuestAction=R(10)),
+            inst(12, "app.QuestProcessor", ProcID=9,
+                 PrevProcCondition=R(7), Process=R(11)),
         ]
-        for fixture, message in cases:
-            with self.subTest(message=message), self.assertRaisesRegex(ew.ExtractError, message):
-                eq.decode_reward_sources(fixture, 10030)
+        row = eq.decode_reward_diagnostics(duplicate_processor, 10030)[0]
+        self.assertEqual(row["ownership_status"], "duplicate_processor_id")
+        self.assertIn("duplicate_processor_id", row["branch_diagnostics"])
 
     def test_context_cast_and_deliveries(self):
         kept = eq.kept_chara(CHARA)
@@ -545,13 +613,13 @@ def e2e_files():
 
 E2E_OUT = {"version": 2, "pak": "7:9", "quests": {
     "10040": {"cast": [], "npcs": [], "items": [], "dest": [], "decoded": False,
-              "tasks": [], "guidance": [], "deliveries": [], "sources": []},
+              "tasks": [], "guidance": [], "deliveries": [], "reward_diagnostics": []},
     "30010": {"cast": [], "npcs": [], "items": [], "dest": [{"cid": 104, "key": 2400}],
-              "decoded": False, "tasks": [], "guidance": [], "deliveries": [], "sources": []},
+              "decoded": False, "tasks": [], "guidance": [], "deliveries": [], "reward_diagnostics": []},
     "20090": {"cast": [101], "npcs": [103], "items": [201], "dest": [{"cid": 101, "key": 2308}],
-              "decoded": True, "tasks": [], "guidance": [], "deliveries": [], "sources": []},
+              "decoded": True, "tasks": [], "guidance": [], "deliveries": [], "reward_diagnostics": []},
     "20141": {"cast": [102], "npcs": [], "items": [], "dest": [], "decoded": False,
-              "tasks": [], "guidance": [], "deliveries": [], "sources": []}}}
+              "tasks": [], "guidance": [], "deliveries": [], "reward_diagnostics": []}}}
 
 
 class ExtractTests(unittest.TestCase):
@@ -576,7 +644,7 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(lines[0], "quests 4, scenes 2, decoded 1, journals 2")
         self.assertEqual(lines[1], "entries: cast 2, npcs 1, items 1, dest 2")
         self.assertEqual(lines[2], "objectives: tasks 0, task destinations 0, concierge records 0, guidance destinations 0, deliveries 0, delivery refs 0")
-        self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 0, records without quest id 0, records without item data 1, reward records 0, gift records 0, transformation records 0, quest reward relations 0, catalog item joins 0, eligible archive source descriptors 0")
+        self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 0, records without quest id 0, records without item data 1, reward records 0, gift records 0, transformation records 0, reward diagnostics 0, eligible archive source descriptors 0")
         self.assertTrue(lines[4].startswith("undecoded 10040: "))
         self.assertEqual(len(lines), 5)
         self.assertEqual(FakePak.closed, 1)
@@ -649,7 +717,7 @@ class ExtractTests(unittest.TestCase):
             f.write("00")
         buf = io.StringIO()
         with mock.patch.object(eq, "load_layouts", return_value=QLAYOUTS), \
-                mock.patch.object(eq, "decode_reward_sources",
+                mock.patch.object(eq, "decode_reward_diagnostics",
                                   side_effect=ew.ExtractError("duplicate reward processor id")), \
                 contextlib.redirect_stdout(buf):
             code = eq.main(["--game", self.game, "--out", out_path, "--key", key])
@@ -669,9 +737,10 @@ class ExtractTests(unittest.TestCase):
         with open(artifact_path, encoding="utf-8") as artifact_file:
             self.assertEqual(json.load(artifact_file), out)
         self.assertEqual(out["pak"], "318966:1887616979")
+        self.assertNotIn("reward_catalog_evidence", out)
         self.assertEqual(lines[0], "quests 122, scenes 114, decoded 105, journals 86")
         self.assertEqual(lines[2], "objectives: tasks 298, task destinations 341, concierge records 246, guidance destinations 240, deliveries 184, delivery refs 77")
-        self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 15, records without quest id 1, records without item data 0, reward records 496, gift records 0, transformation records 0, quest reward relations 124, catalog item joins 0, eligible archive source descriptors 0")
+        self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 15, records without quest id 1, records without item data 0, reward records 496, gift records 0, transformation records 0, reward diagnostics 124, eligible archive source descriptors 0")
         quests = out["quests"]
         legacy_fields = ("cast", "npcs", "items", "dest", "decoded")
         fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
@@ -763,12 +832,21 @@ class ExtractTests(unittest.TestCase):
             "quest_log_reminder": 53, "quest_variable": 103, "item": 10,
             "quest_variable_or": 6}))
         self.assertEqual(negative_task_condition_qids, 260)
-        self.assertEqual(sum(len(quest["sources"]) for quest in quests.values()), 124)
-        reward_sources = [source for quest in quests.values() for source in quest["sources"]]
-        self.assertEqual(sum(source["family"] == "quest_reward" for source in reward_sources), 124)
-        self.assertTrue(all(set(source) == {"family", "quest_id", "action_ordinal",
-                                             "processor_id", "precondition", "reward_hashes"}
-                            for source in reward_sources))
+        self.assertEqual(sum(len(quest["reward_diagnostics"]) for quest in quests.values()), 124)
+        reward_diagnostics = [row for quest in quests.values()
+                              for row in quest["reward_diagnostics"]]
+        self.assertEqual(sum(row["family"] == "quest_reward" for row in reward_diagnostics), 124)
+        self.assertTrue(all(row["eligibility"] == "unknown" for row in reward_diagnostics))
+        self.assertTrue(all("sources" not in quest for quest in quests.values()))
+        raw_hashes = {reward["name_hash"] for row in reward_diagnostics
+                      for reward in row["reward_rows"]}
+        self.assertTrue({801888944, 3741130030, 2856910244}.issubset(raw_hashes))
+        self.assertTrue(all(set(reward) == {"ordinal", "name_hash"}
+                            for row in reward_diagnostics for reward in row["reward_rows"]))
+        self.assertTrue(all("runtime_reward_hash_to_item_count" in row["unresolved_joins"]
+                            for row in reward_diagnostics))
+        self.assertFalse(any("catalog_join" in reward
+                             for row in reward_diagnostics for reward in row["reward_rows"]))
 
         spellbound = quests["30150"]
         self.assertEqual([task["index"] for task in spellbound["tasks"]],

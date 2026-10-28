@@ -69,6 +69,8 @@ PROCESSOR_ENTITY_TYPE = "app.QuestProcessor.ProcessEntity"
 PROC_CONDITION_TYPE = "app.QuestProcessor.ProcCondition"
 PROC_ELEMENT_TYPE = "app.QuestProcessor.ProcCondition.Element"
 PROC_ELEMENT_PARAM_TYPE = "app.QuestProcessor.ProcCondition.ElementParam"
+REWARD_OPERATOR_NAMES = {0: "and", 1: "or"}
+REWARD_RESULT_NUMBERS = {0, 1}
 SUBSKILL_CONDITION_TYPE = "app.ConciergeConditionSubskill"
 DAYTIME_CONDITION_TYPE = "app.ConciergeConditionDayTime"
 TASK_CONDITION_TYPE = "app.QuestLogResource.QuestLogCondition"
@@ -402,51 +404,55 @@ def _reward_ref(insts, value, expected, label):
     return target
 
 
-def decode_reward_sources(insts, qid):
-    """Decode exact static reward-action relations, without runtime eligibility inference."""
+def decode_reward_diagnostics(insts, qid):
+    """Decode exact reward relations, but never create production source candidates."""
     qid = _integer(qid, "reward quest id", 1, U32_MAX)
-    processors = {}
+    processors = collections.defaultdict(list)
     owners = collections.defaultdict(list)
     for processor in insts:
         if processor.type != PROCESSOR_TYPE:
             continue
         proc_id = _integer(_field(processor, "ProcID"), "reward processor id", 0, U32_MAX)
-        if proc_id in processors:
-            raise ew.ExtractError("duplicate reward processor id")
-        processors[proc_id] = processor
-        process = _reward_ref(insts, _field(processor, "Process"),
-                              PROCESSOR_ENTITY_TYPE, "reward processor process")
+        processors[proc_id].append(processor)
+        process = qnml_rsz.deref(insts, processor.fields.get("Process"))
+        if process is None or process.type != PROCESSOR_ENTITY_TYPE:
+            continue
         action = qnml_rsz.deref(insts, _field(process, "QuestAction"))
         if action is not None:
             owners[action.idx].append(processor)
 
-    def decode_condition(condition, active, seen_relations):
+    def decode_condition(condition, diagnostics):
         if condition is None or condition.type != PROC_CONDITION_TYPE:
-            raise ew.ExtractError("invalid reward predecessor condition")
+            diagnostics.add("predecessor_condition_unavailable")
+            return None
         roots = _required_array(_field(condition, "_ElementArray"),
                                "reward predecessor roots")
         if not roots:
-            raise ew.ExtractError("empty reward predecessor roots")
-        seen_elements = set()
+            diagnostics.add("empty_predecessor_condition")
+            return []
+        seen_elements, active_elements, seen_relations = set(), set(), set()
 
         def decode_element(ref):
             element = _reward_ref(insts, ref, PROC_ELEMENT_TYPE,
                                   "reward predecessor element")
-            if element.idx in active:
+            if element.idx in active_elements:
                 raise ew.ExtractError("cyclic reward predecessor tree")
             if element.idx in seen_elements:
-                raise ew.ExtractError("duplicate reward predecessor element")
+                diagnostics.add("duplicate_predecessor_element")
             seen_elements.add(element.idx)
-            active.add(element.idx)
+            active_elements.add(element.idx)
             try:
                 operator = _integer(_field(element, "_Operator"),
                                     "reward predecessor operator")
+                operator_name = REWARD_OPERATOR_NAMES.get(operator)
+                if operator_name is None:
+                    diagnostics.add("unsupported_operator")
                 params = _required_array(_field(element, "_ParamArray"),
                                         "reward predecessor parameters")
                 children = _required_array(_field(element, "_ElementArray"),
                                            "reward predecessor children")
                 if not params and not children:
-                    raise ew.ExtractError("empty reward predecessor element")
+                    diagnostics.add("empty_predecessor_element")
                 decoded_params = []
                 for param_ref in params:
                     param = _reward_ref(insts, param_ref, PROC_ELEMENT_PARAM_TYPE,
@@ -457,40 +463,66 @@ def decode_reward_sources(insts, qid):
                                          "reward predecessor result number")
                     relation = (predecessor_id, result_no)
                     if relation in seen_relations:
-                        raise ew.ExtractError("duplicate reward predecessor relation")
+                        diagnostics.add("duplicate_predecessor_relation")
                     seen_relations.add(relation)
-                    predecessor = processors.get(predecessor_id)
-                    if predecessor is None:
-                        raise ew.ExtractError("unresolved reward predecessor processor")
-                    predecessor_process = _reward_ref(
-                        insts, _field(predecessor, "Process"), PROCESSOR_ENTITY_TYPE,
-                        "reward predecessor process")
-                    predecessor_action = qnml_rsz.deref(
-                        insts, _field(predecessor_process, "QuestAction"))
-                    if predecessor_action is None:
-                        raise ew.ExtractError("unresolved reward predecessor action")
+                    if result_no not in REWARD_RESULT_NUMBERS:
+                        diagnostics.add("unsupported_result_no")
+                        result_status = "unsupported"
+                    else:
+                        result_status = "observed"
+                    predecessor_rows = processors.get(predecessor_id, [])
+                    predecessor_action = None
+                    if len(predecessor_rows) != 1:
+                        diagnostics.add("ambiguous_predecessor_processor"
+                                        if len(predecessor_rows) > 1
+                                        else "missing_predecessor_processor")
+                    else:
+                        predecessor_process = qnml_rsz.deref(
+                            insts, predecessor_rows[0].fields.get("Process"))
+                        if predecessor_process is None or predecessor_process.type != PROCESSOR_ENTITY_TYPE:
+                            diagnostics.add("unsupported_predecessor_process_type")
+                        else:
+                            predecessor_action = qnml_rsz.deref(
+                                insts, predecessor_process.fields.get("QuestAction"))
+                            if predecessor_action is None:
+                                diagnostics.add("missing_predecessor_action")
+                    action_type = predecessor_action.type if predecessor_action else None
+                    if action_type is not None:
+                        if not action_type.startswith("app.quest.action."):
+                            diagnostics.add("unsupported_predecessor_action_type")
+                        else:
+                            diagnostics.add("predecessor_action_semantics_unverified")
                     decoded_params.append({"kind": "processor_result",
                                            "proc_id": predecessor_id,
                                            "result_no": result_no,
-                                           "action_type": predecessor_action.type})
-                return {"operator": operator, "parameters": decoded_params,
+                                           "action_type": action_type,
+                                           "result_status": result_status})
+                return {"operator": operator_name, "operator_value": operator,
+                        "parameters": decoded_params,
                         "children": [decode_element(child) for child in children]}
             finally:
-                active.remove(element.idx)
+                active_elements.remove(element.idx)
 
         return [decode_element(root) for root in roots]
 
-    reward_actions = [item for item in insts if item.type == REWARD_TYPE]
     result = []
+    reward_actions = [item for item in insts if item.type == REWARD_TYPE]
     for ordinal, action in enumerate(reward_actions):
         action_owners = owners.get(action.idx, [])
-        if len(action_owners) != 1:
-            raise ew.ExtractError("ambiguous reward processor owner")
-        processor = action_owners[0]
-        processor_id = _integer(_field(processor, "ProcID"),
-                                "reward processor id", 0, U32_MAX)
+        ownership_status = "exact"
+        processor, processor_id = None, None
+        if len(action_owners) == 0:
+            ownership_status = "missing_owner"
+        elif len(action_owners) > 1:
+            ownership_status = "ambiguous_owner"
+        else:
+            processor = action_owners[0]
+            processor_id = _integer(_field(processor, "ProcID"),
+                                    "reward processor id", 0, U32_MAX)
+            if len(processors[processor_id]) != 1:
+                ownership_status = "duplicate_processor_id"
         params = _required_array(_field(action, "_Param"), "reward action parameters")
-        reward_hashes = []
+        reward_rows = []
         for param_ref in params:
             param = _reward_ref(insts, param_ref, REWARD_PARAM_TYPE,
                                 "reward action parameter")
@@ -498,16 +530,32 @@ def decode_reward_sources(insts, qid):
             for row_ref in rows:
                 row = _reward_ref(insts, row_ref, REWARD_DATA_TYPE, "reward hash row")
                 reward_hash = _integer(_field(row, "_NameHash"), "reward hash", 0, U32_MAX)
-                if reward_hash in reward_hashes:
-                    raise ew.ExtractError("duplicate reward hash join")
-                reward_hashes.append(reward_hash)
-        if not reward_hashes:
-            raise ew.ExtractError("reward action has no reward hashes")
-        previous = qnml_rsz.deref(insts, _field(processor, "PrevProcCondition"))
+                reward_rows.append({"ordinal": len(reward_rows), "name_hash": reward_hash})
+        identity = {"quest_id": qid, "action_ordinal": ordinal}
+        if ownership_status == "exact":
+            identity["processor_id"] = processor_id
+        branch_diagnostics = set()
+        precondition = None
+        if ownership_status == "exact":
+            previous = qnml_rsz.deref(insts, processor.fields.get("PrevProcCondition"))
+            precondition = decode_condition(previous, branch_diagnostics)
+        else:
+            branch_diagnostics.add(ownership_status)
+        branch_status = "unsupported" if any(
+            value.startswith("unsupported_") for value in branch_diagnostics) else "unverified"
         result.append({"family": "quest_reward", "quest_id": qid,
-                       "action_ordinal": ordinal, "processor_id": processor_id,
-                       "precondition": decode_condition(previous, set(), set()),
-                       "reward_hashes": reward_hashes})
+                       "source_identity": identity, "action_type": REWARD_TYPE,
+                       "ownership_status": ownership_status, "branch_status": branch_status,
+                       "branch_diagnostics": sorted(branch_diagnostics),
+                       "precondition": precondition, "reward_rows": reward_rows,
+                       "reward_payload_status": "complete" if reward_rows else "empty",
+                       "task_endpoint_join": {"status": "unproven",
+                         "reason": "journal_task_to_drawable_reward_endpoint_unverified"},
+                       "unresolved_joins": ["journal_task_to_reward_endpoint",
+                                            "reward_action_to_drawable_target",
+                                            "current_branch_truth", "claim_state",
+                                            "runtime_reward_hash_to_item_count"],
+                       "eligibility": "unknown"})
     return result
 
 
@@ -660,13 +708,13 @@ def extract(game, key_hex, layouts):
     dests = {qid: journal_dest(insts, kept) for qid, insts in journal_insts.items()}
     objectives = {qid: decode_journal_objectives(insts, delivery_index, kept)
                   for qid, insts in journal_insts.items()}
-    relations, reward_sources, undecoded, decoded_scene_insts = {}, {}, {}, []
+    relations, reward_diagnostics, undecoded, decoded_scene_insts = {}, {}, {}, []
     for qid, data in scenes.items():
         try:
             insts = qnml_rsz.decode(data, layouts)
             decoded_scene_insts.extend(insts)
             relations[qid] = scene_relations(insts, kept)
-            reward_sources[qid] = decode_reward_sources(insts, qid)
+            reward_diagnostics[qid] = decode_reward_diagnostics(insts, qid)
         except qnml_rsz.DecodeError as e:
             undecoded[qid] = str(e)
     if len(scenes) < MIN_SCENES:
@@ -682,7 +730,7 @@ def extract(game, key_hex, layouts):
         entry = quest_entry(ctx.get(qid), relations.get(qid), dests.get(qid, []))
         entry.update(objectives.get(qid, {"tasks": [], "guidance": []}))
         entry["deliveries"] = deliveries.get(qid, [])
-        entry["sources"] = reward_sources.get(qid, [])
+        entry["reward_diagnostics"] = reward_diagnostics.get(qid, [])
         quests[str(qid)] = entry
     validate_delivery_integrity(quests)
     out = {"version": 2, "pak": "%d:%d" % (total, fingerprint), "quests": quests}
@@ -695,7 +743,7 @@ def extract(game, key_hex, layouts):
         sums["guidance"] += len(q["guidance"])
         sums["guidance_destinations"] += sum(len(g["destinations"]) for g in q["guidance"])
         sums["deliveries"] += len(q["deliveries"])
-        sums["sources"] += len(q["sources"])
+        sums["reward_diagnostics"] += len(q["reward_diagnostics"])
         sums["delivery_refs"] += sum(len(d["delivery"]["refs"])
                                       for g in q["guidance"] for d in g["destinations"])
     lines = [
@@ -706,12 +754,12 @@ def extract(game, key_hex, layouts):
         "objectives: tasks %d, task destinations %d, concierge records %d, guidance destinations %d, deliveries %d, delivery refs %d" % (
             sums["tasks"], sums["task_destinations"], sums["guidance"],
             sums["guidance_destinations"], sums["deliveries"], sums["delivery_refs"]),
-        "diagnostics: delivery item-id zero sentinels %d, records without quest id %d, records without item data %d, reward records %d, gift records %d, transformation records %d, quest reward relations %d, catalog item joins 0, eligible archive source descriptors 0" % (
+        "diagnostics: delivery item-id zero sentinels %d, records without quest id %d, records without item data %d, reward records %d, gift records %d, transformation records %d, reward diagnostics %d, eligible archive source descriptors 0" % (
             extraction_diagnostics["delivery_item_id_zero_sentinels"],
             extraction_diagnostics["delivery_data_without_quest_id"],
             extraction_diagnostics["delivery_records_without_item_data"],
             source_diagnostics["reward_records"], source_diagnostics["gift_records"],
-            source_diagnostics["transform_records"], sums["sources"]),
+            source_diagnostics["transform_records"], sums["reward_diagnostics"]),
     ]
     lines += ["undecoded %d: %s" % (qid, undecoded[qid]) for qid in sorted(undecoded)]
     return out, lines
