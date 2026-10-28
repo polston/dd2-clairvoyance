@@ -5009,11 +5009,19 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
       return "ineligible", "talk_grant_interaction_disabled"
     elseif event.history_readable ~= true then
       return "unknown", "talk_grant_history_unreadable"
+    elseif type(event.history_present) ~= "boolean" then
+      return "unknown", "talk_grant_history_state_unreadable"
+    elseif event.history_present and type(event.history_played) ~= "boolean" then
+      return "unknown", "talk_grant_history_state_unreadable"
+    elseif event.history_present and event.history_played then
+      return "ineligible", "talk_grant_history_played"
     end
     return "eligible", nil
   end
   for _, event in ipairs(events) do
-    local by_id, by_hash, reach = {}, {}, {}
+    local by_id, by_hash, reach, reach_reason = {}, {}, {}, {}
+    local transparent_kind = { ["app.RootSegmentNode"] = true,
+      ["app.TalkSegmentNode"] = true }
     local graph_reason = nil
     for _, node in ipairs(event.nodes) do
       local id_key = ref_key("id:", node.node_id)
@@ -5035,23 +5043,33 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
         local state = reach[node]
         if state ~= nil then
           for _, edge in ipairs(node.edges) do
-            local target = edge.next_node_id ~= nil
-              and by_id[ref_key("id:", edge.next_node_id)] or nil
-            if target == false then
-              target = nil; graph_reason = "talk_grant_node_identity_conflict"
+            local id_target, hash_target = nil, nil
+            if edge.next_node_id ~= nil then
+              id_target = by_id[ref_key("id:", edge.next_node_id)]
             end
-            if target == nil and edge.next_node_name_hash ~= nil then
-              target = by_hash[ref_key("hash:", edge.next_node_name_hash)]
-              if target == false then
-                target = nil; graph_reason = "talk_grant_node_identity_conflict"
-              end
+            if edge.next_node_name_hash ~= nil then
+              hash_target = by_hash[ref_key("hash:", edge.next_node_name_hash)]
             end
-            if target == nil then
+            local both_references = edge.next_node_id ~= nil
+              and edge.next_node_name_hash ~= nil
+            local identity_conflict = id_target == false or hash_target == false
+              or (both_references and (id_target == nil or hash_target == nil
+                or id_target ~= hash_target))
+            local target = not identity_conflict and (id_target or hash_target) or nil
+            if identity_conflict then
+              graph_reason = "talk_grant_node_identity_conflict"
+            elseif target == nil then
               graph_reason = "talk_grant_graph_target_unresolved"
             else
-              local next_state = edge.condition_count > 0 and 1 or state
+              local next_state, next_reason = state, reach_reason[node]
+              if state == 2 and edge.condition_count > 0 then
+                next_state, next_reason = 1, "talk_grant_branch_condition_unmodeled"
+              elseif state == 2 and not transparent_kind[node.kind] then
+                next_state, next_reason = 1, "talk_grant_intermediate_node_unmodeled"
+              end
               if reach[target] == nil or next_state > reach[target] then
-                reach[target] = next_state; changed = true
+                reach[target], reach_reason[target] = next_state, next_reason
+                changed = true
               end
             end
           end
@@ -5078,7 +5096,8 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
           if identity_owner ~= node then
             eligibility, reason = "unknown", "talk_grant_node_identity_conflict"
           elseif reach[node] == 1 then
-            eligibility, reason = "unknown", "talk_grant_branch_condition_unmodeled"
+            eligibility, reason = "unknown", reach_reason[node]
+              or "talk_grant_branch_condition_unmodeled"
           elseif reach[node] ~= 2 then
             eligibility, reason = "unknown",
               graph_reason or "talk_grant_node_unreachable"

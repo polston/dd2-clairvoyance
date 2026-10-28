@@ -312,16 +312,20 @@ do
     and talk.candidates[1].eligibility == "eligible"
     and talk.diagnostics[1].eligibility == "eligible",
     "complete reachable direct grant publishes one stable positioned source")
-  local function talk_variant(fields, edge_conditions)
+  local function talk_variant(fields, edge_conditions, middle_kind, mismatched_hash)
     local event = {
       event_id = 1900, playable = true, playing = false, speaker_cid = 101,
       speaker_position = { x = 1, y = 2, z = 3 }, interaction_readable = true,
       interaction_enabled = true, history_readable = true, history_present = false,
       nodes = {
         { index = 0, kind = "app.RootSegmentNode", node_id = "start",
-          node_name_hash = 10, edges = { { index = 0, next_node_id = "grant",
-            next_node_name_hash = 11, condition_count = edge_conditions or 0 } } },
-        { index = 1, kind = "app.ItemControlSegmentNode", node_id = "grant",
+          node_name_hash = 10, edges = { { index = 0, next_node_id = "talk",
+            next_node_name_hash = mismatched_hash or 12,
+            condition_count = edge_conditions or 0 } } },
+        { index = 1, kind = middle_kind or "app.TalkSegmentNode", node_id = "talk",
+          node_name_hash = 12, edges = { { index = 0, next_node_id = "grant",
+            next_node_name_hash = 11, condition_count = 0 } } },
+        { index = 2, kind = "app.ItemControlSegmentNode", node_id = "grant",
           node_name_hash = 11, edges = {},
           grants = { { item_index = 0, item_id = 29, count = 1 } } },
       },
@@ -330,19 +334,33 @@ do
     return A.objective_talk_grant_provider_snapshot(
       { complete = true, wanted = { 29 }, events = { event } }, 8)
   end
+  local modeled_talk = talk_variant()
+  assert(#modeled_talk.candidates == 1
+    and modeled_talk.diagnostics[1].eligibility == "eligible",
+    "root and talk segments form a modeled unconditional grant path")
   local conditional_talk = talk_variant(nil, 1)
   assert(conditional_talk.status == "ok" and conditional_talk.complete
     and #conditional_talk.candidates == 0
     and conditional_talk.diagnostics[1].eligibility == "unknown"
     and conditional_talk.diagnostics[1].reason == "talk_grant_branch_condition_unmodeled",
     "unsupported branch conditions remain unknown without hiding supported events")
+  local gated_talk = talk_variant(nil, 0, "app.ItemDeliverySegmentNode")
+  assert(#gated_talk.candidates == 0
+    and gated_talk.diagnostics[1].eligibility == "unknown"
+    and gated_talk.diagnostics[1].reason == "talk_grant_intermediate_node_unmodeled",
+    "an unmodeled intermediate segment cannot become an unconditional grant path")
+  local conflicting_edge = talk_variant(nil, 0, nil, 11)
+  assert(#conflicting_edge.candidates == 0
+    and conflicting_edge.diagnostics[1].eligibility == "unknown"
+    and conflicting_edge.diagnostics[1].reason == "talk_grant_node_identity_conflict",
+    "edge node id and name hash must resolve to the same stable node")
   local unavailable_talk = talk_variant({ playable = false })
   assert(#unavailable_talk.candidates == 0
     and unavailable_talk.diagnostics[1].eligibility == "ineligible"
     and unavailable_talk.diagnostics[1].reason == "talk_grant_event_unavailable",
     "a complete negative playability read rejects the grant")
   local claimed_talk = talk_variant({ history_present = true,
-    history_played = false, history_result = 0 })
+    history_played = false, history_result = 60 })
   assert(#claimed_talk.candidates == 1
     and claimed_talk.diagnostics[1].eligibility == "eligible",
     "a previously recorded but currently playable direct event remains obtainable")
@@ -350,6 +368,10 @@ do
       { { playing = true }, "ineligible", "talk_grant_event_playing" },
       { { interaction_enabled = false }, "ineligible", "talk_grant_interaction_disabled" },
       { { history_readable = false }, "unknown", "talk_grant_history_unreadable" },
+      { { history_present = true, history_played = true }, "ineligible",
+        "talk_grant_history_played" },
+      { { history_present = true, history_played = nil }, "unknown",
+        "talk_grant_history_state_unreadable" },
       { { speaker_position = false }, "unknown", "talk_grant_speaker_position_unreadable" },
     }) do
     local result = talk_variant(blocked[1])
