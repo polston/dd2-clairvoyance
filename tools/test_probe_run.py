@@ -119,7 +119,8 @@ return D, qlm, td, world
             "getTalkEventInitialSpeaker", "isEventPlayable",
             "canTalkEventInteract", "getHistory"}
         forgery_methods = {
-            "isFakeShopKeeped", "isFakeShopRemainingMinute"}
+            "get_IsEnableFake", "isFakeShopKeeped",
+            "isFakeShopRemainingMinute"}
         monster_methods = {
             "get_Transform", "get_UniversalPosition", "get_IsDead"}
         self.assertEqual(needed | talk_methods | forgery_methods | monster_methods,

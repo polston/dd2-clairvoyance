@@ -37,7 +37,7 @@ REVIEWED_METHODS = {
     "get_Destinations", "get_DestType", "get_DoneAction", "get_ErrorStatus",
     "get_Executed", "get_FakeShopCompleteTime", "get_FakeShopKeepedItem",
     "get_GimmickID", "get_GmContext", "get_IsAllItem", "get_IsFinish",
-    "get_IsDead", "get_IsOpenedFreeBit", "get_IsRemove", "get_IsStock",
+    "get_IsDead", "get_IsEnableFake", "get_IsOpenedFreeBit", "get_IsRemove", "get_IsStock",
     "get_IsUnlockFreeBit", "get_Item", "get_ItemList", "get_Key",
     "get_KeyLocation", "get_LocalArea", "get_Operator", "get_Process",
     "get_QuestID", "get_SetNpc", "get_Stock", "get_TaskIndex",

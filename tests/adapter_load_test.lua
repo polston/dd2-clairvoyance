@@ -278,6 +278,318 @@ for _, generation in ipairs({ 1.5, math.huge }) do
   assert(malformed.eligibility == "unknown" and malformed.reason == "forgery_generation_invalid",
     "fractional or infinite forgery evidence generation is rejected")
 end
+
+-- Talk-grant and forgery production providers are pure over atomic native
+-- observations.  Research rows are retained for diagnostics, but no source is
+-- published until every eligibility gate has verified game semantics.
+do
+  assert(type(A.objective_talk_grant_provider_snapshot) == "function",
+    "talk-grant provider classifier is exported")
+  assert(type(A.objective_forgery_provider_snapshot) == "function",
+    "forgery provider classifier is exported")
+  local talk_observation = { complete = true, wanted = { 29 }, events = {
+    { event_id = 1900, playable = true, speaker_present = true,
+      interactable = true, history_present = false, nodes = {
+        { index = 0, node_id = "start", node_name_hash = 10, edges = {
+          { index = 0, next_node_id = "grant", next_node_name_hash = 11,
+            has_conditions = true }, } },
+        { index = 1, node_id = "grant", node_name_hash = 11, edges = {},
+          grants = { { item_index = 0, item_id = 29, count = 1 } } },
+      } }, } }
+  local talk = A.objective_talk_grant_provider_snapshot(talk_observation, 7)
+  assert(talk.provider == "talk_grant" and talk.generation == 7
+    and talk.status == "unknown" and talk.complete == false
+    and talk.reason == "talk_grant_reachable_state_unproven"
+    and #talk.candidates == 0 and #talk.diagnostics == 1
+    and talk.diagnostics[1].event_id == 1900
+    and talk.missing_evidence[1] == "current_task_grant_ownership"
+    and talk.missing_evidence[4] == "drawable_target",
+    "talk-grant provider preserves exact graph diagnostics but fails closed")
+  local no_talk = A.objective_talk_grant_provider_snapshot(
+    { complete = true, wanted = { 29 }, events = {} }, 8)
+  assert(no_talk.status == "ok" and no_talk.complete and #no_talk.candidates == 0,
+    "a complete catalog scan with no matching talk grant is authoritative empty")
+  local partial_talk = A.objective_talk_grant_provider_snapshot(
+    { complete = false, reason = "talk_grant_nodes_truncated", wanted = { 29 }, events = {} }, 9)
+  assert(partial_talk.status == "unknown" and not partial_talk.complete
+    and partial_talk.reason == "talk_grant_nodes_truncated" and #partial_talk.candidates == 0,
+    "a partial talk catalog scan clears all candidates")
+
+  local forgery_observation = { complete = true, wanted = { 29 },
+    services = { { job = 94, talk_event_id = 1919, service_index = 0,
+      chara_id = 3472286413, shop_id = 25, service_type = "app.NpcShopForgeryParam",
+      playable = true, speaker_present = true, interactable = true,
+      interaction_disabled = false, condition_truth_readable = false } },
+    mappings = { { input_item_id = 11, output_item_id = 29, price = 6,
+      enabled_readable = false } },
+    order = { kept_readable = true, kept_item_id = 0, kept_item_count = 0,
+      completion_time_readable = true, completion_time = 0,
+      completed_readable = true, completed = false } }
+  local forgery = A.objective_forgery_provider_snapshot(forgery_observation, 11)
+  assert(forgery.provider == "forgery" and forgery.generation == 11
+    and forgery.status == "unknown" and not forgery.complete
+    and forgery.reason == "forgery_mapping_enablement_unproven"
+    and #forgery.candidates == 0 and #forgery.diagnostics.services == 1
+    and #forgery.diagnostics.mappings == 1
+    and forgery.missing_evidence[1] == "mapping_enablement"
+    and forgery.missing_evidence[7] == "busy_kept_completion_semantics",
+    "forgery provider preserves typed service/order diagnostics but fails closed")
+  local enabled_observation = {
+    complete = true, wanted = { 29 }, services = forgery_observation.services,
+    mappings = { { input_item_id = 11, output_item_id = 29, price = 6,
+      enabled_readable = true, enabled = true, held_readable = false,
+      price_readable = false } }, order = forgery_observation.order }
+  local enabled_forgery = A.objective_forgery_provider_snapshot(enabled_observation, 12)
+  assert(enabled_forgery.status == "unknown"
+    and enabled_forgery.reason == "forgery_service_speaker_join_unproven"
+    and enabled_forgery.missing_evidence[1] == "service_speaker_join",
+    "a readable enabled mapping exposes the exact structured-speaker join gate")
+  local availability_service = {}
+  for key, value in pairs(forgery_observation.services[1]) do
+    availability_service[key] = value
+  end
+  availability_service.speaker_matches_service = true
+  availability_service.availability_readable = false
+  local availability_observation = {
+    complete = true, wanted = { 29 }, services = { availability_service },
+    mappings = enabled_observation.mappings, order = forgery_observation.order }
+  local availability_forgery = A.objective_forgery_provider_snapshot(
+    availability_observation, 13)
+  assert(availability_forgery.reason == "forgery_service_availability_unproven"
+    and availability_forgery.missing_evidence[1] == "service_availability",
+    "a matched speaker exposes the exact structured service-availability gate")
+  local no_mapping = A.objective_forgery_provider_snapshot({ complete = true,
+    wanted = { 29 }, services = forgery_observation.services, mappings = {},
+    order = forgery_observation.order }, 14)
+  assert(no_mapping.status == "ok" and no_mapping.complete and #no_mapping.candidates == 0,
+    "a complete item catalog scan with no forgery mapping is authoritative empty")
+  local partial_forgery = A.objective_forgery_provider_snapshot({ complete = false,
+    reason = "forgery_service_catalog_truncated", wanted = { 29 }, services = {},
+    mappings = {}, order = {} }, 15)
+  assert(partial_forgery.status == "unknown" and not partial_forgery.complete
+    and partial_forgery.reason == "forgery_service_catalog_truncated"
+    and #partial_forgery.candidates == 0,
+    "a partial forgery catalog scan clears all candidates")
+
+  local aux = { talk_grant = talk_observation, forgery = forgery_observation }
+  local first = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, aux)
+  local repeated = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, aux)
+  assert(first[4].reason == "talk_grant_reachable_state_unproven"
+    and first[5].reason == "forgery_mapping_enablement_unproven"
+    and repeated[4].generation == first[4].generation
+    and repeated[5].generation == first[5].generation,
+    "identical production observations keep independent provider generations stable")
+  local changed_aux = { talk_grant = {
+      complete = true, wanted = { 29 }, events = {} },
+    forgery = forgery_observation }
+  local changed = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, changed_aux)
+  assert(changed[4].generation == first[4].generation + 1
+    and changed[4].status == "ok" and #changed[4].candidates == 0
+    and changed[5].generation == first[5].generation,
+    "a changed talk observation advances only talk generation and leaves no stale candidate")
+end
+
+-- Native catalog readers reconcile bounded managed collections atomically and
+-- retain only plain diagnostic values (never managed-object references).
+do
+  assert(type(A.read_objective_talk_grant_observation) == "function",
+    "talk-grant native observation reader is exported")
+  assert(type(A.read_objective_forgery_observation) == "function",
+    "forgery native observation reader is exported")
+  local function managed(fields, calls, name)
+    local object = { fields = fields or {}, calls = calls or {} }
+    function object.get_field(_, key) return object.fields[key] end
+    function object.call(_, method, ...)
+      local value = object.calls[method]
+      if type(value) == "function" then return value(...) end
+      return value
+    end
+    function object.get_type_definition()
+      return { get_full_name = function() return name end }
+    end
+    return object
+  end
+  local function managed_list(values, count)
+    return managed({}, { get_Count = count or #values,
+      get_Item = function(index) return values[index + 1] end })
+  end
+  local function managed_array(values)
+    return { get_elements = function() return values end }
+  end
+  local function managed_dict(rows, expected, counter)
+    local entries = {}
+    for index, row in ipairs(rows) do
+      entries[index] = managed({ Next = -1, Key = row[1], Value = row[2] })
+    end
+    local array = { get_elements = function() return entries end }
+    return managed({ _count = #entries, _freeCount = 0, _entries = array },
+      { get_Count = function()
+        if counter ~= nil then counter.reads = counter.reads + 1 end
+        return expected or #entries
+      end })
+  end
+  local grant = managed({ _ItemId = 29, _Num = 2 })
+  local edge = managed({ _NextNodeId = "grant", _NextNodeNameHash = 11,
+    _Conditions = managed({}) })
+  local start = managed({ _NodeId = "start", _NodeNameHash = 10,
+    _NextNodesCandidates = managed_array({ edge }) }, nil, "app.TalkSegmentNode")
+  local grant_node = managed({ _NodeId = "grant", _NodeNameHash = 11,
+    _NextNodesCandidates = managed_array({}), _ChangeType = 0,
+    _Items = managed_array({ grant }) }, nil, "app.ItemControlSegmentNode")
+  local event_data = managed({ _SegmentNodes = managed_array({ start, grant_node }) })
+  local event_ref = managed({ _Item = event_data })
+  local talk_reads, shop_reads, mapping_reads = { reads = 0 }, { reads = 0 }, { reads = 0 }
+  local talk_dict = managed_dict({ { 1900, event_ref } }, nil, talk_reads)
+  local character_data = managed({}, {}, "app.CharacterData")
+  local blackboard = managed({}, {}, "app.AIBlackBoardController")
+  local speaker = managed({}, {
+    get_CharaID = function() return 3472286413 end,
+    get_AIBlackBoardController = function() return blackboard end,
+  }, "app.Character")
+  local npc_manager = managed({}, {
+    getNPCCharacterData = function(chara_id)
+      return chara_id == 3472286413 and character_data or nil
+    end,
+  })
+  local talk_manager = managed({ _ResourceCatalog = managed({
+      ["<MergedCatalog>k__BackingField"] = talk_dict }) }, {
+    getTalkEventInitialSpeaker = function(event_id) return event_id == 1900 and speaker or nil end,
+    isEventPlayable = function(event_id) return event_id == 1900 end,
+    getHistory = function() return nil end,
+    canTalkEventInteract = function(value) return value == speaker end,
+  })
+  local service = managed({ _CharaID = 3472286413, _ShopID = 25 }, nil,
+    "app.NpcShopForgeryParam")
+  local shop_data = managed({ _TalkEventID = 1919,
+    _CharacterShopData = managed_list({ service }) })
+  local shop_dict = managed_dict({ { 94, shop_data } }, nil, shop_reads)
+  talk_manager.fields._ShopTalkEventDataCatalog = shop_dict
+  local mapping = managed({ _Id = 11, _FakeItemId = 29, _FakePrice = 6 }, {
+      get_IsEnableFake = function() return true end },
+    "app.ItemDataParam")
+  local item_manager = managed({ _ItemDataDict = managed_dict({ { 11, mapping } }, nil,
+      mapping_reads) }, {
+    get_FakeShopKeepedItem = function() return managed({ _ItemId = 0, _Num = 0 }) end,
+    get_FakeShopCompleteTime = function() return 0 end,
+    isFakeShopKeeped = function() return false end,
+    isFakeShopCompleted = function() return false end,
+    isFakeShopRemainingMinute = function() return 0 end,
+  })
+  talk_manager.calls.getTalkEventInitialSpeaker = function(event_id)
+    return (event_id == 1900 or event_id == 1919) and speaker or nil
+  end
+  talk_manager.calls.isEventPlayable = function(event_id)
+    return event_id == 1900 or event_id == 1919
+  end
+  talk_manager.calls.isTalkEventInteractDisabled = function(chara_id)
+    return chara_id ~= 3472286413
+  end
+  talk_manager.calls.isShopTalkEventAvailableForChara = function(data, board)
+    return data == character_data and board == blackboard
+  end
+  local original_singleton = sdk.get_managed_singleton
+  sdk.get_managed_singleton = function(name)
+    if name == "app.TalkEventManager" then return talk_manager end
+    if name == "app.ItemManager" then return item_manager end
+    if name == "app.NPCManager" then return npc_manager end
+    return nil
+  end
+  local no_talk_need = A.read_objective_talk_grant_observation({})
+  local no_forgery_need = A.read_objective_forgery_observation({})
+  assert(no_talk_need.complete and no_forgery_need.complete
+    and talk_reads.reads == 0 and shop_reads.reads == 0 and mapping_reads.reads == 0,
+    "no focused item need performs no provider catalog or live scan")
+  local talk_read = A.read_objective_talk_grant_observation({ [29] = true })
+  assert(talk_read.complete and #talk_read.wanted == 1 and talk_read.wanted[1] == 29
+    and #talk_read.events == 1 and talk_read.events[1].event_id == 1900
+    and #talk_read.events[1].nodes == 2
+    and talk_read.events[1].nodes[1].edges[1].next_node_id == "grant"
+    and talk_read.events[1].nodes[2].grants[1].item_id == 29
+    and talk_read.events[1].nodes[2].grants[1].count == 2
+    and talk_read.events[1].speaker_present == true
+    and talk_read.events[1].interactable == true,
+    "talk reader scans the exact typed grant and its bounded event graph")
+  local forgery_read = A.read_objective_forgery_observation({ [29] = true })
+  assert(forgery_read.complete and #forgery_read.wanted == 1
+    and #forgery_read.services == 1
+    and forgery_read.services[1].service_type == "app.NpcShopForgeryParam"
+    and forgery_read.services[1].talk_event_id == 1919
+    and forgery_read.services[1].chara_id == 3472286413
+    and forgery_read.services[1].speaker_cid == 3472286413
+    and forgery_read.services[1].speaker_matches_service
+    and forgery_read.services[1].availability_readable
+    and forgery_read.services[1].available
+    and forgery_read.services[1].interaction_disabled == false
+    and #forgery_read.mappings == 1
+    and forgery_read.mappings[1].input_item_id == 11
+    and forgery_read.mappings[1].output_item_id == 29
+    and forgery_read.mappings[1].enabled_readable
+    and forgery_read.mappings[1].enabled == true
+    and forgery_read.mappings[1].held_readable == false
+    and forgery_read.mappings[1].price_readable == false
+    and forgery_read.order.kept_readable and forgery_read.order.kept_item_id == 0
+    and forgery_read.order.kept_state_readable
+    and forgery_read.order.kept_active == false
+    and forgery_read.order.completion_time_readable
+    and forgery_read.order.completed_readable
+    and forgery_read.order.remaining_minutes_readable
+    and forgery_read.order.remaining_minutes == 0,
+    "forgery reader joins typed service, mapping and exact raw order getters")
+  local saved_kept = item_manager.calls.get_FakeShopKeepedItem
+  local saved_time = item_manager.calls.get_FakeShopCompleteTime
+  local saved_kept_state = item_manager.calls.isFakeShopKeeped
+  local saved_completed = item_manager.calls.isFakeShopCompleted
+  local saved_remaining = item_manager.calls.isFakeShopRemainingMinute
+  item_manager.calls.get_FakeShopKeepedItem = function() return nil end
+  item_manager.calls.get_FakeShopCompleteTime = function() return nil end
+  item_manager.calls.isFakeShopKeeped = function() return nil end
+  item_manager.calls.isFakeShopCompleted = function() return nil end
+  item_manager.calls.isFakeShopRemainingMinute = function() return nil end
+  local unreadable_order = A.read_objective_forgery_observation({ [29] = true })
+  assert(not unreadable_order.order.kept_readable
+    and not unreadable_order.order.completion_time_readable
+    and not unreadable_order.order.kept_state_readable
+    and not unreadable_order.order.completed_readable
+    and not unreadable_order.order.remaining_minutes_readable,
+    "every raw forgery order seam keeps an independent unreadable flag")
+  item_manager.calls.get_FakeShopKeepedItem = saved_kept
+  item_manager.calls.get_FakeShopCompleteTime = saved_time
+  item_manager.calls.isFakeShopKeeped = saved_kept_state
+  item_manager.calls.isFakeShopCompleted = saved_completed
+  item_manager.calls.isFakeShopRemainingMinute = saved_remaining
+  local saved_speaker_cid = speaker.calls.get_CharaID
+  speaker.calls.get_CharaID = function() return 1 end
+  local wrong_speaker = A.read_objective_forgery_observation({ [29] = true })
+  assert(wrong_speaker.services[1].speaker_cid == 1
+    and not wrong_speaker.services[1].speaker_matches_service
+    and wrong_speaker.services[1].join_reason == "forgery_service_speaker_join_unproven"
+    and not wrong_speaker.services[1].availability_readable,
+    "forgery service target rejects a structured speaker CID mismatch")
+  speaker.calls.get_CharaID = saved_speaker_cid
+  local cached_talk_reads, cached_shop_reads, cached_mapping_reads =
+    talk_reads.reads, shop_reads.reads, mapping_reads.reads
+  A.read_objective_talk_grant_observation({ [29] = true })
+  A.read_objective_forgery_observation({ [29] = true })
+  assert(talk_reads.reads == cached_talk_reads
+    and shop_reads.reads == cached_shop_reads
+    and mapping_reads.reads == cached_mapping_reads,
+    "static provider catalogs are built once while focused live gates refresh")
+  assert(type(A.invalidate_objective_provider_catalogs) == "function",
+    "provider catalog invalidation is exported")
+  A.invalidate_objective_provider_catalogs()
+  event_data.fields._SegmentNodes = managed_array({ [1] = start, [3] = grant_node })
+  local sparse = A.read_objective_talk_grant_observation({ [29] = true })
+  assert(not sparse.complete and sparse.reason == "talk_grant_nodes_unreadable"
+    and #sparse.events == 0,
+    "a sparse managed array fails atomically instead of compacting holes")
+  A.invalidate_objective_provider_catalogs()
+  event_data.fields._SegmentNodes = managed_list({ start, grant_node }, 1025)
+  local truncated = A.read_objective_talk_grant_observation({ [29] = true })
+  assert(not truncated.complete and truncated.reason == "talk_grant_nodes_truncated"
+    and #truncated.events == 0,
+    "an over-limit talk graph fails atomically without partial rows")
+  sdk.get_managed_singleton = original_singleton
+end
 local empty_source_snapshots = a.objective_item_source_snapshots()
 assert(type(a.objective_forgery_evidence) == "function"
   and a.objective_forgery_candidate == nil, "forgery helper must be evidence-only")
@@ -291,17 +603,13 @@ assert(#empty_source_snapshots == 5 and empty_source_snapshots[1].provider == "p
   and empty_source_snapshots[4].provider == "talk_grant"
   and empty_source_snapshots[4].status == "unknown"
   and empty_source_snapshots[4].complete == false
-  and empty_source_snapshots[4].reason == "talk_grant_eligibility_evidence_unproven"
-  and #empty_source_snapshots[4].missing_evidence == 4
-  and empty_source_snapshots[4].missing_evidence[4] == "execution_claim_state"
+  and empty_source_snapshots[4].reason == "objective_need_snapshot_incomplete"
   and #empty_source_snapshots[4].candidates == 0
   and empty_source_snapshots[4].generation > 0
   and empty_source_snapshots[5].provider == "forgery"
   and empty_source_snapshots[5].status == "unknown"
   and empty_source_snapshots[5].complete == false
-  and empty_source_snapshots[5].reason == "forgery_order_evidence_unproven"
-  and #empty_source_snapshots[5].missing_evidence == 4
-  and empty_source_snapshots[5].missing_evidence[4] == "busy_kept_completion_time_and_state"
+  and empty_source_snapshots[5].reason == "objective_need_snapshot_incomplete"
   and #empty_source_snapshots[5].candidates == 0
   and empty_source_snapshots[1].generation > 0
   and empty_source_snapshots[2].generation > 0 and empty_source_snapshots[3].generation > 0,
@@ -3997,17 +4305,14 @@ do
     and source_snapshots[4].provider == "talk_grant"
     and source_snapshots[4].status == "unknown"
     and source_snapshots[4].complete == false
-    and source_snapshots[4].reason == "talk_grant_eligibility_evidence_unproven"
-    and #source_snapshots[4].missing_evidence == 4
-    and source_snapshots[4].missing_evidence[4] == "execution_claim_state"
+    and source_snapshots[4].reason == "objective_need_snapshot_incomplete"
     and #source_snapshots[4].candidates == 0
-    and source_snapshots[4].generation == owned_snapshot.need_generation
+    and source_snapshots[4].generation > 0
     and source_snapshots[5].provider == "forgery"
     and source_snapshots[5].status == "unknown"
-    and source_snapshots[5].reason == "forgery_order_evidence_unproven"
-    and source_snapshots[5].missing_evidence[4] == "busy_kept_completion_time_and_state"
+    and source_snapshots[5].reason == "objective_need_snapshot_incomplete"
     and #source_snapshots[5].candidates == 0
-    and source_snapshots[5].generation == owned_snapshot.need_generation
+    and source_snapshots[5].generation > 0
     and source_snapshots[1].generation > 0
     and source_snapshots[1].catalog_version == 2
     and #source_snapshots[1].source_descriptors == 2

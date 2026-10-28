@@ -352,6 +352,7 @@ reviewed_methods = {
   ["get_IsAllItem"] = true,
   ["get_IsFinish"] = true,
   ["get_IsDead"] = true,
+  ["get_IsEnableFake"] = true,
   ["get_IsOpenedFreeBit"] = true,
   ["get_IsRemove"] = true,
   ["get_IsStock"] = true,

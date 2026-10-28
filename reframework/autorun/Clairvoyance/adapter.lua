@@ -3092,7 +3092,7 @@ end
 -- pawns; the storage box, key 65535, is skipped). Returns held
 -- {[id] = n} for the wanted ids plus a skipped count, or nil when the
 -- manager, the dictionary or its _entries is unreadable (failed round).
-local function read_held(ids)
+function items.read_held(ids)
     local im = sdk.get_managed_singleton("app.ItemManager")
     if im == nil then return nil end
     local dict = safe_call(im, "getStorageDict")
@@ -3561,7 +3561,7 @@ local function item_round_needs(now)
         for _, option in ipairs(group.options) do ids[option.item_id] = true end
     end
     if next(ids) ~= nil then
-        local h, hsk, hcomplete = read_held(ids)
+        local h, hsk, hcomplete = items.read_held(ids)
         if h == nil then item_round_failed() return end
         held = h
         skipped = skipped + hsk
@@ -4318,12 +4318,721 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
   return { classify("placed", catalog.placements), classify("chest", catalog.chests) }
 end
 
+-- Bounded atomic scan of TalkEventManager's merged catalog.  Every matching
+-- ItemControlSegmentNode is retained with the complete event node/edge graph,
+-- but no managed object escapes this function.
+A.objective_provider_catalog_cache = {}
+function A.invalidate_objective_provider_catalogs()
+  A.objective_provider_catalog_cache = {}
+end
+
+function A.read_objective_talk_grant_observation(wanted)
+  local out = { complete = false, wanted = {}, events = {} }
+  local wanted_set = {}
+  for item_id, enabled in pairs(type(wanted) == "table" and wanted or {}) do
+    if enabled and type(item_id) == "number" and item_id == math.floor(item_id)
+        and item_id > 0 then
+      wanted_set[item_id] = true; out.wanted[#out.wanted + 1] = item_id
+    end
+  end
+  table.sort(out.wanted)
+  if #out.wanted == 0 then out.complete = true; return out end
+  local function fail(reason) out.reason, out.events = reason, {}; return out end
+  local function call(object, method, ...)
+    if object == nil then return false, nil end
+    return pcall(function(...) return object:call(method, ...) end, ...)
+  end
+  local function type_name(object)
+    local ok, name = pcall(function()
+      return object:get_type_definition():get_full_name()
+    end)
+    return ok and type(name) == "string" and name or nil
+  end
+  local function readable_boolean(ok, value)
+    if ok and type(value) == "boolean" then return value end
+    return nil
+  end
+  local function bounded_list(value, cap, prefix)
+    local array_ok, elements = pcall(function() return value:get_elements() end)
+    if array_ok and type(elements) == "table" then
+      local keys = {}
+      for key, row in pairs(elements) do
+        if type(key) ~= "number" or key ~= math.floor(key) or row == nil then
+          return nil, prefix .. "_unreadable"
+        end
+        keys[#keys + 1] = key
+      end
+      if #keys > cap then return nil, prefix .. "_truncated" end
+      table.sort(keys)
+      local rows = {}
+      for index, key in ipairs(keys) do
+        if key ~= index then return nil, prefix .. "_unreadable" end
+        rows[#rows + 1] = elements[key]
+      end
+      return rows
+    end
+    local ok, count = call(value, "get_Count")
+    count = ok and int_value(count) or nil
+    if type(count) ~= "number" or count < 0 or count ~= math.floor(count) then
+      return nil, prefix .. "_unreadable"
+    elseif count > cap then return nil, prefix .. "_truncated" end
+    local rows = {}
+    for index = 0, count - 1 do
+      local got, row = call(value, "get_Item", index)
+      if not got or row == nil then return nil, prefix .. "_unreadable" end
+      rows[#rows + 1] = row
+    end
+    return rows
+  end
+  local function bounded_entries(value, cap, prefix)
+    local ok, expected = call(value, "get_Count")
+    expected = ok and int_value(expected) or nil
+    local used, free = int_value(safe_field(value, "_count")),
+      int_value(safe_field(value, "_freeCount"))
+    local array, elements = safe_field(value, "_entries"), nil
+    local copied = pcall(function() elements = array:get_elements() end)
+    if type(expected) ~= "number" or expected < 0 or expected ~= math.floor(expected)
+        or type(used) ~= "number" or used < 0 or used ~= math.floor(used)
+        or type(free) ~= "number" or free < 0 or free ~= math.floor(free)
+        or used > cap or not copied or type(elements) ~= "table" or used > #elements then
+      return nil, used ~= nil and used > cap and prefix .. "_truncated"
+        or prefix .. "_unreadable"
+    end
+    local rows, occupied = {}, 0
+    for index = 1, used do
+      local entry = elements[index]
+      local next_index = safe_field(entry, "Next")
+      if next_index == nil then next_index = safe_field(entry, "next") end
+      if type(next_index) ~= "number" then return nil, prefix .. "_unreadable" end
+      if next_index >= -1 then
+        occupied = occupied + 1
+        local key = safe_field(entry, "Key")
+        if key == nil then key = safe_field(entry, "key") end
+        local value = safe_field(entry, "Value")
+        if value == nil then value = safe_field(entry, "value") end
+        rows[#rows + 1] = { key = key, value = value }
+      end
+    end
+    if occupied ~= expected or occupied + free ~= used then
+      return nil, prefix .. "_unreadable"
+    end
+    return rows
+  end
+  local function copy(value)
+    if type(value) ~= "table" then return value end
+    local result = {}
+    for key, child in pairs(value) do result[key] = copy(child) end
+    return result
+  end
+  local manager = sdk.get_managed_singleton("app.TalkEventManager")
+  local owner = manager ~= nil and tostring(manager) or nil
+  local cached = A.objective_provider_catalog_cache.talk
+  if cached == nil or cached.owner ~= owner then
+    local catalog = safe_field(safe_field(manager, "_ResourceCatalog"),
+      "<MergedCatalog>k__BackingField")
+    local entries, reason = bounded_entries(catalog, 8192, "talk_grant_catalog")
+    if entries == nil then return fail(reason) end
+    local static_events = {}
+    for _, entry in ipairs(entries) do
+      local event_id = int_value(entry.key)
+      local data = safe_field(entry.value, "_Item")
+      if type(event_id) ~= "number" or event_id <= 0 or event_id ~= math.floor(event_id)
+          or data == nil then return fail("talk_grant_event_data_unreadable") end
+      local native_nodes, node_reason = bounded_list(safe_field(data, "_SegmentNodes"),
+        1024, "talk_grant_nodes")
+      if native_nodes == nil then return fail(node_reason) end
+      local nodes, has_grant = {}, false
+      for node_index, native_node in ipairs(native_nodes) do
+        local kind = type_name(native_node)
+        if kind == nil then return fail("talk_grant_node_type_unreadable") end
+        local node_id = safe_field(native_node, "_NodeId")
+        if type(node_id) ~= "string" and type(node_id) ~= "number" then node_id = nil end
+        local node_name_hash = int_value(safe_field(native_node, "_NodeNameHash"))
+        if node_id == nil and type(node_name_hash) ~= "number" then
+          return fail("talk_grant_node_identity_unreadable")
+        end
+        local node = { index = node_index - 1, kind = kind,
+          node_id = node_id, node_name_hash = node_name_hash,
+          edges = {}, grants = {} }
+        local raw_edges = safe_field(native_node, "_NextNodesCandidates")
+        local native_edges = {}
+        if raw_edges ~= nil then
+          native_edges, reason = bounded_list(raw_edges, 128, "talk_grant_edges")
+          if native_edges == nil then return fail(reason) end
+        end
+        for edge_index, native_edge in ipairs(native_edges) do
+          local next_node_id = safe_field(native_edge, "_NextNodeId")
+          if type(next_node_id) ~= "string" and type(next_node_id) ~= "number" then
+            next_node_id = nil
+          end
+          local next_node_name_hash = int_value(safe_field(native_edge, "_NextNodeNameHash"))
+          if next_node_id == nil and type(next_node_name_hash) ~= "number" then
+            return fail("talk_grant_edge_identity_unreadable")
+          end
+          node.edges[#node.edges + 1] = { index = edge_index - 1,
+            next_node_id = next_node_id, next_node_name_hash = next_node_name_hash,
+            has_conditions = safe_field(native_edge, "_Conditions") ~= nil }
+        end
+        if kind == "app.ItemControlSegmentNode" then
+          local change = int_value(safe_field(native_node, "_ChangeType"))
+          if type(change) ~= "number" then return fail("talk_grant_change_type_unreadable") end
+          node.change_type = change
+          local native_items, item_reason = bounded_list(safe_field(native_node, "_Items"),
+            128, "talk_grant_items")
+          if native_items == nil then return fail(item_reason) end
+          for item_index, native_item in ipairs(native_items) do
+            local item_id, count = int_value(safe_field(native_item, "_ItemId")),
+              int_value(safe_field(native_item, "_Num"))
+            if type(item_id) ~= "number" or item_id <= 0 or item_id ~= math.floor(item_id)
+                or type(count) ~= "number" or count <= 0 or count ~= math.floor(count) then
+              return fail("talk_grant_item_unreadable")
+            end
+            if change == 0 then
+              has_grant = true
+              node.grants[#node.grants + 1] = { item_index = item_index - 1,
+                item_id = item_id, count = count }
+            end
+          end
+        end
+        nodes[#nodes + 1] = node
+      end
+      if has_grant then static_events[#static_events + 1] = {
+        event_id = event_id, nodes = nodes } end
+    end
+    cached = { owner = owner, events = static_events }
+    A.objective_provider_catalog_cache.talk = cached
+  end
+  local events = {}
+  for _, event in ipairs(cached.events) do
+    local relevant = false
+    for _, node in ipairs(event.nodes) do
+      for _, grant in ipairs(node.grants) do
+        if wanted_set[grant.item_id] then relevant = true; break end
+      end
+      if relevant then break end
+    end
+    if relevant then
+      local event_id = event.event_id
+      local speaker_ok, speaker = call(manager, "getTalkEventInitialSpeaker", event_id)
+      local playable_ok, playable = call(manager, "isEventPlayable", event_id)
+      local history_ok, history = call(manager, "getHistory", event_id)
+      local interact_ok, interactable = false, nil
+      if speaker_ok and speaker ~= nil then
+        interact_ok, interactable = call(manager, "canTalkEventInteract", speaker)
+      end
+      local pos = speaker_ok and speaker ~= nil and extract_position(speaker) or nil
+      events[#events + 1] = { event_id = event_id, nodes = copy(event.nodes),
+        playable = readable_boolean(playable_ok, playable),
+        speaker_present = speaker_ok and speaker ~= nil,
+        speaker_type = speaker_ok and speaker ~= nil and type_name(speaker) or nil,
+        speaker_position = pos and { x = pos.x, y = pos.y, z = pos.z } or nil,
+        interactable = readable_boolean(interact_ok, interactable),
+        history_readable = history_ok, history_present = history_ok and history ~= nil }
+    end
+  end
+  out.events, out.complete = events, true
+  return out
+end
+
+-- Bounded atomic scan of the exact typed forgery service, item transforms and
+-- raw order getters.  Mapping enablement and order semantics remain explicit
+-- missing gates because their guarded live controls have not been proved.
+function A.read_objective_forgery_observation(wanted)
+  local out = { complete = false, wanted = {}, services = {}, mappings = {}, order = {} }
+  local wanted_set = {}
+  for item_id, enabled in pairs(type(wanted) == "table" and wanted or {}) do
+    if enabled and type(item_id) == "number" and item_id == math.floor(item_id)
+        and item_id > 0 then
+      wanted_set[item_id] = true; out.wanted[#out.wanted + 1] = item_id
+    end
+  end
+  table.sort(out.wanted)
+  if #out.wanted == 0 then out.complete = true; return out end
+  local function fail(reason)
+    out.reason, out.services, out.mappings, out.order = reason, {}, {}, {}
+    return out
+  end
+  local function call(object, method, ...)
+    if object == nil then return false, nil end
+    return pcall(function(...) return object:call(method, ...) end, ...)
+  end
+  local function type_name(object)
+    local ok, name = pcall(function()
+      return object:get_type_definition():get_full_name()
+    end)
+    return ok and type(name) == "string" and name or nil
+  end
+  local function readable_boolean(ok, value)
+    if ok and type(value) == "boolean" then return value end
+    return nil
+  end
+  local function bounded_list(value, cap, prefix)
+    local array_ok, elements = pcall(function() return value:get_elements() end)
+    if array_ok and type(elements) == "table" then
+      local keys = {}
+      for key, row in pairs(elements) do
+        if type(key) ~= "number" or key ~= math.floor(key) or row == nil then
+          return nil, prefix .. "_unreadable"
+        end
+        keys[#keys + 1] = key
+      end
+      if #keys > cap then return nil, prefix .. "_truncated" end
+      table.sort(keys)
+      local rows = {}
+      for index, key in ipairs(keys) do
+        if key ~= index then return nil, prefix .. "_unreadable" end
+        rows[#rows + 1] = elements[key]
+      end
+      return rows
+    end
+    local ok, count = call(value, "get_Count")
+    count = ok and int_value(count) or nil
+    if type(count) ~= "number" or count < 0 or count ~= math.floor(count) then
+      return nil, prefix .. "_unreadable"
+    elseif count > cap then return nil, prefix .. "_truncated" end
+    local rows = {}
+    for index = 0, count - 1 do
+      local got, row = call(value, "get_Item", index)
+      if not got or row == nil then return nil, prefix .. "_unreadable" end
+      rows[#rows + 1] = row
+    end
+    return rows
+  end
+  local function bounded_entries(value, cap, prefix)
+    local ok, expected = call(value, "get_Count")
+    expected = ok and int_value(expected) or nil
+    local used, free = int_value(safe_field(value, "_count")),
+      int_value(safe_field(value, "_freeCount"))
+    local array, elements = safe_field(value, "_entries"), nil
+    local copied = pcall(function() elements = array:get_elements() end)
+    if type(expected) ~= "number" or expected < 0 or expected ~= math.floor(expected)
+        or type(used) ~= "number" or used < 0 or used ~= math.floor(used)
+        or type(free) ~= "number" or free < 0 or free ~= math.floor(free)
+        or used > cap or not copied or type(elements) ~= "table" or used > #elements then
+      return nil, used ~= nil and used > cap and prefix .. "_truncated"
+        or prefix .. "_unreadable"
+    end
+    local rows, occupied = {}, 0
+    for index = 1, used do
+      local entry = elements[index]
+      local next_index = safe_field(entry, "Next")
+      if next_index == nil then next_index = safe_field(entry, "next") end
+      if type(next_index) ~= "number" then return nil, prefix .. "_unreadable" end
+      if next_index >= -1 then
+        occupied = occupied + 1
+        local key = safe_field(entry, "Key")
+        if key == nil then key = safe_field(entry, "key") end
+        local value = safe_field(entry, "Value")
+        if value == nil then value = safe_field(entry, "value") end
+        rows[#rows + 1] = { key = key, value = value }
+      end
+    end
+    if occupied ~= expected or occupied + free ~= used then
+      return nil, prefix .. "_unreadable"
+    end
+    return rows
+  end
+  local talk_manager = sdk.get_managed_singleton("app.TalkEventManager")
+  local item_manager = sdk.get_managed_singleton("app.ItemManager")
+  local talk_owner = talk_manager ~= nil and tostring(talk_manager) or nil
+  local item_owner = item_manager ~= nil and tostring(item_manager) or nil
+  local cached = A.objective_provider_catalog_cache.forgery
+  if cached == nil or cached.talk_owner ~= talk_owner or cached.item_owner ~= item_owner then
+    local shop_entries, reason = bounded_entries(
+      safe_field(talk_manager, "_ShopTalkEventDataCatalog"), 256,
+      "forgery_service_catalog")
+    if shop_entries == nil then return fail(reason) end
+    local static_services = {}
+    for _, entry in ipairs(shop_entries) do
+      local job, data = int_value(entry.key), entry.value
+      local talk_event_id = int_value(safe_field(data, "_TalkEventID"))
+      if type(job) ~= "number" or job < 0 or job ~= math.floor(job)
+          or type(talk_event_id) ~= "number" or talk_event_id <= 0
+          or talk_event_id ~= math.floor(talk_event_id) then
+        return fail("forgery_service_identity_unreadable")
+      end
+      local rows, row_reason = bounded_list(safe_field(data, "_CharacterShopData"),
+        64, "forgery_service_rows")
+      if rows == nil then return fail(row_reason) end
+      for service_index, service in ipairs(rows) do
+        local service_type = type_name(service)
+        if service_type == nil then return fail("forgery_service_type_unreadable") end
+        if service_type == "app.NpcShopForgeryParam" then
+          local chara_id, shop_id = int_value(safe_field(service, "_CharaID")),
+            int_value(safe_field(service, "_ShopID"))
+          if type(chara_id) ~= "number" or chara_id <= 0
+              or chara_id ~= math.floor(chara_id)
+              or type(shop_id) ~= "number" or shop_id <= 0
+              or shop_id ~= math.floor(shop_id) then
+            return fail("forgery_service_identity_unreadable")
+          end
+          local conditions, condition_reason = {}, nil
+          local raw_conditions = safe_field(service, "_Conditions")
+          if raw_conditions ~= nil then
+            local native_conditions
+            native_conditions, condition_reason = bounded_list(raw_conditions, 64,
+              "forgery_service_conditions")
+            if native_conditions == nil then return fail(condition_reason) end
+            for _, selector in ipairs(native_conditions) do
+              local process = safe_field(selector, "_Process") or safe_field(selector, "_Class")
+              conditions[#conditions + 1] = type_name(process) or "unknown"
+            end
+          end
+          static_services[#static_services + 1] = { job = job,
+            talk_event_id = talk_event_id, service_index = service_index - 1,
+            chara_id = chara_id, shop_id = shop_id, service_type = service_type,
+            conditions = conditions, condition_truth_readable = false,
+            condition_reason = "forgery_service_condition_evaluation_unproved" }
+        end
+      end
+    end
+    local item_entries
+    item_entries, reason = bounded_entries(safe_field(item_manager, "_ItemDataDict"),
+      8192, "forgery_mapping_catalog")
+    if item_entries == nil then return fail(reason) end
+    local static_mappings = {}
+    for _, entry in ipairs(item_entries) do
+      local item = entry.value
+      local output_item_id = int_value(safe_field(item, "_FakeItemId"))
+      if type(output_item_id) == "number" and output_item_id > 0 then
+        local input_item_id, price = int_value(safe_field(item, "_Id")),
+          int_value(safe_field(item, "_FakePrice"))
+        if type(input_item_id) ~= "number" or input_item_id <= 0
+            or input_item_id ~= math.floor(input_item_id)
+            or output_item_id ~= math.floor(output_item_id)
+            or type(price) ~= "number" or price <= 0 or price ~= math.floor(price)
+            or type_name(item) ~= "app.ItemDataParam" then
+          return fail("forgery_mapping_unreadable")
+        end
+        local enabled_ok, enabled = call(item, "get_IsEnableFake")
+        local enabled_readable = enabled_ok and type(enabled) == "boolean"
+        static_mappings[#static_mappings + 1] = { input_item_id = input_item_id,
+          output_item_id = output_item_id, price = price,
+          enabled_readable = enabled_readable,
+          enabled = readable_boolean(enabled_ok, enabled),
+          enabled_reason = enabled_readable and nil
+            or "forgery_mapping_enablement_read_failed" }
+      end
+    end
+    table.sort(static_mappings, function(left, right)
+      if left.output_item_id ~= right.output_item_id then
+        return left.output_item_id < right.output_item_id
+      end
+      return left.input_item_id < right.input_item_id
+    end)
+    cached = { talk_owner = talk_owner, item_owner = item_owner,
+      services = static_services, mappings = static_mappings }
+    A.objective_provider_catalog_cache.forgery = cached
+  end
+  local mappings = {}
+  for _, mapping in ipairs(cached.mappings) do
+    if wanted_set[mapping.output_item_id] then
+      local live_mapping = {}
+      for key, value in pairs(mapping) do live_mapping[key] = value end
+      mappings[#mappings + 1] = live_mapping
+    end
+  end
+  local services = {}
+  if #mappings > 0 then
+    local npc_manager = sdk.get_managed_singleton("app.NPCManager")
+    for _, static_service in ipairs(cached.services) do
+      local talk_event_id, chara_id = static_service.talk_event_id,
+        static_service.chara_id
+      local speaker_ok, speaker = call(talk_manager, "getTalkEventInitialSpeaker", talk_event_id)
+      local playable_ok, playable = call(talk_manager, "isEventPlayable", talk_event_id)
+      local interact_ok, interactable = false, nil
+      if speaker_ok and speaker ~= nil then
+        interact_ok, interactable = call(talk_manager, "canTalkEventInteract", speaker)
+      end
+      local speaker_cid = speaker_ok and speaker ~= nil
+        and int_value(safe_call(speaker, "get_CharaID")) or nil
+      local speaker_cid_readable = type(speaker_cid) == "number"
+        and speaker_cid > 0 and speaker_cid == math.floor(speaker_cid)
+      local speaker_matches_service = speaker_cid_readable
+        and speaker_cid == chara_id or false
+      local character_data = speaker_matches_service
+        and safe_call(npc_manager, "getNPCCharacterData", chara_id) or nil
+      local blackboard = speaker_matches_service
+        and safe_call(speaker, "get_AIBlackBoardController") or nil
+      local available_ok, available = false, nil
+      if character_data ~= nil and blackboard ~= nil then
+        available_ok, available = call(talk_manager,
+          "isShopTalkEventAvailableForChara", character_data, blackboard)
+      end
+      local disabled_ok, disabled = call(talk_manager,
+        "isTalkEventInteractDisabled", chara_id)
+      local pos = speaker_ok and speaker ~= nil and extract_position(speaker) or nil
+      local service = {}
+      for key, value in pairs(static_service) do service[key] = value end
+      service.playable = readable_boolean(playable_ok, playable)
+      service.speaker_present = speaker_ok and speaker ~= nil
+      service.speaker_cid_readable = speaker_cid_readable
+      service.speaker_cid = speaker_cid_readable and speaker_cid or nil
+      service.speaker_matches_service = speaker_matches_service
+      service.character_data_readable = character_data ~= nil
+      service.blackboard_readable = blackboard ~= nil
+      service.availability_readable = available_ok and type(available) == "boolean"
+      service.available = readable_boolean(available_ok, available)
+      service.condition_truth_readable = service.availability_readable
+      service.condition_truth = service.available
+      if not speaker_matches_service then
+        service.join_reason = "forgery_service_speaker_join_unproven"
+      elseif not service.availability_readable then
+        service.join_reason = "forgery_service_availability_unproven"
+      else
+        service.join_reason = nil
+      end
+      service.speaker_position = pos and { x = pos.x, y = pos.y, z = pos.z } or nil
+      service.interactable = readable_boolean(interact_ok, interactable)
+      service.interaction_disabled = readable_boolean(disabled_ok, disabled)
+      services[#services + 1] = service
+    end
+  end
+  if #mappings > 0 then
+    local input_ids = {}
+    for _, mapping in ipairs(mappings) do input_ids[mapping.input_item_id] = true end
+    local held, _, held_complete = items.read_held(input_ids)
+    for _, mapping in ipairs(mappings) do
+      mapping.held_readable = held ~= nil and held_complete == true
+      mapping.held_count = mapping.held_readable and (held[mapping.input_item_id] or 0) or nil
+      mapping.held_reason = mapping.held_readable and nil
+        or "forgery_input_inventory_read_incomplete"
+      mapping.price_readable = false
+      mapping.price_reason = "forgery_currency_reader_unproved"
+    end
+  end
+  local order = {}
+  if #mappings > 0 then
+    local kept_ok, kept = call(item_manager, "get_FakeShopKeepedItem")
+    local time_ok, completion_time = call(item_manager, "get_FakeShopCompleteTime")
+    local kept_state_ok, kept_active = call(item_manager, "isFakeShopKeeped")
+    local completed_ok, completed = call(item_manager, "isFakeShopCompleted")
+    local remaining_ok, remaining = call(item_manager, "isFakeShopRemainingMinute")
+    local kept_item_id, kept_item_count = int_value(safe_field(kept, "_ItemId")),
+      int_value(safe_field(kept, "_Num"))
+    order = { kept_readable = kept_ok and kept ~= nil
+        and type(kept_item_id) == "number" and kept_item_id >= 0
+        and kept_item_id == math.floor(kept_item_id)
+        and type(kept_item_count) == "number" and kept_item_count >= 0
+        and kept_item_count == math.floor(kept_item_count),
+      kept_item_id = kept_item_id, kept_item_count = kept_item_count,
+      completion_time_readable = time_ok and type(completion_time) == "number"
+        and completion_time >= 0 and completion_time == math.floor(completion_time),
+      completion_time = completion_time,
+      kept_state_readable = kept_state_ok and type(kept_active) == "boolean",
+      kept_active = readable_boolean(kept_state_ok, kept_active),
+      completed_readable = completed_ok and type(completed) == "boolean",
+      completed = completed,
+      remaining_minutes_readable = remaining_ok and type(remaining) == "number"
+        and remaining >= 0 and remaining == math.floor(remaining),
+      remaining_minutes = remaining }
+  end
+  out.services, out.mappings, out.order, out.complete = services, mappings, order, true
+  return out
+end
+
+-- Production provider envelopes over atomic native observations.  The
+-- scanners below retain exact typed catalog/graph evidence, while these
+-- classifiers keep publication closed at the first game-semantic gate that
+-- has not yet been verified with positive and negative controls.
+function A.objective_talk_grant_provider_snapshot(observation, generation)
+  local function finite_integer(value, minimum)
+    return type(value) == "number" and value == value and value > -math.huge
+      and value < math.huge and value == math.floor(value) and value >= minimum
+  end
+  local function dense(value)
+    if type(value) ~= "table" then return nil end
+    local n, count = #value, 0
+    for key in pairs(value) do
+      if not finite_integer(key, 1) or key > n then return nil end
+      count = count + 1
+    end
+    return count == n and value or nil
+  end
+  local function copy(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for key, child in pairs(value) do out[key] = copy(child) end
+    return out
+  end
+  local out = { provider = "talk_grant", generation = generation,
+    status = "unknown", complete = false, candidates = {}, diagnostics = {} }
+  if not finite_integer(generation, 1) then
+    out.reason = "talk_grant_generation_invalid"; return out
+  end
+  if type(observation) ~= "table" then
+    out.reason = "talk_grant_observation_unavailable"; return out
+  end
+  out.diagnostics = copy(type(observation.events) == "table" and observation.events or {})
+  if observation.complete ~= true then
+    out.reason = type(observation.reason) == "string" and observation.reason
+      or "talk_grant_observation_incomplete"
+    return out
+  end
+  local wanted, events = dense(observation.wanted), dense(observation.events)
+  if wanted == nil or events == nil then
+    out.reason = "talk_grant_observation_malformed"; return out
+  end
+  for _, item_id in ipairs(wanted) do
+    if not finite_integer(item_id, 1) then
+      out.reason = "talk_grant_observation_malformed"; return out
+    end
+  end
+  for _, event in ipairs(events) do
+    if type(event) ~= "table" or not finite_integer(event.event_id, 1)
+        or dense(event.nodes) == nil then
+      out.reason = "talk_grant_observation_malformed"; return out
+    end
+    for _, node in ipairs(event.nodes) do
+      if type(node) ~= "table" or not finite_integer(node.index, 0)
+          or dense(node.edges) == nil
+          or (node.grants ~= nil and dense(node.grants) == nil) then
+        out.reason = "talk_grant_observation_malformed"; return out
+      end
+      for _, grant in ipairs(node.grants or {}) do
+        if type(grant) ~= "table" or not finite_integer(grant.item_index, 0)
+            or not finite_integer(grant.item_id, 1)
+            or not finite_integer(grant.count, 1) then
+          out.reason = "talk_grant_observation_malformed"; return out
+        end
+      end
+    end
+  end
+  if #wanted == 0 or #events == 0 then
+    out.status, out.complete, out.reason = "ok", true, nil
+    return out
+  end
+  out.reason = "talk_grant_reachable_state_unproven"
+  out.missing_evidence = { "current_task_grant_ownership",
+    "reachable_condition_truth", "execution_claim_state", "drawable_target" }
+  return out
+end
+
+function A.objective_forgery_provider_snapshot(observation, generation)
+  local function finite_integer(value, minimum)
+    return type(value) == "number" and value == value and value > -math.huge
+      and value < math.huge and value == math.floor(value) and value >= minimum
+  end
+  local function dense(value)
+    if type(value) ~= "table" then return nil end
+    local n, count = #value, 0
+    for key in pairs(value) do
+      if not finite_integer(key, 1) or key > n then return nil end
+      count = count + 1
+    end
+    return count == n and value or nil
+  end
+  local function copy(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for key, child in pairs(value) do out[key] = copy(child) end
+    return out
+  end
+  local out = { provider = "forgery", generation = generation,
+    status = "unknown", complete = false, candidates = {},
+    diagnostics = { services = {}, mappings = {}, order = {} } }
+  if not finite_integer(generation, 1) then
+    out.reason = "forgery_generation_invalid"; return out
+  end
+  if type(observation) ~= "table" then
+    out.reason = "forgery_observation_unavailable"; return out
+  end
+  out.diagnostics.services = copy(type(observation.services) == "table"
+    and observation.services or {})
+  out.diagnostics.mappings = copy(type(observation.mappings) == "table"
+    and observation.mappings or {})
+  out.diagnostics.order = copy(type(observation.order) == "table"
+    and observation.order or {})
+  if observation.complete ~= true then
+    out.reason = type(observation.reason) == "string" and observation.reason
+      or "forgery_observation_incomplete"
+    return out
+  end
+  local wanted, services, mappings = dense(observation.wanted),
+    dense(observation.services), dense(observation.mappings)
+  if wanted == nil or services == nil or mappings == nil
+      or type(observation.order) ~= "table" then
+    out.reason = "forgery_observation_malformed"; return out
+  end
+  for _, item_id in ipairs(wanted) do
+    if not finite_integer(item_id, 1) then
+      out.reason = "forgery_observation_malformed"; return out
+    end
+  end
+  for _, service in ipairs(services) do
+    if type(service) ~= "table" or service.service_type ~= "app.NpcShopForgeryParam"
+        or not finite_integer(service.talk_event_id, 1)
+        or not finite_integer(service.service_index, 0)
+        or not finite_integer(service.chara_id, 1)
+        or not finite_integer(service.shop_id, 1) then
+      out.reason = "forgery_observation_malformed"; return out
+    end
+  end
+  for _, mapping in ipairs(mappings) do
+    if type(mapping) ~= "table" or not finite_integer(mapping.input_item_id, 1)
+        or not finite_integer(mapping.output_item_id, 1)
+        or not finite_integer(mapping.price, 1)
+        or type(mapping.enabled_readable) ~= "boolean"
+        or (mapping.enabled_readable and type(mapping.enabled) ~= "boolean") then
+      out.reason = "forgery_observation_malformed"; return out
+    end
+  end
+  if #wanted == 0 or #mappings == 0 or #services == 0 then
+    out.status, out.complete, out.reason = "ok", true, nil
+    return out
+  end
+  local any_enabled = false
+  for _, mapping in ipairs(mappings) do
+    if not mapping.enabled_readable then
+      out.reason = "forgery_mapping_enablement_unproven"
+      out.missing_evidence = { "mapping_enablement", "service_speaker_join",
+        "service_availability",
+        "positioned_interactable_service", "held_input_acceptance",
+        "price_affordability", "busy_kept_completion_semantics" }
+      return out
+    end
+    if mapping.enabled then any_enabled = true end
+  end
+  if not any_enabled then
+    out.status, out.complete, out.reason = "ok", true, nil
+    return out
+  end
+  local any_available = false
+  for _, service in ipairs(services) do
+    if service.speaker_matches_service ~= true then
+      out.reason = "forgery_service_speaker_join_unproven"
+      out.missing_evidence = { "service_speaker_join", "service_availability",
+        "positioned_interactable_service", "held_input_acceptance",
+        "price_affordability", "busy_kept_completion_semantics" }
+      return out
+    elseif service.availability_readable ~= true then
+      out.reason = "forgery_service_availability_unproven"
+      out.missing_evidence = { "service_availability",
+        "positioned_interactable_service", "held_input_acceptance",
+        "price_affordability", "busy_kept_completion_semantics" }
+      return out
+    end
+    if service.available then any_available = true end
+  end
+  if not any_available then
+    out.status, out.complete, out.reason = "ok", true, nil
+    return out
+  end
+  out.reason = "forgery_positioned_interaction_semantics_unproven"
+  out.missing_evidence = { "positioned_interactable_service",
+    "held_input_acceptance", "price_affordability",
+    "busy_kept_completion_semantics" }
+  return out
+end
+
 function A.make()
   local a = {}
   local objective_task_state = { owner = nil, focus = nil, journal = nil,
     needs = nil, focus_epoch = 0, journal_generation = 0, need_generation = 0,
     source_generation = 1, source_catalog = nil, source_observation = nil,
-    source_at = -math.huge }
+    source_at = -math.huge, talk_generation = 1, talk_observation = nil,
+    talk_at = -math.huge, forgery_generation = 1, forgery_observation = nil,
+    forgery_at = -math.huge }
   local LOC_KINDS = { "placed", "box", "drop" }   -- item_locations order
   a.overhead_block_reason = A.overhead_block_reason
   function a.acceptable_ids()
@@ -4946,6 +5655,7 @@ function A.make()
     end
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")
     if qlm ~= objective_task_state.owner then
+      A.invalidate_objective_provider_catalogs()
       items.reset_task_observations()
       objective_task_state.owner = qlm
       objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
@@ -4954,6 +5664,10 @@ function A.make()
       objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
       objective_task_state.source_at = -math.huge
       objective_task_state.source_generation = objective_task_state.source_generation + 1
+      objective_task_state.talk_observation, objective_task_state.forgery_observation = nil, nil
+      objective_task_state.talk_at, objective_task_state.forgery_at = -math.huge, -math.huge
+      objective_task_state.talk_generation = objective_task_state.talk_generation + 1
+      objective_task_state.forgery_generation = objective_task_state.forgery_generation + 1
     end
     local focus, focus_seen = {}, {}
     for _, qid in ipairs(type(focus_qids) == "table" and focus_qids or {}) do
@@ -5025,7 +5739,7 @@ function A.make()
       need_generation = objective_task_state.need_generation, quests = quests }
   end
   function a.objective_item_source_snapshots(objective_catalog, task_snapshot,
-      source_catalog, supplied_source_observation)
+      source_catalog, supplied_source_observation, supplied_provider_observations)
     local function copy(value)
       if type(value) ~= "table" then return value end
       local out = {}
@@ -5122,22 +5836,62 @@ function A.make()
     loot.signal_evidence = copy(signals)
     loot.guidance_delivery_refs = copy(deliveries)
     providers[#providers + 1] = loot
-    providers[#providers + 1] = { provider = "talk_grant", generation = generation,
-      status = "unknown", complete = false,
-      reason = "talk_grant_eligibility_evidence_unproven",
-      missing_evidence = { "complete_reachable_graph_path", "speaker_position",
-        "interaction_enabled", "execution_claim_state" },
-      candidates = {}, catalog_version = version,
-      source_descriptors = copy(descriptors), signal_evidence = copy(signals),
-      guidance_delivery_refs = copy(deliveries) }
-    providers[#providers + 1] = { provider = "forgery", generation = generation,
-      status = "unknown", complete = false,
-      reason = "forgery_order_evidence_unproven",
-      missing_evidence = { "typed_service_and_mapping", "position_and_interaction",
-        "held_input_and_price", "busy_kept_completion_time_and_state" },
-      candidates = {}, catalog_version = version,
-      source_descriptors = copy(descriptors), signal_evidence = copy(signals),
-      guidance_delivery_refs = copy(deliveries) }
+    local wanted_list = {}
+    if wanted ~= nil then
+      for item_id in pairs(wanted) do wanted_list[#wanted_list + 1] = item_id end
+      table.sort(wanted_list)
+    end
+    local function provider_observation(kind)
+      local state_key, generation_key, at_key, reader
+      if kind == "talk_grant" then
+        state_key, generation_key, at_key = "talk_observation", "talk_generation", "talk_at"
+        reader = A.read_objective_talk_grant_observation
+      else
+        state_key, generation_key, at_key = "forgery_observation", "forgery_generation", "forgery_at"
+        reader = A.read_objective_forgery_observation
+      end
+      local supplied = type(supplied_provider_observations) == "table"
+        and supplied_provider_observations[kind] or nil
+      local value = supplied
+      if value == nil then
+        local previous = objective_task_state[state_key]
+        if wanted == nil then
+          value = { complete = false, reason = "objective_need_snapshot_incomplete",
+            wanted = {}, events = kind == "talk_grant" and {} or nil,
+            services = kind == "forgery" and {} or nil,
+            mappings = kind == "forgery" and {} or nil,
+            order = kind == "forgery" and {} or nil }
+        elseif previous ~= nil and same(previous.wanted, wanted_list)
+            and now - objective_task_state[at_key] < 0.5 then
+          value = previous
+        elseif type(reader) == "function" then
+          value = reader(wanted)
+        else
+          value = { complete = false, reason = kind .. "_observation_unavailable",
+            wanted = copy(wanted_list) }
+        end
+      end
+      if not same(objective_task_state[state_key], value) then
+        if objective_task_state[state_key] ~= nil then
+          objective_task_state[generation_key] = math.min(2147483647,
+            objective_task_state[generation_key] + 1)
+        end
+        objective_task_state[state_key] = copy(value)
+      end
+      objective_task_state[at_key] = now
+      return value, objective_task_state[generation_key]
+    end
+    local talk_observation, talk_generation = provider_observation("talk_grant")
+    local forgery_observation, forgery_generation = provider_observation("forgery")
+    local talk = A.objective_talk_grant_provider_snapshot(talk_observation, talk_generation)
+    local forgery = A.objective_forgery_provider_snapshot(forgery_observation, forgery_generation)
+    for _, provider in ipairs({ talk, forgery }) do
+      provider.catalog_version = version
+      provider.source_descriptors = copy(descriptors)
+      provider.signal_evidence = copy(signals)
+      provider.guidance_delivery_refs = copy(deliveries)
+      providers[#providers + 1] = provider
+    end
     return providers
   end
   -- Pure classification for synthetic/research evidence only. The live service,
@@ -5233,6 +5987,7 @@ function A.make()
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")
     if qlm ~= QUEST_SESSION_OWNER then
       QUEST_SESSION_OWNER = qlm
+      A.invalidate_objective_provider_catalogs()
       reset_runtime_caches()
       items.reset_task_observations()
       objective_task_state.owner = qlm
@@ -5242,6 +5997,10 @@ function A.make()
       objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
       objective_task_state.source_at = -math.huge
       objective_task_state.source_generation = objective_task_state.source_generation + 1
+      objective_task_state.talk_observation, objective_task_state.forgery_observation = nil, nil
+      objective_task_state.talk_at, objective_task_state.forgery_at = -math.huge, -math.huge
+      objective_task_state.talk_generation = objective_task_state.talk_generation + 1
+      objective_task_state.forgery_generation = objective_task_state.forgery_generation + 1
       return true
     end
     return false

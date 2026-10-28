@@ -232,6 +232,19 @@ return tostring(ok) .. ":" .. tostring(value)
 check("reviewed managed try-call reports managed exception failure",
   reviewed_try_error:find("cmd ok=true false:nil", 1, true) ~= nil)
 
+local reviewed_forgery_reads = run_case('', [[
+local o = { call = function(_, name)
+  if name == "get_IsEnableFake" then return true end
+  if name == "isFakeShopKeeped" then return false end
+  if name == "isFakeShopRemainingMinute" then return 0 end
+end }
+return tostring(reviewed_call(o, "get_IsEnableFake")) .. ":"
+  .. tostring(reviewed_call(o, "isFakeShopKeeped")) .. ":"
+  .. tostring(reviewed_call(o, "isFakeShopRemainingMinute"))
+]], 150)
+check("reviewed forgery getters are exact read-only capabilities",
+  reviewed_forgery_reads:find("cmd ok=true true:false:0", 1, true) ~= nil)
+
 local reviewed_call_bad = run_case('', [[
 local o = { call = function() return "mutated" end }
 return reviewed_call(o, "set_Enabled", false)
