@@ -1840,6 +1840,8 @@ local ITEM_STATS = items.new_stats()
 local ITEM_LAST_AT = -math.huge
 items.objective_group_state = { status = "unknown", complete = false,
     generation = 0, groups = {}, task_index = {} }
+items.objective_loot_state = { status = "unknown", complete = false,
+    generation = 0, at = -math.huge, candidates = {} }
 
 -- Clears both location tables and the per-cadence skip/cap counts.
 function items.clear_locs()
@@ -1857,6 +1859,9 @@ function items.invalidate()
     items.objective_group_state = { status = "unknown", complete = false,
         generation = items.objective_group_state.generation + 1,
         groups = {}, task_index = {} }
+    items.objective_loot_state = { status = "unknown", complete = false,
+        generation = items.objective_loot_state.generation + 1,
+        at = -math.huge, candidates = {} }
     items.related, items.related_titles = nil, nil
     ITEM_WANTED = {}
     items.clear_locs()
@@ -3141,6 +3146,112 @@ local function gimmick_pos(g)
     return { x = x, y = y, z = z }, live
 end
 
+-- Runtime loot is joined only to focused current need options. The exact
+-- runtime list is bounded, cached for half a second, and replaced atomically.
+function items.objective_loot_observations(wanted, generation)
+    local state = items.objective_loot_state
+    local ids, key = {}, ""
+    if type(wanted) ~= "table" or type(generation) ~= "number" then
+        state = { provider = "loot", status = "unknown", complete = false,
+            generation = generation, at = os.clock(), candidates = {},
+            reason = "current_need_snapshot_unavailable" }
+        items.objective_loot_state = state
+        return state
+    end
+    for id, needed in pairs(wanted) do
+        if needed == true and type(id) == "number" and id > 0
+            and id == math.floor(id) then ids[#ids + 1] = id end
+    end
+    table.sort(ids)
+    local key_parts = {}
+    for i, id in ipairs(ids) do key_parts[i] = tostring(id) end
+    key = table.concat(key_parts, ",")
+    local now = os.clock()
+    if state.generation == generation and state.wanted_key == key
+        and now - state.at < 0.5 then
+        return state
+    end
+    local result = { provider = "loot", status = "unknown", complete = false,
+        generation = generation, at = now, wanted_key = key, candidates = {},
+        reason = "loot_scan_unavailable" }
+    if #ids == 0 then
+        result.status, result.complete, result.reason = "ok", true, nil
+        items.objective_loot_state = result
+        return result
+    end
+    local gm = sdk.get_managed_singleton("app.GimmickManager")
+    local list = gm ~= nil and safe_field(gm, "<DropItemGimmicks>k__BackingField") or nil
+    local count = safe_call(list, "get_Count")
+    if type(count) ~= "number" or count < 0 or count ~= math.floor(count) then
+        result.reason = "loot_rows_unreadable"
+    elseif count > 64 then
+        result.reason = "loot_rows_truncated"
+    else
+        local by_id, candidates, seen_uid = {}, {}, {}
+        for _, id in ipairs(ids) do by_id[id] = true end
+        local complete, reason = true, nil
+        for i = 0, count - 1 do
+            local drop = safe_call(list, "get_Item", i)
+            if drop == nil then complete, reason = false, "loot_row_unreadable" break end
+            local context = safe_field(drop, "MyContext")
+            local id = int_value(safe_field(context, "_ItemId"))
+            if type(id) ~= "number" or id <= 0 or id ~= math.floor(id) then
+                complete, reason = false, "loot_item_id_unreadable" break
+            end
+            if by_id[id] then
+                local deleted = safe_field(drop, "<IsDeleted>k__BackingField")
+                if type(deleted) ~= "boolean" then
+                    complete, reason = false, "loot_deletion_state_unreadable" break
+                elseif deleted == false then
+                    local amount = int_value(safe_field(context, "_Num"))
+                    local unique_id = safe_call(drop, "get_UniqId")
+                    local uid = safe_call(unique_id, "ToString()")
+                    local pos = gimmick_pos(drop)
+                    local uid_a, uid_b, uid_c, uid_d, uid_e
+                    if type(uid) == "string" then
+                        uid_a, uid_b, uid_c, uid_d, uid_e = uid:match(
+                            "^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)$")
+                    end
+                    if type(amount) ~= "number" or amount <= 0 or amount ~= math.floor(amount) then
+                        complete, reason = false, "loot_count_unreadable" break
+                    elseif uid_a == nil or #uid_a ~= 8 or #uid_b ~= 4
+                        or #uid_c ~= 4 or #uid_d ~= 4 or #uid_e ~= 12 then
+                        complete, reason = false, "loot_identity_unreadable" break
+                    elseif pos == nil then
+                        complete, reason = false, "loot_position_unreadable" break
+                    else
+                        uid = uid:lower()
+                        if seen_uid[uid] then
+                            complete, reason = false, "loot_identity_duplicated" break
+                        end
+                        seen_uid[uid] = true
+                        local source_id = { "source", "loot", uid }
+                        candidates[#candidates + 1] = {
+                            source_id = source_id,
+                            provider = "loot", target = { kind = "loot", uid = uid, pos = pos },
+                            outputs = { { item_id = id, count = amount } },
+                            capacity_pool_id = { "capacity", "loot", uid },
+                            capacity_kind = "finite", available_acquisitions = 1,
+                            certainty = "guaranteed", eligibility = "eligible",
+                            generation = generation,
+                            evidence = { uid = uid, item_id = id, count = amount,
+                                deleted = false },
+                        }
+                    end
+                end
+            end
+        end
+        if complete then
+            result.status, result.complete, result.reason = "ok", true, nil
+            result.candidates = candidates
+        else
+            result.reason = reason
+        end
+    end
+    items.objective_loot_state = result
+    return result
+end
+
 -- v14 (SPEC 22.11.3): read the masquerade passage leaf. The full fingerprint
 -- prevents another nearby saloon door from deciding this one hint pin.
 function A.read_masquerade_door_closed(gm)
@@ -4406,12 +4517,26 @@ function A.make()
       end
     end
     local providers = {}
-    for _, name in ipairs({ "placed", "chest", "loot" }) do
+    for _, name in ipairs({ "placed", "chest" }) do
       providers[#providers + 1] = { provider = name, generation = generation,
         status = "unknown", reason = "objective_source_scan_not_performed", candidates = {},
         catalog_version = version, source_descriptors = copy(descriptors),
         signal_evidence = copy(signals), guidance_delivery_refs = copy(deliveries) }
     end
+    local need_snapshot = a.objective_need_groups(task_snapshot)
+    local wanted = nil
+    if need_snapshot.complete then
+      wanted = {}
+      for _, group in ipairs(need_snapshot.groups) do
+        for _, option in ipairs(group.options) do wanted[option.item_id] = true end
+      end
+    end
+    local loot = copy(items.objective_loot_observations(wanted, generation))
+    loot.catalog_version = version
+    loot.source_descriptors = copy(descriptors)
+    loot.signal_evidence = copy(signals)
+    loot.guidance_delivery_refs = copy(deliveries)
+    providers[#providers + 1] = loot
     return providers
   end
   function a.reset_session_caches()

@@ -2302,7 +2302,7 @@ do
   local HAS = "app.quest.condition.CheckHasItem"
   local IS = { procs = {}, prog = {}, prog_nil = false, qm = nil, qm_on = true,
     im_on = true, dict = nil, icons = {}, icon_fail = {}, gm = nil, gets = {},
-    data_calls = 0, dict_reads = 0, cls_reads = 0, started_reads = 0,
+    data_calls = 0, dict_reads = 0, cls_reads = 0, loot_reads = 0, started_reads = 0,
     count_reads = 0, drift = 0 }
   local function typed(tn, fields)
     local o = mobj(fields)
@@ -2450,10 +2450,23 @@ do
   local function placed(id, upos, lpos, tn)
     return gim(tn or "app.Gm82_000", { ItemId = id, ItemNum = 1 }, upos, lpos)
   end
-  local function drop(id, upos, lpos, deleted)
-    return gim("app.Gm82_000_01", { ItemId = id,
-      MyContext = mobj({ _ItemId = id, _Num = 1 }),
-      ["<IsDeleted>k__BackingField"] = deleted == true }, upos, lpos)
+  local drop_id = 0
+  local function drop(id, upos, lpos, deleted, uid, amount)
+    drop_id = drop_id + 1
+    if uid == nil then uid = string.format("00000000-0000-4000-8000-%012x", drop_id) end
+    if amount == nil then amount = 1 end
+    local fields = { ItemId = id, MyContext = mobj({ _ItemId = id, _Num = amount }) }
+    if deleted ~= "unreadable" then fields["<IsDeleted>k__BackingField"] = deleted == true end
+    local out = gim("app.Gm82_000_01", fields, upos, lpos)
+    local original_call = out.call
+    out.call = function(self, method, ...)
+      if method == "get_UniqId" then
+        if uid == false then return nil end
+        return { call = function(_, name) if name == "ToString()" then return uid end end }
+      end
+      return original_call(self, method, ...)
+    end
+    return out
   end
   local function box(ids, upos, lpos)
     local items = {}
@@ -2478,7 +2491,8 @@ do
   local function gmgr(o)
     return mobj({
       ["<ManagedGimmicksByIDs>k__BackingField"] = o.managed,
-      ["<DropItemGimmicks>k__BackingField"] = o.drops and ilist(o.drops) or nil,
+      ["<DropItemGimmicks>k__BackingField"] = o.drops and ilist(o.drops,
+        function() IS.loot_reads = IS.loot_reads + 1 end) or nil,
       ["<TreasureBoxGimmicks>k__BackingField"] = o.boxes and ilist(o.boxes) or nil,
     })
   end
@@ -2516,6 +2530,7 @@ do
     IS.gm = gmgr({ managed = managed({ hset({ placed(300, V, L) }) }),
       drops = {}, boxes = {} })
     IS.gets = {}
+    IS.loot_reads = 0
     IS.data_calls, IS.dict_reads, IS.cls_reads = 0, 0, 0
     IS.started_reads, IS.count_reads = 0, 0
   end
@@ -2714,12 +2729,82 @@ do
     and #need_snapshot.groups[1].options == 1
     and need_snapshot.groups[1].options[1].item_id == 300,
     "IW1 objective groups are co-published with verified zero-based task snapshot")
+  local live_drop = drop(300, V, L, false,
+    "00000000-0000-4000-8000-000000000101", 2)
+  IS.gm = gmgr({ managed = managed({}), drops = { live_drop }, boxes = {} })
+  local source_views = ai.objective_item_source_snapshots(nil, task_snapshot)
+  local loot_view = source_views[3]
+  assert(loot_view.provider == "loot" and loot_view.status == "ok"
+    and loot_view.complete and #loot_view.candidates == 1,
+    "IW1 current focused loot publishes one complete source")
+  local loot_candidate = loot_view.candidates[1]
+  assert(loot_candidate.source_id[1] == "source"
+    and loot_candidate.source_id[2] == "loot"
+    and loot_candidate.source_id[3] == "00000000-0000-4000-8000-000000000101"
+    and loot_candidate.outputs[1].item_id == 300 and loot_candidate.outputs[1].count == 2
+    and loot_candidate.target.kind == "loot"
+    and loot_candidate.target.uid == "00000000-0000-4000-8000-000000000101"
+    and loot_candidate.target.pos.x == V.x
+    and loot_candidate.capacity_kind == "finite"
+    and loot_candidate.available_acquisitions == 1
+    and loot_candidate.capacity_pool_id[1] == "capacity"
+    and loot_candidate.capacity_pool_id[2] == "loot"
+    and loot_candidate.certainty == "guaranteed"
+    and loot_candidate.eligibility == "eligible"
+    and loot_candidate.evidence.deleted == false
+    and loot_candidate.generation == task_snapshot.need_generation,
+    "IW1 loot observation carries UID, exact output, position and capacity")
+  local loot_count_reads = IS.loot_reads
+  ai.objective_item_source_snapshots(nil, task_snapshot)
+  assert(IS.loot_reads == loot_count_reads,
+    "IW1 repeated snapshot reuses the bounded loot observation")
+  live_drop["<IsDeleted>k__BackingField"] = true
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "ok" and loot_view.complete
+    and #loot_view.candidates == 0, "IW1 collected loot disappears on refresh")
+  local function loot_unknown(next_drop, label)
+    IS.gm = gmgr({ managed = managed({}), drops = { next_drop }, boxes = {} })
+    iclk = iclk + 0.6
+    local view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+    assert(view.status == "unknown" and not view.complete and #view.candidates == 0,
+      "IW1 " .. label .. " fails closed without retained loot")
+  end
+  loot_unknown(drop(300, V, L, false, false, 1), "UID unreadable")
+  loot_unknown(drop(300, nil, nil, false, "00000000-0000-4000-8000-000000000102", 1),
+    "position unreadable")
+  loot_unknown(drop(300, V, L, "unreadable",
+    "00000000-0000-4000-8000-000000000103", 1), "deletion state unreadable")
+  loot_unknown(drop(300, V, L, false,
+    "00000000-0000-4000-8000-000000000104", 0), "nonpositive count")
+  local too_many_drops = {}
+  for i = 1, 65 do too_many_drops[i] = drop(999, V, L, false) end
+  IS.gm = gmgr({ managed = managed({}), drops = too_many_drops, boxes = {} })
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "unknown" and loot_view.reason == "loot_rows_truncated"
+    and #loot_view.candidates == 0, "IW1 over-limit loot list is unknown")
   local s = ai.item_stats()
   assert(s.needs == 1 and s.ids == 1 and s.located == 1 and s.rounds == 1
     and s.skipped == 0 and s.ignored == 0 and s.failed_total == 0,
     "IW1 stats (rounds re-counted after the owner reset)")
+  IS.gm = gmgr({ managed = managed({}), drops = { drop(300, V, L, false) }, boxes = {} })
+  iclk = iclk + 0.6
+  source_views = ai.objective_item_source_snapshots(nil, task_snapshot)
+  assert(#source_views[3].candidates == 1, "IW1 loot is present before task change")
   IS.task_index = 1
   local changed_task = ai.objective_task_snapshot({ 20090 })
+  loot_view = ai.objective_item_source_snapshots(nil, changed_task)[3]
+  assert(loot_view.status == "unknown" and #loot_view.candidates == 0,
+    "IW1 task change invalidates cached loot candidates")
+  IS.task_index = 0
+  ai.invalidate_items()
+  local changed_needs = ai.objective_task_snapshot({ 20090 })
+  loot_view = ai.objective_item_source_snapshots(nil, changed_needs)[3]
+  assert(loot_view.status == "unknown" and #loot_view.candidates == 0,
+    "IW1 need invalidation removes cached loot candidates")
+  IS.task_index = 1
+  changed_task = ai.objective_task_snapshot({ 20090 })
   local invalidated = ai.objective_need_groups(changed_task)
   assert(invalidated.status == "unknown" and not invalidated.complete
     and #invalidated.groups == 0, "IW1 task change immediately invalidates old groups")
@@ -2861,6 +2946,16 @@ do
   excluded = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
   assert(excluded.status == "ok" and excluded.complete and #excluded.groups == 0,
     "IW1 unstarted processor contributes no current objective group")
+  ifresh()
+  IS.procs = {}
+  ai.refresh_items()
+  local no_need_task = ai.objective_task_snapshot({ 20090 })
+  IS.gm = gmgr({ managed = managed({}), drops = { drop(300, V, L, false) }, boxes = {} })
+  local no_need_reads = IS.loot_reads
+  loot_view = ai.objective_item_source_snapshots(nil, no_need_task)[3]
+  assert(loot_view.status == "ok" and loot_view.complete
+    and #loot_view.candidates == 0 and IS.loot_reads == no_need_reads,
+    "IW1 no focused item need skips the live loot scan")
   -- IW2 enum by name: Morethan 1 -> 2, Morethan 0 -> 1, Equal ignored
   ifresh()
   IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 5 },
