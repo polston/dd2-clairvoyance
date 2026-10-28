@@ -5132,6 +5132,130 @@ function M.game_reads()
     return out
   end
 
+  -- Live objective observations retain each spawned Character identity and
+  -- one row per positive structured drop entry. The game rate is preserved
+  -- as raw_rate: without a scale it is neither an availability proof nor a
+  -- probability. Access proof is likewise left absent until a live gate exists.
+  function R.objective_monster_rows()
+    local ENEMY_MAX, SOURCE_MAX, TABLE_MAX, ITEM_MAX = 512, 8192, 64, 256
+    local function integer(value, minimum)
+      return type(value) == "number" and math.type(value) == "integer" and value >= minimum
+    end
+    local function bounded(value, cap)
+      local array = elems(value)
+      if array ~= nil then
+        if #array > cap then return nil end
+        return array
+      end
+      local count = int_value(C(value, "get_Count"))
+      if not integer(count, 0) or count > cap then return nil end
+      local out = {}
+      for i = 0, count - 1 do
+        local row = C(value, "get_Item", i)
+        if row == nil then return nil end
+        out[#out + 1] = row
+      end
+      return out
+    end
+    local function fail(reason)
+      return { complete = false, rows = {}, reason = reason }
+    end
+    local enemy_list = G(single("app.EnemyManager"), "_EnemyList")
+    local enemies = bounded(enemy_list, ENEMY_MAX)
+    if enemies == nil then return fail("enemy_list_unreadable") end
+    local item_manager = single("app.ItemManager")
+    local default_dict = G(item_manager, "EnemyDefaultItemDropDataDict")
+    local param_dict = G(item_manager, "EnemyItemDropDataDict")
+    local defaults, params = bounded(G(default_dict, "_entries"), SOURCE_MAX),
+      bounded(G(param_dict, "_entries"), SOURCE_MAX)
+    local function dict_complete(dict, slots)
+      local count = int_value(C(dict, "get_Count"))
+      if slots == nil or not integer(count, 0) then return false end
+      local filled = 0
+      for _, entry in ipairs(slots) do
+        if hs_value(entry) ~= nil then filled = filled + 1 end
+      end
+      return count == filled
+    end
+    if not dict_complete(default_dict, defaults) or not dict_complete(param_dict, params) then
+      return fail("drop_dictionary_unreadable")
+    end
+    local by_cid, default_cids = {}, {}
+    local function add_sources(slots, is_default)
+      for _, entry in ipairs(slots) do
+        local value = hs_value(entry)
+        if value ~= nil then
+          local cid = int_value(G(value, "_CharaId"))
+          if (cid == nil or cid == 0) and is_default then cid = int_value(G(entry, "key")) end
+          if not integer(cid, 1) then return false end
+          if is_default then default_cids[cid] = true end
+          if is_default or not default_cids[cid] then
+            local list = by_cid[cid]
+            if list == nil then list = {}; by_cid[cid] = list end
+            list[#list + 1] = value
+          end
+        end
+      end
+      return true
+    end
+    if not add_sources(defaults, true) or not add_sources(params, false) then
+      return fail("drop_source_identity_unreadable")
+    end
+    local function drops_for(cid)
+      local sources = by_cid[cid] or {}
+      if #sources > TABLE_MAX then return nil end
+      local rows = {}
+      for source_index, source in ipairs(sources) do
+        local tables = bounded(G(source, "_TableList"), TABLE_MAX)
+        if tables == nil then return nil end
+        for table_index, table_row in ipairs(tables) do
+          local items = bounded(G(table_row, "_ItemList"), ITEM_MAX)
+          if items == nil then return nil end
+          for item_index, item in ipairs(items) do
+            local item_id, count, rate = int_value(G(item, "_Id")),
+              int_value(G(item, "_Num")), int_value(G(item, "_Rate"))
+            if not integer(item_id, 1) or not integer(count, 1) or not integer(rate, 0) then
+              return nil
+            end
+            if rate > 0 then
+              rows[#rows + 1] = { item_id = item_id, count = count, raw_rate = rate,
+                drop_row_id = table.concat({ tostring(cid), tostring(source_index),
+                  tostring(table_index), tostring(item_index) }, ":") }
+            end
+          end
+        end
+      end
+      return rows
+    end
+    local out, seen_uids = {}, {}
+    for _, enemy in ipairs(enemies) do
+      if enemy == nil then return fail("enemy_identity_unreadable") end
+      local chara = C(enemy, "get_Chara")
+      local uid = C(C(chara, "get_UniqId"), "ToString()")
+      local cid = int_value(C(chara, "get_CharaID"))
+      local dead = C(chara, "get_IsDead")
+      local transform = C(chara, "get_Transform")
+      local pos = xyz(C(transform, "get_UniversalPosition"))
+      if chara == nil or type(uid) ~= "string" or uid == "" or seen_uids[uid]
+          or not integer(cid, 1)
+          or type(dead) ~= "boolean" or pos == nil or near_zero(pos) then
+        return fail("enemy_state_unreadable")
+      end
+      seen_uids[uid] = true
+      if not dead then
+        local drops = drops_for(cid)
+        if drops == nil then return fail("drop_rows_unreadable") end
+        for _, drop in ipairs(drops) do
+          out[#out + 1] = { uid = uid, drop_row_id = drop.drop_row_id,
+            item_id = drop.item_id, count = drop.count, raw_rate = drop.raw_rate,
+            alive = true, drop_table_readable = true,
+            pos = { x = pos.x, y = pos.y, z = pos.z } }
+        end
+      end
+    end
+    return { complete = true, rows = out }
+  end
+
   -- _RegisteredTimeInfos is a List<RegisterInfo> with _UniqID (UniqueID) and
   -- _Key (String); each key joins a save record's CharacterIDContext.CharacterID
   -- and CharacterPosRotContext.Position.

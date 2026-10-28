@@ -1499,6 +1499,60 @@ do
   }
   local R = world.game_reads()
 
+  local function monster_drop_entry(cid, item, count, rate)
+    return obj({ key = cid, value = obj({ _CharaId = cid, _TableList = array({ obj({
+      _ItemList = array({ obj({ _Id = item, _Num = count, _Rate = rate }) }) }) }) }) })
+  end
+  local function drop_dictionary(rows)
+    local slots = {}
+    for i, row in ipairs(rows) do
+      slots[i] = obj({ key = row:get_field("key"), value = row:get_field("value") })
+    end
+    return obj({ _entries = array(slots), _count = #slots },
+      { get_Count = function() return #rows end })
+  end
+  local function live_monster(uid, cid, dead, pos)
+    local chara = obj(nil, {
+      get_UniqId = function() return guid(uid) end,
+      get_CharaID = function() return cid end,
+      get_IsDead = function() return dead end,
+      get_Transform = function() return obj(nil, {
+        get_UniversalPosition = function() return pos end,
+      }) end,
+    })
+    return obj(nil, { get_Chara = function() return chara end })
+  end
+  singletons["app.EnemyManager"] = obj({ _EnemyList = list({
+    live_monster("instance-a", 1001, false, P(30, 0, 40)),
+    live_monster("instance-b", 1001, false, P(31, 0, 40)),
+    live_monster("instance-dead", 1001, true, P(32, 0, 40)),
+  }) })
+  singletons["app.ItemManager"] = obj({
+    EnemyDefaultItemDropDataDict = drop_dictionary({
+      monster_drop_entry(1001, 501, 2, 2500),
+    }), EnemyItemDropDataDict = drop_dictionary({
+      monster_drop_entry(1001, 502, 3, 9000),
+    }),
+  })
+  local monster_ok, monster_snapshot = pcall(R.objective_monster_rows)
+  check("reads: live monster rows preserve instance identity and raw drops",
+    monster_ok and monster_snapshot.complete and #monster_snapshot.rows == 2
+      and monster_snapshot.rows[1].uid ~= monster_snapshot.rows[2].uid
+      and monster_snapshot.rows[1].drop_table_readable
+      and monster_snapshot.rows[1].item_id == 501
+      and monster_snapshot.rows[1].count == 2
+      and monster_snapshot.rows[2].item_id == 501
+      and monster_snapshot.rows[1].raw_rate == 2500
+      and monster_snapshot.rows[1].accessible == nil
+      and monster_snapshot.rows[1].chance == nil)
+  singletons["app.EnemyManager"] = obj({ _EnemyList = list({
+    live_monster("instance-unreadable", 1001, false, nil),
+  }) })
+  local partial_monster_ok, partial_monsters = pcall(R.objective_monster_rows)
+  check("reads: unreadable live position clears the whole monster snapshot",
+    partial_monster_ok and partial_monsters.complete == false
+      and #partial_monsters.rows == 0)
+
   -- reserved rows: List<GenerateSelector> -> <Table> -> set infos
   local function row_obj(f) return obj(f) end
   local sel = obj({ ["<Table>k__BackingField"] = obj({
@@ -1754,6 +1808,8 @@ do
       and dn[-1233720880] == nil)
     setdrops({}, {})
     check("reads: empty walk raises", not pcall(R.monster_drops))
+    check("reads: live objective monster drop reader is available",
+      type(R.objective_monster_rows) == "function")
   end
 
   -- v14 reads: schedule rows, current row, area nodes, holders, sentiment
@@ -6933,6 +6989,18 @@ do
       and monsters.candidates[1].available_acquisitions == 1
       and monsters.candidates[1].probability == 0.25
       and monsters.candidates[1].source_id[3] ~= monsters.candidates[2].source_id[3])
+  monster_rows.rows[1].accessible = nil
+  mw:refresh(0, true, { chests = true })
+  local access_unknown = mw:objective_monster_observations(source_task, need_proof)
+  check("monster objectives: missing structured access proof makes the provider unknown",
+    access_unknown.status == "unknown" and #access_unknown.candidates == 0)
+  monster_rows.rows[1].accessible = true
+  monster_rows.rows[1].chance, monster_rows.rows[1].raw_rate = nil, 2500
+  mw:refresh(0, true, { chests = true })
+  local scale_unknown = mw:objective_monster_observations(source_task, need_proof)
+  check("monster objectives: raw game rate is not normalized probability evidence",
+    scale_unknown.status == "unknown" and #scale_unknown.candidates == 0)
+  monster_rows.rows[1].chance, monster_rows.rows[1].raw_rate = 0.25, nil
   monster_rows.rows[2].drop_table_readable = false
   mw:refresh(0, true, { chests = true })
   local partial_monsters = mw:objective_monster_observations(source_task, need_proof)
