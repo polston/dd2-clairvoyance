@@ -3521,7 +3521,10 @@ local function item_round_needs(now)
                             qid = qid, processor_id = procid,
                             list_index = group.list_index,
                             condition_index = group.condition_index,
-                            complete = true, current_work = true,
+                            -- A progressing quest does not prove this processor
+                            -- belongs to its current task. Keep the expression
+                            -- unrouted until an exact structured join exists.
+                            complete = true, current_work = false,
                             options = group.options }
                     end
                 end

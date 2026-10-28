@@ -3587,13 +3587,25 @@ do
     "IW1 need committed")
   local task_snapshot = ai.objective_task_snapshot({ 20090 })
   local need_snapshot = ai.objective_need_groups(task_snapshot)
-  assert(need_snapshot.status == "ok" and need_snapshot.complete
-    and #need_snapshot.groups == 1 and need_snapshot.groups[1].qid == 20090
-    and need_snapshot.groups[1].task_index == 0
-    and need_snapshot.groups[1].remaining == 1
-    and #need_snapshot.groups[1].options == 1
-    and need_snapshot.groups[1].options[1].item_id == 300,
-    "IW1 objective groups are co-published with verified zero-based task snapshot")
+  assert(need_snapshot.status == "unknown" and not need_snapshot.complete
+    and #need_snapshot.groups == 0 and nd ~= nil and #nd == 1,
+    "IW1 processor need without exact current-task ownership stays unrouted")
+  -- The loot reader tests below exercise provider behavior independently of
+  -- processor-to-task ownership. Supply the proven need snapshot they require.
+  ai._test_real_objective_need_groups = ai.objective_need_groups
+  ai._test_owned_need_generation = task_snapshot.need_generation
+  ai.objective_need_groups = function(snapshot)
+    local row = type(snapshot) == "table" and type(snapshot.quests) == "table"
+      and snapshot.quests[1] or nil
+    if type(row) ~= "table" or row.qid ~= 20090 or row.task_index ~= 0
+        or snapshot.need_generation ~= ai._test_owned_need_generation then
+      return { status = "unknown", complete = false, groups = {},
+        generation = type(snapshot) == "table" and snapshot.need_generation or nil }
+    end
+    return { status = "ok", complete = true, generation = snapshot.need_generation,
+      groups = { { qid = 20090, task_index = 0, remaining = 1,
+        options = { { item_id = 300, accepted_count = 1 } } } } }
+  end
   local live_drop = drop(300, V, L, false,
     "00000000-0000-4000-8000-000000000101", 2)
   IS.gm = gmgr({ managed = managed({}), drops = { live_drop }, boxes = {} })
@@ -3687,6 +3699,8 @@ do
   loot_view = ai.objective_item_source_snapshots(nil, changed_needs)[3]
   assert(loot_view.status == "unknown" and #loot_view.candidates == 0,
     "IW1 need invalidation removes cached loot candidates")
+  ai.objective_need_groups = ai._test_real_objective_need_groups
+  ai._test_real_objective_need_groups, ai._test_owned_need_generation = nil, nil
   IS.task_index = 1
   changed_task = ai.objective_task_snapshot({ 20090 })
   local invalidated = ai.objective_need_groups(changed_task)
@@ -3708,8 +3722,10 @@ do
   for i = 1, 512 do exact_held[i] = sd(900 + i, 1) end
   IS.dict = storage({ { key = PL, value = ilist(exact_held) } })
   ai.refresh_items()
-  assert(ai.objective_need_groups(ai.objective_task_snapshot({ 20090 })).status == "ok",
-    "IW1 exact held-owner cap remains complete")
+  need_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(need_snapshot.status == "unknown" and #need_snapshot.groups == 0
+      and #needs_of(ai, 20090) == 1,
+    "IW1 exact held-owner cap preserves legacy need without ownership proof")
   local over_held = {}
   for i = 1, 513 do over_held[i] = sd(900 + i, 1) end
   ifresh()
@@ -3739,8 +3755,8 @@ do
   iclk = iclk + 10
   ai.refresh_items("needs")
   task_snapshot = ai.objective_task_snapshot({ 20090 })
-  assert(ai.objective_need_groups(task_snapshot).status == "ok",
-    "IW1 fresh item scan republishes groups for the observed current task")
+  assert(ai.objective_need_groups(task_snapshot).status == "unknown",
+    "IW1 fresh item scan does not invent current-task ownership")
   IS.task_index_unreadable = true
   ai.objective_task_snapshot({ 20090 })
   IS.task_index_unreadable = false
@@ -3751,8 +3767,8 @@ do
   iclk = iclk + 10
   ai.refresh_items("needs")
   task_snapshot = ai.objective_task_snapshot({ 20090 })
-  assert(ai.objective_need_groups(task_snapshot).status == "ok",
-    "IW1 fresh item scan recovers after unreadable task observation")
+  assert(ai.objective_need_groups(task_snapshot).status == "unknown",
+    "IW1 fresh item scan still requires exact current-task ownership")
   IS.task_index = 0
   ifresh()
   IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }),
