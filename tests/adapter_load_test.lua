@@ -174,17 +174,31 @@ local contract = {
   "seen_quest_name", "quest_region",
   "refresh_tree_gates", "invalidate_tree_gates", "tree_gate_qids",
   "tree_gate_table", "tree_gate_stats",
-  "invalidate_items", "item_needs", "item_locations", "item_name", "item_stats",
+  "invalidate_items", "item_needs", "objective_need_groups", "item_locations", "item_name", "item_stats",
   "refresh_items", "item_related", "reset_item_throttle", "quest_steps_text",
   "tracked_qid", "journal_now", "journal_all", "npc_name", "journal_stats",
   "map_open", "map_jump_apply", "journal_note_jump", "map_cursor",
   "quest_step", "masquerade_door_closed",
   "overhead_block_reason",
 }
-assert(#contract == 53)
+assert(#contract == 54)
 for _, name in ipairs(contract) do
   assert(type(a[name]) == "function", "contract function missing: " .. name)
 end
+local grouped, grouped_complete = A.objective_need_builder.build({
+  { qid = 700, processor_id = 800, list_index = 0, condition_index = 1,
+    complete = true, current_work = true, options = {
+      { item_id = 900, required = 2, op = "more" },
+      { item_id = 901, required = 2, op = "more" },
+    } },
+}, { [900] = 1 }, { generation = 3, task_generation = 3,
+  task_index = { [700] = 4 } })
+assert(grouped_complete and #grouped == 1 and grouped[1].remaining == 1
+  and #grouped[1].options == 2 and grouped[1].id[1] == "need"
+  and grouped[1].generation == 3, "adapter exports objective-only grouped need model")
+local empty_need_snapshot = a.objective_need_groups()
+assert(empty_need_snapshot.status == "unknown" and not empty_need_snapshot.complete
+  and #empty_need_snapshot.groups == 0, "unrefreshed objective group snapshot is unknown")
 local empty_source_snapshots = a.objective_item_source_snapshots()
 assert(#empty_source_snapshots == 3 and empty_source_snapshots[1].provider == "placed"
   and empty_source_snapshots[2].provider == "chest" and empty_source_snapshots[3].provider == "loot"
@@ -2339,7 +2353,7 @@ do
     local p = mobj({
       ["<RefQuestController>k__BackingField"] = mobj({ _QuestID = qid }),
       ProcID = o.procid or (900 + iproc_n),
-      ConditionLists = ilist({ ilist(conds) },
+      ConditionLists = ilist(o.condition_lists or { ilist(conds) },
         function() IS.cls_reads = IS.cls_reads + 1 end),
     })
     p.get_field = function(self, n)
@@ -2382,8 +2396,23 @@ do
     if m == "getProgressingQuestIds" then
       if IS.prog_nil then return nil end
       return mcoll(IS.prog)
+    elseif m == "getCurrentTask" then
+      return { call = function(_, method)
+        if method == "getActiveDestinations" then return mcoll({}) end
+      end }
     end
-  end }
+  end,
+    get_field = function(_, name)
+      if name == "_QuestLogInfoDict" then
+        return { call = function(_, method, qid)
+          if method == "get_Item" then
+            return { call = function(_, method_name)
+              if method_name == "get_CurrentTaskIndex" then return IS.task_index or 0 end
+            end }
+          end
+        end }
+      end
+    end }
   local function sd(id, num) return mobj({ _ItemId = id, _Num = num }) end
   local function storage(entries)   -- {key=, value=}; value absent = free slot
     local elems = {}
@@ -2480,6 +2509,7 @@ do
     IS.qm_on, IS.im_on, IS.prog_nil, IS.drift = true, true, false, 0
     IS.prog = { 20090 }
     IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+    IS.task_index = 0
     IS.dict = storage({ { key = PL, value = ilist({}) } })
     IS.icons = { [300] = 2017 }
     IS.icon_fail = {}
@@ -2567,7 +2597,7 @@ do
   ai.reset_session_caches()                 -- primes the session owner
   ai.item_name(300)
   dc = IS.data_calls
-  iqlm = { call = iqlm.call }
+  iqlm = { call = iqlm.call, get_field = iqlm.get_field }
   assert(ai.reset_session_caches() == true, "NM6 session reset ran")
   ai.item_name(300)
   assert(IS.data_calls == dc + 1, "NM6 reset_runtime_caches clears the name cache")
@@ -2675,10 +2705,71 @@ do
   local nd = needs_of(ai, 20090)
   assert(nd ~= nil and #nd == 1 and nd[1].id == 300 and nd[1].num == 1,
     "IW1 need committed")
+  local task_snapshot = ai.objective_task_snapshot({ 20090 })
+  local need_snapshot = ai.objective_need_groups(task_snapshot)
+  assert(need_snapshot.status == "ok" and need_snapshot.complete
+    and #need_snapshot.groups == 1 and need_snapshot.groups[1].qid == 20090
+    and need_snapshot.groups[1].task_index == 0
+    and need_snapshot.groups[1].remaining == 1
+    and #need_snapshot.groups[1].options == 1
+    and need_snapshot.groups[1].options[1].item_id == 300,
+    "IW1 objective groups are co-published with verified zero-based task snapshot")
   local s = ai.item_stats()
   assert(s.needs == 1 and s.ids == 1 and s.located == 1 and s.rounds == 1
     and s.skipped == 0 and s.ignored == 0 and s.failed_total == 0,
     "IW1 stats (rounds re-counted after the owner reset)")
+  IS.task_index = 1
+  local changed_task = ai.objective_task_snapshot({ 20090 })
+  local invalidated = ai.objective_need_groups(changed_task)
+  assert(invalidated.status == "unknown" and not invalidated.complete
+    and #invalidated.groups == 0, "IW1 task change immediately invalidates old groups")
+  IS.task_index = 0
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }),
+    deliver(nil, 1, 4) }) }
+  ai.refresh_items()
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  need_snapshot = ai.objective_need_groups(task_snapshot)
+  assert(need_snapshot.status == "unknown" and not need_snapshot.complete
+    and #need_snapshot.groups == 0 and #needs_of(ai, 20090) == 1,
+    "IW1 incomplete sibling expression empties objective groups and preserves legacy need")
+  ifresh()
+  ai.refresh_items()
+  IS.prog_nil = true
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  need_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(need_snapshot.status == "unknown" and #need_snapshot.groups == 0,
+    "IW1 failed refresh immediately clears objective groups")
+  local function other_conditions(n)
+    local out = {}
+    for _ = 1, n do out[#out + 1] = typed("app.quest.condition.Other", {}) end
+    return out
+  end
+  local function objective_after_lists(outer_count, inner_count)
+    ifresh()
+    local lists = {}
+    if outer_count == 1 then
+      lists[1] = ilist(other_conditions(inner_count))
+    else
+      for i = 1, outer_count do lists[i] = ilist({}) end
+    end
+    IS.procs = { iproc(20090, {}, { condition_lists = lists }) }
+    ai.refresh_items()
+    return ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  end
+  local exact_inner = objective_after_lists(1, 16)
+  assert(exact_inner.status == "ok" and exact_inner.complete
+    and #exact_inner.groups == 0, "IW1 exact inner condition limit remains complete")
+  local over_inner = objective_after_lists(1, 17)
+  assert(over_inner.status == "unknown" and not over_inner.complete
+    and #over_inner.groups == 0, "IW1 over-limit inner list empties objective groups")
+  local exact_outer = objective_after_lists(16, 0)
+  assert(exact_outer.status == "ok" and exact_outer.complete,
+    "IW1 exact outer condition limit remains complete")
+  local over_outer = objective_after_lists(17, 0)
+  assert(over_outer.status == "unknown" and not over_outer.complete
+    and #over_outer.groups == 0, "IW1 over-limit outer list empties objective groups")
   ifresh()
   IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } },
     "app.quest.condition.CheckHasItemParam") }) }
@@ -2760,6 +2851,16 @@ do
     { fin = true }) }
   ai.refresh_items()
   assert(next(ai.item_needs()) == nil, "IW1 finished processor contributes nothing")
+  local excluded = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(excluded.status == "ok" and excluded.complete and #excluded.groups == 0,
+    "IW1 finished processor contributes no current objective group")
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) },
+    { started = false }) }
+  ai.refresh_items()
+  excluded = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(excluded.status == "ok" and excluded.complete and #excluded.groups == 0,
+    "IW1 unstarted processor contributes no current objective group")
   -- IW2 enum by name: Morethan 1 -> 2, Morethan 0 -> 1, Equal ignored
   ifresh()
   IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 5 },
