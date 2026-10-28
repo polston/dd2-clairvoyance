@@ -118,9 +118,11 @@ return D, qlm, td, world
         talk_methods = {
             "getTalkEventInitialSpeaker", "isEventPlayable",
             "canTalkEventInteract", "getHistory"}
+        forgery_methods = {
+            "isFakeShopKeeped", "isFakeShopRemainingMinute"}
         monster_methods = {
             "get_Transform", "get_UniversalPosition", "get_IsDead"}
-        self.assertEqual(needed | talk_methods | monster_methods,
+        self.assertEqual(needed | talk_methods | forgery_methods | monster_methods,
                          probe_run.REVIEWED_METHODS)
         self.assertEqual(allowed, probe_run.REVIEWED_METHODS)
         self.assertEqual(needed - allowed, set())
@@ -182,6 +184,19 @@ return D, qlm, td, world
                        "get_IsDeadExtra", "isDead")
         for method in near_misses:
             source = 'return reviewed_call(character, "%s")' % method
+            with self.subTest(near_miss=method):
+                self.assertEqual(
+                    probe_run.unsafe_probe_call(source),
+                    "unreviewed managed method")
+
+    def test_forgery_state_methods_are_reviewed_literals(self):
+        methods = ("isFakeShopKeeped", "isFakeShopRemainingMinute")
+        for method in methods:
+            source = 'return reviewed_call(item_manager, "%s")' % method
+            with self.subTest(method=method):
+                self.assertIsNone(probe_run.unsafe_probe_call(source))
+        for method in ("isFakeShopKeepedExtra", "isFakeShopRemainingMinutes"):
+            source = 'return reviewed_call(item_manager, "%s")' % method
             with self.subTest(near_miss=method):
                 self.assertEqual(
                     probe_run.unsafe_probe_call(source),

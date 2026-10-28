@@ -43,7 +43,8 @@ REVIEWED_METHODS = {
     "get_QuestID", "get_SetNpc", "get_Stock", "get_TaskIndex",
     "get_Transform", "get_UniqId", "get_UniversalPosition",
     "get_Value", "getContext", "hasDeliver", "isEventPlayable",
-    "isFakeShopCompleted", "isFinish", "canTalkEventInteract",
+    "isFakeShopCompleted", "isFakeShopKeeped", "isFakeShopRemainingMinute",
+    "isFinish", "canTalkEventInteract",
     "isShopTalkEventAvailableForChara",
     "isTalkEventInteractDisabled",
 }

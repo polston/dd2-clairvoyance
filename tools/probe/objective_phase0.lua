@@ -1017,7 +1017,10 @@ section("transform", function()
   local fake_item_ok, fake_item = reviewed_try_call(im, "get_FakeShopKeepedItem")
   local fake_time_ok, fake_time = reviewed_try_call(im, "get_FakeShopCompleteTime")
   local fake_done_ok, fake_done = reviewed_try_call(im, "isFakeShopCompleted")
-  if not fake_item_ok or not fake_time_ok or not fake_done_ok then
+  local fake_kept_ok, fake_kept = reviewed_try_call(im, "isFakeShopKeeped")
+  local fake_remaining_ok, fake_remaining = reviewed_try_call(im, "isFakeShopRemainingMinute")
+  if not fake_item_ok or not fake_time_ok or not fake_done_ok
+      or not fake_kept_ok or not fake_remaining_ok then
     unknown("transform_forgery_state_unreadable")
   end
 
@@ -1036,10 +1039,10 @@ section("transform", function()
   unknown("transform_ageing_service_unknown")
   note("transform", 0)
   return string.format(
-    "mix=%d/%s fake_item=%s fake_time=%s fake_done=%s decay_interval=%s decay_elapsed=%s decay_check=%s eligible=0",
+    "mix=%d/%s fake_item=%s fake_time=%s fake_done=%s fake_kept=%s fake_remaining=%s decay_interval=%s decay_elapsed=%s decay_check=%s eligible=0",
     #mix_rows, tostring(mix_total), value_text(fake_item), value_text(fake_time),
-    bool_text(fake_done), value_text(decay_interval), value_text(decay_elapsed),
-    value_text(decay_check))
+    bool_text(fake_done), bool_text(fake_kept), value_text(fake_remaining),
+    value_text(decay_interval), value_text(decay_elapsed), value_text(decay_check))
 end)
 
 section("delivery", function()

@@ -146,6 +146,21 @@ return initial .. "|" .. tostring(playable) .. "|" .. interact .. "|" .. history
 check("talk-event read calls accept only their literal allowlist entries",
   talk_methods_ok:find("cmd ok=true getTalkEventInitialSpeaker:talk-event-id|true|canTalkEventInteract:engine-character|getHistory:talk-event-id", 1, true) ~= nil)
 
+local forgery_methods_ok = run_case('', [[
+local im = { call = function(_, name) return name end }
+local kept = reviewed_call(im, "isFakeShopKeeped")
+local remaining = reviewed_call(im, "isFakeShopRemainingMinute")
+return kept .. "|" .. remaining
+]], 150)
+check("forgery probe state reads accept only literal allowlist entries",
+  forgery_methods_ok:find("cmd ok=true isFakeShopKeeped|isFakeShopRemainingMinute", 1, true) ~= nil)
+
+local forgery_method_near_miss = run_case('', [[
+return reviewed_call({}, "isFakeShopKeepedExtra")
+]], 150)
+check("forgery probe state near-miss stays rejected",
+  forgery_method_near_miss:find("cmd ok=false unsafe probe call: unreviewed managed method", 1, true) ~= nil)
+
 local monster_getters_ok = run_case('', [[
 local character = { call = function(_, name) return name end }
 local transform = reviewed_call(character, "get_Transform")
