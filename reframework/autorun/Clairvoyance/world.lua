@@ -3892,6 +3892,9 @@ end
 -- treats it as a failed read (one-round keep, then "unknown").
 function M.game_reads()
   local R = {}
+  local shop_scan_state = nil
+  local SHOP_HOLDER_MAX, SHOP_HOLDER_SLICE = 2048, 256
+  local SHOP_CATALOG_MAX, SHOP_CATALOG_SLOTS, SHOP_OFFER_MAX = 256, 8192, 256
 
   -- Guarded reads. The bodies are named functions handed to pcall with
   -- their arguments, so no read allocates a closure.
@@ -4700,6 +4703,292 @@ function M.game_reads()
 
   function R.shop_of(cid)
     return int_value(C(single("app.TalkEventManager"), "getShopId", cid))
+  end
+
+  -- Bounded, two-pass shop observation. The first pass collects plain rows;
+  -- a second full pass must reproduce its holder fingerprint before any rows
+  -- are called complete. No managed holder or BuyParam survives this call.
+  function R.objective_shop_rows(task_snapshot, _, need_snapshot)
+    local function integer(value, minimum)
+      return type(value) == "number" and math.type(value) == "integer" and value >= minimum
+    end
+    local function sequence(value, cap)
+      local array = elems(value)
+      if array ~= nil then
+        if #array > cap then return nil end
+        return array, #array
+      end
+      local count = int_value(C(value, "get_Count"))
+      if not integer(count, 0) or count > cap then return nil end
+      local out = {}
+      for i = 0, count - 1 do
+        local row = C(value, "get_Item", i)
+        if row == nil then return nil end
+        out[#out + 1] = row
+      end
+      return out, count
+    end
+    local function complete_empty(reason)
+      return { complete = false, rows = {}, reason = reason }
+    end
+    local function fingerprint_add(hash, value)
+      for i = 1, #value do hash = ((hash ~ value:byte(i)) * 16777619) & 0xFFFFFFFF end
+      return ((hash ~ 255) * 16777619) & 0xFFFFFFFF
+    end
+    if type(task_snapshot) ~= "table" or not integer(task_snapshot.need_generation, 1)
+        or type(need_snapshot) ~= "table" or need_snapshot.status ~= "ok"
+        or need_snapshot.complete ~= true
+        or need_snapshot.generation ~= task_snapshot.need_generation
+        or not integer(need_snapshot.source_generation, 1) then
+      shop_scan_state = nil
+      return complete_empty("current_need_unavailable")
+    end
+    local wanted, need_parts = {}, {}
+    for _, group in ipairs(need_snapshot.groups or {}) do
+      if type(group) ~= "table" or not integer(group.qid, 1)
+          or not integer(group.task_index, 0) or group.status ~= "eligible"
+          or group.complete ~= true or group.generation ~= need_snapshot.source_generation
+          or not integer(group.remaining, 1) or type(group.options) ~= "table"
+          or #group.options == 0 then
+        shop_scan_state = nil
+        return complete_empty("current_need_malformed")
+      end
+      local options = {}
+      for _, option in ipairs(group.options) do
+        if type(option) ~= "table" or not integer(option.item_id, 1)
+            or not integer(option.accepted_count, 1) then
+          shop_scan_state = nil
+          return complete_empty("current_need_malformed")
+        end
+        wanted[option.item_id] = true
+        options[#options + 1] = tostring(option.item_id) .. ":" .. tostring(option.accepted_count)
+      end
+      table.sort(options)
+      need_parts[#need_parts + 1] = table.concat({ tostring(group.qid),
+        tostring(group.task_index), tostring(group.remaining), table.concat(options, ",") }, ":")
+    end
+    if next(wanted) == nil then
+      shop_scan_state = nil
+      return { complete = true, rows = {}, holder_count = 0, fingerprint = "no_focused_items" }
+    end
+    table.sort(need_parts)
+    local need_key = table.concat(need_parts, "|")
+
+    local im = single("app.ItemManager")
+    local table_value = G(im, "ShopParamTable")
+    local slots = elems(G(table_value, "_entries"))
+    local logical_count = int_value(C(table_value, "get_Count"))
+    if slots == nil or #slots > SHOP_CATALOG_SLOTS
+        or not integer(logical_count, 0) or logical_count > SHOP_CATALOG_MAX then
+      shop_scan_state = nil
+      return complete_empty("shop_catalog_unreadable")
+    end
+    local entry_count, seen_shop, offers_by_shop, offers = 0, {}, {}, {}
+    local unsupported_stock = false
+    for _, entry in ipairs(slots) do
+      local param = G(entry, "value")
+      if param == nil then param = G(entry, "Value") end
+      if param ~= nil then
+        entry_count = entry_count + 1
+        local shop_id = int_value(G(entry, "key"))
+        if not integer(shop_id, 1) or seen_shop[shop_id] then
+          shop_scan_state = nil
+          return complete_empty("shop_catalog_identity_invalid")
+        end
+        seen_shop[shop_id] = true
+        local buys, buy_count = sequence(G(param, "_BuyParams"), SHOP_OFFER_MAX)
+        if buys == nil then
+          shop_scan_state = nil
+          return complete_empty("shop_buy_rows_unreadable")
+        end
+        for ordinal, buy in ipairs(buys) do
+          local item_id = int_value(G(buy, "_ItemId"))
+          if not integer(item_id, 1) then
+            shop_scan_state = nil
+            return complete_empty("shop_buy_item_unreadable")
+          end
+          if wanted[item_id] then
+            local stock_flag = C(buy, "get_IsStock")
+            if type(stock_flag) ~= "boolean" then
+              shop_scan_state = nil
+              return complete_empty("shop_stock_kind_unreadable")
+            end
+            if stock_flag ~= true then
+              unsupported_stock = true
+            else
+              local stock = int_value(C(im, "getItemStockNum", shop_id, buy))
+              local pay = int_value(C(im, "getItemShopTotalPay", shop_id))
+              if not integer(stock, 0) or not integer(pay, 0) then
+                shop_scan_state = nil
+                return complete_empty("shop_restock_or_pay_unreadable")
+              end
+              local offer = { shop_id = shop_id, offer_ordinal = ordinal,
+                item_id = item_id, count = 1, capacity_kind = "finite", unlimited = false,
+                stock = stock, restock_readable = true, total_pay = pay, buy = buy }
+              offers[#offers + 1] = offer
+              local bucket = offers_by_shop[shop_id]
+              if bucket == nil then bucket = {}; offers_by_shop[shop_id] = bucket end
+              bucket[#bucket + 1] = offer
+            end
+          end
+        end
+        if buy_count ~= #buys then
+          shop_scan_state = nil
+          return complete_empty("shop_buy_rows_incomplete")
+        end
+      end
+    end
+    if entry_count ~= logical_count then
+      shop_scan_state = nil
+      return complete_empty("shop_catalog_incomplete")
+    end
+    table.sort(offers, function(a, b)
+      if a.shop_id ~= b.shop_id then return a.shop_id < b.shop_id end
+      return a.offer_ordinal < b.offer_ordinal
+    end)
+    if unsupported_stock then
+      shop_scan_state = nil
+      return complete_empty("non_stock_semantics_unverified")
+    end
+    local catalog_parts = {}
+    for _, offer in ipairs(offers) do
+      catalog_parts[#catalog_parts + 1] = table.concat({ tostring(offer.shop_id),
+        tostring(offer.offer_ordinal), tostring(offer.item_id), tostring(offer.stock),
+        tostring(offer.total_pay) }, ":")
+    end
+    local catalog_key = table.concat(catalog_parts, "|")
+    if #offers == 0 then
+      shop_scan_state = nil
+      return { complete = true, rows = {}, holder_count = 0,
+        fingerprint = "no_matching_shop_offers", catalog_fingerprint = catalog_key }
+    end
+
+    local holder_count = R.holder_count()
+    if not integer(holder_count, 0) or holder_count > SHOP_HOLDER_MAX then
+      shop_scan_state = nil
+      return complete_empty("shop_holder_count_invalid_or_over_limit")
+    end
+    local holder_dictionary = holder_dic()
+    local holder_address
+    pcall(function() holder_address = math.tointeger(holder_dictionary:get_address()) end)
+    if holder_dictionary == nil or holder_address == nil or holder_address <= 0 then
+      shop_scan_state = nil
+      return complete_empty("shop_holder_identity_unreadable")
+    end
+    local scan_key = table.concat({ tostring(holder_address), tostring(holder_count),
+      need_key, catalog_key }, "#")
+    if shop_scan_state == nil or shop_scan_state.key ~= scan_key then
+      shop_scan_state = { key = scan_key, count = holder_count, phase = "collect",
+        index = 0, rows = {}, parts = {}, seen = {}, first_rows = nil, first_parts = nil }
+    end
+    local scan = shop_scan_state
+    local slice_end = math.min(scan.count, scan.index + SHOP_HOLDER_SLICE)
+    local nm, tem = single("app.NPCManager"), single("app.TalkEventManager")
+    if nm == nil or tem == nil then
+      shop_scan_state = nil
+      return complete_empty("shop_live_managers_unavailable")
+    end
+    for index = scan.index, slice_end - 1 do
+      local holder = R.holder_at(index)
+      local slot_rows, part = {}, "empty"
+      if holder ~= nil then
+        local cid = int_value(holder.cid)
+        if not integer(cid, 1) or scan.seen[cid] then
+          shop_scan_state = nil
+          return complete_empty("shop_holder_identity_invalid")
+        end
+        scan.seen[cid] = true
+        local shop_id = int_value(C(tem, "getShopId", cid))
+        if shop_id == nil then
+          shop_scan_state = nil
+          return complete_empty("shop_holder_shop_unreadable")
+        end
+        part = tostring(cid) .. ":" .. tostring(shop_id)
+        local seller_offers = offers_by_shop[shop_id]
+        if shop_id > 0 and seller_offers ~= nil then
+          local chara = G(holder.holder, "_chara")
+          if chara == nil then
+            shop_scan_state = nil
+            return complete_empty("shop_holder_chara_unreadable")
+          end
+          local dead = C(chara, "get_IsDead")
+          if type(dead) ~= "boolean" then dead = C(chara, "isDead") end
+          if type(dead) ~= "boolean" then dead = C(nm, "isDead", cid) end
+          if type(dead) ~= "boolean" then dead = C(nm, "get_IsDead", cid) end
+          if type(dead) ~= "boolean" then
+            shop_scan_state = nil
+            return complete_empty("shop_seller_dead_state_unreadable")
+          end
+          part = part .. ":dead=" .. tostring(dead)
+          if not dead then
+            local pos = R.schedule_pos(cid)
+            local rank = select(1, R.sentiment(holder.holder))
+            local data = C(nm, "getNPCCharacterData", cid)
+            local board = C(chara, "get_AIBlackBoardController")
+            if not valid_pos(pos) or near_zero(pos) or not integer(rank, 0)
+                or data == nil or board == nil then
+              shop_scan_state = nil
+              return complete_empty("shop_seller_identity_or_position_unreadable")
+            end
+            local talk_available = C(tem, "isShopTalkEventAvailableForChara", data, board)
+            local interact_disabled = C(tem, "isTalkEventInteractDisabled", cid)
+            if type(talk_available) ~= "boolean" or type(interact_disabled) ~= "boolean" then
+              shop_scan_state = nil
+              return complete_empty("shop_seller_interaction_gate_unreadable")
+            end
+            part = table.concat({ part, tostring(pos.x), tostring(pos.y), tostring(pos.z),
+              tostring(rank), tostring(talk_available), tostring(interact_disabled) }, ":")
+            for _, offer in ipairs(seller_offers) do
+              local released = C(offer.buy, "IsRelease", offer.total_pay, rank)
+              if type(released) ~= "boolean" then
+                shop_scan_state = nil
+                return complete_empty("shop_offer_release_unreadable")
+              end
+              part = part .. ":o" .. tostring(offer.offer_ordinal) .. "=" .. tostring(released)
+              slot_rows[#slot_rows + 1] = { shop_id = offer.shop_id,
+                offer_ordinal = offer.offer_ordinal, seller_cid = cid, item_id = offer.item_id,
+                count = 1, capacity_kind = "finite", unlimited = false, stock = offer.stock,
+                restock_readable = true, released = released,
+                talk_available = talk_available, interactable = not interact_disabled,
+                alive = true, pos = { x = pos.x, y = pos.y, z = pos.z } }
+            end
+          end
+        end
+      end
+      scan.parts[index + 1] = part
+      for _, row in ipairs(slot_rows) do scan.rows[#scan.rows + 1] = row end
+      scan.index = index + 1
+    end
+    local after_count = R.holder_count()
+    local after_dictionary = holder_dic()
+    local after_address
+    pcall(function() after_address = math.tointeger(after_dictionary:get_address()) end)
+    if after_count ~= holder_count or after_address ~= holder_address then
+      shop_scan_state = nil
+      return complete_empty("shop_holder_fingerprint_changed")
+    end
+    if scan.index < scan.count then
+      return { complete = false, rows = {}, holder_count = holder_count,
+        reason = "shop_holder_scan_in_progress" }
+    end
+    local fingerprint_parts = table.concat(scan.parts, "|")
+    if scan.phase == "collect" then
+      scan.first_rows, scan.first_parts = scan.rows, fingerprint_parts
+      scan.phase, scan.index, scan.rows, scan.parts, scan.seen = "verify", 0, {}, {}, {}
+      return { complete = false, rows = {}, holder_count = holder_count,
+        reason = "shop_holder_scan_verifying" }
+    end
+    if fingerprint_parts == scan.first_parts then
+      local result = { complete = true, rows = scan.first_rows, holder_count = holder_count,
+        fingerprint = string.format("%08x", fingerprint_add(2166136261, fingerprint_parts)),
+        catalog_fingerprint = catalog_key }
+      shop_scan_state = nil
+      return result
+    end
+    scan.first_rows, scan.first_parts = scan.rows, fingerprint_parts
+    scan.index, scan.rows, scan.parts, scan.seen = 0, {}, {}, {}
+    return { complete = false, rows = {}, holder_count = holder_count,
+      reason = "shop_holder_snapshot_changed" }
   end
 
   function R.shops()

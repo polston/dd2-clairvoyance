@@ -1858,6 +1858,157 @@ do
     local rk, vl = R.sentiment(h0.holder)
     check("reads: sentiment rank and value", rk == 100 and vl == 137)
     check("reads: unreadable sentiment raises", not pcall(R.sentiment, obj({})))
+
+    local function install_shop_fake(holders, stock, remaining, opts)
+      opts = opts or {}
+      local shop_id, cid, item_id = 7, 30, opts.item_id or 501
+      local buy = obj({ _ItemId = item_id }, {
+        get_IsStock = function() return stock end,
+        IsRelease = function(pay, rank) return pay == 5 and rank == 4 and opts.released ~= false end,
+      })
+      local param = obj({ _BuyParams = list({ buy }) })
+      local dict_row = obj({ key = shop_id, value = param })
+      local shop_table = obj({ _entries = array({ dict_row }), _count = 1 }, {
+        get_Count = function() return 1 end,
+      })
+      local schedule = {}
+      if opts.position ~= false then schedule[cid] = obj({ Pos = P(50, 0, 60) }) end
+      local schedule_dict = obj(nil, {
+        ContainsKey = function(key) return schedule[key] ~= nil end,
+        get_Item = function(key) return schedule[key] end,
+      })
+      local holder_reads = 0
+      local npc_manager = obj({ NPCHolderDic = obj(nil, {
+        get_Length = function() return #holders end,
+        get_element = function(index) holder_reads = holder_reads + 1; return holders[index + 1] end,
+      }), ["<NPCScheduleCurrentDict>k__BackingField"] = schedule_dict }, {
+        getNPCCharacterData = function() return {} end,
+        isDead = function() return opts.dead == true end,
+      })
+      local talk_manager = obj(nil, {
+        getShopId = function(value) return opts.shop_by_cid and opts.shop_by_cid[value] or shop_id end,
+        isShopTalkEventAvailableForChara = function() return opts.available ~= false end,
+        isTalkEventInteractDisabled = function() return opts.disabled == true end,
+      })
+      local item_manager = obj({ ShopParamTable = shop_table }, {
+        getItemShopTotalPay = function() return 5 end,
+        getItemStockNum = function() return remaining end,
+      })
+      singletons["app.NPCManager"] = npc_manager
+      singletons["app.TalkEventManager"] = talk_manager
+      singletons["app.ItemManager"] = item_manager
+      return buy, function() return holder_reads end
+    end
+    local function seller_holder(cid, dead)
+      local chara = obj(nil, {
+        get_Transform = function() return "tf" end,
+        get_AIBlackBoardController = function() return {} end,
+        get_IsDead = function() return dead == true end,
+      })
+      return obj({ _chara = chara, CharaID = cid,
+        SentimentToPlayer = obj({ Rank = 4, Value = 100 }) })
+    end
+    local focused_need = { status = "ok", complete = true, generation = 1,
+      source_generation = 1, groups = { { qid = 1001, task_index = 0, remaining = 1,
+        options = { { item_id = 501, accepted_count = 1 } }, complete = true,
+        generation = 1, status = "eligible" } } }
+    local focused_task = { need_generation = 1,
+      quests = { { qid = 1001, task_index = 0, read_status = "ok" } } }
+    local function read_shop_snapshot(reader, task, need)
+      local snapshot
+      for _ = 1, 20 do
+        snapshot = reader.objective_shop_rows(task, nil, need)
+        if snapshot.complete then return snapshot end
+      end
+      return snapshot
+    end
+    install_shop_fake({ seller_holder(30) }, true, 1)
+    local shop_reader = world.game_reads()
+    local finite_shop = read_shop_snapshot(shop_reader, focused_task, focused_need)
+    check("reads: objective shop joins 1-based offer, finite stock and live seller gates",
+      finite_shop.complete and type(finite_shop.fingerprint) == "string"
+        and #finite_shop.rows == 1 and finite_shop.rows[1].shop_id == 7
+        and finite_shop.rows[1].offer_ordinal == 1 and finite_shop.rows[1].item_id == 501
+        and finite_shop.rows[1].count == 1 and finite_shop.rows[1].stock == 1
+        and finite_shop.rows[1].restock_readable == true
+        and finite_shop.rows[1].released == true and finite_shop.rows[1].talk_available == true
+        and finite_shop.rows[1].interactable == true and finite_shop.rows[1].alive == true
+        and finite_shop.rows[1].pos.x == 50)
+    install_shop_fake({ seller_holder(30) }, false, -1)
+    local unsupported_shop = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
+    check("reads: non-stock shop offers stay unknown",
+      unsupported_shop.complete == false and #unsupported_shop.rows == 0)
+    install_shop_fake({ seller_holder(30) }, true, 1, { disabled = true })
+    local disabled_shop = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
+    check("reads: disabled shop seller is recorded as non-interactable",
+      disabled_shop.complete and #disabled_shop.rows == 1
+        and disabled_shop.rows[1].interactable == false)
+    install_shop_fake({ seller_holder(30) }, true, 1, { released = false })
+    local unreleased_shop = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
+    check("reads: unreleased shop offer is gated off",
+      unreleased_shop.complete and #unreleased_shop.rows == 1
+        and unreleased_shop.rows[1].released == false)
+    install_shop_fake({ seller_holder(30) }, true, 1, { available = false })
+    local unavailable_shop = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
+    check("reads: unavailable shop talk is gated off",
+      unavailable_shop.complete and #unavailable_shop.rows == 1
+        and unavailable_shop.rows[1].talk_available == false)
+    install_shop_fake({ seller_holder(30) }, true, -1)
+    local unreadable_restock = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
+    check("reads: negative finite stock is unknown",
+      unreadable_restock.complete == false and #unreadable_restock.rows == 0)
+    install_shop_fake({ seller_holder(30) }, true, 1, { position = false })
+    local unreadable_position = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
+    check("reads: missing seller position is unknown",
+      unreadable_position.complete == false and #unreadable_position.rows == 0)
+    local other_need = { status = "ok", complete = true, generation = 1,
+      source_generation = 1, groups = { { qid = 1001, task_index = 0, remaining = 1,
+        options = { { item_id = 999, accepted_count = 1 } }, complete = true,
+        generation = 1, status = "eligible" } } }
+    local unfocused_shop = read_shop_snapshot(world.game_reads(), focused_task, other_need)
+    check("reads: objective shop ignores offers outside focused item options",
+      unfocused_shop.complete and #unfocused_shop.rows == 0)
+    install_shop_fake({ seller_holder(30, true) }, true, 1)
+    local dead_shop = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
+    check("reads: dead shop seller is excluded",
+      dead_shop.complete and #dead_shop.rows == 0)
+    local many_holders = {}
+    local shop_by_cid = {}
+    for i = 1, 257 do many_holders[i] = seller_holder(1000 + i); shop_by_cid[1000 + i] = 0 end
+    local _, holder_reads = install_shop_fake(many_holders, true, 1,
+      { shop_by_cid = shop_by_cid })
+    local bounded_reader = world.game_reads()
+    local reads_before = holder_reads()
+    local bounded_first = bounded_reader.objective_shop_rows(focused_task, nil, focused_need)
+    local reads_first = holder_reads() - reads_before
+    reads_before = holder_reads()
+    local bounded_second = bounded_reader.objective_shop_rows(focused_task, nil, focused_need)
+    local reads_second = holder_reads() - reads_before
+    reads_before = holder_reads()
+    local bounded_third = bounded_reader.objective_shop_rows(focused_task, nil, focused_need)
+    local reads_third = holder_reads() - reads_before
+    reads_before = holder_reads()
+    local bounded_final = bounded_reader.objective_shop_rows(focused_task, nil, focused_need)
+    local reads_final = holder_reads() - reads_before
+    check("reads: objective shop scans holders in bounded slices before publishing completeness",
+      bounded_first.complete == false and bounded_second.complete == false
+        and bounded_third.complete == false
+        and bounded_final.complete == true and #bounded_final.rows == 0
+        and bounded_final.holder_count == 257 and bounded_final.fingerprint ~= nil
+        and reads_first == 256 and reads_second == 1
+        and reads_third == 256 and reads_final == 1)
+    local mutable_holders = { seller_holder(201) }
+    local mutable_map = { [201] = 0, [202] = 0 }
+    install_shop_fake(mutable_holders, true, 1, { shop_by_cid = mutable_map })
+    local changing_reader = world.game_reads()
+    local changing_first = changing_reader.objective_shop_rows(focused_task, nil, focused_need)
+    mutable_holders[1] = seller_holder(202)
+    local changing_second = changing_reader.objective_shop_rows(focused_task, nil, focused_need)
+    local changing_final = changing_reader.objective_shop_rows(focused_task, nil, focused_need)
+    check("reads: shop fingerprint rejects a holder change between passes",
+      changing_first.complete == false and changing_second.complete == false
+        and changing_second.reason == "shop_holder_snapshot_changed"
+        and changing_final.complete == true and changing_final.fingerprint ~= nil)
   end
 
   -- quest override rows (SPEC 26)
