@@ -9,6 +9,7 @@ import argparse
 import collections
 import glob
 import json
+import math
 import os
 import re
 import sys
@@ -234,6 +235,36 @@ def _round1(pos):
     return [round(float(v), 1) for v in pos]
 
 
+def _placement_item_row(insts, row, src, params):
+    """Return a stable non-chest placed-item row, or None when it has no item join."""
+    cont = qnml_rsz.deref(insts, row.fields.get("_Container"))
+    gs = qnml_rsz.deref(insts, cont.fields.get("_GimmickSetting")) if cont else None
+    pid = gs.fields.get("_ParamId") if gs else None
+    param = params.get(pid)
+    if param is None or not param["items"]:
+        return None
+    if len(param["items"]) != 1:
+        raise ExtractError("a placed-item row has ambiguous item outputs")
+    item_id, count = param["items"][0]
+    uid = row.fields.get("_ManualSetGuid")
+    if not isinstance(uid, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", uid):
+        raise ExtractError("a placed-item row has an invalid uid")
+    if type(item_id) is not int or item_id <= 0 or type(count) is not int or count <= 0:
+        raise ExtractError("a placed-item row has an invalid item output")
+    position = row.fields.get("_ManualPos")
+    if not isinstance(position, (tuple, list)) or len(position) != 3 or any(
+            type(value) not in (int, float) or not math.isfinite(value) for value in position):
+        raise ExtractError("a placed-item row has an invalid position")
+    x, y, z = _round1(position)
+    result = {"k": "item", "uid": uid.lower(), "id": item_id, "n": count,
+              "x": x, "y": y, "z": z, "src": src}
+    gate = gate_of(insts, cont)
+    if gate:
+        result["gate"] = gate
+    return result
+
+
 def collect_rows(decoded, params, conflicts, chara_names):
     """Rows of the tracked kinds from decoded table files {rel: instances}.
 
@@ -260,10 +291,11 @@ def collect_rows(decoded, params, conflicts, chara_names):
             f = r.fields
             if kind == "enemy":
                 k, rid = "chara", f["_CharaID"] & 0xFFFFFFFF
-            elif kind == "gimmick" and f["_GimmickID"] in KIND_OF_GIMMICK:
+            elif kind == "gimmick":
                 rid = f["_GimmickID"]
-                k = KIND_OF_GIMMICK[rid]
-                gimmick_ids[rid] += 1
+                k = KIND_OF_GIMMICK.get(rid, "gimmick")
+                if k != "gimmick":
+                    gimmick_ids[rid] += 1
             else:
                 continue
             src = src_of.get(rel)
@@ -291,6 +323,15 @@ def collect_rows(decoded, params, conflicts, chara_names):
                 gate = gate_of(insts, cont)
                 if gate:
                     row["gate"] = gate
+            elif k == "gimmick":
+                placement = _placement_item_row(insts, r, src, params)
+                if placement is not None:
+                    key = ("item", placement["uid"])
+                    if key in seen:
+                        raise ExtractError("an item placement guid appears in two rows")
+                    seen[key] = True
+                    rows.append(placement)
+                    continue
             if k == "chara":
                 if src in ("subquest", "mainquest"):
                     row["table_qid"] = table_qid_of(rel)
@@ -357,8 +398,8 @@ def extract(game, key_hex, layouts):
         gid = FIRST_GIMMICK[k]
         if gimmick_ids[gid] == 0:
             raise ExtractError("no %s rows (gimmick %d) found" % (k, gid))
-    order = {"chest": 0, "token": 1, "beetle": 2, "chara": 3}
-    rows.sort(key=lambda r: (order[r["k"]], r["uid"]))
+    order = {"chest": 0, "item": 1, "token": 2, "beetle": 3, "chara": 4}
+    rows.sort(key=lambda r: (order[r["k"]], r["uid"], r.get("id", 0)))
     out = {"version": 2, "pak": "%d:%d" % (pak.total, pak.fingerprint), "rows": rows}
 
     chara = [r for r in rows if r["k"] == "chara"]
