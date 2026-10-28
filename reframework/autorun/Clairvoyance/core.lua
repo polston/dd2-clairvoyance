@@ -4585,6 +4585,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
   local provider_generations = {}
   local invalid_sources, invalid_pools, capacity_pools = {}, {}, {}
   local grouped_contracts, source_claims = {}, {}
+  local capacity_claims, capacity_contracts = {}, {}
   local function outputs_signature(outputs)
     local parts = {}
     for _, output in ipairs(outputs) do
@@ -4593,18 +4594,30 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
     table.sort(parts)
     return table.concat(parts, ",")
   end
-  local function grouped_contract(provider, candidate)
-    if type(candidate) ~= "table" or (candidate.eligibility ~= "eligible"
-        and candidate.eligibility ~= "ineligible" and candidate.eligibility ~= "unknown") then
-      return nil
-    end
+  local function grouped_identity_claim(candidate)
+    if type(candidate) ~= "table" then return {} end
     local source_tuple = objective_tuple_copy(candidate.source_id)
     local capacity_tuple = objective_tuple_copy(candidate.capacity_pool_id)
     local source_key = source_tuple and M.target_key(source_tuple) or nil
     local capacity_key = capacity_tuple and M.target_key(capacity_tuple) or nil
+    if not (source_key ~= nil and source_tuple[1] == "source") then
+      source_tuple, source_key = nil, nil
+    end
+    if not (capacity_key ~= nil and capacity_tuple[1] == "capacity") then
+      capacity_tuple, capacity_key = nil, nil
+    end
+    return { source_tuple = source_tuple, capacity_tuple = capacity_tuple,
+      source_key = source_key, capacity_key = capacity_key }
+  end
+  local function grouped_contract(provider, candidate, claim)
+    if type(candidate) ~= "table" or (candidate.eligibility ~= "eligible"
+        and candidate.eligibility ~= "ineligible" and candidate.eligibility ~= "unknown") then
+      return nil
+    end
+    local source_tuple, capacity_tuple = claim.source_tuple, claim.capacity_tuple
+    local source_key, capacity_key = claim.source_key, claim.capacity_key
     local outputs, output_ids = {}, {}
-    local valid = source_key ~= nil and source_tuple[1] == "source"
-      and capacity_key ~= nil and capacity_tuple[1] == "capacity"
+    local valid = source_key ~= nil and capacity_key ~= nil
       and candidate.provider == provider.provider and type(candidate.target) == "table"
       and candidate.generation == provider.generation
       and objective_array(candidate.outputs) ~= nil and #candidate.outputs > 0
@@ -4651,10 +4664,18 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
           and provider.status == "ok" and provider.complete == true
           and objective_array(provider.candidates) ~= nil then
         for _, candidate in ipairs(provider.candidates) do
-          local contract = grouped_contract(provider, candidate)
+          local claim = grouped_identity_claim(candidate)
+          if claim.source_key then
+            source_claims[claim.source_key] = (source_claims[claim.source_key] or 0) + 1
+          end
+          if claim.capacity_key then
+            capacity_claims[claim.capacity_key] = (capacity_claims[claim.capacity_key] or 0) + 1
+          end
+          local contract = grouped_contract(provider, candidate, claim)
           if contract then
             grouped_contracts[candidate] = contract
-            source_claims[contract.source_key] = (source_claims[contract.source_key] or 0) + 1
+            capacity_contracts[contract.capacity_key]
+              = (capacity_contracts[contract.capacity_key] or 0) + 1
             local previous = capacity_pools[contract.capacity_key]
             if previous ~= nil and previous ~= contract.pool_signature then
               invalid_pools[contract.capacity_key] = true
@@ -4669,6 +4690,11 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
     end
     for source_key, count in pairs(source_claims) do
       if count > 1 then invalid_sources[source_key] = true end
+    end
+    for capacity_key, count in pairs(capacity_claims) do
+      if count > 1 and count ~= (capacity_contracts[capacity_key] or 0) then
+        invalid_pools[capacity_key] = true
+      end
     end
     for source_key in pairs(invalid_sources) do
       diagnostic("source", "source_identity_duplicate", source_key)

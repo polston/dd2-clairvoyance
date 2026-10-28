@@ -6545,6 +6545,36 @@ do
     check("objective grouped claims: eligibility and need filtering cannot hide identity or pool conflicts",
       contradiction_snapshot and #contradiction_snapshot.targets == 0)
 
+    local exhausted_contradiction = core.objective_snapshot(
+      grouped_task(grouped_needs, 10, 32), nil, {
+        { provider = "pickup", generation = 49, status = "ok", complete = true, candidates = {
+          { source_id = { "source", "pickup", "collected-duplicate" }, provider = "pickup",
+            capacity_pool_id = { "capacity", "pickup", "collected-duplicate" },
+            outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite",
+            available_acquisitions = 1, certainty = "guaranteed", target = { pos = pos(1) },
+            eligibility = "eligible", generation = 49 },
+          { source_id = { "source", "pickup", "collected-duplicate" }, provider = "pickup",
+            capacity_pool_id = { "capacity", "pickup", "collected-duplicate" },
+            outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite",
+            available_acquisitions = 0, certainty = "guaranteed", target = { pos = pos(1) },
+            eligibility = "ineligible", reason = "collected", generation = 49 },
+        } },
+      }, core.target_registry_new())
+    local exhausted_contradiction_routes = core.objective_routes(
+      exhausted_contradiction, pos(0), { npc_route_mode = 0, objective_places = true,
+        focus_order = { 60 }, route_cap = 8 })
+    local exhausted_source_conflict, exhausted_pool_conflict = false, false
+    for _, row in ipairs(exhausted_contradiction.diagnostics) do
+      exhausted_source_conflict = exhausted_source_conflict
+        or row.reason == "source_identity_duplicate"
+      exhausted_pool_conflict = exhausted_pool_conflict
+        or row.reason == "capacity_pool_conflict"
+    end
+    check("objective grouped claims: collected zero-stock duplicate fails closed before filtering",
+      exhausted_contradiction and #exhausted_contradiction.targets == 0
+        and #exhausted_contradiction_routes.members == 0
+        and exhausted_source_conflict and exhausted_pool_conflict)
+
     local ordered_actual_task = grouped_task({}, 16, 31)
     ordered_actual_task.quests[1].issued_npcs = {
       { kind = "npc", target = { cid = 600, pos = pos(6) }, eligibility = "eligible" },
