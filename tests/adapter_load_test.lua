@@ -203,6 +203,10 @@ local empty_source_snapshots = a.objective_item_source_snapshots()
 assert(#empty_source_snapshots == 3 and empty_source_snapshots[1].provider == "placed"
   and empty_source_snapshots[2].provider == "chest" and empty_source_snapshots[3].provider == "loot"
   and empty_source_snapshots[1].status == "unknown"
+  and empty_source_snapshots[1].complete == false
+  and empty_source_snapshots[1].reason == "pickup_persisted_uid_state_join_unavailable"
+  and empty_source_snapshots[2].complete == false
+  and empty_source_snapshots[2].reason == "chest_generation_access_gate_unproven"
   and empty_source_snapshots[1].generation > 0
   and empty_source_snapshots[2].generation > 0 and empty_source_snapshots[3].generation > 0,
   "source envelopes initialize with separate positive generations")
@@ -3601,6 +3605,10 @@ do
   assert(#source_snapshots == 3 and source_snapshots[1].provider == "placed"
     and source_snapshots[2].provider == "chest" and source_snapshots[3].provider == "loot"
     and source_snapshots[1].status == "unknown"
+    and source_snapshots[1].complete == false
+    and source_snapshots[1].reason == "pickup_persisted_uid_state_join_unavailable"
+    and source_snapshots[2].complete == false
+    and source_snapshots[2].reason == "chest_generation_access_gate_unproven"
     and source_snapshots[1].generation == owned_snapshot.need_generation
     and source_snapshots[1].catalog_version == 2
     and #source_snapshots[1].source_descriptors == 2

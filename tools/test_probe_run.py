@@ -118,7 +118,10 @@ return D, qlm, td, world
         talk_methods = {
             "getTalkEventInitialSpeaker", "isEventPlayable",
             "canTalkEventInteract", "getHistory"}
-        self.assertEqual(needed | talk_methods, probe_run.REVIEWED_METHODS)
+        monster_methods = {
+            "get_Transform", "get_UniversalPosition", "get_IsDead"}
+        self.assertEqual(needed | talk_methods | monster_methods,
+                         probe_run.REVIEWED_METHODS)
         self.assertEqual(allowed, probe_run.REVIEWED_METHODS)
         self.assertEqual(needed - allowed, set())
 
@@ -168,6 +171,21 @@ return D, qlm, td, world
             probe_run.unsafe_probe_call(
                 'return reviewed_call(tem, method, value)'),
             "unreviewed managed method")
+
+    def test_monster_probe_getters_are_reviewed_literals(self):
+        methods = ("get_Transform", "get_UniversalPosition", "get_IsDead")
+        for method in methods:
+            source = 'return reviewed_call(character, "%s")' % method
+            with self.subTest(method=method):
+                self.assertIsNone(probe_run.unsafe_probe_call(source))
+        near_misses = ("get_TransformExtra", "get_UniversalPositionExtra",
+                       "get_IsDeadExtra", "isDead")
+        for method in near_misses:
+            source = 'return reviewed_call(character, "%s")' % method
+            with self.subTest(near_miss=method):
+                self.assertEqual(
+                    probe_run.unsafe_probe_call(source),
+                    "unreviewed managed method")
 
     def test_comments_preserve_token_boundaries(self):
         source = 'return--[[ gap ]]sdk.create_resource("x")'
