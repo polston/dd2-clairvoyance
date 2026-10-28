@@ -767,12 +767,25 @@ do
     return rows[1], rows[2]
   end
   local placed, chest = classify(base_catalog(), base_observation())
+  assert(placed.status == "unknown" and placed.complete == false
+    and placed.reason == "placed_current_state_unproven" and #placed.candidates == 0,
+    "placed provider fails closed when persisted and loaded state are both absent")
+  assert(chest.status == "unknown" and chest.complete == false
+    and chest.reason == "chest_current_state_unproven" and #chest.candidates == 0,
+    "chest provider fails closed when persisted and loaded state are both absent")
+
+  local available = base_observation()
+  available.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 0 }
+  available.persisted["22222222-2222-2222-2222-222222222222:0"] =
+    { family = "chest", pick = false, keep = false, unlock = false, seal = false }
+  placed, chest = classify(base_catalog(), available)
   assert(placed.status == "ok" and placed.complete == true and #placed.candidates == 1
     and placed.candidates[1].generation == 7 and placed.candidates[1].provider == "placed"
     and placed.candidates[1].target.uid == "11111111-1111-1111-1111-111111111111"
     and placed.candidates[1].outputs[1].item_id == 501
     and placed.candidates[1].outputs[1].count == 2,
-    "placed provider accepts complete absent persisted context as uncollected")
+    "placed provider accepts exact persisted evidence of an uncollected source")
   assert(chest.status == "ok" and chest.complete == true and #chest.candidates == 1
     and #chest.candidates[1].outputs == 2
     and chest.candidates[1].outputs[2].item_id == 602
@@ -887,6 +900,8 @@ do
   local subquest_catalog = base_catalog()
   subquest_catalog.placements[1].layer = 2
   local requested = base_observation()
+  requested.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 0 }
   requested.requested_tables["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"] = {
     active = true, failed = false, finished = true,
     uids = { ["11111111-1111-1111-1111-111111111111:0"] = true } }
@@ -936,7 +951,13 @@ do
     clock = function() return 0 end,
   })
   local integrated_catalog = integrated_world:objective_static_source_catalog()
-  local integrated_placed, integrated_chest = classify(integrated_catalog, base_observation(), 12)
+  local integrated_observation = base_observation()
+  integrated_observation.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 0 }
+  integrated_observation.persisted["22222222-2222-2222-2222-222222222222:0"] =
+    { family = "chest", pick = false, keep = false, unlock = false, seal = false }
+  local integrated_placed, integrated_chest = classify(integrated_catalog,
+    integrated_observation, 12)
   assert(integrated_catalog.status == "ok" and integrated_placed.status == "ok"
     and integrated_chest.status == "ok" and #integrated_placed.candidates == 1
     and #integrated_chest.candidates == 1
@@ -945,6 +966,10 @@ do
     "generated world metadata reaches the real pickup/chest classifier")
 
   local wired_catalog, wired_observation = base_catalog(), base_observation()
+  wired_observation.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 0 }
+  wired_observation.persisted["22222222-2222-2222-2222-222222222222:0"] =
+    { family = "chest", pick = false, keep = false, unlock = false, seal = false }
   local wired = a.objective_item_source_snapshots(nil, { need_generation = 11 },
     wired_catalog, wired_observation)
   local wired_repeat = a.objective_item_source_snapshots(nil, { need_generation = 11 },
@@ -1061,8 +1086,10 @@ do
     and scanned.persisted[scanner_catalog.placements[1].uid .. ":0"] == nil,
     "native reader treats sparse nil slots and complete pickup absence exactly")
   placed, chest = classify(scanner_catalog, scanned)
-  assert(#placed.candidates == 1 and #chest.candidates == 1,
-    "complete scanner absence is uncollected while exact live/persisted chest joins publish: "
+  assert(placed.status == "unknown" and #placed.candidates == 0
+    and placed.reason == "placed_current_state_unproven"
+    and chest.status == "ok" and #chest.candidates == 1,
+    "complete scanner absence is unknown while exact live/persisted chest joins publish: "
       .. tostring(placed.status) .. "/" .. tostring(#placed.candidates) .. "/"
       .. tostring(placed.reason) .. " chest " .. tostring(chest.status) .. "/"
       .. tostring(#chest.candidates) .. "/" .. tostring(chest.reason))

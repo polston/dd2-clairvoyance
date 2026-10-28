@@ -4299,6 +4299,9 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
           end
         end
       end
+      if eligible and persisted == nil and loaded == nil then
+        return envelope(provider, "unknown", provider .. "_current_state_unproven")
+      end
       if eligible then
         candidates[#candidates + 1] = {
           source_id = { "source", provider, uid, index },

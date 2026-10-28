@@ -6678,12 +6678,14 @@ do
 
   local observation_fixture = fixture()
   local observed = {
-    { provider = "placed", generation = 0, status = "ok", candidates = {
+    { provider = "placed", generation = 0, status = "ok", complete = true, candidates = {
       { id = "p1", generation = 4, target = { cid = 2058 }, pos = P(1, 0, 1),
         eligibility = "eligible" },
     } },
-    { provider = "chest", generation = 4, status = "unknown", reason = "scan_pending", candidates = {} },
-    { provider = "loot", generation = 4, status = "unknown", reason = "scan_pending", candidates = {} },
+    { provider = "chest", generation = 4, status = "unknown", complete = false,
+      reason = "scan_pending", candidates = {} },
+    { provider = "loot", generation = 4, status = "unknown", complete = false,
+      reason = "scan_pending", candidates = {} },
   }
   observation_fixture.adapter.objective_item_source_snapshots = function() return observed end
   local observation_world = observation_fixture.new()
@@ -6696,8 +6698,10 @@ do
   local normalized = observation_world:objective_source_snapshots(nil, source_task)
   check("objective sources: provider observation generations advance independently on recovery",
     normalized[1].generation > placed_generation and normalized[1].status == "ok"
+      and normalized[1].complete == true
       and normalized[1].candidates[1].generation == normalized[1].generation
-      and normalized[2].generation == chest_generation)
+      and normalized[2].generation == chest_generation
+      and normalized[4].complete == false)
   observed[1].candidates[1].id = "p2"
   local content_changed = observation_world:objective_source_snapshots(nil, source_task)
   check("objective sources: candidate content changes advance only that provider generation",
@@ -7111,13 +7115,10 @@ do
   mf.reads.objective_monster_rows = function() return monster_rows end
   local mw = mf.new()
   local monsters = mw:objective_monster_observations(source_task, need_proof)
-  check("monster objectives: live instances publish probabilistic drops with stable identities",
-    monsters.status == "ok" and #monsters.candidates == 2
-      and monsters.candidates[1].certainty == "probabilistic"
-      and monsters.candidates[1].capacity_kind == "finite"
-      and monsters.candidates[1].available_acquisitions == 1
-      and monsters.candidates[1].probability == 0.25
-      and monsters.candidates[1].source_id[3] ~= monsters.candidates[2].source_id[3])
+  check("monster objectives: possible future catalog drops remain unknown and unrouted",
+    monsters.status == "unknown" and monsters.complete == false
+      and monsters.reason == "monster_catalog_drop_not_current"
+      and #monsters.candidates == 0)
   monster_rows.rows[1].accessible = nil
   mw:refresh(0, true, { chests = true })
   local access_unknown = mw:objective_monster_observations(source_task, need_proof)
@@ -7130,7 +7131,7 @@ do
   check("monster objectives: raw game rate is not normalized probability evidence",
     scale_unknown.status == "unknown" and #scale_unknown.candidates == 0
       and scale_unknown.reason == "monster_probability_unproven")
-  monster_rows.rows[1].chance, monster_rows.rows[1].raw_rate = 0.25, nil
+  monster_rows.rows[1].chance, monster_rows.rows[1].raw_rate = 0, nil
   monster_rows.rows[2].drop_table_readable = false
   mw:poke()
   local partial_monsters = mw:objective_monster_observations(source_task, need_proof)
@@ -7145,7 +7146,8 @@ do
     integrated.adapter_catalog = source_catalog
     local base = {}
     for _, provider in ipairs({ "placed", "chest", "loot", "talk_grant", "reward", "forgery" }) do
-      base[#base + 1] = { provider = provider, generation = 1, status = "ok", candidates = {} }
+      base[#base + 1] = { provider = provider, generation = 1, status = "ok",
+        complete = true, candidates = {} }
     end
     return base
   end
@@ -7176,8 +7178,10 @@ do
   check("objective source snapshot: world-owned shop and monster rows use shared provider contract",
     joined_by_name.shop.status == "ok"
       and joined_by_name.shop.candidates[1].source_id[2] == "shop_offer"
-      and joined_by_name.monster.status == "ok"
-      and joined_by_name.monster.candidates[1].certainty == "probabilistic")
+      and joined_by_name.placed.complete == true
+      and joined_by_name.monster.status == "unknown"
+      and joined_by_name.monster.reason == "monster_catalog_drop_not_current"
+      and #joined_by_name.monster.candidates == 0)
   check("objective source snapshot: adapter receives the parsed immutable world source catalog",
     integrated.adapter_catalog ~= nil
       and integrated.adapter_catalog == integrated_world:objective_static_source_catalog())

@@ -2745,7 +2745,7 @@ function M.new(a, reads, io)
       end
       return out
     end
-    local function observe(name, status, reason, evidence)
+    local function observe(name, status, complete, reason, evidence)
       local state = S.objective_source_observations[name]
       local generation = state and state.generation or 1
       if state ~= nil and not objective_same(state.value, evidence) then
@@ -2754,7 +2754,7 @@ function M.new(a, reads, io)
       S.objective_source_observations[name] = { generation = generation,
         value = objective_clone(evidence) }
       return { provider = name, generation = generation, status = status,
-        reason = reason, candidates = {} }
+        complete = complete, reason = reason, candidates = {} }
     end
     local generation = type(task_snapshot) == "table" and task_snapshot.need_generation or nil
     local current_tasks = objective_task_rows(task_snapshot)
@@ -2816,23 +2816,26 @@ function M.new(a, reads, io)
       local evidence = { task_valid = valid_task and true or false,
         status = status, reason = reason,
         adapter_status = row and row.status or nil,
+        adapter_complete = row and row.complete or nil,
         adapter_reason = row and row.reason or nil,
         adapter_candidates = row and candidate_evidence(row.candidates) or nil }
       if row ~= nil then
         for k, v in pairs(row) do
-          if k ~= "generation" and k ~= "status" and k ~= "reason" and k ~= "candidates" then
+          if k ~= "generation" and k ~= "status" and k ~= "complete"
+              and k ~= "reason" and k ~= "candidates" then
             evidence[k] = objective_clone(v)
           end
         end
       end
-      local out = observe(name, status, reason, evidence)
+      local out = observe(name, status, row ~= nil and row.complete or false, reason, evidence)
       out.candidates = candidates
       for _, candidate in ipairs(out.candidates) do
         if type(candidate) == "table" then candidate.generation = out.generation end
       end
       if row ~= nil then
         for k, v in pairs(row) do
-          if k ~= "generation" and k ~= "status" and k ~= "reason" and k ~= "candidates" then
+          if k ~= "generation" and k ~= "status" and k ~= "complete"
+              and k ~= "reason" and k ~= "candidates" then
             out[k] = objective_clone(v)
           end
         end
@@ -3021,15 +3024,7 @@ function M.new(a, reads, io)
         return nil, "monster_drop_evidence_invalid"
       end
       if row.chance == 0 then return false end
-      local source_id = { "source", "monster_drop", row.uid, drop_id }
-      return { source_id = source_id, provider = "monster",
-        target = { kind = "monster", uid = row.uid, pos = { x = row.pos.x,
-          y = row.pos.y, z = row.pos.z } },
-        outputs = { { item_id = item_id, count = count } },
-        capacity_pool_id = { "capacity", "monster_drop", row.uid, drop_id },
-        capacity_kind = "finite", available_acquisitions = 1, certainty = "probabilistic",
-        probability = row.chance, eligibility = "eligible",
-        evidence = { alive = true, accessible = true, drop_table_readable = true } }
+      return nil, "monster_catalog_drop_not_current"
     end, task_snapshot, need_snapshot)
   end
 
