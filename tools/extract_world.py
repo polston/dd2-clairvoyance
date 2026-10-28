@@ -26,6 +26,8 @@ KEY_MSG = "tools/pak_key.local.txt missing"
 PAK_NAME = "re_chunk_000.pak"
 PREFIX = "natives/STM/"
 GMDATA = "AppSystem/Gimmick/UserData/Gm80_001_GmData.user"
+PICKUP_GMDATA = "AppSystem/Gimmick/UserData/Gm82_000_GmData.user"
+PICKUP_GIMMICK_ID = 163
 MIN_FILES = 2000
 
 LIST_FIELDS = (("_NormalTableList", "normal"), ("_SubQuestTableList", "subquest"),
@@ -175,6 +177,25 @@ def chest_items(data, layouts):
     return params_of(_decode(data, layouts))
 
 
+def pickup_params_of(insts):
+    """Exact {ParamId: {item, count}} joins from Gm82_000Param only."""
+    params = {}
+    for inst in insts:
+        if inst.type != "app.Gm82_000Param":
+            continue
+        pid = inst.fields.get("ParamId")
+        item_id = inst.fields.get("ItemId")
+        count = inst.fields.get("ItemNum")
+        if type(pid) is not int or pid < 0 or type(item_id) is not int or item_id <= 0 or \
+                type(count) is not int or count <= 0:
+            raise ExtractError("a placed-item param has an invalid identity or output")
+        entry = {"item": item_id, "count": count}
+        if pid in params and params[pid] != entry:
+            raise ExtractError("a placed-item ParamId has conflicting item outputs")
+        params[pid] = entry
+    return params
+
+
 QUEST_FLAG = "app.GenerateManager.QuestFlagInfos.QuestFlagInfo"
 QUEST_VAR = "app.GenerateManager.QuestFlagInfos.QuestVariableInfo"
 
@@ -236,16 +257,14 @@ def _round1(pos):
 
 
 def _placement_item_row(insts, row, src, params):
-    """Return a stable non-chest placed-item row, or None when it has no item join."""
+    """Return a stable Gm82-backed placed-item row, or None without its exact join."""
     cont = qnml_rsz.deref(insts, row.fields.get("_Container"))
     gs = qnml_rsz.deref(insts, cont.fields.get("_GimmickSetting")) if cont else None
     pid = gs.fields.get("_ParamId") if gs else None
     param = params.get(pid)
-    if param is None or not param["items"]:
+    if param is None:
         return None
-    if len(param["items"]) != 1:
-        raise ExtractError("a placed-item row has ambiguous item outputs")
-    item_id, count = param["items"][0]
+    item_id, count = param["item"], param["count"]
     uid = row.fields.get("_ManualSetGuid")
     if not isinstance(uid, str) or not re.fullmatch(
             r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", uid):
@@ -265,7 +284,7 @@ def _placement_item_row(insts, row, src, params):
     return result
 
 
-def collect_rows(decoded, params, conflicts, chara_names):
+def collect_rows(decoded, params, conflicts, chara_names, pickup_params=None):
     """Rows of the tracked kinds from decoded table files {rel: instances}.
 
     Returns (rows, count of chest rows without an item list, gimmick id counts,
@@ -293,9 +312,12 @@ def collect_rows(decoded, params, conflicts, chara_names):
                 k, rid = "chara", f["_CharaID"] & 0xFFFFFFFF
             elif kind == "gimmick":
                 rid = f["_GimmickID"]
-                k = KIND_OF_GIMMICK.get(rid, "gimmick")
-                if k != "gimmick":
-                    gimmick_ids[rid] += 1
+                k = KIND_OF_GIMMICK.get(rid)
+                if rid == PICKUP_GIMMICK_ID:
+                    k = "pickup"
+                elif k is None:
+                    continue
+                gimmick_ids[rid] += 1
             else:
                 continue
             src = src_of.get(rel)
@@ -323,8 +345,8 @@ def collect_rows(decoded, params, conflicts, chara_names):
                 gate = gate_of(insts, cont)
                 if gate:
                     row["gate"] = gate
-            elif k == "gimmick":
-                placement = _placement_item_row(insts, r, src, params)
+            elif k == "pickup":
+                placement = _placement_item_row(insts, r, src, pickup_params or {})
                 if placement is not None:
                     key = ("item", placement["uid"])
                     if key in seen:
@@ -377,6 +399,7 @@ def extract(game, key_hex, layouts):
     try:
         files, seed_hits, dangling = enumerate_files(pak, layouts)
         gm = pak.read(_full(GMDATA))
+        pickup_gm = pak.read(_full(PICKUP_GMDATA))
     except qnml_pak.PakError as e:
         raise ExtractError(str(e))
     finally:
@@ -389,10 +412,13 @@ def extract(game, key_hex, layouts):
         raise ExtractError("only %d generate files found (expected at least %d)" % (len(files), MIN_FILES))
     if gm is None:
         raise ExtractError("chest contents file missing from the archive")
+    if pickup_gm is None:
+        raise ExtractError("placed-item data file missing from the archive")
     params, conflicts = chest_items(gm, layouts)
+    pickup_params = pickup_params_of(_decode(pickup_gm, layouts))
     decoded = {rel: _decode(data, layouts) for rel, data in files.items()}
     rows, unjoined, gimmick_ids, kinds = collect_rows(
-        decoded, params, conflicts, layouts["enums"]["CharacterID"])
+        decoded, params, conflicts, layouts["enums"]["CharacterID"], pickup_params)
     by_k = collections.Counter(r["k"] for r in rows)
     for k in ("token", "beetle", "chest"):
         gid = FIRST_GIMMICK[k]
