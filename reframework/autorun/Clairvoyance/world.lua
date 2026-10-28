@@ -2744,7 +2744,8 @@ function M.new(a, reads, io)
     local providers, rows_by_provider, adapter_rows_invalid = {}, {}, false
     local ok, base = false, nil
     if valid_task and type(a.objective_item_source_snapshots) == "function" then
-      ok, base = pcall(a.objective_item_source_snapshots, objective_catalog, task_snapshot)
+      ok, base = pcall(a.objective_item_source_snapshots, objective_catalog, task_snapshot,
+        w:objective_static_source_catalog())
     end
     local base_rows = ok and array(base) or nil
     if base_rows ~= nil then

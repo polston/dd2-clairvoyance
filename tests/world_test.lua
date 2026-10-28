@@ -7101,8 +7101,9 @@ do
 
   local integrated = fixture()
   integrated.shop_reads, integrated.monster_reads, integrated.base_reads = 0, 0, 0
-  integrated.adapter.objective_item_source_snapshots = function()
+  integrated.adapter.objective_item_source_snapshots = function(_, _, source_catalog)
     integrated.base_reads = integrated.base_reads + 1
+    integrated.adapter_catalog = source_catalog
     local base = {}
     for _, provider in ipairs({ "placed", "chest", "loot", "talk_grant", "reward", "forgery" }) do
       base[#base + 1] = { provider = provider, generation = 1, status = "ok", candidates = {} }
@@ -7138,6 +7139,9 @@ do
       and joined_by_name.shop.candidates[1].source_id[2] == "shop_offer"
       and joined_by_name.monster.status == "ok"
       and joined_by_name.monster.candidates[1].certainty == "probabilistic")
+  check("objective source snapshot: adapter receives the parsed immutable world source catalog",
+    integrated.adapter_catalog ~= nil
+      and integrated.adapter_catalog == integrated_world:objective_static_source_catalog())
   integrated.data.objective_need_snapshot = { status = "ok", complete = true,
     generation = 45, source_generation = 2,
     groups = { { qid = 1001, task_index = 1, remaining = 1,
