@@ -106,6 +106,9 @@ local safe_sdk_methods = {
 }
 local secondary_loaders = { load = true, loadfile = true, dofile = true }
 local allowed_require = { ["Clairvoyance.world"] = true }
+-- TalkEventManager signatures verified in the local il2cpp dump:
+-- initial speaker, playable and history take TalkEventDefine.ID; interaction
+-- takes app.Character. These names remain exact read-only capabilities.
 local reviewed_methods
 local reviewed_capabilities = {
   reviewed_call = 2,
@@ -330,6 +333,7 @@ reviewed_methods = {
   ["get_CompContext"] = true,
   ["get_Count"] = true,
   ["get_CurrentTaskIndex"] = true,
+  ["getHistory"] = true,
   ["get_Data"] = true,
   ["get_DataList"] = true,
   ["get_DeliverData"] = true,
@@ -365,9 +369,12 @@ reviewed_methods = {
   ["get_TaskIndex"] = true,
   ["get_UniqId"] = true,
   ["get_Value"] = true,
+  ["getTalkEventInitialSpeaker"] = true,
   ["hasDeliver"] = true,
   ["isFakeShopCompleted"] = true,
+  ["isEventPlayable"] = true,
   ["isFinish"] = true,
+  ["canTalkEventInteract"] = true,
   ["isShopTalkEventAvailableForChara"] = true,
   ["isTalkEventInteractDisabled"] = true,
 }
