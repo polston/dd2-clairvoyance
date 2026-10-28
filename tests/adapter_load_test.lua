@@ -280,37 +280,120 @@ for _, generation in ipairs({ 1.5, math.huge }) do
 end
 
 -- Talk-grant and forgery production providers are pure over atomic native
--- observations.  Research rows are retained for diagnostics, but no source is
--- published until every eligibility gate has verified game semantics.
+-- observations. Complete talk evidence publishes only reachable, currently
+-- playable grants; incomplete source gates remain diagnostic and fail closed.
 do
   assert(type(A.objective_talk_grant_provider_snapshot) == "function",
     "talk-grant provider classifier is exported")
   assert(type(A.objective_forgery_provider_snapshot) == "function",
     "forgery provider classifier is exported")
   local talk_observation = { complete = true, wanted = { 29 }, events = {
-    { event_id = 1900, playable = true, speaker_present = true,
-      interactable = true, history_present = false, nodes = {
-        { index = 0, node_id = "start", node_name_hash = 10, edges = {
+    { event_id = 1900, playable = true, playing = false,
+      speaker_cid = 101, speaker_position = { x = 1, y = 2, z = 3 },
+      interaction_readable = true, interaction_enabled = true,
+      history_readable = true, history_present = false, nodes = {
+        { index = 0, kind = "app.RootSegmentNode", node_id = "start",
+          node_name_hash = 10, edges = {
           { index = 0, next_node_id = "grant", next_node_name_hash = 11,
-            has_conditions = true }, } },
-        { index = 1, node_id = "grant", node_name_hash = 11, edges = {},
+            condition_count = 0 }, } },
+        { index = 1, kind = "app.ItemControlSegmentNode", node_id = "grant",
+          node_name_hash = 11, edges = {},
           grants = { { item_index = 0, item_id = 29, count = 1 } } },
       } }, } }
   local talk = A.objective_talk_grant_provider_snapshot(talk_observation, 7)
   assert(talk.provider == "talk_grant" and talk.generation == 7
-    and talk.status == "unknown" and talk.complete == false
-    and talk.reason == "talk_grant_reachable_state_unproven"
-    and #talk.candidates == 0 and #talk.diagnostics == 1
-    and talk.diagnostics[1].event_id == 1900
-    and talk.missing_evidence[1] == "current_task_grant_ownership"
-    and talk.missing_evidence[4] == "drawable_target",
-    "talk-grant provider preserves exact graph diagnostics but fails closed")
+    and talk.status == "ok" and talk.complete == true
+    and #talk.candidates == 1 and #talk.diagnostics == 1
+    and talk.candidates[1].source_id[2] == "talk_grant"
+    and talk.candidates[1].source_id[3] == 1900
+    and talk.candidates[1].source_id[4] == "grant"
+    and talk.candidates[1].target.cid == 101
+    and talk.candidates[1].outputs[1].item_id == 29
+    and talk.candidates[1].eligibility == "eligible"
+    and talk.diagnostics[1].eligibility == "eligible",
+    "complete reachable direct grant publishes one stable positioned source")
+  local function talk_variant(fields, edge_conditions, middle_kind, mismatched_hash)
+    local event = {
+      event_id = 1900, playable = true, playing = false, speaker_cid = 101,
+      speaker_position = { x = 1, y = 2, z = 3 }, interaction_readable = true,
+      interaction_enabled = true, history_readable = true, history_present = false,
+      nodes = {
+        { index = 0, kind = "app.RootSegmentNode", node_id = "start",
+          node_name_hash = 10, edges = { { index = 0, next_node_id = "talk",
+            next_node_name_hash = mismatched_hash or 12,
+            condition_count = edge_conditions or 0 } } },
+        { index = 1, kind = middle_kind or "app.TalkSegmentNode", node_id = "talk",
+          node_name_hash = 12, edges = { { index = 0, next_node_id = "grant",
+            next_node_name_hash = 11, condition_count = 0 } } },
+        { index = 2, kind = "app.ItemControlSegmentNode", node_id = "grant",
+          node_name_hash = 11, edges = {},
+          grants = { { item_index = 0, item_id = 29, count = 1 } } },
+      },
+    }
+    for key, value in pairs(fields or {}) do event[key] = value end
+    return A.objective_talk_grant_provider_snapshot(
+      { complete = true, wanted = { 29 }, events = { event } }, 8)
+  end
+  local modeled_talk = talk_variant()
+  assert(#modeled_talk.candidates == 1
+    and modeled_talk.diagnostics[1].eligibility == "eligible",
+    "root and talk segments form a modeled unconditional grant path")
+  local conditional_talk = talk_variant(nil, 1)
+  assert(conditional_talk.status == "ok" and conditional_talk.complete
+    and #conditional_talk.candidates == 0
+    and conditional_talk.diagnostics[1].eligibility == "unknown"
+    and conditional_talk.diagnostics[1].reason == "talk_grant_branch_condition_unmodeled",
+    "unsupported branch conditions remain unknown without hiding supported events")
+  local gated_talk = talk_variant(nil, 0, "app.ItemDeliverySegmentNode")
+  assert(#gated_talk.candidates == 0
+    and gated_talk.diagnostics[1].eligibility == "unknown"
+    and gated_talk.diagnostics[1].reason == "talk_grant_intermediate_node_unmodeled",
+    "an unmodeled intermediate segment cannot become an unconditional grant path")
+  local conflicting_edge = talk_variant(nil, 0, nil, 11)
+  assert(#conflicting_edge.candidates == 0
+    and conflicting_edge.diagnostics[1].eligibility == "unknown"
+    and conflicting_edge.diagnostics[1].reason == "talk_grant_node_identity_conflict",
+    "edge node id and name hash must resolve to the same stable node")
+  local unavailable_talk = talk_variant({ playable = false })
+  assert(#unavailable_talk.candidates == 0
+    and unavailable_talk.diagnostics[1].eligibility == "ineligible"
+    and unavailable_talk.diagnostics[1].reason == "talk_grant_event_unavailable",
+    "a complete negative playability read rejects the grant")
+  local claimed_talk = talk_variant({ history_present = true,
+    history_played = false, history_result = 60 })
+  assert(#claimed_talk.candidates == 1
+    and claimed_talk.diagnostics[1].eligibility == "eligible",
+    "a previously recorded but currently playable direct event remains obtainable")
+  for _, observed_result in ipairs({ -1, 0, 60 }) do
+    local recorded = talk_variant({ history_present = true,
+      history_played = false, history_result = observed_result })
+    assert(#recorded.candidates == 1,
+      "observed playable history result is branch evidence, not claim state")
+  end
+  for _, blocked in ipairs({
+      { { playing = true }, "ineligible", "talk_grant_event_playing" },
+      { { interaction_enabled = false }, "ineligible", "talk_grant_interaction_disabled" },
+      { { history_readable = false }, "unknown", "talk_grant_history_unreadable" },
+      { { history_present = true, history_played = true }, "ineligible",
+        "talk_grant_history_played" },
+      { { history_present = true, history_played = nil }, "unknown",
+        "talk_grant_history_state_unreadable" },
+      { { history_present = true, history_played = false, history_result = false },
+        "unknown", "talk_grant_history_result_unreadable" },
+      { { speaker_position = false }, "unknown", "talk_grant_speaker_position_unreadable" },
+    }) do
+    local result = talk_variant(blocked[1])
+    assert(#result.candidates == 0
+      and result.diagnostics[1].eligibility == blocked[2]
+      and result.diagnostics[1].reason == blocked[3],
+      "talk-grant source gate: " .. blocked[3])
+  end
   local no_talk = A.objective_talk_grant_provider_snapshot(
-    { complete = true, wanted = { 29 }, events = {} }, 8)
+    { complete = true, wanted = { 29 }, events = {} }, 9)
   assert(no_talk.status == "ok" and no_talk.complete and #no_talk.candidates == 0,
     "a complete catalog scan with no matching talk grant is authoritative empty")
   local partial_talk = A.objective_talk_grant_provider_snapshot(
-    { complete = false, reason = "talk_grant_nodes_truncated", wanted = { 29 }, events = {} }, 9)
+    { complete = false, reason = "talk_grant_nodes_truncated", wanted = { 29 }, events = {} }, 10)
   assert(partial_talk.status == "unknown" and not partial_talk.complete
     and partial_talk.reason == "talk_grant_nodes_truncated" and #partial_talk.candidates == 0,
     "a partial talk catalog scan clears all candidates")
@@ -374,7 +457,8 @@ do
   local aux = { talk_grant = talk_observation, forgery = forgery_observation }
   local first = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, aux)
   local repeated = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, aux)
-  assert(first[5].reason == "talk_grant_reachable_state_unproven"
+  assert(first[5].status == "ok" and first[5].complete
+    and #first[5].candidates == 1
     and first[6].reason == "forgery_mapping_enablement_unproven"
     and repeated[5].generation == first[5].generation
     and repeated[6].generation == first[6].generation,
@@ -429,10 +513,11 @@ do
       end })
   end
   local grant = managed({ _ItemId = 29, _Num = 2 })
+  local edge_conditions = managed({ _ConditionList = managed_array({}) })
   local edge = managed({ _NextNodeId = "grant", _NextNodeNameHash = 11,
-    _Conditions = managed({}) })
+    _Conditions = edge_conditions })
   local start = managed({ _NodeId = "start", _NodeNameHash = 10,
-    _NextNodesCandidates = managed_array({ edge }) }, nil, "app.TalkSegmentNode")
+    _NextNodesCandidates = managed_array({ edge }) }, nil, "app.RootSegmentNode")
   local grant_node = managed({ _NodeId = "grant", _NodeNameHash = 11,
     _NextNodesCandidates = managed_array({}), _ChangeType = 0,
     _Items = managed_array({ grant }) }, nil, "app.ItemControlSegmentNode")
@@ -443,20 +528,29 @@ do
   local character_data = managed({}, {}, "app.CharacterData")
   local blackboard = managed({}, {}, "app.AIBlackBoardController")
   local speaker = managed({}, {
-    get_CharaID = function() return 3472286413 end,
     get_AIBlackBoardController = function() return blackboard end,
+    get_UniversalPosition = function() return { x = 10, y = 20, z = 30 } end,
   }, "app.Character")
-  local npc_manager = managed({}, {
+  local speaker_holder = managed({ CharaID = 3472286413, _chara = speaker }, {
+    get_chara = function() return speaker end,
+    get_UniversalPosition = function() return { x = 10, y = 20, z = 30 } end,
+  }, "app.NPCHolder")
+  local holder_dict = managed({}, { get_Item = function(chara_id)
+    return chara_id == 3472286413 and speaker_holder or nil
+  end })
+  local npc_manager = managed({ NPCHolderDic = holder_dict }, {
     getNPCCharacterData = function(chara_id)
       return chara_id == 3472286413 and character_data or nil
     end,
   })
   local talk_manager = managed({ _ResourceCatalog = managed({
-      ["<MergedCatalog>k__BackingField"] = talk_dict }) }, {
-    getTalkEventInitialSpeaker = function(event_id) return event_id == 1900 and speaker or nil end,
+      ["<MergedCatalog>k__BackingField"] = talk_dict }),
+      _PlayingEventIDList = managed_list({}) }, {
+    getTalkEventInitialSpeaker = function(event_id)
+      return event_id == 1900 and 3472286413 or nil
+    end,
     isEventPlayable = function(event_id) return event_id == 1900 end,
     getHistory = function() return nil end,
-    canTalkEventInteract = function(value) return value == speaker end,
   })
   local service = managed({ _CharaID = 3472286413, _ShopID = 25 }, nil,
     "app.NpcShopForgeryParam")
@@ -476,7 +570,7 @@ do
     isFakeShopRemainingMinute = function() return 0 end,
   })
   talk_manager.calls.getTalkEventInitialSpeaker = function(event_id)
-    return (event_id == 1900 or event_id == 1919) and speaker or nil
+    return (event_id == 1900 or event_id == 1919) and 3472286413 or nil
   end
   talk_manager.calls.isEventPlayable = function(event_id)
     return event_id == 1900 or event_id == 1919
@@ -504,11 +598,22 @@ do
     and #talk_read.events == 1 and talk_read.events[1].event_id == 1900
     and #talk_read.events[1].nodes == 2
     and talk_read.events[1].nodes[1].edges[1].next_node_id == "grant"
+    and talk_read.events[1].nodes[1].edges[1].condition_count == 0
     and talk_read.events[1].nodes[2].grants[1].item_id == 29
     and talk_read.events[1].nodes[2].grants[1].count == 2
-    and talk_read.events[1].speaker_present == true
-    and talk_read.events[1].interactable == true,
-    "talk reader scans the exact typed grant and its bounded event graph")
+    and talk_read.events[1].speaker_cid == 3472286413
+    and talk_read.events[1].speaker_position.x == 10
+    and talk_read.events[1].playing == false
+    and talk_read.events[1].interaction_readable
+    and talk_read.events[1].interaction_enabled,
+    "talk reader scans the typed graph and current numeric-speaker gates")
+  local saved_interaction_disabled = talk_manager.calls.isTalkEventInteractDisabled
+  talk_manager.calls.isTalkEventInteractDisabled = function() return true end
+  local disabled_talk = A.read_objective_talk_grant_observation({ [29] = true })
+  assert(disabled_talk.events[1].interaction_readable
+    and disabled_talk.events[1].interaction_enabled == false,
+    "a readable disabled interaction remains a negative Boolean gate")
+  talk_manager.calls.isTalkEventInteractDisabled = saved_interaction_disabled
   local forgery_read = A.read_objective_forgery_observation({ [29] = true })
   assert(forgery_read.complete and #forgery_read.wanted == 1
     and #forgery_read.services == 1
@@ -557,15 +662,17 @@ do
   item_manager.calls.isFakeShopKeeped = saved_kept_state
   item_manager.calls.isFakeShopCompleted = saved_completed
   item_manager.calls.isFakeShopRemainingMinute = saved_remaining
-  local saved_speaker_cid = speaker.calls.get_CharaID
-  speaker.calls.get_CharaID = function() return 1 end
+  local saved_initial_speaker = talk_manager.calls.getTalkEventInitialSpeaker
+  talk_manager.calls.getTalkEventInitialSpeaker = function(event_id)
+    return event_id == 1900 and 3472286413 or 1
+  end
   local wrong_speaker = A.read_objective_forgery_observation({ [29] = true })
   assert(wrong_speaker.services[1].speaker_cid == 1
     and not wrong_speaker.services[1].speaker_matches_service
     and wrong_speaker.services[1].join_reason == "forgery_service_speaker_join_unproven"
     and not wrong_speaker.services[1].availability_readable,
     "forgery service target rejects a structured speaker CID mismatch")
-  speaker.calls.get_CharaID = saved_speaker_cid
+  talk_manager.calls.getTalkEventInitialSpeaker = saved_initial_speaker
   local cached_talk_reads, cached_shop_reads, cached_mapping_reads =
     talk_reads.reads, shop_reads.reads, mapping_reads.reads
   A.read_objective_talk_grant_observation({ [29] = true })

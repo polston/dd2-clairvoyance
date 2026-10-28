@@ -4469,9 +4469,18 @@ function A.read_objective_talk_grant_observation(wanted)
           if next_node_id == nil and type(next_node_name_hash) ~= "number" then
             return fail("talk_grant_edge_identity_unreadable")
           end
+          local raw_conditions = safe_field(native_edge, "_Conditions")
+          local condition_count = 0
+          if raw_conditions ~= nil then
+            local conditions, condition_reason = bounded_list(
+              safe_field(raw_conditions, "_ConditionList"), 128,
+              "talk_grant_edge_conditions")
+            if conditions == nil then return fail(condition_reason) end
+            condition_count = #conditions
+          end
           node.edges[#node.edges + 1] = { index = edge_index - 1,
             next_node_id = next_node_id, next_node_name_hash = next_node_name_hash,
-            has_conditions = safe_field(native_edge, "_Conditions") ~= nil }
+            condition_count = condition_count }
         end
         if kind == "app.ItemControlSegmentNode" then
           local change = int_value(safe_field(native_node, "_ChangeType"))
@@ -4502,6 +4511,20 @@ function A.read_objective_talk_grant_observation(wanted)
     cached = { owner = owner, events = static_events }
     A.objective_provider_catalog_cache.talk = cached
   end
+  local playing_rows = bounded_list(safe_field(manager, "_PlayingEventIDList"),
+    256, "talk_grant_playing_events")
+  local playing_set = nil
+  if playing_rows ~= nil then
+    playing_set = {}
+    for _, value in ipairs(playing_rows) do
+      local playing_id = int_value(value)
+      if type(playing_id) ~= "number" or playing_id <= 0
+          or playing_id ~= math.floor(playing_id) then
+        playing_set = nil; break
+      end
+      playing_set[playing_id] = true
+    end
+  end
   local events = {}
   for _, event in ipairs(cached.events) do
     local relevant = false
@@ -4513,21 +4536,46 @@ function A.read_objective_talk_grant_observation(wanted)
     end
     if relevant then
       local event_id = event.event_id
-      local speaker_ok, speaker = call(manager, "getTalkEventInitialSpeaker", event_id)
+      local speaker_ok, raw_speaker_cid = call(
+        manager, "getTalkEventInitialSpeaker", event_id)
+      local speaker_cid = speaker_ok and int_value(raw_speaker_cid) or nil
+      if type(speaker_cid) ~= "number" or speaker_cid <= 0
+          or speaker_cid ~= math.floor(speaker_cid) then speaker_cid = nil end
       local playable_ok, playable = call(manager, "isEventPlayable", event_id)
       local history_ok, history = call(manager, "getHistory", event_id)
-      local interact_ok, interactable = false, nil
-      if speaker_ok and speaker ~= nil then
-        interact_ok, interactable = call(manager, "canTalkEventInteract", speaker)
+      local interaction_ok, interaction_disabled = false, nil
+      if speaker_cid ~= nil then
+        interaction_ok, interaction_disabled = call(
+          manager, "isTalkEventInteractDisabled", speaker_cid)
       end
-      local pos = speaker_ok and speaker ~= nil and extract_position(speaker) or nil
+      local npc_manager = sdk.get_managed_singleton("app.NPCManager")
+      local holder = speaker_cid ~= nil and safe_call(
+        safe_field(npc_manager, "NPCHolderDic"), "get_Item", speaker_cid) or nil
+      local character = holder ~= nil and (safe_call(holder, "get_chara")
+        or safe_field(holder, "_chara") or safe_field(holder, "Chara")) or nil
+      local px, py, pz
+      if character ~= nil then px, py, pz = extract_position(character) end
+      local playing = nil
+      if playing_set ~= nil then playing = playing_set[event_id] == true end
+      local interaction_enabled = nil
+      if interaction_ok and type(interaction_disabled) == "boolean" then
+        interaction_enabled = not interaction_disabled
+      end
       events[#events + 1] = { event_id = event_id, nodes = copy(event.nodes),
         playable = readable_boolean(playable_ok, playable),
-        speaker_present = speaker_ok and speaker ~= nil,
-        speaker_type = speaker_ok and speaker ~= nil and type_name(speaker) or nil,
-        speaker_position = pos and { x = pos.x, y = pos.y, z = pos.z } or nil,
-        interactable = readable_boolean(interact_ok, interactable),
-        history_readable = history_ok, history_present = history_ok and history ~= nil }
+        playing_readable = playing_set ~= nil,
+        playing = playing,
+        speaker_cid_readable = speaker_cid ~= nil,
+        speaker_cid = speaker_cid,
+        speaker_present = character ~= nil,
+        speaker_type = character ~= nil and type_name(character) or nil,
+        speaker_position = px ~= nil and { x = px, y = py, z = pz } or nil,
+        interaction_readable = interaction_ok
+          and type(interaction_disabled) == "boolean",
+        interaction_enabled = interaction_enabled,
+        history_readable = history_ok, history_present = history_ok and history ~= nil,
+        history_played = history ~= nil and safe_field(history, "Played") or nil,
+        history_result = history ~= nil and int_value(safe_field(history, "ResultNum")) or nil }
     end
   end
   out.events, out.complete = events, true
@@ -4738,18 +4786,22 @@ function A.read_objective_forgery_observation(wanted)
     for _, static_service in ipairs(cached.services) do
       local talk_event_id, chara_id = static_service.talk_event_id,
         static_service.chara_id
-      local speaker_ok, speaker = call(talk_manager, "getTalkEventInitialSpeaker", talk_event_id)
+      local speaker_ok, raw_speaker_cid = call(
+        talk_manager, "getTalkEventInitialSpeaker", talk_event_id)
       local playable_ok, playable = call(talk_manager, "isEventPlayable", talk_event_id)
-      local interact_ok, interactable = false, nil
-      if speaker_ok and speaker ~= nil then
-        interact_ok, interactable = call(talk_manager, "canTalkEventInteract", speaker)
-      end
-      local speaker_cid = speaker_ok and speaker ~= nil
-        and int_value(safe_call(speaker, "get_CharaID")) or nil
+      local speaker_cid = speaker_ok and int_value(raw_speaker_cid) or nil
       local speaker_cid_readable = type(speaker_cid) == "number"
         and speaker_cid > 0 and speaker_cid == math.floor(speaker_cid)
       local speaker_matches_service = speaker_cid_readable
         and speaker_cid == chara_id or false
+      local holder = speaker_cid_readable and safe_call(
+        safe_field(npc_manager, "NPCHolderDic"), "get_Item", speaker_cid) or nil
+      local speaker = holder ~= nil and (safe_call(holder, "get_chara")
+        or safe_field(holder, "_chara") or safe_field(holder, "Chara")) or nil
+      local interact_ok, interactable = false, nil
+      if speaker ~= nil then
+        interact_ok, interactable = call(talk_manager, "canTalkEventInteract", speaker)
+      end
       local character_data = speaker_matches_service
         and safe_call(npc_manager, "getNPCCharacterData", chara_id) or nil
       local blackboard = speaker_matches_service
@@ -4761,11 +4813,12 @@ function A.read_objective_forgery_observation(wanted)
       end
       local disabled_ok, disabled = call(talk_manager,
         "isTalkEventInteractDisabled", chara_id)
-      local pos = speaker_ok and speaker ~= nil and extract_position(speaker) or nil
+      local px, py, pz
+      if speaker ~= nil then px, py, pz = extract_position(speaker) end
       local service = {}
       for key, value in pairs(static_service) do service[key] = value end
       service.playable = readable_boolean(playable_ok, playable)
-      service.speaker_present = speaker_ok and speaker ~= nil
+      service.speaker_present = speaker ~= nil
       service.speaker_cid_readable = speaker_cid_readable
       service.speaker_cid = speaker_cid_readable and speaker_cid or nil
       service.speaker_matches_service = speaker_matches_service
@@ -4782,7 +4835,7 @@ function A.read_objective_forgery_observation(wanted)
       else
         service.join_reason = nil
       end
-      service.speaker_position = pos and { x = pos.x, y = pos.y, z = pos.z } or nil
+      service.speaker_position = px ~= nil and { x = px, y = py, z = pz } or nil
       service.interactable = readable_boolean(interact_ok, interactable)
       service.interaction_disabled = readable_boolean(disabled_ok, disabled)
       services[#services + 1] = service
@@ -4863,7 +4916,6 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
   if type(observation) ~= "table" then
     out.reason = "talk_grant_observation_unavailable"; return out
   end
-  out.diagnostics = copy(type(observation.events) == "table" and observation.events or {})
   if observation.complete ~= true then
     out.reason = type(observation.reason) == "string" and observation.reason
       or "talk_grant_observation_incomplete"
@@ -4873,10 +4925,12 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
   if wanted == nil or events == nil then
     out.reason = "talk_grant_observation_malformed"; return out
   end
+  local wanted_set = {}
   for _, item_id in ipairs(wanted) do
     if not finite_integer(item_id, 1) then
       out.reason = "talk_grant_observation_malformed"; return out
     end
+    wanted_set[item_id] = true
   end
   for _, event in ipairs(events) do
     if type(event) ~= "table" or not finite_integer(event.event_id, 1)
@@ -4885,9 +4939,24 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
     end
     for _, node in ipairs(event.nodes) do
       if type(node) ~= "table" or not finite_integer(node.index, 0)
-          or dense(node.edges) == nil
+          or type(node.kind) ~= "string" or dense(node.edges) == nil
           or (node.grants ~= nil and dense(node.grants) == nil) then
         out.reason = "talk_grant_observation_malformed"; return out
+      end
+      if node.node_id == nil and not finite_integer(node.node_name_hash, 0) then
+        out.reason = "talk_grant_observation_malformed"; return out
+      end
+      if node.node_id ~= nil and type(node.node_id) ~= "string"
+          and not finite_integer(node.node_id, 0) then
+        out.reason = "talk_grant_observation_malformed"; return out
+      end
+      for _, edge in ipairs(node.edges) do
+        if type(edge) ~= "table" or not finite_integer(edge.index, 0)
+            or not finite_integer(edge.condition_count, 0)
+            or (edge.next_node_id == nil
+              and not finite_integer(edge.next_node_name_hash, 0)) then
+          out.reason = "talk_grant_observation_malformed"; return out
+        end
       end
       for _, grant in ipairs(node.grants or {}) do
         if type(grant) ~= "table" or not finite_integer(grant.item_index, 0)
@@ -4902,9 +4971,172 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
     out.status, out.complete, out.reason = "ok", true, nil
     return out
   end
-  out.reason = "talk_grant_reachable_state_unproven"
-  out.missing_evidence = { "current_task_grant_ownership",
-    "reachable_condition_truth", "execution_claim_state", "drawable_target" }
+  local function node_identity(node)
+    if node.node_id ~= nil then return node.node_id end
+    return node.node_name_hash
+  end
+  local function ref_key(prefix, value)
+    if value == nil then return nil end
+    return prefix .. type(value) .. ":" .. tostring(value)
+  end
+  local function valid_position(value)
+    if type(value) ~= "table" then return false end
+    local x, y, z = value.x, value.y, value.z
+    local function finite_number(number)
+      return type(number) == "number" and number == number
+        and number > -math.huge and number < math.huge
+    end
+    return finite_number(x) and finite_number(y) and finite_number(z)
+      and not (x == 0 and y == 0 and z == 0)
+  end
+  local function event_gate(event)
+    if type(event.playable) ~= "boolean" then
+      return "unknown", "talk_grant_playability_unreadable"
+    elseif not event.playable then
+      return "ineligible", "talk_grant_event_unavailable"
+    elseif type(event.playing) ~= "boolean" then
+      return "unknown", "talk_grant_playing_state_unreadable"
+    elseif event.playing then
+      return "ineligible", "talk_grant_event_playing"
+    elseif not finite_integer(event.speaker_cid, 1) then
+      return "unknown", "talk_grant_speaker_unreadable"
+    elseif not valid_position(event.speaker_position) then
+      return "unknown", "talk_grant_speaker_position_unreadable"
+    elseif event.interaction_readable ~= true
+        or type(event.interaction_enabled) ~= "boolean" then
+      return "unknown", "talk_grant_interaction_unreadable"
+    elseif not event.interaction_enabled then
+      return "ineligible", "talk_grant_interaction_disabled"
+    elseif event.history_readable ~= true then
+      return "unknown", "talk_grant_history_unreadable"
+    elseif type(event.history_present) ~= "boolean" then
+      return "unknown", "talk_grant_history_state_unreadable"
+    elseif event.history_present and type(event.history_played) ~= "boolean" then
+      return "unknown", "talk_grant_history_state_unreadable"
+    elseif event.history_present and event.history_played then
+      return "ineligible", "talk_grant_history_played"
+    -- ResultNum is branch evidence, not a success/cancel enum: the live catalog
+    -- has currently playable, unplayed records at -1, 0 and 60.  Require the
+    -- value to be readable without inventing meanings for those values.
+    elseif event.history_present and (type(event.history_result) ~= "number"
+        or event.history_result ~= event.history_result
+        or event.history_result <= -math.huge or event.history_result >= math.huge
+        or event.history_result ~= math.floor(event.history_result)) then
+      return "unknown", "talk_grant_history_result_unreadable"
+    end
+    return "eligible", nil
+  end
+  for _, event in ipairs(events) do
+    local by_id, by_hash, reach, reach_reason = {}, {}, {}, {}
+    local transparent_kind = { ["app.RootSegmentNode"] = true,
+      ["app.TalkSegmentNode"] = true }
+    local graph_reason = nil
+    for _, node in ipairs(event.nodes) do
+      local id_key = ref_key("id:", node.node_id)
+      local hash_key = ref_key("hash:", node.node_name_hash)
+      if id_key ~= nil then
+        by_id[id_key] = by_id[id_key] == nil and node or false
+      end
+      if hash_key ~= nil then
+        by_hash[hash_key] = by_hash[hash_key] == nil and node or false
+      end
+      if node.kind == "app.RootSegmentNode" then reach[node] = 2 end
+    end
+    if next(reach) == nil then graph_reason = "talk_grant_root_unreadable" end
+    local changed = true
+    for _ = 1, #event.nodes do
+      if not changed then break end
+      changed = false
+      for _, node in ipairs(event.nodes) do
+        local state = reach[node]
+        if state ~= nil then
+          for _, edge in ipairs(node.edges) do
+            local id_target, hash_target = nil, nil
+            if edge.next_node_id ~= nil then
+              id_target = by_id[ref_key("id:", edge.next_node_id)]
+            end
+            if edge.next_node_name_hash ~= nil then
+              hash_target = by_hash[ref_key("hash:", edge.next_node_name_hash)]
+            end
+            local both_references = edge.next_node_id ~= nil
+              and edge.next_node_name_hash ~= nil
+            local identity_conflict = id_target == false or hash_target == false
+              or (both_references and (id_target == nil or hash_target == nil
+                or id_target ~= hash_target))
+            local target = not identity_conflict and (id_target or hash_target) or nil
+            if identity_conflict then
+              graph_reason = "talk_grant_node_identity_conflict"
+            elseif target == nil then
+              graph_reason = "talk_grant_graph_target_unresolved"
+            else
+              local next_state, next_reason = state, reach_reason[node]
+              if state == 2 and edge.condition_count > 0 then
+                next_state, next_reason = 1, "talk_grant_branch_condition_unmodeled"
+              elseif state == 2 and not transparent_kind[node.kind] then
+                next_state, next_reason = 1, "talk_grant_intermediate_node_unmodeled"
+              end
+              if reach[target] == nil or next_state > reach[target] then
+                reach[target], reach_reason[target] = next_state, next_reason
+                changed = true
+              end
+            end
+          end
+        end
+      end
+    end
+    local gate_eligibility, gate_reason = event_gate(event)
+    for _, node in ipairs(event.nodes) do
+      local outputs = {}
+      for _, grant in ipairs(node.grants or {}) do
+        if wanted_set[grant.item_id] then outputs[#outputs + 1] = copy(grant) end
+      end
+      if #outputs > 0 then
+        local eligibility, reason = gate_eligibility, gate_reason
+        local identity, identity_owner = node_identity(node), nil
+        if node.node_id ~= nil
+            and by_id[ref_key("id:", node.node_id)] == node then
+          identity_owner = node
+        elseif node.node_name_hash ~= nil
+            and by_hash[ref_key("hash:", node.node_name_hash)] == node then
+          identity, identity_owner = node.node_name_hash, node
+        end
+        if eligibility == "eligible" then
+          if identity_owner ~= node then
+            eligibility, reason = "unknown", "talk_grant_node_identity_conflict"
+          elseif reach[node] == 1 then
+            eligibility, reason = "unknown", reach_reason[node]
+              or "talk_grant_branch_condition_unmodeled"
+          elseif reach[node] ~= 2 then
+            eligibility, reason = "unknown",
+              graph_reason or "talk_grant_node_unreachable"
+          end
+        end
+        local diagnostic = { event_id = event.event_id, node_id = identity,
+          node_index = node.index, eligibility = eligibility, reason = reason,
+          outputs = copy(outputs), speaker_cid = event.speaker_cid,
+          history_present = event.history_present == true,
+          history_played = event.history_played,
+          history_result = event.history_result }
+        out.diagnostics[#out.diagnostics + 1] = diagnostic
+        if eligibility == "eligible" then
+          out.candidates[#out.candidates + 1] = {
+            source_id = { "source", "talk_grant", event.event_id, identity },
+            provider = "talk_grant",
+            target = { kind = "npc", cid = event.speaker_cid,
+              pos = copy(event.speaker_position) },
+            outputs = copy(outputs),
+            capacity_pool_id = { "capacity", "talk_grant", event.event_id, identity },
+            capacity_kind = "finite", available_acquisitions = 1,
+            certainty = "guaranteed", eligibility = "eligible",
+            generation = generation,
+            evidence = { event_id = event.event_id, node_index = node.index,
+              node_id = identity, history_present = event.history_present == true },
+          }
+        end
+      end
+    end
+  end
+  out.status, out.complete, out.reason = "ok", true, nil
   return out
 end
 
