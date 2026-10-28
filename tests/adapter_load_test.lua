@@ -285,9 +285,9 @@ assert(#empty_source_snapshots == 5 and empty_source_snapshots[1].provider == "p
   and empty_source_snapshots[2].provider == "chest" and empty_source_snapshots[3].provider == "loot"
   and empty_source_snapshots[1].status == "unknown"
   and empty_source_snapshots[1].complete == false
-  and empty_source_snapshots[1].reason == "pickup_persisted_uid_state_join_unavailable"
+  and empty_source_snapshots[1].reason == "source_catalog_unavailable"
   and empty_source_snapshots[2].complete == false
-  and empty_source_snapshots[2].reason == "chest_generation_access_gate_unproven"
+  and empty_source_snapshots[2].reason == "source_catalog_unavailable"
   and empty_source_snapshots[4].provider == "talk_grant"
   and empty_source_snapshots[4].status == "unknown"
   and empty_source_snapshots[4].complete == false
@@ -306,6 +306,295 @@ assert(#empty_source_snapshots == 5 and empty_source_snapshots[1].provider == "p
   and empty_source_snapshots[1].generation > 0
   and empty_source_snapshots[2].generation > 0 and empty_source_snapshots[3].generation > 0,
   "source envelopes initialize with separate positive generations")
+
+-- Pickup/chest classification is pure over one complete static catalog and
+-- one atomic adapter observation.  The live reader feeds this same contract.
+do
+  assert(type(A.objective_source_provider_snapshots) == "function",
+    "pickup/chest provider classifier is exported")
+  local function base_catalog()
+    return { version = 2, status = "ok", complete = true, generation = 3,
+      placements = {
+        { uid = "11111111-1111-1111-1111-111111111111", index = 0,
+          table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
+          source_id = { "source", "placed", "11111111-1111-1111-1111-111111111111", 0 },
+          capacity_pool_id = { "capacity", "placed", "11111111-1111-1111-1111-111111111111", 0 },
+          outputs = { { item_id = 501, count = 2 } }, pos = { x = 1, y = 2, z = 3 } },
+      }, chests = {
+        { uid = "22222222-2222-2222-2222-222222222222", index = 0,
+          table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", layer = 0,
+          source_id = { "source", "chest", "22222222-2222-2222-2222-222222222222", 0 },
+          capacity_pool_id = { "capacity", "chest", "22222222-2222-2222-2222-222222222222", 0 },
+          outputs = { { item_id = 601, count = 1 }, { item_id = 602, count = 3 } },
+          pos = { x = 4, y = 5, z = 6 }, unlock_item = 0, is_seal = false,
+          fake_unlock_item = 0, quest_override = false },
+      } }
+  end
+  local function base_observation()
+    return { complete = true, persisted_complete = true, generation_complete = true,
+      requested_complete = true, loaded_complete = true,
+      persisted = {}, never = {}, dead = {}, disabled_tables = {}, blacklist = {},
+      requested_tables = {}, loaded = {}, gate_results = {} }
+  end
+  local function classify(catalog, observation, generation)
+    local rows = A.objective_source_provider_snapshots(catalog, observation, generation or 7)
+    return rows[1], rows[2]
+  end
+  local placed, chest = classify(base_catalog(), base_observation())
+  assert(placed.status == "ok" and placed.complete == true and #placed.candidates == 1
+    and placed.candidates[1].generation == 7 and placed.candidates[1].provider == "placed"
+    and placed.candidates[1].target.uid == "11111111-1111-1111-1111-111111111111"
+    and placed.candidates[1].outputs[1].item_id == 501
+    and placed.candidates[1].outputs[1].count == 2,
+    "placed provider accepts complete absent persisted context as uncollected")
+  assert(chest.status == "ok" and chest.complete == true and #chest.candidates == 1
+    and #chest.candidates[1].outputs == 2
+    and chest.candidates[1].outputs[2].item_id == 602
+    and chest.candidates[1].outputs[2].count == 3,
+    "chest provider preserves exact multi-item outputs")
+
+  local collected = base_observation()
+  collected.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 3 }
+  placed = classify(base_catalog(), collected)
+  assert(placed.status == "ok" and #placed.candidates == 0,
+    "pickup free bits 0/1 remove a collected source")
+  local opened = base_observation()
+  opened.persisted["22222222-2222-2222-2222-222222222222:0"] =
+    { family = "chest", pick = true, keep = false, unlock = false, seal = false }
+  _, chest = classify(base_catalog(), opened)
+  assert(chest.status == "ok" and #chest.candidates == 0,
+    "chest Pick/opened removes an emptied source")
+  local unopened_keep = base_observation()
+  unopened_keep.persisted["22222222-2222-2222-2222-222222222222:0"] =
+    { family = "chest", pick = false, keep = true, unlock = false, seal = false }
+  _, chest = classify(base_catalog(), unopened_keep)
+  assert(chest.status == "ok" and #chest.candidates == 1,
+    "chest Keep and Unlock false do not remove an unopened zero-key source")
+
+  local live = base_observation()
+  live.loaded["11111111-1111-1111-1111-111111111111:0"] = {
+    family = "placed", table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    generated = true, disabled = false, freebit = 0, broken = false, used = false }
+  live.loaded["22222222-2222-2222-2222-222222222222:0"] = {
+    family = "chest", table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    generated = true, disabled = false, pick = false, keep = false, unlock = false,
+    opened = false, unlock_api = false, seal = false, unlock_item = 0,
+    fake_unlock_item = 0, pawn_restrict = true }
+  placed, chest = classify(base_catalog(), live, 9)
+  assert(#placed.candidates == 1 and #chest.candidates == 1
+    and placed.candidates[1].generation == 9 and chest.candidates[1].generation == 9,
+    "exact loaded/catalog joins publish one stable generation")
+  live.loaded["22222222-2222-2222-2222-222222222222:0"].opened = true
+  placed, chest = classify(base_catalog(), live, 10)
+  assert(placed.status == "ok" and #placed.candidates == 1
+    and chest.status == "unknown" and chest.complete == false and #chest.candidates == 0
+    and chest.reason == "chest_loaded_state_inconsistent",
+    "one family inconsistency fails closed without stale candidates")
+
+  local wrong_join = base_observation()
+  wrong_join.loaded["11111111-1111-1111-1111-111111111111:0"] = {
+    family = "placed", table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    generated = true, disabled = false, freebit = 0, broken = false, used = false }
+  placed = classify(base_catalog(), wrong_join)
+  assert(placed.status == "unknown" and #placed.candidates == 0
+    and placed.reason == "placed_loaded_identity_unreadable",
+    "a negative loaded UID/table join invalidates the placed observation")
+  local wrong_persisted = base_observation()
+  wrong_persisted.persisted["11111111-1111-1111-1111-111111111111:0"] = {
+    family = "chest", pick = false, keep = false, unlock = false }
+  placed = classify(base_catalog(), wrong_persisted)
+  assert(placed.status == "unknown" and #placed.candidates == 0,
+    "a negative persisted UID/family join fails closed")
+  for _, exclusion in ipairs({ "never", "dead" }) do
+    local excluded = base_observation()
+    excluded[exclusion]["11111111-1111-1111-1111-111111111111:0"] = true
+    placed = classify(base_catalog(), excluded)
+    assert(placed.status == "ok" and #placed.candidates == 0,
+      "full-UID " .. exclusion .. " exclusion removes a pickup")
+  end
+  local excluded = base_observation()
+  excluded.blacklist["22222222-2222-2222-2222-222222222222"] = true
+  _, chest = classify(base_catalog(), excluded)
+  assert(chest.status == "ok" and #chest.candidates == 0,
+    "bare-GUID blacklist removes a chest")
+  excluded = base_observation()
+  excluded.disabled_tables["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"] = true
+  placed = classify(base_catalog(), excluded)
+  assert(placed.status == "ok" and #placed.candidates == 0,
+    "disabled table removes its pickup")
+  local removed_live = base_observation()
+  removed_live.loaded["11111111-1111-1111-1111-111111111111:0"] = {
+    family = "placed", table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    generated = true, disabled = false, freebit = 0, broken = true, used = false }
+  removed_live.loaded["22222222-2222-2222-2222-222222222222:0"] = {
+    family = "chest", table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    generated = true, disabled = false, pick = true, keep = false, unlock = false,
+    opened = true, unlock_api = false, unlock_item = 0, fake_unlock_item = 0,
+    pawn_restrict = false }
+  placed, chest = classify(base_catalog(), removed_live)
+  assert(placed.status == "ok" and chest.status == "ok"
+    and #placed.candidates == 0 and #chest.candidates == 0,
+    "loaded broken pickup and opened chest are removed without stale candidates")
+
+  local duplicate_catalog = base_catalog()
+  duplicate_catalog.chests[1].uid = duplicate_catalog.placements[1].uid
+  placed, chest = classify(duplicate_catalog, base_observation())
+  assert(placed.status == "unknown" and chest.status == "unknown"
+    and placed.reason == "source_catalog_identity_duplicate",
+    "cross-family duplicate native identity invalidates both providers")
+
+  local gated_catalog = base_catalog()
+  gated_catalog.placements[1].gate = { check = 0, conditions = {
+    { kind = "quest", qid = 20040, finish = true } } }
+  local gated = base_observation()
+  gated.gate_results["placed:11111111-1111-1111-1111-111111111111:0"] = false
+  placed = classify(gated_catalog, gated)
+  assert(placed.status == "ok" and #placed.candidates == 0,
+    "a proven false structured row gate removes the source")
+  gated.gate_results = {}
+  placed = classify(gated_catalog, gated)
+  assert(placed.status == "unknown" and #placed.candidates == 0
+    and placed.reason == "placed_gate_state_unreadable",
+    "an unreadable structured gate makes the provider unknown")
+
+  local subquest_catalog = base_catalog()
+  subquest_catalog.placements[1].layer = 2
+  local requested = base_observation()
+  requested.requested_tables["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"] = {
+    active = true, failed = false, finished = true,
+    uids = { ["11111111-1111-1111-1111-111111111111:0"] = true } }
+  placed = classify(subquest_catalog, requested)
+  assert(placed.status == "ok" and #placed.candidates == 1,
+    "active complete requested subquest table admits its exact UID")
+  requested.requested_tables["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"].uids = {}
+  placed = classify(subquest_catalog, requested)
+  assert(placed.status == "ok" and #placed.candidates == 0,
+    "subquest table without exact UID is ineligible")
+  requested.requested_tables["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"].finished = nil
+  placed = classify(subquest_catalog, requested)
+  assert(placed.status == "unknown" and #placed.candidates == 0,
+    "partial subquest request fails closed")
+
+  local partial = base_observation()
+  partial.persisted_complete = false
+  placed, chest = classify(base_catalog(), partial)
+  assert(placed.status == "unknown" and chest.status == "unknown"
+    and #placed.candidates == 0 and #chest.candidates == 0,
+    "an incomplete shared sparse scan invalidates both providers atomically")
+  local future_access = base_catalog()
+  future_access.chests[1].unlock_item = 77
+  _, chest = classify(future_access, base_observation())
+  assert(chest.status == "unknown" and #chest.candidates == 0
+    and chest.reason == "chest_access_domain_unmodeled",
+    "future keyed chest access stays unknown")
+
+  local wired_catalog, wired_observation = base_catalog(), base_observation()
+  local wired = a.objective_item_source_snapshots(nil, { need_generation = 11 },
+    wired_catalog, wired_observation)
+  local wired_repeat = a.objective_item_source_snapshots(nil, { need_generation = 11 },
+    wired_catalog, wired_observation)
+  assert(wired[1].status == "ok" and wired[2].status == "ok"
+    and #wired[1].candidates == 1 and #wired[2].candidates == 1
+    and wired_repeat[1].generation == wired[1].generation,
+    "adapter provider API publishes and keeps an identical observation generation stable")
+  wired_observation.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 3 }
+  local wired_changed = a.objective_item_source_snapshots(nil, { need_generation = 11 },
+    wired_catalog, wired_observation)
+  assert(wired_changed[1].generation == wired[1].generation + 1
+    and #wired_changed[1].candidates == 0 and #wired_changed[2].candidates == 1,
+    "a changed atomic source observation advances generation and removes stale pickup")
+
+  -- The native reader reconciles sparse persisted records and exact loaded
+  -- identities before the pure classifier sees them.
+  local function robj(fields, calls, name)
+    local o = { fields = fields or {}, calls = calls or {} }
+    function o.get_field(_, key) return o.fields[key] end
+    function o.call(_, method, ...)
+      local value = o.calls[method]
+      if type(value) == "function" then return value(...) end
+      return value
+    end
+    function o.get_type_definition()
+      return { get_full_name = function() return name end }
+    end
+    return o
+  end
+  local function rlist(values, count)
+    return robj({}, { get_Count = count or #values,
+      get_Item = function(index) return values[index + 1] end })
+  end
+  local function rdict(rows)
+    local entries = {}
+    for i, row in ipairs(rows or {}) do
+      entries[i] = robj({ Next = -1, Key = row[1], Value = row[2] })
+    end
+    local array = { get_elements = function() return entries end }
+    return robj({ _count = #entries, _freeCount = 0, _entries = array },
+      { get_Count = #entries })
+  end
+  local function rguid(text) return robj({}, { ["ToString()"] = text }) end
+  local function ruid(text)
+    return robj({ _RowID = rguid(text), _Index = 0 })
+  end
+  local function holder(contexts)
+    local rows = {}
+    for i, context in ipairs(contexts) do
+      rows[i] = { i, robj({ ["<CurrentContext>k__BackingField"] = context }) }
+    end
+    return robj({ Contexts = rdict(rows), RestoredContexts = rdict({}) })
+  end
+  local scanner_catalog = base_catalog()
+  local chest_uid = scanner_catalog.chests[1].uid
+  local chest_item = robj({ _IsPick = false, _IsKeep = true, _IsUnlock = false }, nil,
+    "app.GmItemContext")
+  local chest_record = robj({ Contexts = rlist({
+    robj({ UniqueID = ruid(chest_uid) }, nil, "app.UniqueIDContext"), chest_item,
+  }) })
+  local chest_record_info = robj({ ["<Record>k__BackingField"] = chest_record })
+  local gen_context = robj({ _IsGenerated = true, _IsDisableGenerate = false }, nil,
+    "app.GenerateInfoContext")
+  local live_holder = holder({ gen_context, chest_item })
+  local table_guid = rguid(scanner_catalog.chests[1].table_id)
+  local generator_id = robj({ _TableID = table_guid })
+  local common = robj({ _CustomGeneratorID = generator_id })
+  local comp_generate = robj({ _Container = robj({ _CommonInfo = common }) })
+  local live_chest = robj({ ["<UniqId>k__BackingField"] = ruid(chest_uid),
+      ["<CompContext>k__BackingField"] = live_holder,
+      ["<CompGenerateInfo>k__BackingField"] = comp_generate,
+      ItemContext = chest_item, UnlockItem = 0, FakeUnlockItem = 0,
+      _IsPawnRestrict = false },
+    { get_IsOpenedFreeBit = false, get_IsUnlockFreeBit = false }, "app.gm80_001")
+  local empty_set = function() return rdict({}) end
+  local generation_manager = robj({ _NeverGenetateID = empty_set(),
+    _NeverGenerateIDByDeadRequests = empty_set(), _DisableGenerateRequests = empty_set(),
+    _GenerateBlacklistUniqueIDHashSet = empty_set(), _RequestedTableInfos = empty_set() })
+  local game_managers = {
+    ["app.ContextDBMS"] = robj({ OfflineDB = robj({
+      Records = rlist({ nil, chest_record_info }, 2) }) }),
+    ["app.GenerateManager"] = generation_manager,
+    ["app.GimmickManager"] = robj({
+      ["<ManagedGimmicksByIDs>k__BackingField"] = rdict({ { 80,
+        rdict({ { chest_uid, live_chest } }) } }) }),
+    ["app.QuestManager"] = robj(), ["app.QuestLogManager"] = robj(),
+  }
+  local saved_singleton = sdk.get_managed_singleton
+  sdk.get_managed_singleton = function(name) return game_managers[name] end
+  local scanned = A.read_objective_source_observation(scanner_catalog)
+  sdk.get_managed_singleton = saved_singleton
+  assert(scanned.complete == true and scanned.persisted_complete == true
+    and scanned.persisted[chest_uid .. ":0"].keep == true
+    and scanned.loaded[chest_uid .. ":0"].table_id == scanner_catalog.chests[1].table_id
+    and scanned.persisted[scanner_catalog.placements[1].uid .. ":0"] == nil,
+    "native reader treats sparse nil slots and complete pickup absence exactly")
+  placed, chest = classify(scanner_catalog, scanned)
+  assert(#placed.candidates == 1 and #chest.candidates == 1,
+    "complete scanner absence is uncollected while exact live/persisted chest joins publish: "
+      .. tostring(placed.status) .. "/" .. tostring(#placed.candidates) .. "/"
+      .. tostring(placed.reason) .. " chest " .. tostring(chest.status) .. "/"
+      .. tostring(#chest.candidates) .. "/" .. tostring(chest.reason))
+end
 assert(type(a.reset_session_caches) == "function", "reset_session_caches missing")
 assert(a.objective_cids(1) == nil, "no walk committed yet")
 assert(a.objective_issued_cids(1) == nil, "no issued target before a walk")
@@ -3702,9 +3991,9 @@ do
     and source_snapshots[2].provider == "chest" and source_snapshots[3].provider == "loot"
     and source_snapshots[1].status == "unknown"
     and source_snapshots[1].complete == false
-    and source_snapshots[1].reason == "pickup_persisted_uid_state_join_unavailable"
+    and source_snapshots[1].reason == "source_catalog_unavailable"
     and source_snapshots[2].complete == false
-    and source_snapshots[2].reason == "chest_generation_access_gate_unproven"
+    and source_snapshots[2].reason == "source_catalog_unavailable"
     and source_snapshots[4].provider == "talk_grant"
     and source_snapshots[4].status == "unknown"
     and source_snapshots[4].complete == false
@@ -3719,7 +4008,7 @@ do
     and source_snapshots[5].missing_evidence[4] == "busy_kept_completion_time_and_state"
     and #source_snapshots[5].candidates == 0
     and source_snapshots[5].generation == owned_snapshot.need_generation
-    and source_snapshots[1].generation == owned_snapshot.need_generation
+    and source_snapshots[1].generation > 0
     and source_snapshots[1].catalog_version == 2
     and #source_snapshots[1].source_descriptors == 2
     and source_snapshots[1].source_descriptors[1].qid == nil
