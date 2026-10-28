@@ -3822,11 +3822,508 @@ function A.overhead_block_reason()
   return nil
 end
 
+-- One bounded, read-only native observation for the placed/chest providers.
+-- Every collection is reconciled against its logical count.  Nil slots in the
+-- context record list are intentional sparse entries; absence of a matching
+-- UID after a complete pass is therefore meaningful.
+function A.read_objective_source_observation(catalog)
+  local out = { complete = false, persisted_complete = false,
+    generation_complete = false, requested_complete = false, loaded_complete = false,
+    persisted = {}, never = {}, dead = {}, disabled_tables = {}, blacklist = {},
+    requested_tables = {}, loaded = {}, gate_results = {} }
+  local by_identity = {}
+  local function catalog_rows(rows, family)
+    if type(rows) ~= "table" then return false end
+    for _, row in ipairs(rows) do
+      if type(row) ~= "table" or type(row.uid) ~= "string"
+          or type(row.index) ~= "number" then return false end
+      by_identity[row.uid:lower() .. ":" .. tostring(row.index)] = family
+    end
+    return true
+  end
+  if type(catalog) ~= "table" or not catalog_rows(catalog.placements, "placed")
+      or not catalog_rows(catalog.chests, "chest") then return out end
+  local function call(obj, method, ...)
+    if obj == nil then return false, nil end
+    return pcall(function(...) return obj:call(method, ...) end, ...)
+  end
+  local function type_name(obj)
+    local ok, value = pcall(function()
+      return obj:get_type_definition():get_full_name()
+    end)
+    if ok and type(value) == "string" then return value end
+  end
+  local function guid_text(value)
+    local ok, text = call(value, "ToString()")
+    if not ok or type(text) ~= "string" then return nil end
+    text = text:lower()
+    if not text:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") then
+      return nil
+    end
+    return text
+  end
+  local function identity(value)
+    local uid = guid_text(safe_field(value, "_RowID"))
+    local index = int_value(safe_field(value, "_Index"))
+    if uid == nil or type(index) ~= "number" or index < 0 or index ~= math.floor(index) then
+      return nil
+    end
+    return uid .. ":" .. tostring(index), uid, index
+  end
+  local function list(value, cap, visit)
+    local ok, count = call(value, "get_Count")
+    if not ok or type(count) ~= "number" or count < 0 or count ~= math.floor(count)
+        or count > cap then return false end
+    for i = 0, count - 1 do
+      local got, item = call(value, "get_Item", i)
+      if not got then return false end
+      if visit(item, i) == false then return false end
+    end
+    return true
+  end
+  local function entries(value, cap, visit)
+    if value == nil then return false end
+    local ok, expected = call(value, "get_Count")
+    local used = int_value(safe_field(value, "_count"))
+    local free = int_value(safe_field(value, "_freeCount"))
+    local array = safe_field(value, "_entries")
+    local elements
+    local copied = pcall(function()
+      local raw = array:get_elements()
+      elements = {}
+      for i = 1, #raw do elements[i] = raw[i] end
+    end)
+    if not ok or type(expected) ~= "number" or expected < 0 or expected ~= math.floor(expected)
+        or type(used) ~= "number" or used < 0 or used ~= math.floor(used)
+        or type(free) ~= "number" or free < 0 or free ~= math.floor(free)
+        or used > cap or not copied or type(elements) ~= "table" or used > #elements then
+      return false
+    end
+    local occupied = 0
+    for i = 1, used do
+      local entry = elements[i]
+      local next_index = safe_field(entry, "Next")
+      if next_index == nil then next_index = safe_field(entry, "next") end
+      if type(next_index) ~= "number" then return false end
+      if next_index >= -1 then
+        occupied = occupied + 1
+        local key = safe_field(entry, "Key")
+        if key == nil then key = safe_field(entry, "key") end
+        local value = safe_field(entry, "Value")
+        if value == nil then value = safe_field(entry, "value") end
+        if visit(key, value, entry) == false then return false end
+      end
+    end
+    return occupied == expected and occupied + free == used
+  end
+  local function context_map(record, save_data)
+    local map = {}
+    local function add(context)
+      if context == nil then return true end
+      local name = type_name(context)
+      if name == nil then return false end
+      if map[name] == nil then map[name] = context end
+      return true
+    end
+    if record == nil or not list(safe_field(record, "Contexts"), 128, add) then return nil end
+    local saved = safe_field(save_data, "Contexts")
+    if saved ~= nil and not list(saved, 128, add) then return nil end
+    return map
+  end
+  local function persisted_scan()
+    local db = safe_field(sdk.get_managed_singleton("app.ContextDBMS"), "OfflineDB")
+    return list(safe_field(db, "Records"), 32768, function(info)
+      if info == nil then return true end
+      local map = context_map(safe_field(info, "<Record>k__BackingField"),
+        safe_field(info, "SaveData"))
+      if map == nil then return false end
+      local key = identity(safe_field(map["app.UniqueIDContext"], "UniqueID"))
+      if key == nil then return false end
+      local family = by_identity[key]
+      if family == "placed" then
+        local freebit = int_value(safe_field(map["app.GimmickContext"], "_FreeBit"))
+        if type(freebit) ~= "number" then return false end
+        out.persisted[key] = { family = family, freebit = freebit }
+      elseif family == "chest" then
+        local item = map["app.GmItemContext"]
+        local pick, keep, unlock = safe_field(item, "_IsPick"),
+          safe_field(item, "_IsKeep"), safe_field(item, "_IsUnlock")
+        if type(pick) ~= "boolean" or type(keep) ~= "boolean"
+            or type(unlock) ~= "boolean" then return false end
+        local state = { family = family, pick = pick, keep = keep, unlock = unlock }
+        local treasure = map["app.TreasureBoxGimmickContext"]
+        if treasure ~= nil then
+          state.seal = safe_field(treasure, "_IsSeal")
+          if type(state.seal) ~= "boolean" then return false end
+        end
+        out.persisted[key] = state
+      end
+      return true
+    end)
+  end
+  local generation = sdk.get_managed_singleton("app.GenerateManager")
+  local function uid_set(field, target)
+    return entries(safe_field(generation, field), 32768, function(_, value)
+      local key = identity(value)
+      if key == nil then return false end
+      target[key] = true
+      return true
+    end)
+  end
+  local function guid_set(field, target)
+    return entries(safe_field(generation, field), 32768, function(_, value)
+      local key = guid_text(value)
+      if key == nil then return false end
+      target[key] = true
+      return true
+    end)
+  end
+  local function requested_scan()
+    return entries(safe_field(generation, "_RequestedTableInfos"), 32768,
+      function(generator_id, info)
+        local table_id = guid_text(safe_field(generator_id, "_TableID"))
+        local extra = int_value(safe_field(generator_id, "_ExtraID"))
+        local failed = safe_field(info, "_IsFailedAllRequest")
+        local finished = safe_field(info, "_IsFinishAllRequestForGenerateTable")
+        if table_id == nil or type(extra) ~= "number" or type(failed) ~= "boolean"
+            or type(finished) ~= "boolean" then return false end
+        local state = out.requested_tables[table_id]
+        if state == nil then
+          state = { active = true, failed = false, finished = true, uids = {} }
+          out.requested_tables[table_id] = state
+        end
+        state.failed = state.failed or failed
+        state.finished = state.finished and finished
+        return entries(safe_field(info, "_Requests"), 32768, function(uid_value)
+          local key = identity(uid_value)
+          if key == nil then return false end
+          state.uids[key] = true
+          return true
+        end)
+      end)
+  end
+  local function holder_contexts(holder)
+    local map = {}
+    local ok = entries(safe_field(holder, "Contexts"), 256, function(_, info)
+      local context = safe_field(info, "<CurrentContext>k__BackingField")
+      local name = type_name(context)
+      if name == nil then return false end
+      map[name] = context
+      return true
+    end)
+    if not ok then return nil end
+    ok = entries(safe_field(holder, "RestoredContexts"), 256, function(_, context)
+      local name = type_name(context)
+      if name == nil then return false end
+      if map[name] == nil then map[name] = context end
+      return true
+    end)
+    return ok and map or nil
+  end
+  local function loaded_source(object, family)
+    local key = identity(safe_field(object, "<UniqId>k__BackingField"))
+    if key == nil then return false end
+    if by_identity[key] ~= family then return true end
+    if out.loaded[key] ~= nil then return false end
+    local contexts = holder_contexts(safe_field(object, "<CompContext>k__BackingField"))
+    if contexts == nil then return false end
+    local common = safe_field(safe_field(object, "<CompGenerateInfo>k__BackingField"), "_Container")
+    common = safe_field(common, "_CommonInfo")
+    local table_id = guid_text(safe_field(safe_field(common, "_CustomGeneratorID"), "_TableID"))
+    local gen = contexts["app.GenerateInfoContext"]
+    local state = { family = family, table_id = table_id,
+      generated = safe_field(gen, "_IsGenerated"),
+      disabled = safe_field(gen, "_IsDisableGenerate") }
+    if table_id == nil or type(state.generated) ~= "boolean"
+        or type(state.disabled) ~= "boolean" then return false end
+    if family == "placed" then
+      local gimmick = safe_field(object, "<GmContext>k__BackingField")
+        or contexts["app.GimmickContext"]
+      state.freebit = int_value(safe_field(gimmick, "_FreeBit"))
+      state.broken, state.used = safe_field(object, "_IsBroken"), safe_field(object, "_IsUsed")
+    else
+      local item = safe_field(object, "ItemContext") or contexts["app.GmItemContext"]
+      state.pick, state.keep, state.unlock = safe_field(item, "_IsPick"),
+        safe_field(item, "_IsKeep"), safe_field(item, "_IsUnlock")
+      local opened_ok, opened = call(object, "get_IsOpenedFreeBit")
+      local unlock_ok, unlock_api = call(object, "get_IsUnlockFreeBit")
+      if opened_ok then state.opened = opened end
+      if unlock_ok then state.unlock_api = unlock_api end
+      state.unlock_item = int_value(safe_field(object, "UnlockItem"))
+      state.fake_unlock_item = int_value(safe_field(object, "FakeUnlockItem"))
+      state.pawn_restrict = safe_field(object, "_IsPawnRestrict")
+      local treasure = contexts["app.TreasureBoxGimmickContext"]
+      if treasure ~= nil then state.seal = safe_field(treasure, "_IsSeal") end
+    end
+    out.loaded[key] = state
+    return true
+  end
+  local function loaded_scan()
+    local gm = sdk.get_managed_singleton("app.GimmickManager")
+    return entries(safe_field(gm, "<ManagedGimmicksByIDs>k__BackingField"), 1024,
+      function(_, set)
+        return entries(set, 8192, function(_, object)
+          local name = type_name(object)
+          if name == nil then return false end
+          if name == "app.Gm82_000" then return loaded_source(object, "placed") end
+          if name == "app.gm80_001" then return loaded_source(object, "chest") end
+          return true
+        end)
+      end)
+  end
+  local function gate_scan()
+    local qm = sdk.get_managed_singleton("app.QuestManager")
+    local qlm = sdk.get_managed_singleton("app.QuestLogManager")
+    local method
+    local ok = pcall(function()
+      method = sdk.find_type_definition("app.QuestLogManager")
+        :get_method("isQuestLogEnd(app.QuestDefine.ID)")
+    end)
+    if not ok or method == nil then return false end
+    for _, spec in ipairs({ { "placed", catalog.placements }, { "chest", catalog.chests } }) do
+      for _, row in ipairs(spec[2]) do
+        if row.gate ~= nil then
+          if type(row.gate) ~= "table" or type(row.gate.conditions) ~= "table"
+              or (row.gate.check ~= 0 and row.gate.check ~= 1) then return false end
+          local matched = 0
+          for _, condition in ipairs(row.gate.conditions) do
+            if type(condition) ~= "table" or condition.kind ~= "quest"
+                or type(condition.qid) ~= "number" or type(condition.finish) ~= "boolean" then
+              return false
+            end
+            local active_ok, active = call(qm, "checkActivated", condition.qid)
+            local ended_ok, ended = pcall(function() return method:call(qlm, condition.qid) end)
+            if not active_ok or type(active) ~= "boolean" or not ended_ok
+                or type(ended) ~= "boolean" then return false end
+            if ended == condition.finish then matched = matched + 1
+            elseif row.gate.check == 0 then matched = -32768; break end
+          end
+          out.gate_results[spec[1] .. ":" .. row.uid:lower() .. ":" .. tostring(row.index)] =
+            row.gate.check == 0 and matched == #row.gate.conditions or matched > 0
+        end
+      end
+    end
+    return true
+  end
+  local ok, err = pcall(function()
+    out.persisted_complete = persisted_scan()
+    out.generation_complete = generation ~= nil
+      and uid_set("_NeverGenetateID", out.never)
+      and uid_set("_NeverGenerateIDByDeadRequests", out.dead)
+      and guid_set("_DisableGenerateRequests", out.disabled_tables)
+      and guid_set("_GenerateBlacklistUniqueIDHashSet", out.blacklist)
+    out.requested_complete = generation ~= nil and requested_scan()
+    out.loaded_complete = loaded_scan() and gate_scan()
+  end)
+  if not ok then return out, tostring(err) end
+  out.complete = out.persisted_complete and out.generation_complete
+    and out.requested_complete and out.loaded_complete
+  return out
+end
+
+-- Classifies the immutable places catalog against one atomic read of the
+-- persisted/generation/loaded managers.  This is deliberately pure: world.lua
+-- owns the static output/position catalog, while the adapter owns the native
+-- observation.  A partial shared scan makes both providers unknown and a
+-- family-local inconsistency clears that family's candidates.
+function A.objective_source_provider_snapshots(catalog, observation, generation)
+  local function envelope(provider, status, reason, candidates)
+    return { provider = provider, generation = generation, status = status,
+      complete = status == "ok", reason = reason, candidates = candidates or {} }
+  end
+  local function unknown_pair(reason)
+    return { envelope("placed", "unknown", reason), envelope("chest", "unknown", reason) }
+  end
+  local function finite(v)
+    return type(v) == "number" and v == v and v > -math.huge and v < math.huge
+  end
+  local function integer(v, minimum)
+    return finite(v) and v == math.floor(v) and v >= minimum
+  end
+  local function dense(value)
+    if type(value) ~= "table" then return nil end
+    local n, count = #value, 0
+    for k in pairs(value) do
+      if not integer(k, 1) or k > n then return nil end
+      count = count + 1
+    end
+    return count == n and value or nil
+  end
+  local function guid(value)
+    if type(value) ~= "string" then return nil end
+    local a, b, c, d, e = value:lower():match(
+      "^(%x%x%x%x%x%x%x%x)%-(%x%x%x%x)%-(%x%x%x%x)%-(%x%x%x%x)%-(%x%x%x%x%x%x%x%x%x%x%x%x)$")
+    if a == nil then return nil end
+    return table.concat({ a, b, c, d, e }, "-")
+  end
+  local function copy(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for k, v in pairs(value) do out[k] = copy(v) end
+    return out
+  end
+  if not integer(generation, 1) then return unknown_pair("source_generation_invalid") end
+  if type(catalog) ~= "table" or catalog.status ~= "ok" or catalog.complete ~= true
+      or dense(catalog.placements) == nil or dense(catalog.chests) == nil then
+    return unknown_pair("source_catalog_unavailable")
+  end
+  if type(observation) ~= "table" or observation.complete ~= true
+      or observation.persisted_complete ~= true or observation.generation_complete ~= true
+      or observation.requested_complete ~= true or observation.loaded_complete ~= true then
+    return unknown_pair("source_observation_incomplete")
+  end
+  for _, key in ipairs({ "persisted", "never", "dead", "disabled_tables", "blacklist",
+      "requested_tables", "loaded", "gate_results" }) do
+    if type(observation[key]) ~= "table" then return unknown_pair("source_observation_malformed") end
+  end
+
+  local catalog_identities = {}
+  for _, rows in ipairs({ catalog.placements, catalog.chests }) do
+    for _, row in ipairs(rows) do
+      local uid = type(row) == "table" and guid(row.uid) or nil
+      local index = type(row) == "table" and row.index or nil
+      if uid ~= nil and integer(index, 0) then
+        local identity = uid .. ":" .. tostring(index)
+        if catalog_identities[identity] then
+          return unknown_pair("source_catalog_identity_duplicate")
+        end
+        catalog_identities[identity] = true
+      end
+    end
+  end
+
+  local function classify(provider, rows)
+    local candidates = {}
+    for _, row in ipairs(rows) do
+      local uid = type(row) == "table" and guid(row.uid) or nil
+      local index = type(row) == "table" and row.index or nil
+      local table_id = type(row) == "table" and guid(row.table_id) or nil
+      local outputs = type(row) == "table" and dense(row.outputs) or nil
+      local pos = type(row) == "table" and row.pos or nil
+      if uid == nil or not integer(index, 0) or table_id == nil
+          or (row.layer ~= 0 and row.layer ~= 2) or outputs == nil or #outputs == 0
+          or type(pos) ~= "table" or not finite(pos.x) or not finite(pos.y) or not finite(pos.z) then
+        return envelope(provider, "unknown", provider .. "_catalog_row_malformed")
+      end
+      for _, output in ipairs(outputs) do
+        if type(output) ~= "table" or not integer(output.item_id, 1)
+            or not integer(output.count, 1) then
+          return envelope(provider, "unknown", provider .. "_catalog_output_malformed")
+        end
+      end
+      if provider == "chest" and (row.unlock_item ~= 0 or row.is_seal ~= false
+          or row.fake_unlock_item ~= 0 or row.quest_override ~= false) then
+        return envelope(provider, "unknown", "chest_access_domain_unmodeled")
+      end
+      local identity = uid .. ":" .. tostring(index)
+      local gate_key = provider .. ":" .. identity
+      local eligible = true
+      if row.gate ~= nil then
+        local gate = observation.gate_results[gate_key]
+        if type(gate) ~= "boolean" then
+          return envelope(provider, "unknown", provider .. "_gate_state_unreadable")
+        end
+        eligible = gate
+      end
+      if observation.never[identity] or observation.dead[identity]
+          or observation.blacklist[uid] or observation.disabled_tables[table_id] then
+        eligible = false
+      end
+      if row.layer == 2 then
+        local request = observation.requested_tables[table_id]
+        if request == nil then
+          eligible = false
+        elseif type(request) ~= "table" or type(request.active) ~= "boolean"
+            or type(request.failed) ~= "boolean" or type(request.finished) ~= "boolean"
+            or type(request.uids) ~= "table" then
+          return envelope(provider, "unknown", provider .. "_subquest_request_unreadable")
+        elseif request.failed or not request.active then
+          eligible = false
+        elseif not request.finished then
+          return envelope(provider, "unknown", provider .. "_subquest_request_pending")
+        elseif request.uids[identity] ~= true then
+          eligible = false
+        end
+      end
+
+      local persisted = observation.persisted[identity]
+      if persisted ~= nil then
+        if type(persisted) ~= "table" or persisted.family ~= provider then
+          return envelope(provider, "unknown", provider .. "_persisted_state_unreadable")
+        elseif provider == "placed" then
+          if not integer(persisted.freebit, 0) then
+            return envelope(provider, "unknown", "placed_persisted_state_unreadable")
+          end
+          if persisted.freebit & 3 ~= 0 then eligible = false end
+        else
+          if type(persisted.pick) ~= "boolean" or type(persisted.keep) ~= "boolean"
+              or type(persisted.unlock) ~= "boolean"
+              or (persisted.seal ~= nil and type(persisted.seal) ~= "boolean") then
+            return envelope(provider, "unknown", "chest_persisted_state_unreadable")
+          end
+          if persisted.pick or persisted.seal == true then eligible = false end
+        end
+      end
+
+      local loaded = observation.loaded[identity]
+      if loaded ~= nil then
+        if type(loaded) ~= "table" or loaded.family ~= provider
+            or guid(loaded.table_id) ~= table_id
+            or type(loaded.generated) ~= "boolean" or type(loaded.disabled) ~= "boolean" then
+          return envelope(provider, "unknown", provider .. "_loaded_identity_unreadable")
+        elseif not loaded.generated or loaded.disabled then
+          eligible = false
+        elseif provider == "placed" then
+          if not integer(loaded.freebit, 0) or type(loaded.broken) ~= "boolean"
+              or type(loaded.used) ~= "boolean" then
+            return envelope(provider, "unknown", "placed_loaded_state_unreadable")
+          elseif persisted ~= nil and loaded.freebit ~= persisted.freebit then
+            return envelope(provider, "unknown", "placed_loaded_state_inconsistent")
+          elseif loaded.freebit & 3 ~= 0 or loaded.broken or loaded.used then
+            eligible = false
+          end
+        else
+          if type(loaded.pick) ~= "boolean" or type(loaded.keep) ~= "boolean"
+              or type(loaded.unlock) ~= "boolean" or type(loaded.opened) ~= "boolean"
+              or type(loaded.unlock_api) ~= "boolean" or type(loaded.pawn_restrict) ~= "boolean"
+              or loaded.unlock_item ~= 0 or loaded.fake_unlock_item ~= 0
+              or (loaded.seal ~= nil and type(loaded.seal) ~= "boolean") then
+            return envelope(provider, "unknown", "chest_loaded_state_unreadable")
+          elseif loaded.opened ~= loaded.pick or loaded.unlock_api ~= loaded.unlock
+              or (persisted ~= nil and (loaded.pick ~= persisted.pick
+                or loaded.keep ~= persisted.keep or loaded.unlock ~= persisted.unlock
+                or (persisted.seal ~= nil and loaded.seal ~= persisted.seal))) then
+            return envelope(provider, "unknown", "chest_loaded_state_inconsistent")
+          elseif loaded.pick or loaded.seal == true then
+            eligible = false
+          end
+        end
+      end
+      if eligible then
+        candidates[#candidates + 1] = {
+          source_id = { "source", provider, uid, index },
+          provider = provider,
+          target = { kind = provider, uid = uid, index = index, pos = copy(pos) },
+          outputs = copy(outputs),
+          capacity_pool_id = { "capacity", provider, uid, index },
+          capacity_kind = "finite", available_acquisitions = 1,
+          certainty = "guaranteed", eligibility = "eligible", generation = generation,
+          evidence = { uid = uid, index = index, table_id = table_id, layer = row.layer,
+            persisted = persisted ~= nil, loaded = loaded ~= nil },
+        }
+      end
+    end
+    return envelope(provider, "ok", nil, candidates)
+  end
+  return { classify("placed", catalog.placements), classify("chest", catalog.chests) }
+end
+
 function A.make()
   local a = {}
   local objective_task_state = { owner = nil, focus = nil, journal = nil,
     needs = nil, focus_epoch = 0, journal_generation = 0, need_generation = 0,
-    source_generation = 1 }
+    source_generation = 1, source_catalog = nil, source_observation = nil,
+    source_at = -math.huge }
   local LOC_KINDS = { "placed", "box", "drop" }   -- item_locations order
   a.overhead_block_reason = A.overhead_block_reason
   function a.acceptable_ids()
@@ -4454,6 +4951,9 @@ function A.make()
       objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
         objective_task_state.need_generation = 0, 0, 0
+      objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
+      objective_task_state.source_at = -math.huge
+      objective_task_state.source_generation = objective_task_state.source_generation + 1
     end
     local focus, focus_seen = {}, {}
     for _, qid in ipairs(type(focus_qids) == "table" and focus_qids or {}) do
@@ -4524,7 +5024,8 @@ function A.make()
       journal_generation = objective_task_state.journal_generation,
       need_generation = objective_task_state.need_generation, quests = quests }
   end
-  function a.objective_item_source_snapshots(objective_catalog, task_snapshot)
+  function a.objective_item_source_snapshots(objective_catalog, task_snapshot,
+      source_catalog, supplied_source_observation)
     local function copy(value)
       if type(value) ~= "table" then return value end
       local out = {}
@@ -4569,16 +5070,43 @@ function A.make()
         end
       end
     end
-    local providers = {}
-    local unresolved = {
-      placed = "pickup_persisted_uid_state_join_unavailable",
-      chest = "chest_generation_access_gate_unproven",
-    }
-    for _, name in ipairs({ "placed", "chest" }) do
-      providers[#providers + 1] = { provider = name, generation = generation,
-        status = "unknown", complete = false, reason = unresolved[name], candidates = {},
-        catalog_version = version, source_descriptors = copy(descriptors),
-        signal_evidence = copy(signals), guidance_delivery_refs = copy(deliveries) }
+    local function same(x, y)
+      if type(x) ~= type(y) then return false end
+      if type(x) ~= "table" then return x == y end
+      for k, v in pairs(x) do if not same(v, y[k]) then return false end end
+      for k in pairs(y) do if x[k] == nil then return false end end
+      return true
+    end
+    local now = os.clock()
+    local observation = supplied_source_observation
+    if observation == nil and type(source_catalog) == "table" then
+      if objective_task_state.source_catalog == source_catalog
+          and objective_task_state.source_observation ~= nil
+          and now - objective_task_state.source_at < 0.5 then
+        observation = objective_task_state.source_observation
+      else
+        observation = A.read_objective_source_observation(source_catalog)
+      end
+    end
+    if objective_task_state.source_catalog ~= source_catalog
+        or not same(objective_task_state.source_observation, observation) then
+      if objective_task_state.source_catalog ~= nil
+          or objective_task_state.source_observation ~= nil then
+        objective_task_state.source_generation = math.min(2147483647,
+          objective_task_state.source_generation + 1)
+      end
+      objective_task_state.source_catalog = source_catalog
+      objective_task_state.source_observation = copy(observation)
+    end
+    objective_task_state.source_at = now
+    local providers = A.objective_source_provider_snapshots(source_catalog, observation,
+      objective_task_state.source_generation)
+    for _, provider in ipairs(providers) do
+      provider.catalog_version = version
+      provider.source_catalog_version = type(source_catalog) == "table" and source_catalog.version or nil
+      provider.source_descriptors = copy(descriptors)
+      provider.signal_evidence = copy(signals)
+      provider.guidance_delivery_refs = copy(deliveries)
     end
     local need_snapshot = a.objective_need_groups(task_snapshot)
     local wanted = nil
@@ -4711,6 +5239,9 @@ function A.make()
       objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
         objective_task_state.need_generation = 0, 0, 0
+      objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
+      objective_task_state.source_at = -math.huge
+      objective_task_state.source_generation = objective_task_state.source_generation + 1
       return true
     end
     return false
