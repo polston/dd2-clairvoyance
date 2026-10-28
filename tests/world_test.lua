@@ -6723,22 +6723,36 @@ do
       and #empty_joined[4].candidates == 0 and empty_joined[5].status == "unknown"
       and #empty_joined[5].candidates == 0
       and integrated.shop_reads == 0 and integrated.monster_reads == 0)
-  local joined = integrated_world:objective_source_snapshots(nil,
-    { need_generation = 45, quests = { { qid = 1001, task_index = 1, read_status = "ok" } } })
+  local live_task = { need_generation = 45,
+    quests = { { qid = 1001, task_index = 1, read_status = "ok" } } }
+  local joined = integrated_world:objective_source_snapshots(nil, live_task)
   check("objective source snapshot: world-owned shop and monster rows use shared provider contract",
     joined[4].provider == "shop" and joined[4].status == "ok"
       and joined[4].candidates[1].source_id[2] == "shop_offer"
       and joined[5].provider == "monster" and joined[5].status == "ok"
       and joined[5].candidates[1].certainty == "probabilistic")
+  integrated.data.objective_need_snapshot = { status = "ok", complete = true,
+    generation = 45, source_generation = 2,
+    groups = { { qid = 1001, task_index = 1, remaining = 1,
+      options = { { item_id = 502, accepted_count = 1 } }, complete = true,
+      generation = 2, status = "eligible" } } }
+  integrated_world:objective_source_snapshots(nil, live_task)
+  check("objective source snapshot: source generation change invalidates same-task cache",
+    integrated.shop_reads == 2 and integrated.monster_reads == 2)
+  integrated.data.objective_need_snapshot.groups[1].options[1].item_id = 503
+  integrated_world:objective_source_snapshots(nil, live_task)
+  check("objective source snapshot: need option change invalidates same-source cache",
+    integrated.shop_reads == 3 and integrated.monster_reads == 3)
+  integrated.data.objective_need_snapshot = nil
   local suspended = integrated_world:objective_source_snapshots(nil,
     { need_generation = 46, quests = {} })
   local resumed = integrated_world:objective_source_snapshots(nil,
-    { need_generation = 45, quests = { { qid = 1001, task_index = 1, read_status = "ok" } } })
+    live_task)
   check("objective source snapshot: empty work clears cached live candidates before resume",
     suspended[4].status == "unknown" and #suspended[4].candidates == 0
       and resumed[4].status == "ok" and #resumed[4].candidates == 1
-      and integrated.shop_reads == 2 and integrated.monster_reads == 2
-      and integrated.base_reads == 2)
+      and integrated.shop_reads == 4 and integrated.monster_reads == 4
+      and integrated.base_reads == 4)
 
   local calls_before_rejections = { integrated.base_reads, integrated.shop_reads,
     integrated.monster_reads, integrated.adapter_n.objective_need_groups or 0 }

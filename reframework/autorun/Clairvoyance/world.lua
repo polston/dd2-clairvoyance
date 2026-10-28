@@ -2681,6 +2681,21 @@ function M.new(a, reads, io)
     return matched
   end
 
+  local function objective_need_signature(need_snapshot)
+    local groups = {}
+    for _, group in ipairs(need_snapshot.groups) do
+      local options = {}
+      for _, option in ipairs(group.options) do
+        options[#options + 1] = tostring(option.item_id) .. ":" .. tostring(option.accepted_count)
+      end
+      table.sort(options)
+      groups[#groups + 1] = table.concat({ tostring(group.qid), tostring(group.task_index),
+        tostring(group.remaining), table.concat(options, ",") }, ":")
+    end
+    table.sort(groups)
+    return table.concat(groups, "|")
+  end
+
   function w:objective_source_snapshots(objective_catalog, task_snapshot)
     local function array(value)
       if type(value) ~= "table" then return nil end
@@ -2819,10 +2834,14 @@ function M.new(a, reads, io)
       return { provider = provider, status = "unknown", complete = false,
         generation = generation, reason = evidence.reason, candidates = {} }
     end
+    local source_generation = need_snapshot.source_generation
+    local need_signature = objective_need_signature(need_snapshot)
     local cached = S.objective_live_source_cache[provider]
     if cached ~= nil and cached.round == last_round
-      and cached.need_generation == need_generation then return objective_clone(cached.value) end
-    local ok, raw = call(read_name, task_snapshot, objective_catalog)
+      and cached.need_generation == need_generation
+      and cached.source_generation == source_generation
+      and cached.need_signature == need_signature then return objective_clone(cached.value) end
+    local ok, raw = call(read_name, task_snapshot, objective_catalog, need_snapshot)
     local rows = type(raw) == "table" and raw.rows or nil
     local dense, n = type(rows) == "table", type(rows) == "table" and #rows or 0
     if dense then
@@ -2883,7 +2902,8 @@ function M.new(a, reads, io)
     local result = { provider = provider, status = status, complete = status == "ok",
       generation = generation, reason = reason, candidates = candidates }
     S.objective_live_source_cache[provider] = { round = last_round,
-      need_generation = need_generation,
+      need_generation = need_generation, source_generation = source_generation,
+      need_signature = need_signature,
       value = objective_clone(result) }
     return result
   end
