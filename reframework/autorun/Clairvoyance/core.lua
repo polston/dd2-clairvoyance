@@ -4755,8 +4755,11 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
   end
   for _, provider in ipairs(objective_array(provider_snapshots) or {}) do
     if type(provider) == "table" then
+      local provider_candidates = objective_array(provider.candidates)
       provider_generations[#provider_generations + 1] = { provider = provider.provider,
-        generation = provider.generation }
+        generation = provider.generation, status = provider.status,
+        complete = provider.complete, reason = provider.reason,
+        candidate_count = provider_candidates and #provider_candidates or nil }
       if grouped_needs then
         if not grouped_needs_valid then
           diagnostic(provider.provider, "need_snapshot_invalid")

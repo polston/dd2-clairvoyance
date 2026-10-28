@@ -2281,15 +2281,38 @@ local function install_debug()
           routes_total = wt.routes_total }
         local objective_snapshot = snapshot ~= nil and snapshot.objective_snapshot or nil
         if objective_snapshot ~= nil then
+          local function scalar_array(values)
+            local copy = {}
+            for i, value in ipairs(values or {}) do copy[i] = value end
+            return copy
+          end
+          local function scalar_map(values)
+            local copy = {}
+            for key, value in pairs(values or {}) do copy[key] = value end
+            return copy
+          end
           local targets = {}
           for i, target in ipairs(objective_snapshot.targets or {}) do
             local row = { key = target.key, ordinal = target.ordinal, kind = target.kind,
               task_index = target.task_index, provider = target.provider,
               source_id = target.source_id, eligibility = target.eligibility,
-              reason = target.reason, generation = target.generation, item_ids = {}, owners = {} }
+              reason = target.reason, generation = target.generation, item_ids = {}, owners = {},
+              capacity_pool_id = scalar_array(target.capacity_pool_id),
+              capacity_key = target.capacity_key, capacity_kind = target.capacity_kind,
+              available_acquisitions = target.available_acquisitions,
+              certainty = target.certainty, probability = target.probability,
+              outputs = {}, groups = {} }
             for j, item_id in ipairs(target.item_ids or {}) do row.item_ids[j] = item_id end
             for j, owner in ipairs(target.owners or {}) do
               row.owners[j] = { qid = owner.qid, task_index = owner.task_index }
+            end
+            for j, output in ipairs(target.outputs or {}) do
+              row.outputs[j] = { item_id = output.item_id, count = output.count }
+            end
+            for j, group in ipairs(target.groups or {}) do
+              row.groups[j] = { key = group.key, qid = group.qid,
+                task_index = group.task_index, remaining = group.remaining,
+                contribution = group.contribution, item_ids = scalar_array(group.item_ids) }
             end
             if type(target.target) == "table" then
               row.target = { cid = target.target.cid }
@@ -2313,7 +2336,21 @@ local function install_debug()
           for i, provider in ipairs(objective_snapshot.stamp
               and objective_snapshot.stamp.providers or {}) do
             provider_generations[i] = { provider = provider.provider,
-              generation = provider.generation }
+              generation = provider.generation, status = provider.status,
+              complete = provider.complete, reason = provider.reason,
+              candidate_count = provider.candidate_count }
+          end
+          local need_groups = {}
+          for i, group in ipairs(objective_snapshot.need_groups or {}) do
+            local row = { id = scalar_array(group.id), key = group.key, qid = group.qid,
+              task_index = group.task_index, remaining = group.remaining,
+              status = group.status, complete = group.complete,
+              generation = group.generation, options = {} }
+            for j, option in ipairs(group.options or {}) do
+              row.options[j] = { item_id = option.item_id,
+                accepted_count = option.accepted_count }
+            end
+            need_groups[i] = row
           end
           local registry_diagnostics = {}
           for i, diagnostic in ipairs(objective_snapshot.registry_diagnostics or {}) do
@@ -2326,7 +2363,13 @@ local function install_debug()
               journal_generation = objective_snapshot.stamp and objective_snapshot.stamp.journal_generation,
               need_generation = objective_snapshot.stamp and objective_snapshot.stamp.need_generation,
               providers = provider_generations }, targets = targets,
-            diagnostics = diagnostics, registry_diagnostics = registry_diagnostics }
+            need_groups = need_groups, diagnostics = diagnostics,
+            registry_diagnostics = registry_diagnostics,
+            marker_omitted = scalar_map(snapshot and snapshot.focus
+              and snapshot.focus.objective_marker_projection
+              and snapshot.focus.objective_marker_projection.omitted or nil),
+            route_omitted = snapshot and snapshot.objective_routes
+              and snapshot.objective_routes.omitted or nil }
         end
         for _, r in ipairs((wt.q("input", nil) or {}).routes or {}) do
           local e = { cid = r.cid, name = r.name, stops = #(r.stops or {}),

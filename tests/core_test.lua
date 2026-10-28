@@ -6213,6 +6213,13 @@ do
         and grouped_sources[1].capacity_key == grouped_sources[2].capacity_key)
     check("objective grouped snapshot: legacy item ownership cannot admit raw-contract fallbacks",
       grouped and #grouped_sources == 2)
+    check("objective grouped debug stamp: provider status and candidate counts survive normalization",
+      grouped and grouped.stamp and grouped.stamp.providers
+        and grouped.stamp.providers[1].provider == "shop"
+        and grouped.stamp.providers[1].generation == 30
+        and grouped.stamp.providers[1].status == "ok"
+        and grouped.stamp.providers[1].complete == true
+        and grouped.stamp.providers[1].candidate_count == 4)
 
     local grouped_routes = core.objective_routes(grouped, pos(0), {
       npc_route_mode = 0, objective_places = true, focus_order = { 60, 61 }, route_cap = 8 })
