@@ -199,14 +199,110 @@ assert(grouped_complete and #grouped == 1 and grouped[1].remaining == 1
 local empty_need_snapshot = a.objective_need_groups()
 assert(empty_need_snapshot.status == "unknown" and not empty_need_snapshot.complete
   and #empty_need_snapshot.groups == 0, "unrefreshed objective group snapshot is unknown")
+local forgery_identity = { "source", "forgery", 17, 29 }
+local function forgery_evidence(overrides)
+  local e = { identity = forgery_identity, service_id = 17, output_item_id = 29,
+    mapping_input_item_id = 11, mapping_output_item_id = 29, price = 6, mapping_price = 6,
+    service_type = "NpcShopForgeryParam", service_position = { x = 1, y = 2, z = 3 },
+    interactable = true, row_enabled = true, input_held = true, price_held = true,
+    idle = true, busy = false, kept_item_id = 0, kept_item_count = 0,
+    completed = false, completion_readable = true, busy_readable = true,
+    kept_readable = true, completion_time_readable = true, completion_time = 0 }
+  for k, v in pairs(overrides or {}) do e[k] = v end
+  return e
+end
+local pre_order = a.objective_forgery_evidence(forgery_evidence(), 7)
+assert(pre_order.evidence_only == true and pre_order.publication_ready == false
+  and pre_order.eligibility == "eligible" and pre_order.reason == "forgery_order_can_start"
+  and pre_order.evidence_generation == 7 and pre_order.provider == nil
+  and pre_order.status == nil and pre_order.complete == nil and pre_order.candidates == nil,
+  "forgery classification is explicit evidence-only data, never an eligible provider publication")
+local pending = a.objective_forgery_evidence(forgery_evidence({ idle = false, busy = true,
+  input_held = false, price_held = false, kept_item_id = 11, kept_item_count = 1 }))
+assert(pending.eligibility == "ineligible" and pending.reason == "forgery_order_pending",
+  "forgery pending order is an ineligible evidence finding")
+local complete = a.objective_forgery_evidence(forgery_evidence({ completed = true,
+  input_held = false, price_held = false, kept_item_id = 29, kept_item_count = 1 }))
+assert(complete.eligibility == "eligible" and complete.reason == "matching_forgery_output_ready"
+  and complete.publication_ready == false,
+  "completed matching output remains eligible without input or price")
+local unrelated = a.objective_forgery_evidence(forgery_evidence({ completed = true,
+  input_held = false, price_held = false, kept_item_id = 30, kept_item_count = 1 }))
+assert(unrelated.eligibility == "ineligible" and unrelated.reason == "forgery_order_unrelated",
+  "unrelated completed order is ineligible")
+local unrelated_busy = a.objective_forgery_evidence(forgery_evidence({ idle = false, busy = true,
+  input_held = false, price_held = false, kept_item_id = 30, kept_item_count = 1 }))
+assert(unrelated_busy.eligibility == "ineligible"
+  and unrelated_busy.reason == "forgery_order_unrelated",
+  "unrelated active order is ineligible and distinct from a matching pending order")
+local unreadable = a.objective_forgery_evidence(forgery_evidence({ busy_readable = false }))
+assert(unreadable.eligibility == "unknown" and unreadable.reason == "forgery_busy_state_unreadable",
+  "unreadable forgery state invalidates provider without stale candidates")
+local completion_time_unreadable = a.objective_forgery_evidence(forgery_evidence({
+  completion_time_readable = false }))
+assert(completion_time_unreadable.eligibility == "unknown"
+  and completion_time_unreadable.reason == "forgery_completion_time_unreadable",
+  "forgery classification requires readable completion-time evidence")
+local disabled = a.objective_forgery_evidence(forgery_evidence({ row_enabled = false,
+  completion_time_readable = false }))
+assert(disabled.eligibility == "ineligible" and disabled.reason == "forgery_mapping_disabled",
+  "exact disabled forgery mapping is ineligible, not unknown")
+local blocked = a.objective_forgery_evidence(forgery_evidence({ interactable = false,
+  busy_readable = false }))
+assert(blocked.eligibility == "ineligible"
+  and blocked.reason == "forgery_service_not_interactable",
+  "exact non-interactable service is ineligible, not unknown")
+for _, bad in ipairs({
+    { "false service id", { service_id = false } },
+    { "false input id", { mapping_input_item_id = false } },
+    { "false output id", { output_item_id = false } },
+    { "false mapped output id", { mapping_output_item_id = false } },
+    { "false kept item id", { kept_item_id = false } },
+    { "fractional service id", { service_id = 17.5 } },
+    { "fractional output id", { output_item_id = 29.5 } },
+    { "fractional mapped output id", { mapping_output_item_id = 29.5 } },
+    { "fractional kept item id", { kept_item_id = 0.5 } },
+    { "fractional count", { kept_item_count = 0.5 } },
+    { "infinite count", { kept_item_count = math.huge } },
+    { "infinite position", { service_position = { x = math.huge, y = 2, z = 3 } } },
+    { "nan position", { service_position = { x = 1, y = 0 / 0, z = 3 } } },
+    { "infinite price", { price = math.huge, mapping_price = math.huge } },
+    { "infinite completion time", { completion_time = math.huge } },
+  }) do
+  local malformed = a.objective_forgery_evidence(forgery_evidence(bad[2]))
+  assert(malformed.eligibility == "unknown" and malformed.reason == "forgery_evidence_malformed",
+    "malformed forgery evidence rejected: " .. bad[1])
+end
+for _, generation in ipairs({ 1.5, math.huge }) do
+  local malformed = a.objective_forgery_evidence(forgery_evidence(), generation)
+  assert(malformed.eligibility == "unknown" and malformed.reason == "forgery_generation_invalid",
+    "fractional or infinite forgery evidence generation is rejected")
+end
 local empty_source_snapshots = a.objective_item_source_snapshots()
-assert(#empty_source_snapshots == 3 and empty_source_snapshots[1].provider == "placed"
+assert(type(a.objective_forgery_evidence) == "function"
+  and a.objective_forgery_candidate == nil, "forgery helper must be evidence-only")
+assert(#empty_source_snapshots == 5 and empty_source_snapshots[1].provider == "placed"
   and empty_source_snapshots[2].provider == "chest" and empty_source_snapshots[3].provider == "loot"
   and empty_source_snapshots[1].status == "unknown"
   and empty_source_snapshots[1].complete == false
   and empty_source_snapshots[1].reason == "pickup_persisted_uid_state_join_unavailable"
   and empty_source_snapshots[2].complete == false
   and empty_source_snapshots[2].reason == "chest_generation_access_gate_unproven"
+  and empty_source_snapshots[4].provider == "talk_grant"
+  and empty_source_snapshots[4].status == "unknown"
+  and empty_source_snapshots[4].complete == false
+  and empty_source_snapshots[4].reason == "talk_grant_eligibility_evidence_unproven"
+  and #empty_source_snapshots[4].missing_evidence == 4
+  and empty_source_snapshots[4].missing_evidence[4] == "execution_claim_state"
+  and #empty_source_snapshots[4].candidates == 0
+  and empty_source_snapshots[4].generation > 0
+  and empty_source_snapshots[5].provider == "forgery"
+  and empty_source_snapshots[5].status == "unknown"
+  and empty_source_snapshots[5].complete == false
+  and empty_source_snapshots[5].reason == "forgery_order_evidence_unproven"
+  and #empty_source_snapshots[5].missing_evidence == 4
+  and empty_source_snapshots[5].missing_evidence[4] == "busy_kept_completion_time_and_state"
+  and #empty_source_snapshots[5].candidates == 0
   and empty_source_snapshots[1].generation > 0
   and empty_source_snapshots[2].generation > 0 and empty_source_snapshots[3].generation > 0,
   "source envelopes initialize with separate positive generations")
@@ -3602,13 +3698,27 @@ do
     and owned[1].item_id ~= 9002,
     "objective task owner preserves delivery groups and does not flatten alternatives")
   local source_snapshots = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
-  assert(#source_snapshots == 3 and source_snapshots[1].provider == "placed"
+  assert(#source_snapshots == 5 and source_snapshots[1].provider == "placed"
     and source_snapshots[2].provider == "chest" and source_snapshots[3].provider == "loot"
     and source_snapshots[1].status == "unknown"
     and source_snapshots[1].complete == false
     and source_snapshots[1].reason == "pickup_persisted_uid_state_join_unavailable"
     and source_snapshots[2].complete == false
     and source_snapshots[2].reason == "chest_generation_access_gate_unproven"
+    and source_snapshots[4].provider == "talk_grant"
+    and source_snapshots[4].status == "unknown"
+    and source_snapshots[4].complete == false
+    and source_snapshots[4].reason == "talk_grant_eligibility_evidence_unproven"
+    and #source_snapshots[4].missing_evidence == 4
+    and source_snapshots[4].missing_evidence[4] == "execution_claim_state"
+    and #source_snapshots[4].candidates == 0
+    and source_snapshots[4].generation == owned_snapshot.need_generation
+    and source_snapshots[5].provider == "forgery"
+    and source_snapshots[5].status == "unknown"
+    and source_snapshots[5].reason == "forgery_order_evidence_unproven"
+    and source_snapshots[5].missing_evidence[4] == "busy_kept_completion_time_and_state"
+    and #source_snapshots[5].candidates == 0
+    and source_snapshots[5].generation == owned_snapshot.need_generation
     and source_snapshots[1].generation == owned_snapshot.need_generation
     and source_snapshots[1].catalog_version == 2
     and #source_snapshots[1].source_descriptors == 2
