@@ -5015,6 +5015,14 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
       return "unknown", "talk_grant_history_state_unreadable"
     elseif event.history_present and event.history_played then
       return "ineligible", "talk_grant_history_played"
+    -- ResultNum is branch evidence, not a success/cancel enum: the live catalog
+    -- has currently playable, unplayed records at -1, 0 and 60.  Require the
+    -- value to be readable without inventing meanings for those values.
+    elseif event.history_present and (type(event.history_result) ~= "number"
+        or event.history_result ~= event.history_result
+        or event.history_result <= -math.huge or event.history_result >= math.huge
+        or event.history_result ~= math.floor(event.history_result)) then
+      return "unknown", "talk_grant_history_result_unreadable"
     end
     return "eligible", nil
   end

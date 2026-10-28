@@ -364,6 +364,12 @@ do
   assert(#claimed_talk.candidates == 1
     and claimed_talk.diagnostics[1].eligibility == "eligible",
     "a previously recorded but currently playable direct event remains obtainable")
+  for _, observed_result in ipairs({ -1, 0, 60 }) do
+    local recorded = talk_variant({ history_present = true,
+      history_played = false, history_result = observed_result })
+    assert(#recorded.candidates == 1,
+      "observed playable history result is branch evidence, not claim state")
+  end
   for _, blocked in ipairs({
       { { playing = true }, "ineligible", "talk_grant_event_playing" },
       { { interaction_enabled = false }, "ineligible", "talk_grant_interaction_disabled" },
@@ -372,6 +378,8 @@ do
         "talk_grant_history_played" },
       { { history_present = true, history_played = nil }, "unknown",
         "talk_grant_history_state_unreadable" },
+      { { history_present = true, history_played = false, history_result = false },
+        "unknown", "talk_grant_history_result_unreadable" },
       { { speaker_position = false }, "unknown", "talk_grant_speaker_position_unreadable" },
     }) do
     local result = talk_variant(blocked[1])
