@@ -1304,6 +1304,11 @@ re.on_frame(function()
       objective_qids, wt.quest_catalog)
     if not ok_objective or type(task_snapshot) ~= "table"
         or type(task_snapshot.quests) ~= "table" then task_snapshot = { quests = {} } end
+    local need_snapshot = { status = "unknown", complete = false,
+      generation = task_snapshot.need_generation, groups = {}, reason = "need_snapshot_failed" }
+    local ok_needs, observed_needs = pcall(adapter.objective_need_groups, task_snapshot)
+    if ok_needs and type(observed_needs) == "table" then need_snapshot = observed_needs end
+    task_snapshot.objective_needs = need_snapshot
     local place_snapshot = wt.q("objective_place_snapshot",
       { generation = 0, status = "unknown", places = {} }, task_snapshot)
     local source_snapshots = wt.q("objective_source_snapshots", {}, wt.quest_catalog, task_snapshot)

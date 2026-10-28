@@ -6155,9 +6155,17 @@ do
 
     local function grouped_task(groups, need_generation, source_generation)
       need_generation = need_generation or 10
+      source_generation = source_generation or 20
+      local current_groups = {}
+      for i, group in ipairs(groups) do
+        local current = {}
+        for key, value in pairs(group) do current[key] = value end
+        current.generation = source_generation
+        current_groups[i] = current
+      end
       return { focus_epoch = 1, journal_generation = 2, need_generation = need_generation,
         objective_needs = { status = "ok", complete = true, generation = need_generation,
-          source_generation = source_generation or 20, groups = groups },
+          source_generation = source_generation, groups = current_groups },
         quests = {
           { qid = 60, task_index = 0, read_status = "ok", issued_npcs = {},
             task_destinations = {}, guidance = {}, item_ownership = {
@@ -6211,6 +6219,22 @@ do
       grouped and #grouped_sources == 2 and #grouped_sources[1].item_ids == 1
         and grouped_sources[1].item_ids[1] == 5 and #grouped_sources[1].groups == 2
         and grouped_sources[1].capacity_key == grouped_sources[2].capacity_key)
+    check("objective grouped snapshot: group freshness follows independent source generation",
+      grouped and #grouped.need_groups == 2
+        and grouped.need_groups[1].generation == 20
+        and grouped.stamp.need_generation == 10
+        and grouped.stamp.need_source_generation == 20)
+    local mismatched_group_task = grouped_task(grouped_needs, 10, 20)
+    mismatched_group_task.objective_needs.groups[1].generation = 19
+    local mismatched_group_snapshot = core.objective_snapshot(mismatched_group_task, nil,
+      grouped_providers, core.target_registry_new())
+    local mismatched_group_failed_closed = false
+    for _, row in ipairs(mismatched_group_snapshot.diagnostics or {}) do
+      mismatched_group_failed_closed = mismatched_group_failed_closed
+        or row.reason == "need_group_invalid"
+    end
+    check("objective grouped validation: mismatched group source generation fails closed",
+      #mismatched_group_snapshot.targets == 0 and mismatched_group_failed_closed)
     check("objective grouped snapshot: legacy item ownership cannot admit raw-contract fallbacks",
       grouped and #grouped_sources == 2)
     check("objective grouped debug stamp: provider status and candidate counts survive normalization",
@@ -6264,10 +6288,11 @@ do
     }, core.target_registry_new())
     local mixed_routes = core.objective_routes(mixed_snapshot, pos(0), {
       npc_route_mode = 0, objective_places = true, focus_order = { 60, 61 }, route_cap = 8 })
-    check("objective grouped routes: mixed one-shot covers both groups once and probabilistic follows",
-      #mixed_routes.members == 2
-        and mixed_routes.members[1].item_ids[1] == 5 and mixed_routes.members[1].item_ids[2] == 6
-        and mixed_routes.members[2].certainty == "probabilistic")
+    check("objective grouped routes: guaranteed coverage suppresses probabilistic fallback",
+      #mixed_routes.members == 1
+        and mixed_routes.members[1].item_ids[1] == 5
+        and mixed_routes.members[1].item_ids[2] == 6
+        and mixed_routes.members[1].certainty == "guaranteed")
 
     local capped_markers, _, marker_projection = core.objective_markers({}, nil,
       mixed_snapshot, { marker_cap = 1, focus_order = { 60, 61 } })
@@ -6393,13 +6418,26 @@ do
           outputs = { { item_id = 5, count = 99 } }, capacity_kind = "finite",
           available_acquisitions = 1, certainty = "probabilistic", probability = 0.9,
           target = { pos = pos(9) }, eligibility = "eligible", generation = 43 },
+        { source_id = { "source", "monster", "z-near-high" },
+          provider = "monster",
+          capacity_pool_id = { "capacity", "monster", "z-near-high" },
+          outputs = { { item_id = 5, count = 99 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "probabilistic", probability = 0.9,
+          target = { pos = pos(2) }, eligibility = "eligible", generation = 43 },
+        { source_id = { "source", "monster", "a-near-high" },
+          provider = "monster",
+          capacity_pool_id = { "capacity", "monster", "a-near-high" },
+          outputs = { { item_id = 5, count = 99 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "probabilistic", probability = 0.9,
+          target = { pos = pos(2) }, eligibility = "eligible", generation = 43 },
       } },
     }, core.target_registry_new())
     local probability_routes = core.objective_routes(probability_snapshot, pos(0), {
       npc_route_mode = 0, objective_places = true, focus_order = { 60 }, route_cap = 8 })
-    check("objective grouped probability: chance orders before distance and never claims coverage",
-      #probability_routes.members == 2 and probability_routes.members[1].probability == 0.9
-        and probability_routes.members[2].probability == 0.1)
+    check("objective grouped probability: one fallback orders by chance, distance and stable source ID",
+      #probability_routes.members == 1 and probability_routes.members[1].probability == 0.9
+        and probability_routes.members[1].target_key
+          == tk({ "source", "monster", "a-near-high" }))
 
     local priority_markers, _, priority_projection = core.objective_markers({
       { key = "ordinary", cat = "world", qids = {}, pos = pos(20) },

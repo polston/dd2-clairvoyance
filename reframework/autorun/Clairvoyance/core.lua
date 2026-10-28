@@ -4542,7 +4542,8 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         local options, option_ids, accepted_count = {}, {}, nil
         local valid = type(group) == "table" and key ~= nil and id[1] == "need"
           and group.status == "eligible" and group.complete == true
-          and objective_generation(group.generation) and group.generation == snapshot.generation
+          and objective_generation(group.generation)
+          and group.generation == snapshot.source_generation
           and objective_uint(group.qid, 2147483647)
           and objective_index(group.task_index, 2147483647)
           and current_tasks[group.qid] == group.task_index
@@ -5369,22 +5370,21 @@ local function objective_grouped_routes(snapshot, player_origin, policy)
       end
     end
   end
-  local probability_seen = {}
   for _, group in ipairs(group_states) do
-    local candidates = {}
-    for _, pool in ipairs(pools) do
-      if pool.certainty == "probabilistic" and pool.matches[group.key]
-          and not probability_seen[pool.key] then candidates[#candidates + 1] = pool end
-    end
-    table.sort(candidates, function(a, b)
-      if (a.probability or 0) ~= (b.probability or 0) then
-        return (a.probability or 0) > (b.probability or 0)
+    if group.remaining > 0 then
+      local candidates = {}
+      for _, pool in ipairs(pools) do
+        if pool.certainty == "probabilistic" and pool.matches[group.key] then
+          candidates[#candidates + 1] = pool
+        end
       end
-      return pool_less(a, b)
-    end)
-    for _, pool in ipairs(candidates) do
-      probability_seen[pool.key] = true
-      select_pool(pool, group)
+      table.sort(candidates, function(a, b)
+        if (a.probability or 0) ~= (b.probability or 0) then
+          return (a.probability or 0) > (b.probability or 0)
+        end
+        return pool_less(a, b)
+      end)
+      if candidates[1] then select_pool(candidates[1], group) end
     end
   end
   local extra = {}; for qid in pairs(missing_focus) do extra[#extra + 1] = qid end
