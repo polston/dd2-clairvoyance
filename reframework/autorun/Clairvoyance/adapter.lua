@@ -3225,6 +3225,26 @@ function items.objective_loot_observations(wanted, generation)
         for i = 0, count - 1 do
             local drop = safe_call(list, "get_Item", i)
             if drop == nil then complete, reason = false, "loot_row_unreadable" break end
+            local unique_id = safe_call(drop, "get_UniqId")
+            local uid = safe_call(unique_id, "ToString()")
+            local uid_a, uid_b, uid_c, uid_d, uid_e
+            if type(uid) == "string" then
+                uid_a, uid_b, uid_c, uid_d, uid_e = uid:match(
+                    "^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)_[0-9]+$")
+                if uid_a == nil then
+                    uid_a, uid_b, uid_c, uid_d, uid_e = uid:match(
+                        "^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)$")
+                end
+            end
+            if uid_a == nil or #uid_a ~= 8 or #uid_b ~= 4 or #uid_c ~= 4
+                or #uid_d ~= 4 or #uid_e ~= 12 then
+                complete, reason = false, "loot_identity_unreadable" break
+            end
+            uid = uid:lower()
+            if seen_uid[uid] then
+                complete, reason = false, "loot_identity_duplicated" break
+            end
+            seen_uid[uid] = true
             local context = safe_field(drop, "MyContext")
             local id = int_value(safe_field(context, "_ItemId"))
             if type(id) ~= "number" or id <= 0 or id ~= math.floor(id) then
@@ -3236,27 +3256,12 @@ function items.objective_loot_observations(wanted, generation)
                     complete, reason = false, "loot_deletion_state_unreadable" break
                 elseif deleted == false then
                     local amount = int_value(safe_field(context, "_Num"))
-                    local unique_id = safe_call(drop, "get_UniqId")
-                    local uid = safe_call(unique_id, "ToString()")
                     local pos = gimmick_pos(drop)
-                    local uid_a, uid_b, uid_c, uid_d, uid_e
-                    if type(uid) == "string" then
-                        uid_a, uid_b, uid_c, uid_d, uid_e = uid:match(
-                            "^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)$")
-                    end
                     if type(amount) ~= "number" or amount <= 0 or amount ~= math.floor(amount) then
                         complete, reason = false, "loot_count_unreadable" break
-                    elseif uid_a == nil or #uid_a ~= 8 or #uid_b ~= 4
-                        or #uid_c ~= 4 or #uid_d ~= 4 or #uid_e ~= 12 then
-                        complete, reason = false, "loot_identity_unreadable" break
                     elseif pos == nil then
                         complete, reason = false, "loot_position_unreadable" break
                     else
-                        uid = uid:lower()
-                        if seen_uid[uid] then
-                            complete, reason = false, "loot_identity_duplicated" break
-                        end
-                        seen_uid[uid] = true
                         local source_id = { "source", "loot", uid }
                         candidates[#candidates + 1] = {
                             source_id = source_id,
@@ -3596,8 +3601,8 @@ local function item_round_needs(now)
     end
     items.objective_group_state = { status = groups_complete and "ok" or "unknown",
         complete = groups_complete, generation = group_generation,
-            task_generation = items.task_observation_generation,
-            groups = groups_complete and objective_groups or {}, task_index = task_index }
+        task_generation = items.task_observation_generation,
+        groups = groups_complete and objective_groups or {}, task_index = task_index }
     commit_item_needs(t)
     if type(rel) == "table" then items.related = rel end
     ITEM_FAILED_STREAK = 0

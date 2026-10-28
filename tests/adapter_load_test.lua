@@ -2758,10 +2758,29 @@ do
     and loot_candidate.evidence.deleted == false
     and loot_candidate.generation == task_snapshot.need_generation,
     "IW1 loot observation carries UID, exact output, position and capacity")
+  local native_uid = "00000000-0000-4000-8000-000000000105_0"
+  IS.gm = gmgr({ managed = managed({}),
+    drops = { drop(300, V, L, false, native_uid, 2) }, boxes = {} })
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "ok" and #loot_view.candidates == 1
+    and loot_view.candidates[1].target.uid == native_uid
+    and loot_view.candidates[1].source_id[3] == native_uid,
+    "IW1 native indexed GUID UID is accepted and preserved")
+  local duplicate_uid = "00000000-0000-4000-8000-000000000106_0"
+  IS.gm = gmgr({ managed = managed({}), drops = {
+    drop(999, V, L, true, duplicate_uid, 1),
+    drop(300, V, L, false, duplicate_uid, 2) }, boxes = {} })
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "unknown" and not loot_view.complete
+    and #loot_view.candidates == 0,
+    "IW1 duplicate UID across unwanted and deleted rows invalidates loot atomically")
   local loot_count_reads = IS.loot_reads
   ai.objective_item_source_snapshots(nil, task_snapshot)
   assert(IS.loot_reads == loot_count_reads,
     "IW1 repeated snapshot reuses the bounded loot observation")
+  IS.gm = gmgr({ managed = managed({}), drops = { live_drop }, boxes = {} })
   live_drop["<IsDeleted>k__BackingField"] = true
   iclk = iclk + 0.6
   loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
