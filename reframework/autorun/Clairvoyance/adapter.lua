@@ -4594,6 +4594,14 @@ function A.make()
     loot.signal_evidence = copy(signals)
     loot.guidance_delivery_refs = copy(deliveries)
     providers[#providers + 1] = loot
+    providers[#providers + 1] = { provider = "talk_grant", generation = generation,
+      status = "unknown", complete = false,
+      reason = "talk_grant_eligibility_evidence_unproven",
+      missing_evidence = { "complete_reachable_graph_path", "speaker_position",
+        "interaction_enabled", "execution_claim_state" },
+      candidates = {}, catalog_version = version,
+      source_descriptors = copy(descriptors), signal_evidence = copy(signals),
+      guidance_delivery_refs = copy(deliveries) }
     return providers
   end
   function a.reset_session_caches()

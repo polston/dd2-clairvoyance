@@ -200,13 +200,21 @@ local empty_need_snapshot = a.objective_need_groups()
 assert(empty_need_snapshot.status == "unknown" and not empty_need_snapshot.complete
   and #empty_need_snapshot.groups == 0, "unrefreshed objective group snapshot is unknown")
 local empty_source_snapshots = a.objective_item_source_snapshots()
-assert(#empty_source_snapshots == 3 and empty_source_snapshots[1].provider == "placed"
+assert(#empty_source_snapshots == 4 and empty_source_snapshots[1].provider == "placed"
   and empty_source_snapshots[2].provider == "chest" and empty_source_snapshots[3].provider == "loot"
   and empty_source_snapshots[1].status == "unknown"
   and empty_source_snapshots[1].complete == false
   and empty_source_snapshots[1].reason == "pickup_persisted_uid_state_join_unavailable"
   and empty_source_snapshots[2].complete == false
   and empty_source_snapshots[2].reason == "chest_generation_access_gate_unproven"
+  and empty_source_snapshots[4].provider == "talk_grant"
+  and empty_source_snapshots[4].status == "unknown"
+  and empty_source_snapshots[4].complete == false
+  and empty_source_snapshots[4].reason == "talk_grant_eligibility_evidence_unproven"
+  and #empty_source_snapshots[4].missing_evidence == 4
+  and empty_source_snapshots[4].missing_evidence[4] == "execution_claim_state"
+  and #empty_source_snapshots[4].candidates == 0
+  and empty_source_snapshots[4].generation > 0
   and empty_source_snapshots[1].generation > 0
   and empty_source_snapshots[2].generation > 0 and empty_source_snapshots[3].generation > 0,
   "source envelopes initialize with separate positive generations")
@@ -3602,13 +3610,21 @@ do
     and owned[1].item_id ~= 9002,
     "objective task owner preserves delivery groups and does not flatten alternatives")
   local source_snapshots = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
-  assert(#source_snapshots == 3 and source_snapshots[1].provider == "placed"
+  assert(#source_snapshots == 4 and source_snapshots[1].provider == "placed"
     and source_snapshots[2].provider == "chest" and source_snapshots[3].provider == "loot"
     and source_snapshots[1].status == "unknown"
     and source_snapshots[1].complete == false
     and source_snapshots[1].reason == "pickup_persisted_uid_state_join_unavailable"
     and source_snapshots[2].complete == false
     and source_snapshots[2].reason == "chest_generation_access_gate_unproven"
+    and source_snapshots[4].provider == "talk_grant"
+    and source_snapshots[4].status == "unknown"
+    and source_snapshots[4].complete == false
+    and source_snapshots[4].reason == "talk_grant_eligibility_evidence_unproven"
+    and #source_snapshots[4].missing_evidence == 4
+    and source_snapshots[4].missing_evidence[4] == "execution_claim_state"
+    and #source_snapshots[4].candidates == 0
+    and source_snapshots[4].generation == owned_snapshot.need_generation
     and source_snapshots[1].generation == owned_snapshot.need_generation
     and source_snapshots[1].catalog_version == 2
     and #source_snapshots[1].source_descriptors == 2
