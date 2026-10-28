@@ -6419,6 +6419,181 @@ do
         and #core.objective_markers({}, nil, provider_lost, {}) == 0
         and #core.objective_routes(provider_lost, pos(0), {
           npc_route_mode = 0, objective_places = true, focus_order = { 60 } }).members == 0)
+
+    -- Review regressions: finite output is acquired once, then allocated once
+    -- across independent need groups in focus/group order with surplus retained.
+    local split_groups = {
+      { id = { "need", 60, 740, 0, 1 }, qid = 60, task_index = 0, remaining = 1,
+        options = { { item_id = 5, accepted_count = 1 } }, status = "eligible",
+        complete = true, generation = 13 },
+      { id = { "need", 61, 741, 0, 1 }, qid = 61, task_index = 1, remaining = 1,
+        options = { { item_id = 6, accepted_count = 1 } }, status = "eligible",
+        complete = true, generation = 13 },
+      { id = { "need", 61, 742, 0, 1 }, qid = 61, task_index = 1, remaining = 1,
+        options = { { item_id = 6, accepted_count = 1 } }, status = "eligible",
+        complete = true, generation = 13 },
+    }
+    local split_snapshot = core.objective_snapshot(grouped_task(split_groups, 13, 27), nil, {
+      { provider = "chest", generation = 45, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "chest", "ab" }, provider = "chest",
+          capacity_pool_id = { "capacity", "chest", "ab" },
+          outputs = { { item_id = 5, count = 1 }, { item_id = 6, count = 1 } },
+          capacity_kind = "finite", available_acquisitions = 1, certainty = "guaranteed",
+          target = { pos = pos(1) }, eligibility = "eligible", generation = 45 },
+        { source_id = { "source", "chest", "b" }, provider = "chest",
+          capacity_pool_id = { "capacity", "chest", "b" },
+          outputs = { { item_id = 6, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "guaranteed", target = { pos = pos(2) },
+          eligibility = "eligible", generation = 45 },
+      } },
+    }, core.target_registry_new())
+    local split_routes = core.objective_routes(split_snapshot, pos(0), {
+      npc_route_mode = 0, objective_places = true, focus_order = { 60, 61 }, route_cap = 8 })
+    check("objective grouped allocation: mixed one-shot output is allocated once across three groups",
+      #split_routes.members == 2
+        and split_routes.members[1].target_key == tk({ "source", "chest", "ab" })
+        and split_routes.members[2].target_key == tk({ "source", "chest", "b" }))
+
+    local surplus_groups = {
+      { id = { "need", 60, 750, 0, 1 }, qid = 60, task_index = 0, remaining = 1,
+        options = { { item_id = 5, accepted_count = 1 } }, status = "eligible",
+        complete = true, generation = 14 },
+      { id = { "need", 61, 751, 0, 1 }, qid = 61, task_index = 1, remaining = 1,
+        options = { { item_id = 5, accepted_count = 1 } }, status = "eligible",
+        complete = true, generation = 14 },
+    }
+    local surplus_snapshot = core.objective_snapshot(grouped_task(surplus_groups, 14, 28), nil, {
+      { provider = "pickup", generation = 46, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "pickup", "a2" }, provider = "pickup",
+          capacity_pool_id = { "capacity", "pickup", "a2" },
+          outputs = { { item_id = 5, count = 2 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "guaranteed", target = { pos = pos(1) },
+          eligibility = "eligible", generation = 46 },
+        { source_id = { "source", "pickup", "a1" }, provider = "pickup",
+          capacity_pool_id = { "capacity", "pickup", "a1" },
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "guaranteed", target = { pos = pos(2) },
+          eligibility = "eligible", generation = 46 },
+      } },
+    }, core.target_registry_new())
+    local surplus_routes = core.objective_routes(surplus_snapshot, pos(0), {
+      npc_route_mode = 0, objective_places = true, focus_order = { 60, 61 }, route_cap = 8 })
+    check("objective grouped allocation: same-item surplus satisfies the next independent group",
+      #surplus_routes.members == 1
+        and surplus_routes.members[1].target_key == tk({ "source", "pickup", "a2" }))
+
+    local shared_marker_groups = {
+      { id = { "need", 60, 760, 0, 1 }, qid = 60, task_index = 0, remaining = 2,
+        options = { { item_id = 5, accepted_count = 2 } }, status = "eligible",
+        complete = true, generation = 15 },
+    }
+    local shared_marker_snapshot = core.objective_snapshot(grouped_task(shared_marker_groups, 15, 29), nil, {
+      { provider = "pickup", generation = 47, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "pickup", "same-target-a" }, provider = "pickup",
+          capacity_pool_id = { "capacity", "pickup", "same-target-a" },
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "guaranteed",
+          target = { pos = pos(3), marker_key = "ordinary-shared" },
+          eligibility = "eligible", generation = 47 },
+        { source_id = { "source", "pickup", "same-target-b" }, provider = "pickup",
+          capacity_pool_id = { "capacity", "pickup", "same-target-b" },
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "guaranteed",
+          target = { pos = pos(3), marker_key = "ordinary-shared" },
+          eligibility = "eligible", generation = 47 },
+      } },
+    }, core.target_registry_new())
+    local shared_marker_rows, _, shared_marker_projection = core.objective_markers({
+      { key = "ordinary-shared", cat = "world", qids = {}, pos = pos(3) },
+    }, nil, shared_marker_snapshot, { focus_order = { 60 }, origin = pos(0) })
+    local shared_marker_routes = core.objective_routes(shared_marker_snapshot, pos(0), {
+      npc_route_mode = 0, objective_places = true, focus_order = { 60 }, route_cap = 8,
+      visible_objective_keys = shared_marker_projection.visible_keys })
+    local distinct_marker_claims = {}
+    for _, marker in ipairs(shared_marker_rows) do
+      distinct_marker_claims[marker.objective_key] = true
+    end
+    check("objective markers: distinct sources sharing one ordinary marker retain distinct claims and routes",
+      #shared_marker_rows == 2 and #shared_marker_routes.members == 2
+        and distinct_marker_claims[tk({ "source", "pickup", "same-target-a" })]
+        and distinct_marker_claims[tk({ "source", "pickup", "same-target-b" })])
+
+    local contradiction_snapshot = core.objective_snapshot(grouped_task(grouped_needs, 10, 30), nil, {
+      { provider = "pickup", generation = 48, status = "ok", complete = true, candidates = {
+        { source_id = { "source", "pickup", "duplicate" }, provider = "pickup",
+          capacity_pool_id = { "capacity", "pickup", "duplicate" },
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "guaranteed", target = { pos = pos(1) },
+          eligibility = "eligible", generation = 48 },
+        { source_id = { "source", "pickup", "duplicate" }, provider = "pickup",
+          capacity_pool_id = { "capacity", "pickup", "duplicate" },
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "guaranteed", target = { pos = pos(1) },
+          eligibility = "ineligible", reason = "collected", generation = 48 },
+        { source_id = { "source", "pickup", "off-need" }, provider = "pickup",
+          capacity_pool_id = { "capacity", "pickup", "conflict" },
+          outputs = { { item_id = 99, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "guaranteed", target = { pos = pos(2) },
+          eligibility = "eligible", generation = 48 },
+        { source_id = { "source", "pickup", "needed" }, provider = "pickup",
+          capacity_pool_id = { "capacity", "pickup", "conflict" },
+          outputs = { { item_id = 5, count = 1 } }, capacity_kind = "finite",
+          available_acquisitions = 1, certainty = "guaranteed", target = { pos = pos(3) },
+          eligibility = "eligible", generation = 48 },
+      } },
+    }, core.target_registry_new())
+    check("objective grouped claims: eligibility and need filtering cannot hide identity or pool conflicts",
+      contradiction_snapshot and #contradiction_snapshot.targets == 0)
+
+    local ordered_actual_task = grouped_task({}, 16, 31)
+    ordered_actual_task.quests[1].issued_npcs = {
+      { kind = "npc", target = { cid = 600, pos = pos(6) }, eligibility = "eligible" },
+    }
+    ordered_actual_task.quests[2].issued_npcs = {
+      { kind = "npc", target = { cid = 610, pos = pos(7) }, eligibility = "eligible" },
+    }
+    ordered_actual_task.quests[2].task_destinations = {
+      { kind = "place", task_index = 1, destination_index = 1,
+        target = { pos = pos(8) }, eligibility = "eligible" },
+    }
+    local ordered_actual_snapshot = core.objective_snapshot(ordered_actual_task, nil, {},
+      core.target_registry_new())
+    local ordered_actual_markers = core.objective_markers({}, nil, ordered_actual_snapshot,
+      { marker_cap = 2, focus_order = { 61, 60 }, origin = pos(0) })
+    check("objective marker cap: actual people and places follow focus and declared target order",
+      #ordered_actual_markers == 2 and ordered_actual_markers[1].cid == 610
+        and ordered_actual_markers[2].cid == nil
+        and ordered_actual_markers[1].objective_key == tk({ 61, "issued_npc", 610 })
+        and ordered_actual_markers[2].objective_key == tk({ 61, "task", 1, 1, "place" }))
+
+    local scale_operations = {}
+    for _, n in ipairs({ 128, 256, 512, 1024 }) do
+      local base, targets = {}, {}
+      for i = 1, n do
+        local source_key = tk({ "source", "scale", i })
+        base[i] = { key = "scale:" .. tostring(i), cat = "world", qids = {}, pos = pos(i) }
+        targets[i] = { key = source_key, source_id = source_key,
+          source_tuple = { "source", "scale", i }, capacity_key = tk({ "capacity", "scale", i }),
+          capacity_pool_id = { "capacity", "scale", i }, ordinal = i, kind = "source",
+          target = { pos = pos(i), marker_key = base[i].key }, owners = { { qid = 60, task_index = 0 } },
+          item_ids = { 5 }, outputs = { { item_id = 5, count = 1 } }, groups = {
+            { key = tk({ "need", 60, 770, 0, 1 }), qid = 60, task_index = 0,
+              remaining = 1, contribution = 1, item_ids = { 5 } },
+          }, capacity_kind = "finite", available_acquisitions = 1,
+          certainty = "guaranteed", eligibility = "eligible", generation = 90 }
+      end
+      local scaled, _, projection = core.objective_markers(base, nil, {
+        generation = 90, grouped_needs = true, need_groups = {}, targets = targets,
+      }, { marker_cap = 128, focus_order = { 60 }, origin = pos(0) })
+      scale_operations[#scale_operations + 1] = projection.operations
+      check("objective marker index: cap and operation count are deterministic at " .. tostring(n),
+        #scaled == 128 and type(projection.operations) == "number"
+          and projection.operations <= n * 8)
+    end
+    check("objective marker index: doubling inputs remains linear",
+      type(scale_operations[1]) == "number" and scale_operations[2] <= scale_operations[1] * 2
+        and scale_operations[3] <= scale_operations[2] * 2
+        and scale_operations[4] <= scale_operations[3] * 2)
   end
   end)()
 end
