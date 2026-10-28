@@ -257,6 +257,15 @@ local function prow(k, uid, id, x, z, extra)
   return r
 end
 
+local function provider_map(rows)
+  local map, counts = {}, {}
+  for _, row in ipairs(rows) do
+    counts[row.provider] = (counts[row.provider] or 0) + 1
+    map[row.provider] = row
+  end
+  return map, counts
+end
+
 -- 1. atlas_merge_overwrite
 do
   local f = fixture()
@@ -1499,6 +1508,104 @@ do
   }
   local R = world.game_reads()
 
+  local function monster_drop_entry(cid, item, count, rate, key)
+    return obj({ key = key or cid, value = obj({ _CharaId = cid, _TableList = array({ obj({
+      _ItemList = array({ obj({ _Id = item, _Num = count, _Rate = rate }) }) }) }) }) })
+  end
+  local function drop_dictionary(rows)
+    local slots = {}
+    for i, row in ipairs(rows) do
+      slots[i] = obj({ key = row:get_field("key"), value = row:get_field("value") })
+    end
+    return obj({ _entries = array(slots), _count = #slots },
+      { get_Count = function() return #rows end })
+  end
+  local function live_monster(uid, cid, dead, pos)
+    local chara = obj(nil, {
+      get_UniqId = function() return guid(uid) end,
+      get_CharaID = function() return cid end,
+      get_IsDead = function() return dead end,
+      get_Transform = function() return obj(nil, {
+        get_UniversalPosition = function() return pos end,
+      }) end,
+    })
+    return obj(nil, { get_Chara = function() return chara end })
+  end
+  singletons["app.EnemyManager"] = obj({ _EnemyList = list({
+    live_monster("instance-a", 1001, false, P(30, 0, 40)),
+    live_monster("instance-b", 1001, false, P(31, 0, 40)),
+    live_monster("instance-dead", 1001, true, P(32, 0, 40)),
+  }) })
+  singletons["app.ItemManager"] = obj({
+    EnemyDefaultItemDropDataDict = drop_dictionary({
+      monster_drop_entry(1001, 501, 2, 2500, 7001),
+      monster_drop_entry(1001, 503, 4, 5000, 7002),
+    }), EnemyItemDropDataDict = drop_dictionary({
+      monster_drop_entry(1001, 502, 3, 9000),
+    }),
+  })
+  local monster_task = { need_generation = 1, focused_item_ids = { [501] = true },
+    quests = { { qid = 1, task_index = 0, read_status = "ok" } } }
+  local monster_need = { status = "ok", complete = true, generation = 1,
+    source_generation = 1, groups = { { qid = 1, task_index = 0, remaining = 1,
+      options = { { item_id = 501, accepted_count = 1 } }, complete = true,
+      generation = 1, status = "eligible" } } }
+  local monster_ok, monster_snapshot = pcall(R.objective_monster_rows,
+    monster_task, nil, monster_need)
+  check("reads: live monster rows preserve instance identity and raw drops",
+    monster_ok and monster_snapshot.complete and #monster_snapshot.rows == 2
+      and monster_snapshot.rows[1].uid ~= monster_snapshot.rows[2].uid
+      and monster_snapshot.rows[1].drop_table_readable
+      and monster_snapshot.rows[1].item_id == 501
+      and monster_snapshot.rows[1].count == 2
+      and monster_snapshot.rows[2].item_id == 501
+      and monster_snapshot.rows[1].raw_rate == 2500
+      and monster_snapshot.rows[1].accessible == nil
+      and monster_snapshot.rows[1].chance == nil)
+  check("reads: live monster rows are bounded to focused current item ids",
+    monster_ok and monster_snapshot.complete
+      and monster_snapshot.rows[1].item_id == 501
+      and monster_snapshot.rows[2].item_id == 501)
+  local ids_before = {}
+  for _, row in ipairs(monster_snapshot.rows or {}) do
+    ids_before[row.item_id] = row.drop_row_id
+  end
+  singletons["app.ItemManager"] = obj({
+    EnemyDefaultItemDropDataDict = drop_dictionary({
+      monster_drop_entry(1001, 503, 4, 5000, 7002),
+      monster_drop_entry(1001, 501, 2, 2500, 7001),
+    }), EnemyItemDropDataDict = drop_dictionary({}) })
+  monster_need.groups[1].options[2] = { item_id = 503, accepted_count = 1 }
+  local reordered_ok, reordered = pcall(R.objective_monster_rows,
+    monster_task, nil, monster_need)
+  local ids_after = {}
+  for _, row in ipairs(reordered.rows or {}) do ids_after[row.item_id] = row.drop_row_id end
+  check("reads: monster drop identity uses native dictionary key, not traversal order",
+    reordered_ok and reordered.complete and ids_before[501] == ids_after[501]
+      and ids_after[501] ~= ids_after[503])
+  local signed_cid = -1233720880
+  singletons["app.EnemyManager"] = obj({ _EnemyList = list({
+    live_monster("instance-signed", signed_cid, false, P(30, 0, 40)),
+  }) })
+  singletons["app.ItemManager"] = obj({
+    EnemyDefaultItemDropDataDict = drop_dictionary({
+      monster_drop_entry(signed_cid, 501, 2, 2500, signed_cid),
+    }), EnemyItemDropDataDict = drop_dictionary({}) })
+  monster_need.groups[1].options[2] = nil
+  local signed_ok, signed = pcall(R.objective_monster_rows,
+    monster_task, nil, monster_need)
+  check("reads: objective monster CIDs normalize signed values to u32",
+    signed_ok and signed.complete and #signed.rows == 1
+      and signed.rows[1].item_id == 501)
+  singletons["app.EnemyManager"] = obj({ _EnemyList = list({
+    live_monster("instance-unreadable", 1001, false, nil),
+  }) })
+  local partial_monster_ok, partial_monsters = pcall(R.objective_monster_rows,
+    monster_task, nil, monster_need)
+  check("reads: unreadable live position clears the whole monster snapshot",
+    partial_monster_ok and partial_monsters.complete == false
+      and #partial_monsters.rows == 0)
+
   -- reserved rows: List<GenerateSelector> -> <Table> -> set infos
   local function row_obj(f) return obj(f) end
   local sel = obj({ ["<Table>k__BackingField"] = obj({
@@ -1754,6 +1861,8 @@ do
       and dn[-1233720880] == nil)
     setdrops({}, {})
     check("reads: empty walk raises", not pcall(R.monster_drops))
+    check("reads: live objective monster drop reader is available",
+      type(R.objective_monster_rows) == "function")
   end
 
   -- v14 reads: schedule rows, current row, area nodes, holders, sentiment
@@ -6459,15 +6568,49 @@ do
   local source_task = { need_generation = 4, quests = { { qid = 1001, task_index = 1,
     read_status = "ok" } } }
   local source_rows = w:objective_source_snapshots(nil, source_task)
+  local source_by_name = provider_map(source_rows)
   check("objective sources: adapter diagnostic envelopes pass through as frozen unknown",
     #source_rows >= 5 and source_rows[1].provider == "placed"
       and source_rows[1].status == "unknown" and #source_rows[1].candidates == 0
       and source_rows[1].reason ~= nil)
   check("objective sources: missing snapshots cannot claim shop or seller availability",
-    source_rows[4].provider == "shop" and source_rows[4].status == "unknown"
-      and #source_rows[4].candidates == 0 and source_rows[4].reason ~= nil
-      and source_rows[5].provider == "monster" and source_rows[5].status == "unknown"
-      and #source_rows[5].candidates == 0 and source_rows[5].reason ~= nil)
+    source_by_name.shop.status == "unknown"
+      and #source_by_name.shop.candidates == 0 and source_by_name.shop.reason ~= nil
+      and source_by_name.monster.status == "unknown"
+      and #source_by_name.monster.candidates == 0 and source_by_name.monster.reason ~= nil)
+
+  local adapter_fixture = fixture()
+  local adapter_rows = {}
+  for _, provider in ipairs({ "placed", "chest", "loot", "talk_grant", "reward", "forgery" }) do
+    adapter_rows[#adapter_rows + 1] = { provider = provider, generation = 7, status = "ok",
+      candidates = (provider == "placed" or provider == "chest" or provider == "loot") and {}
+        or { { generation = 7, source_id = { "source", provider, provider .. "-1" } } } }
+  end
+  adapter_fixture.adapter.objective_item_source_snapshots = function() return adapter_rows end
+  local adapter_world = adapter_fixture.new()
+  local adapter_sources, adapter_counts = provider_map(
+    adapter_world:objective_source_snapshots(nil, source_task))
+  check("objective sources: every adapter-owned provider passes through exactly once",
+    adapter_counts.placed == 1 and adapter_counts.chest == 1 and adapter_counts.loot == 1
+      and adapter_counts.talk_grant == 1 and adapter_counts.reward == 1
+      and adapter_counts.forgery == 1)
+  check("objective sources: talk grants, rewards and forgery candidates reach core input",
+    adapter_sources.talk_grant.status == "ok" and #adapter_sources.talk_grant.candidates == 1
+      and adapter_sources.reward.status == "ok" and #adapter_sources.reward.candidates == 1
+      and adapter_sources.forgery.status == "ok" and #adapter_sources.forgery.candidates == 1)
+  local talk_generation = adapter_sources.talk_grant.generation
+  adapter_rows[4].status, adapter_rows[4].reason = "unknown", "talk_scan_partial"
+  adapter_rows[4].candidates = { { generation = 7,
+    source_id = { "source", "talk_grant", "stale" } } }
+  adapter_rows[5].candidates[1].generation = 6
+  adapter_rows[#adapter_rows + 1] = adapter_rows[6]
+  local invalid_adapter = provider_map(adapter_world:objective_source_snapshots(nil, source_task))
+  check("objective sources: partial, stale and duplicate adapter rows fail closed",
+    invalid_adapter.talk_grant.status == "unknown"
+      and #invalid_adapter.talk_grant.candidates == 0
+      and invalid_adapter.talk_grant.generation > talk_generation
+      and invalid_adapter.reward.status == "unknown" and #invalid_adapter.reward.candidates == 0
+      and invalid_adapter.forgery.status == "unknown" and #invalid_adapter.forgery.candidates == 0)
 
   local source_generation_before = source_rows[1].generation
   source_task.need_generation = 5
@@ -6491,32 +6634,36 @@ do
   local sw = sf.new()
   sw:refresh(0, true, { search = true, shops = true, sellers = true })
   local available = sw:objective_source_snapshots(nil, source_task)
+  local available_by_name = provider_map(available)
   check("objective sources: legacy shop and seller display rows remain unknown",
-    available[4].status == "unknown" and #available[4].candidates == 0)
-  local source_generation = available[4].generation
+    available_by_name.shop.status == "unknown" and #available_by_name.shop.candidates == 0)
+  local source_generation = available_by_name.shop.generation
   sf.data.shops[41][1].flag = 5
   sf.data.needs = { [100] = { { id = 379, num = 1 } } }
   sw:poke()
   sw:refresh(5, true, { search = true, shops = true, sellers = true })
   local changed_source = sw:objective_source_snapshots(nil, source_task)
+  local changed_by_name = provider_map(changed_source)
   check("objective sources: locked legacy display rows still cannot prove offer stock",
-    changed_source[4].status == "unknown" and #changed_source[4].candidates == 0
-      and changed_source[4].generation == source_generation)
+    changed_by_name.shop.status == "unknown" and #changed_by_name.shop.candidates == 0
+      and changed_by_name.shop.generation == source_generation)
   sf.fail.shops = true
   sf.afail.item_needs = true
   sw:poke()
   sw:refresh(10, true, { search = true, shops = true, sellers = true })
   local stale = sw:objective_source_snapshots(nil, source_task)
+  local stale_by_name = provider_map(stale)
   check("objective sources: failed legacy seller refresh cannot create candidates",
-    stale[4].status == "unknown" and #stale[4].candidates == 0)
+    stale_by_name.shop.status == "unknown" and #stale_by_name.shop.candidates == 0)
   sf.fail.shops, sf.afail.item_needs = nil, nil
   sw:poke()
   sw:refresh(20, true, { search = true, shops = true, sellers = true })
   sw:input().shops[1].items[1].id = nil
   local partial = sw:objective_source_snapshots(nil, source_task)
+  local partial_by_name = provider_map(partial)
   check("objective sources: partial legacy shop rows cannot create candidates",
-    partial[4].status == "unknown" and #partial[4].candidates == 0
-      and partial[4].reason ~= nil)
+    partial_by_name.shop.status == "unknown" and #partial_by_name.shop.candidates == 0
+      and partial_by_name.shop.reason ~= nil)
 
   local observation_fixture = fixture()
   local observed = {
@@ -6933,6 +7080,18 @@ do
       and monsters.candidates[1].available_acquisitions == 1
       and monsters.candidates[1].probability == 0.25
       and monsters.candidates[1].source_id[3] ~= monsters.candidates[2].source_id[3])
+  monster_rows.rows[1].accessible = nil
+  mw:refresh(0, true, { chests = true })
+  local access_unknown = mw:objective_monster_observations(source_task, need_proof)
+  check("monster objectives: missing structured access proof makes the provider unknown",
+    access_unknown.status == "unknown" and #access_unknown.candidates == 0)
+  monster_rows.rows[1].accessible = true
+  monster_rows.rows[1].chance, monster_rows.rows[1].raw_rate = nil, 2500
+  mw:refresh(0, true, { chests = true })
+  local scale_unknown = mw:objective_monster_observations(source_task, need_proof)
+  check("monster objectives: raw game rate is not normalized probability evidence",
+    scale_unknown.status == "unknown" and #scale_unknown.candidates == 0)
+  monster_rows.rows[1].chance, monster_rows.rows[1].raw_rate = 0.25, nil
   monster_rows.rows[2].drop_table_readable = false
   mw:refresh(0, true, { chests = true })
   local partial_monsters = mw:objective_monster_observations(source_task, need_proof)
@@ -6945,7 +7104,7 @@ do
   integrated.adapter.objective_item_source_snapshots = function()
     integrated.base_reads = integrated.base_reads + 1
     local base = {}
-    for _, provider in ipairs({ "placed", "chest", "loot" }) do
+    for _, provider in ipairs({ "placed", "chest", "loot", "talk_grant", "reward", "forgery" }) do
       base[#base + 1] = { provider = provider, generation = 1, status = "ok", candidates = {} }
     end
     return base
@@ -6962,22 +7121,23 @@ do
   local integrated_world = integrated.new()
   local empty_joined = integrated_world:objective_source_snapshots(nil,
     { need_generation = 44, quests = {} })
+  local empty_by_name = provider_map(empty_joined)
   check("objective source snapshot: no owned current work does not invoke live readers",
-    #empty_joined == 5 and empty_joined[1].status == "unknown"
-      and #empty_joined[1].candidates == 0 and empty_joined[2].status == "unknown"
-      and #empty_joined[2].candidates == 0 and empty_joined[3].status == "unknown"
-      and #empty_joined[3].candidates == 0 and empty_joined[4].status == "unknown"
-      and #empty_joined[4].candidates == 0 and empty_joined[5].status == "unknown"
-      and #empty_joined[5].candidates == 0
+    #empty_joined == 8 and empty_by_name.placed.status == "unknown"
+      and empty_by_name.chest.status == "unknown" and empty_by_name.loot.status == "unknown"
+      and empty_by_name.talk_grant.status == "unknown" and empty_by_name.reward.status == "unknown"
+      and empty_by_name.forgery.status == "unknown" and empty_by_name.shop.status == "unknown"
+      and empty_by_name.monster.status == "unknown"
       and integrated.shop_reads == 0 and integrated.monster_reads == 0)
   local live_task = { need_generation = 45,
     quests = { { qid = 1001, task_index = 1, read_status = "ok" } } }
   local joined = integrated_world:objective_source_snapshots(nil, live_task)
+  local joined_by_name = provider_map(joined)
   check("objective source snapshot: world-owned shop and monster rows use shared provider contract",
-    joined[4].provider == "shop" and joined[4].status == "ok"
-      and joined[4].candidates[1].source_id[2] == "shop_offer"
-      and joined[5].provider == "monster" and joined[5].status == "ok"
-      and joined[5].candidates[1].certainty == "probabilistic")
+    joined_by_name.shop.status == "ok"
+      and joined_by_name.shop.candidates[1].source_id[2] == "shop_offer"
+      and joined_by_name.monster.status == "ok"
+      and joined_by_name.monster.candidates[1].certainty == "probabilistic")
   integrated.data.objective_need_snapshot = { status = "ok", complete = true,
     generation = 45, source_generation = 2,
     groups = { { qid = 1001, task_index = 1, remaining = 1,
@@ -6995,9 +7155,10 @@ do
     { need_generation = 46, quests = {} })
   local resumed = integrated_world:objective_source_snapshots(nil,
     live_task)
+  local suspended_by_name, resumed_by_name = provider_map(suspended), provider_map(resumed)
   check("objective source snapshot: empty work clears cached live candidates before resume",
-    suspended[4].status == "unknown" and #suspended[4].candidates == 0
-      and resumed[4].status == "ok" and #resumed[4].candidates == 1
+    suspended_by_name.shop.status == "unknown" and #suspended_by_name.shop.candidates == 0
+      and resumed_by_name.shop.status == "ok" and #resumed_by_name.shop.candidates == 1
       and integrated.shop_reads == 4 and integrated.monster_reads == 4
       and integrated.base_reads == 4)
 
@@ -7006,11 +7167,12 @@ do
   local function rejected_current_work(label, task, needs)
     integrated.data.objective_need_snapshot = needs
     local result = integrated_world:objective_source_snapshots(nil, task)
+    local all_unknown = #result == 8
+    for _, row in ipairs(result) do
+      all_unknown = all_unknown and row.status == "unknown" and #row.candidates == 0
+    end
     check("objective source snapshot: " .. label .. " is unknown and skips all source readers",
-      #result == 5 and result[1].status == "unknown" and result[2].status == "unknown"
-        and result[3].status == "unknown" and result[4].status == "unknown"
-        and result[5].status == "unknown" and #result[4].candidates == 0
-        and #result[5].candidates == 0
+      all_unknown
         and integrated.base_reads == calls_before_rejections[1]
         and integrated.shop_reads == calls_before_rejections[2]
         and integrated.monster_reads == calls_before_rejections[3]
