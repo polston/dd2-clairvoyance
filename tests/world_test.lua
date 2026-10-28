@@ -99,6 +99,22 @@ local function fixture(o)
   end
   adef("quest_state", function(q) return d.qstate[q] end)
   adef("item_needs", function() return d.needs end)
+  adef("objective_need_groups", function(task)
+    if d.objective_need_snapshot ~= nil then return d.objective_need_snapshot end
+    local generation = type(task) == "table" and task.need_generation or nil
+    local groups = {}
+    for _, quest in ipairs(type(task) == "table" and task.quests or {}) do
+      if type(quest) == "table" and quest.read_status == "ok"
+          and type(quest.qid) == "number" and quest.qid > 0
+          and type(quest.task_index) == "number" and quest.task_index >= 0 then
+        groups[#groups + 1] = { qid = quest.qid, task_index = quest.task_index,
+          remaining = 1, options = { { item_id = 501, accepted_count = 1 } },
+          complete = true, generation = 1, status = "eligible" }
+      end
+    end
+    return { status = "ok", complete = true, generation = generation,
+      source_generation = 1, groups = groups }
+  end)
   adef("item_locations", function() return d.locs end)
   adef("catalog_ids", function() return d.catalog end)
   adef("cast_ids", function(q) return d.cast[q] end)
@@ -6193,7 +6209,8 @@ do
     empty.status == "unknown" and empty.reason ~= nil and #empty.places == 0
       and empty.generation > recovered_places.generation)
 
-  local source_task = { need_generation = 4, quests = { { qid = 1001, task_index = 1 } } }
+  local source_task = { need_generation = 4, quests = { { qid = 1001, task_index = 1,
+    read_status = "ok" } } }
   local source_rows = w:objective_source_snapshots(nil, source_task)
   check("objective sources: adapter diagnostic envelopes pass through as frozen unknown",
     #source_rows >= 5 and source_rows[1].provider == "placed"
@@ -6554,9 +6571,14 @@ do
   sf.shop_reads = 0
   sf.reads.objective_shop_rows = function() sf.shop_reads = sf.shop_reads + 1; return shop_rows end
   local sw = sf.new()
-  local source_task = { need_generation = 1, quests = { { qid = 1001, task_index = 1 } } }
-  local shops = sw:objective_shop_observations(source_task)
-  local shops_reused = sw:objective_shop_observations(source_task)
+  local source_task = { need_generation = 1, quests = { { qid = 1001, task_index = 1,
+    read_status = "ok" } } }
+  local need_proof = { status = "ok", complete = true, generation = 1,
+    source_generation = 1, groups = { { qid = 1001, task_index = 1, remaining = 1,
+      options = { { item_id = 501, accepted_count = 1 } }, complete = true,
+      generation = 1, status = "eligible" } } }
+  local shops = sw:objective_shop_observations(source_task, need_proof)
+  local shops_reused = sw:objective_shop_observations(source_task, need_proof)
   check("shop objectives: finite and unlimited offers publish gated seller targets",
     shops.status == "ok" and shops.complete and #shops.candidates == 4
       and shops.candidates[1].certainty == "guaranteed"
@@ -6579,38 +6601,38 @@ do
   shop_rows.rows[2].talk_available = false
   shop_rows.rows[3].interactable = false
   sw:refresh(0, true, { chests = true })
-  local interaction_gated = sw:objective_shop_observations(source_task)
+  local interaction_gated = sw:objective_shop_observations(source_task, need_proof)
   check("shop objectives: disabled interaction excludes seller target",
     interaction_gated.status == "ok" and #interaction_gated.candidates == 1
       and interaction_gated.candidates[1].capacity_kind == "unlimited")
   shop_rows.rows[3].interactable = true
   sw:refresh(10, true, { chests = true })
-  local gated = sw:objective_shop_observations(source_task)
+  local gated = sw:objective_shop_observations(source_task, need_proof)
   check("shop objectives: release and talk gates exclude unavailable sellers",
     gated.status == "ok" and #gated.candidates == 2
       and gated.candidates[2].capacity_kind == "unlimited")
   table.remove(shop_rows.rows, 2)
   sw:refresh(20, true, { chests = true })
-  local seller_gone = sw:objective_shop_observations(source_task)
+  local seller_gone = sw:objective_shop_observations(source_task, need_proof)
   check("shop objectives: disappeared seller drops only its target",
     seller_gone.status == "ok" and #seller_gone.candidates == 2
       and seller_gone.generation > gated.generation)
   shop_rows.rows[2].stock = 0
   sw:refresh(30, true, { chests = true })
-  local depleted = sw:objective_shop_observations(source_task)
+  local depleted = sw:objective_shop_observations(source_task, need_proof)
   check("shop objectives: exhausted finite offer disappears while unlimited remains",
     depleted.status == "ok" and #depleted.candidates == 1
       and depleted.candidates[1].capacity_kind == "unlimited")
   shop_rows.rows[2].stock = 1
   shop_rows.rows[2].restock_readable = false
   sw:refresh(40, true, { chests = true })
-  local stock_unknown = sw:objective_shop_observations(source_task)
+  local stock_unknown = sw:objective_shop_observations(source_task, need_proof)
   check("shop objectives: unreadable restock evidence invalidates all candidates",
     stock_unknown.status == "unknown" and #stock_unknown.candidates == 0
       and stock_unknown.generation > depleted.generation)
   shop_rows.complete = false
   sw:refresh(50, true, { chests = true })
-  local partial_shop = sw:objective_shop_observations(source_task)
+  local partial_shop = sw:objective_shop_observations(source_task, need_proof)
   check("shop objectives: partial scan invalidates all seller targets",
     partial_shop.status == "unknown" and partial_shop.complete == false
       and #partial_shop.candidates == 0 and partial_shop.generation > stock_unknown.generation)
@@ -6624,19 +6646,19 @@ do
       released = true, talk_available = true, interactable = true, pos = P(11, 0, 20) },
   }
   sw:refresh(60, true, { chests = true })
-  local conflicting_offer = sw:objective_shop_observations(source_task)
+  local conflicting_offer = sw:objective_shop_observations(source_task, need_proof)
   check("shop objectives: sellers sharing an offer must agree on output and stock evidence",
     conflicting_offer.status == "unknown" and #conflicting_offer.candidates == 0)
   shop_rows.rows[2].item_id, shop_rows.rows[2].stock = 501, 3
   sw:refresh(65, true, { chests = true })
-  local conflicting_stock = sw:objective_shop_observations(source_task)
+  local conflicting_stock = sw:objective_shop_observations(source_task, need_proof)
   check("shop objectives: sellers sharing an offer must agree on available stock",
     conflicting_stock.status == "unknown" and #conflicting_stock.candidates == 0)
   shop_rows.rows = { { shop_id = 9, offer_ordinal = 3, seller_cid = 21, item_id = 501, count = 1,
     capacity_kind = "unlimited", unlimited = true, restock_readable = false,
     released = true, talk_available = true, interactable = true, pos = P(11, 0, 20) } }
   sw:refresh(70, true, { chests = true })
-  local unreadable_unlimited = sw:objective_shop_observations(source_task)
+  local unreadable_unlimited = sw:objective_shop_observations(source_task, need_proof)
   check("shop objectives: unlimited offers still require readable restock evidence",
     unreadable_unlimited.status == "unknown" and #unreadable_unlimited.candidates == 0
       and unreadable_unlimited.candidates[1] == nil)
@@ -6656,7 +6678,7 @@ do
   } }
   mf.reads.objective_monster_rows = function() return monster_rows end
   local mw = mf.new()
-  local monsters = mw:objective_monster_observations(source_task)
+  local monsters = mw:objective_monster_observations(source_task, need_proof)
   check("monster objectives: live instances publish probabilistic drops with stable identities",
     monsters.status == "ok" and #monsters.candidates == 2
       and monsters.candidates[1].certainty == "probabilistic"
@@ -6666,13 +6688,21 @@ do
       and monsters.candidates[1].source_id[3] ~= monsters.candidates[2].source_id[3])
   monster_rows.rows[2].drop_table_readable = false
   mw:refresh(0, true, { chests = true })
-  local partial_monsters = mw:objective_monster_observations(source_task)
+  local partial_monsters = mw:objective_monster_observations(source_task, need_proof)
   check("monster objectives: unreadable drop table clears whole snapshot",
     partial_monsters.status == "unknown" and #partial_monsters.candidates == 0
       and partial_monsters.generation > monsters.generation)
 
   local integrated = fixture()
-  integrated.shop_reads, integrated.monster_reads = 0, 0
+  integrated.shop_reads, integrated.monster_reads, integrated.base_reads = 0, 0, 0
+  integrated.adapter.objective_item_source_snapshots = function()
+    integrated.base_reads = integrated.base_reads + 1
+    local base = {}
+    for _, provider in ipairs({ "placed", "chest", "loot" }) do
+      base[#base + 1] = { provider = provider, generation = 1, status = "ok", candidates = {} }
+    end
+    return base
+  end
   integrated.reads.objective_shop_rows = function() integrated.shop_reads = integrated.shop_reads + 1; return { complete = true, rows = {
     { shop_id = 9, offer_ordinal = 4, seller_cid = 30, item_id = 501, count = 1,
       capacity_kind = "finite", unlimited = false, stock = 1, restock_readable = true,
@@ -6694,7 +6724,7 @@ do
       and #empty_joined[5].candidates == 0
       and integrated.shop_reads == 0 and integrated.monster_reads == 0)
   local joined = integrated_world:objective_source_snapshots(nil,
-    { need_generation = 45, quests = { { qid = 1001, task_index = 1 } } })
+    { need_generation = 45, quests = { { qid = 1001, task_index = 1, read_status = "ok" } } })
   check("objective source snapshot: world-owned shop and monster rows use shared provider contract",
     joined[4].provider == "shop" and joined[4].status == "ok"
       and joined[4].candidates[1].source_id[2] == "shop_offer"
@@ -6703,11 +6733,49 @@ do
   local suspended = integrated_world:objective_source_snapshots(nil,
     { need_generation = 46, quests = {} })
   local resumed = integrated_world:objective_source_snapshots(nil,
-    { need_generation = 45, quests = { { qid = 1001, task_index = 1 } } })
+    { need_generation = 45, quests = { { qid = 1001, task_index = 1, read_status = "ok" } } })
   check("objective source snapshot: empty work clears cached live candidates before resume",
     suspended[4].status == "unknown" and #suspended[4].candidates == 0
       and resumed[4].status == "ok" and #resumed[4].candidates == 1
-      and integrated.shop_reads == 2 and integrated.monster_reads == 2)
+      and integrated.shop_reads == 2 and integrated.monster_reads == 2
+      and integrated.base_reads == 2)
+
+  local calls_before_rejections = { integrated.base_reads, integrated.shop_reads,
+    integrated.monster_reads, integrated.adapter_n.objective_need_groups or 0 }
+  local function rejected_current_work(label, task, needs)
+    integrated.data.objective_need_snapshot = needs
+    local result = integrated_world:objective_source_snapshots(nil, task)
+    check("objective source snapshot: " .. label .. " is unknown and skips all source readers",
+      #result == 5 and result[1].status == "unknown" and result[2].status == "unknown"
+        and result[3].status == "unknown" and result[4].status == "unknown"
+        and result[5].status == "unknown" and #result[4].candidates == 0
+        and #result[5].candidates == 0
+        and integrated.base_reads == calls_before_rejections[1]
+        and integrated.shop_reads == calls_before_rejections[2]
+        and integrated.monster_reads == calls_before_rejections[3]
+        and integrated.adapter_n.objective_need_groups == calls_before_rejections[4] + 1)
+    calls_before_rejections[4] = calls_before_rejections[4] + 1
+  end
+  rejected_current_work("malformed current quest row",
+    { need_generation = 50, quests = { { qid = "bad", task_index = 1, read_status = "ok" } } },
+    { status = "ok", complete = true, generation = 50, source_generation = 5,
+      groups = { { qid = 1, task_index = 1, remaining = 1,
+        options = { { item_id = 501, accepted_count = 1 } }, complete = true,
+        generation = 5, status = "eligible" } } })
+  rejected_current_work("stale need groups",
+    { need_generation = 51, quests = { { qid = 1001, task_index = 1, read_status = "ok" } } },
+    { status = "ok", complete = true, generation = 50, source_generation = 6,
+      groups = { { qid = 1001, task_index = 1, remaining = 1,
+        options = { { item_id = 501, accepted_count = 1 } }, complete = true,
+        generation = 6, status = "eligible" } } })
+  rejected_current_work("itemless objective groups",
+    { need_generation = 52, quests = { { qid = 1001, task_index = 1, read_status = "ok" } } },
+    { status = "ok", complete = true, generation = 52, source_generation = 7,
+      groups = { { qid = 1001, task_index = 1, remaining = 1, options = {},
+        complete = true, generation = 7, status = "eligible" } } })
+  rejected_current_work("no owned objective need groups",
+    { need_generation = 53, quests = { { qid = 1001, task_index = 1, read_status = "ok" } } },
+    { status = "ok", complete = true, generation = 53, source_generation = 8, groups = {} })
 end
 
 if failures > 0 then os.exit(1) end

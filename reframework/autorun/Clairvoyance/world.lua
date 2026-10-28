@@ -2615,6 +2615,72 @@ function M.new(a, reads, io)
     return publish("ok", nil, places)
   end
 
+  local function objective_task_rows(task_snapshot)
+    local function integer(value, minimum)
+      return type(value) == "number" and math.type(value) == "integer" and value >= minimum
+    end
+    local function array(value)
+      if type(value) ~= "table" then return nil end
+      local n, count = #value, 0
+      for k in pairs(value) do
+        if type(k) ~= "number" or math.type(k) ~= "integer" or k < 1 or k > n then return nil end
+        count = count + 1
+      end
+      return count == n and value or nil
+    end
+    if type(task_snapshot) ~= "table" or not integer(task_snapshot.need_generation, 1) then return nil end
+    local quests = array(task_snapshot.quests)
+    if quests == nil then return nil end
+    local current = {}
+    for _, quest in ipairs(quests) do
+      if type(quest) == "table" and integer(quest.qid, 1)
+          and integer(quest.task_index, 0) and quest.read_status == "ok" then
+        if current[quest.qid] ~= nil and current[quest.qid] ~= quest.task_index then return nil end
+        current[quest.qid] = quest.task_index
+      end
+    end
+    return current
+  end
+
+  local function objective_need_proves_current_work(task_snapshot, need_snapshot, current_tasks)
+    local function integer(value, minimum)
+      return type(value) == "number" and math.type(value) == "integer" and value >= minimum
+    end
+    local function array(value)
+      if type(value) ~= "table" then return nil end
+      local n, count = #value, 0
+      for k in pairs(value) do
+        if type(k) ~= "number" or math.type(k) ~= "integer" or k < 1 or k > n then return nil end
+        count = count + 1
+      end
+      return count == n and value or nil
+    end
+    if current_tasks == nil or next(current_tasks) == nil or type(need_snapshot) ~= "table"
+        or need_snapshot.status ~= "ok" or need_snapshot.complete ~= true
+        or need_snapshot.generation ~= task_snapshot.need_generation
+        or not integer(need_snapshot.generation, 1)
+        or not integer(need_snapshot.source_generation, 1) then return false end
+    local groups = array(need_snapshot.groups)
+    if groups == nil or #groups == 0 then return false end
+    local matched = false
+    for _, group in ipairs(groups) do
+      if type(group) ~= "table" or not integer(group.qid, 1)
+          or not integer(group.task_index, 0)
+          or current_tasks[group.qid] ~= group.task_index
+          or group.status ~= "eligible" or group.complete ~= true
+          or group.generation ~= need_snapshot.source_generation
+          or not integer(group.remaining, 1) then return false end
+      local options = array(group.options)
+      if options == nil or #options == 0 then return false end
+      for _, option in ipairs(options) do
+        if type(option) ~= "table" or not integer(option.item_id, 1)
+            or not integer(option.accepted_count, 1) then return false end
+      end
+      matched = true
+    end
+    return matched
+  end
+
   function w:objective_source_snapshots(objective_catalog, task_snapshot)
     local function array(value)
       if type(value) ~= "table" then return nil end
@@ -2648,9 +2714,16 @@ function M.new(a, reads, io)
         reason = reason, candidates = {} }
     end
     local generation = type(task_snapshot) == "table" and task_snapshot.need_generation or nil
-    local valid_task = type(generation) == "number" and math.type(generation) == "integer"
-      and generation > 0 and type(task_snapshot.quests) == "table"
-      and array(task_snapshot.quests) ~= nil and #task_snapshot.quests > 0
+    local current_tasks = objective_task_rows(task_snapshot)
+    local task_array_valid = type(task_snapshot) == "table"
+      and type(generation) == "number" and math.type(generation) == "integer" and generation > 0
+      and array(task_snapshot.quests) ~= nil
+    local need_snapshot, need_readable = nil, false
+    if task_array_valid and type(a.objective_need_groups) == "function" then
+      need_readable, need_snapshot = pcall(a.objective_need_groups, task_snapshot)
+    end
+    local valid_task = objective_need_proves_current_work(task_snapshot,
+      need_readable and need_snapshot or nil, current_tasks)
     local providers, rows_by_provider = {}, {}
     local ok, base = false, nil
     if valid_task and type(a.objective_item_source_snapshots) == "function" then
@@ -2715,8 +2788,10 @@ function M.new(a, reads, io)
       end
       providers[#providers + 1] = out
     end
-    local shop = w:objective_shop_observations(valid_task and task_snapshot or nil)
-    local monster = w:objective_monster_observations(valid_task and task_snapshot or nil)
+    local shop = w:objective_shop_observations(valid_task and task_snapshot or nil,
+      valid_task and need_snapshot or nil)
+    local monster = w:objective_monster_observations(valid_task and task_snapshot or nil,
+      valid_task and need_snapshot or nil)
     providers[#providers + 1] = shop
     providers[#providers + 1] = monster
     return providers
@@ -2724,22 +2799,12 @@ function M.new(a, reads, io)
 
   -- World-owned live source readers are optional until their managed gates are
   -- proven. Missing or partial reads publish unknown and never retain rows.
-  local function objective_live_sources(provider, read_name, normalize, task_snapshot)
+  local function objective_live_sources(provider, read_name, normalize, task_snapshot, need_snapshot)
     local need_generation = type(task_snapshot) == "table"
       and to_int(task_snapshot.need_generation) or nil
-    local task_quests = type(task_snapshot) == "table" and task_snapshot.quests or nil
-    local owns_current_work = need_generation ~= nil and need_generation > 0
-      and type(task_quests) == "table" and #task_quests > 0
-    if owns_current_work then
-      local count = 0
-      for k in pairs(task_quests) do
-        if type(k) ~= "number" or math.type(k) ~= "integer" or k < 1 or k > #task_quests then
-          owns_current_work = false; break
-        end
-        count = count + 1
-      end
-      owns_current_work = owns_current_work and count == #task_quests
-    end
+    local current_tasks = objective_task_rows(task_snapshot)
+    local owns_current_work = objective_need_proves_current_work(task_snapshot,
+      need_snapshot, current_tasks)
     if not owns_current_work then
       S.objective_live_source_cache[provider] = nil
       local evidence = { status = "unknown", reason = "current_work_unavailable" }
@@ -2823,7 +2888,7 @@ function M.new(a, reads, io)
     return result
   end
 
-  function w:objective_shop_observations(task_snapshot)
+  function w:objective_shop_observations(task_snapshot, need_snapshot)
     local offers = {}
     return objective_live_sources("shop", "objective_shop_rows", function(row)
       if type(row) ~= "table" then return nil, "shop_row_malformed" end
@@ -2872,10 +2937,10 @@ function M.new(a, reads, io)
         available_acquisitions = available, certainty = "guaranteed",
         eligibility = "eligible", evidence = { released = true, talk_available = true,
           interactable = true, restock_readable = row.restock_readable } }
-    end, task_snapshot)
+    end, task_snapshot, need_snapshot)
   end
 
-  function w:objective_monster_observations(task_snapshot)
+  function w:objective_monster_observations(task_snapshot, need_snapshot)
     return objective_live_sources("monster", "objective_monster_rows", function(row)
       if type(row) ~= "table" then return nil, "monster_row_malformed" end
       local drop_id = row.drop_row_id
@@ -2904,7 +2969,7 @@ function M.new(a, reads, io)
         capacity_kind = "finite", available_acquisitions = 1, certainty = "probabilistic",
         probability = row.chance, eligibility = "eligible",
         evidence = { alive = true, accessible = true, drop_table_readable = true } }
-    end, task_snapshot)
+    end, task_snapshot, need_snapshot)
   end
 
   -- the next refresh runs a round even inside the throttle window

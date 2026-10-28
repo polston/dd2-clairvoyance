@@ -262,9 +262,13 @@ local function source_bench(label, count, task)
       w:poke()
       assert(w:refresh(t, true, TG), "source benchmark round did not run")
       local read_before, provider_start = shop_reads, os.clock()
-      local snapshot = w:objective_shop_observations(task)
+      local proof = { status = "ok", complete = true, generation = task.need_generation,
+        source_generation = 1, groups = { { qid = 1, task_index = 0, remaining = 1,
+          options = { { item_id = 100, accepted_count = 1 } }, complete = true,
+          generation = 1, status = "eligible" } } }
+      local snapshot = w:objective_shop_observations(task, proof)
       provider_total = provider_total + (os.clock() - provider_start) * 1000
-      local cached = w:objective_shop_observations(task)
+      local cached = w:objective_shop_observations(task, proof)
       assert(snapshot.status == "ok" and #snapshot.candidates == task.expected_rows)
       assert(cached.generation == snapshot.generation and shop_reads == read_before + 1,
         "provider repeated a full scan inside one world round")
@@ -280,7 +284,8 @@ local function source_bench(label, count, task)
     shop_reads - reads_before))
 end
 source_bench("no focused need", 60,
-  { need_generation = 1, focused_item_ids = {}, quests = { { qid = 1, task_index = 1 } },
+  { need_generation = 1, focused_item_ids = {}, quests = { { qid = 1, task_index = 0,
+    read_status = "ok" } },
     expected_rows = 0 })
 local focused_items = {}
 for i = 100, 109 do focused_items[i] = true end
@@ -288,7 +293,7 @@ local expected_rows = 0
 for i = 1, 60 do if focused_items[100 + (i % 40)] then expected_rows = expected_rows + 1 end end
 source_bench("representative focused needs", 60,
   { need_generation = 2, focused_item_ids = focused_items,
-    quests = { { qid = 1, task_index = 1 } }, expected_rows = expected_rows })
+    quests = { { qid = 1, task_index = 0, read_status = "ok" } }, expected_rows = expected_rows })
 
 local monster_rows, monster_reads = {}, 0
 for i = 1, 100 do
@@ -316,9 +321,13 @@ local function monster_bench(label, task)
       w:poke()
       assert(w:refresh(t, true, TG), "monster benchmark round did not run")
       local read_before, provider_start = monster_reads, os.clock()
-      local snapshot = w:objective_monster_observations(task)
+      local proof = { status = "ok", complete = true, generation = task.need_generation,
+        source_generation = 1, groups = { { qid = 1, task_index = 0, remaining = 1,
+          options = { { item_id = 100, accepted_count = 1 } }, complete = true,
+          generation = 1, status = "eligible" } } }
+      local snapshot = w:objective_monster_observations(task, proof)
       provider_total = provider_total + (os.clock() - provider_start) * 1000
-      local cached = w:objective_monster_observations(task)
+      local cached = w:objective_monster_observations(task, proof)
       assert(snapshot.status == "ok" and #snapshot.candidates == task.expected_rows)
       assert(cached.generation == snapshot.generation and monster_reads == read_before + 1,
         "monster provider repeated a full scan inside one world round")
@@ -334,12 +343,13 @@ local function monster_bench(label, task)
     median(samples), monster_reads - reads_before))
 end
 local monster_empty = { need_generation = 3, focused_item_ids = {},
-  quests = { { qid = 1, task_index = 1 } }, expected_rows = 0 }
+  quests = { { qid = 1, task_index = 0, read_status = "ok" } }, expected_rows = 0 }
 monster_bench("no focused need", monster_empty)
 local monster_expected = 0
 for _, row in ipairs(monster_rows) do
   if focused_items[row.item_id] then monster_expected = monster_expected + 1 end
 end
 monster_bench("representative focused needs", { need_generation = 4,
-  focused_item_ids = focused_items, quests = { { qid = 1, task_index = 1 } },
+  focused_item_ids = focused_items,
+  quests = { { qid = 1, task_index = 0, read_status = "ok" } },
   expected_rows = monster_expected })
