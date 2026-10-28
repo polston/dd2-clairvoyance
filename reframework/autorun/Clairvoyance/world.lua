@@ -325,6 +325,12 @@ function M.new(a, reads, io)
       for k in pairs(t) do if not allowed[k] then return false end end
       return true
     end
+    local function source_guid(value)
+      if type(value) ~= "string" then return nil end
+      local guid = value:lower()
+      return guid:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$")
+        and guid or nil
+    end
     local function valid_gate(g)
       if type(g) ~= "table" or not exact_fields(g, { check = true, conditions = true })
         or (g.check ~= 0 and g.check ~= 1) or math.tointeger(g.check) == nil
@@ -389,9 +395,18 @@ function M.new(a, reads, io)
       else
         rows = rows + 1
         local uid = r.uid:lower()
+        local source_index, source_table, source_layer
         if r.k == "item" or r.k == "chest" then
-          if source_uids[r.k][uid] then source_catalog_bad = "duplicate_source_identity" end
-          source_uids[r.k][uid] = true
+          source_index, source_table, source_layer = to_int(r.index), source_guid(r.table_id),
+            to_int(r.layer)
+          if source_index == nil or source_index < 0 or source_table == nil
+              or (source_layer ~= 0 and source_layer ~= 2) then
+            source_catalog_bad = source_catalog_bad or "malformed_source_native_metadata"
+          else
+            local identity = uid .. ":" .. source_index
+            if source_uids[r.k][identity] then source_catalog_bad = "duplicate_source_identity" end
+            source_uids[r.k][identity] = true
+          end
         end
         new_uids[uid] = true
         local x, y, z = round1(r.x), round1(r.y), round1(r.z)
@@ -399,12 +414,14 @@ function M.new(a, reads, io)
         if r.k == "item" then
           local item_id, count = to_int(r.item or r.id), to_int(r.n or r.count)
           if item_id == nil or item_id <= 0 or count == nil or count <= 0
+            or source_index == nil or source_table == nil or source_layer == nil
             or type(r.src) ~= "string" or not normal_src(r.src) then
             source_catalog_bad = source_catalog_bad or "malformed_placement"
           else
             new_placements[#new_placements + 1] = { uid = uid,
-              source_id = { "source", "placed", uid },
-              capacity_pool_id = { "capacity", "placed", uid },
+              index = source_index, table_id = source_table, layer = source_layer,
+              source_id = { "source", "placed", uid, source_index },
+              capacity_pool_id = { "capacity", "placed", uid, source_index },
               outputs = { { item_id = item_id, count = count } },
               pos = { x = x, y = y, z = z }, gate = r.gate }
           end
@@ -452,15 +469,27 @@ function M.new(a, reads, io)
             if r.pawn == true then e.pawn = true end
           end
           if r.k == "chest" then
+            local unlock_item, fake_unlock_item = to_int(r.unlock_item), to_int(r.fake_unlock_item)
+            local access_ok = unlock_item ~= nil and unlock_item >= 0
+              and fake_unlock_item ~= nil and fake_unlock_item >= 0
+              and type(r.is_seal) == "boolean" and type(r.quest_override) == "boolean"
+              and source_index ~= nil and source_table ~= nil and source_layer ~= nil
+            if not access_ok then
+              source_catalog_bad = source_catalog_bad or "malformed_chest_access_metadata"
+            end
             e.quest = chest_quest(r.gate) or e.quest
-            if e.items ~= nil then
+            if e.items ~= nil and access_ok then
               local outputs = {}
               for _, item in ipairs(e.items) do
                 outputs[#outputs + 1] = { item_id = item.id, count = item.n }
               end
               new_chests[#new_chests + 1] = { uid = uid,
-                source_id = { "source", "chest", uid },
-                capacity_pool_id = { "capacity", "chest", uid }, outputs = outputs,
+                index = source_index, table_id = source_table, layer = source_layer,
+                source_id = { "source", "chest", uid, source_index },
+                capacity_pool_id = { "capacity", "chest", uid, source_index },
+                unlock_item = unlock_item, is_seal = r.is_seal,
+                fake_unlock_item = fake_unlock_item, quest_override = r.quest_override,
+                outputs = outputs,
                 pos = { x = x, y = y, z = z }, gate = r.gate }
             end
           end

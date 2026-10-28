@@ -254,6 +254,17 @@ end
 local function prow(k, uid, id, x, z, extra)
   local r = { k = k, uid = uid, id = id, x = x, y = 0, z = z, src = "normal" }
   for kk, v in pairs(extra or {}) do r[kk] = v end
+  if k == "item" or k == "chest" then
+    r.index = r.index or 0
+    r.table_id = r.table_id or "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    r.layer = r.layer or (r.src == "subquest" and 2 or 0)
+  end
+  if k == "chest" then
+    if r.unlock_item == nil then r.unlock_item = 0 end
+    if r.is_seal == nil then r.is_seal = false end
+    if r.fake_unlock_item == nil then r.fake_unlock_item = 0 end
+    if r.quest_override == nil then r.quest_override = false end
+  end
   return r
 end
 
@@ -6886,11 +6897,16 @@ end
 do
   local source_rows = {
     { k = "item", uid = "pickup-1", id = 501, n = 2, x = 1, y = 2, z = 3,
+      index = 0, table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
       src = "normal", gate = { check = 0, conditions = {
         { kind = "quest", qid = 1234, finish = true } } } },
     { k = "chest", uid = "chest-1", id = 10, x = 4, y = 5, z = 6,
+      index = 0, table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", layer = 0,
+      unlock_item = 0, is_seal = false, fake_unlock_item = 0, quest_override = false,
       items = { { id = 501, n = 3 }, { id = 502, n = 1 } }, src = "normal" },
     { k = "chest", uid = "quest-chest-1", id = 11, x = 7, y = 8, z = 9,
+      index = 0, table_id = "cccccccc-cccc-cccc-cccc-cccccccccccc", layer = 2,
+      unlock_item = 0, is_seal = false, fake_unlock_item = 0, quest_override = false,
       items = { { id = 503, n = 1 } }, src = "subquest" },
   }
   local f = fixture({ files = { [K.PLACES] = places(source_rows) } })
@@ -6904,23 +6920,35 @@ do
     catalog.placements[1].uid == "pickup-1"
       and catalog.placements[1].source_id[1] == "source"
       and catalog.placements[1].source_id[2] == "placed"
+      and catalog.placements[1].source_id[4] == 0
       and catalog.placements[1].capacity_pool_id[2] == "placed"
+      and catalog.placements[1].table_id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+      and catalog.placements[1].layer == 0
       and catalog.placements[1].outputs[1].item_id == 501
       and catalog.placements[1].outputs[1].count == 2 and catalog.placements[1].pos.x == 1
       and catalog.placements[1].gate.conditions[1].qid == 1234
       and #catalog.chests == 2 and catalog.chests[1].uid == "chest-1"
       and #catalog.chests[1].outputs == 2
       and catalog.chests[1].source_id[2] == "chest"
+      and catalog.chests[1].source_id[4] == 0
+      and catalog.chests[1].table_id == "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+      and catalog.chests[1].unlock_item == 0 and catalog.chests[1].is_seal == false
+      and catalog.chests[1].fake_unlock_item == 0
+      and catalog.chests[1].quest_override == false
       and catalog.chests[1].outputs[2].item_id == 502
-      and catalog.chests[2].uid == "quest-chest-1")
+      and catalog.chests[2].uid == "quest-chest-1" and catalog.chests[2].layer == 2)
   local mutation_ok = pcall(function() catalog.placements[1].outputs[1].count = 900 end)
   local nested_mutation_ok = pcall(function() catalog.chests[1].outputs[1].count = 900 end)
   check("static catalog: returned values cannot mutate private closure catalog",
     not mutation_ok and not nested_mutation_ok
       and w:objective_static_source_catalog().placements[1].outputs[1].count == 2)
   local malformed = fixture({ files = { [K.PLACES] = places({
-    { k = "item", uid = "dup", id = 501, n = 1, x = 0, y = 0, z = 0, src = "normal" },
-    { k = "item", uid = "dup", id = 502, n = 1, x = 1, y = 0, z = 1, src = "normal" },
+    { k = "item", uid = "dup", id = 501, n = 1, x = 0, y = 0, z = 0,
+      index = 0, table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
+      src = "normal" },
+    { k = "item", uid = "dup", id = 502, n = 1, x = 1, y = 0, z = 1,
+      index = 0, table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
+      src = "normal" },
   }) } }):new():objective_static_source_catalog()
   check("static catalog: duplicate identity invalidates catalog atomically",
     malformed.status == "unknown" and malformed.complete == false
@@ -6931,6 +6959,7 @@ do
       and #missing.placements == 0 and #missing.chests == 0)
   local malformed_content = fixture({ files = { [K.PLACES] = places({
     { k = "item", uid = "bad-count", id = 501, n = 0, x = 0, y = 0, z = 0,
+      index = 0, table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
       src = "normal" },
   }) } }):new():objective_static_source_catalog()
   check("static catalog: malformed placement quantity fails closed",
@@ -6938,11 +6967,20 @@ do
       and #malformed_content.placements == 0)
   local malformed_chest = fixture({ files = { [K.PLACES] = places({
     { k = "chest", uid = "bad-chest", id = 10, x = 0, y = 1, z = 2,
+      index = 0, table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", layer = 0,
+      unlock_item = 0, is_seal = false, fake_unlock_item = 0, quest_override = false,
       src = "normal", items = { { id = 501, n = 0 } } },
   }) } }):new():objective_static_source_catalog()
   check("static catalog: malformed chest output fails closed",
     malformed_chest.status == "unknown" and malformed_chest.complete == false
       and #malformed_chest.chests == 0)
+  local malformed_metadata = fixture({ files = { [K.PLACES] = places({
+    { k = "item", uid = "missing-table", id = 501, n = 1, x = 0, y = 1, z = 2,
+      index = 0, layer = 0, src = "normal" },
+  }) } }):new():objective_static_source_catalog()
+  check("static catalog: missing native metadata fails closed",
+    malformed_metadata.status == "unknown" and malformed_metadata.complete == false
+      and #malformed_metadata.placements == 0)
 
   local sf = fixture()
   local shop_rows = { complete = true, rows = {
