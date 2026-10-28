@@ -146,6 +146,28 @@ return initial .. "|" .. tostring(playable) .. "|" .. interact .. "|" .. history
 check("talk-event read calls accept only their literal allowlist entries",
   talk_methods_ok:find("cmd ok=true getTalkEventInitialSpeaker:talk-event-id|true|canTalkEventInteract:engine-character|getHistory:talk-event-id", 1, true) ~= nil)
 
+local monster_getters_ok = run_case('', [[
+local character = { call = function(_, name) return name end }
+local transform = reviewed_call(character, "get_Transform")
+local position = reviewed_call(character, "get_UniversalPosition")
+local dead = reviewed_call(character, "get_IsDead")
+return transform .. "|" .. position .. "|" .. dead
+]], 150)
+check("monster probe read getters accept only literal allowlist entries",
+  monster_getters_ok:find("cmd ok=true get_Transform|get_UniversalPosition|get_IsDead", 1, true) ~= nil)
+
+local monster_getter_near_miss = run_case('', [[
+return reviewed_call({}, "get_IsDeadExtra")
+]], 150)
+check("monster probe getter near-miss stays rejected",
+  monster_getter_near_miss:find("cmd ok=false unsafe probe call: unreviewed managed method", 1, true) ~= nil)
+
+local unproven_is_dead_alias = run_case('', [[
+return reviewed_call({}, "isDead")
+]], 150)
+check("unverified isDead alias stays rejected",
+  unproven_is_dead_alias:find("cmd ok=false unsafe probe call: unreviewed managed method", 1, true) ~= nil)
+
 local talk_method_near_miss = run_case('', [[
 return reviewed_call({}, "getTalkEventInitialSpeakerExtra", "id")
 ]], 150)
