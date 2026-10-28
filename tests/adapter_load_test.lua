@@ -174,17 +174,31 @@ local contract = {
   "seen_quest_name", "quest_region",
   "refresh_tree_gates", "invalidate_tree_gates", "tree_gate_qids",
   "tree_gate_table", "tree_gate_stats",
-  "invalidate_items", "item_needs", "item_locations", "item_name", "item_stats",
+  "invalidate_items", "item_needs", "objective_need_groups", "item_locations", "item_name", "item_stats",
   "refresh_items", "item_related", "reset_item_throttle", "quest_steps_text",
   "tracked_qid", "journal_now", "journal_all", "npc_name", "journal_stats",
   "map_open", "map_jump_apply", "journal_note_jump", "map_cursor",
   "quest_step", "masquerade_door_closed",
   "overhead_block_reason",
 }
-assert(#contract == 53)
+assert(#contract == 54)
 for _, name in ipairs(contract) do
   assert(type(a[name]) == "function", "contract function missing: " .. name)
 end
+local grouped, grouped_complete = A.objective_need_builder.build({
+  { qid = 700, processor_id = 800, list_index = 0, condition_index = 1,
+    complete = true, current_work = true, options = {
+      { item_id = 900, required = 2, op = "more" },
+      { item_id = 901, required = 2, op = "more" },
+    } },
+}, { [900] = 1 }, { generation = 3, task_generation = 3,
+  task_index = { [700] = 4 } })
+assert(grouped_complete and #grouped == 1 and grouped[1].remaining == 1
+  and #grouped[1].options == 2 and grouped[1].id[1] == "need"
+  and grouped[1].generation == 3, "adapter exports objective-only grouped need model")
+local empty_need_snapshot = a.objective_need_groups()
+assert(empty_need_snapshot.status == "unknown" and not empty_need_snapshot.complete
+  and #empty_need_snapshot.groups == 0, "unrefreshed objective group snapshot is unknown")
 local empty_source_snapshots = a.objective_item_source_snapshots()
 assert(#empty_source_snapshots == 3 and empty_source_snapshots[1].provider == "placed"
   and empty_source_snapshots[2].provider == "chest" and empty_source_snapshots[3].provider == "loot"
@@ -2288,7 +2302,7 @@ do
   local HAS = "app.quest.condition.CheckHasItem"
   local IS = { procs = {}, prog = {}, prog_nil = false, qm = nil, qm_on = true,
     im_on = true, dict = nil, icons = {}, icon_fail = {}, gm = nil, gets = {},
-    data_calls = 0, dict_reads = 0, cls_reads = 0, started_reads = 0,
+    data_calls = 0, dict_reads = 0, cls_reads = 0, loot_reads = 0, started_reads = 0,
     count_reads = 0, drift = 0 }
   local function typed(tn, fields)
     local o = mobj(fields)
@@ -2339,7 +2353,7 @@ do
     local p = mobj({
       ["<RefQuestController>k__BackingField"] = mobj({ _QuestID = qid }),
       ProcID = o.procid or (900 + iproc_n),
-      ConditionLists = ilist({ ilist(conds) },
+      ConditionLists = ilist(o.condition_lists or { ilist(conds) },
         function() IS.cls_reads = IS.cls_reads + 1 end),
     })
     p.get_field = function(self, n)
@@ -2349,6 +2363,7 @@ do
       end
       if n == "<IsStarted>k__BackingField" then
         IS.started_reads = IS.started_reads + 1
+        if o.unread_started then return nil end
         if o.started == nil then return true end
         return o.started
       end
@@ -2382,8 +2397,26 @@ do
     if m == "getProgressingQuestIds" then
       if IS.prog_nil then return nil end
       return mcoll(IS.prog)
+    elseif m == "getCurrentTask" then
+      return { call = function(_, method)
+        if method == "getActiveDestinations" then return mcoll({}) end
+      end }
     end
-  end }
+  end,
+    get_field = function(_, name)
+      if name == "_QuestLogInfoDict" then
+        return { call = function(_, method, qid)
+          if method == "get_Item" then
+            return { call = function(_, method_name)
+              if method_name == "get_CurrentTaskIndex" then
+                if IS.task_index_unreadable then return nil end
+                return IS.task_index or 0
+              end
+            end }
+          end
+        end }
+      end
+    end }
   local function sd(id, num) return mobj({ _ItemId = id, _Num = num }) end
   local function storage(entries)   -- {key=, value=}; value absent = free slot
     local elems = {}
@@ -2421,10 +2454,23 @@ do
   local function placed(id, upos, lpos, tn)
     return gim(tn or "app.Gm82_000", { ItemId = id, ItemNum = 1 }, upos, lpos)
   end
-  local function drop(id, upos, lpos, deleted)
-    return gim("app.Gm82_000_01", { ItemId = id,
-      MyContext = mobj({ _ItemId = id, _Num = 1 }),
-      ["<IsDeleted>k__BackingField"] = deleted == true }, upos, lpos)
+  local drop_id = 0
+  local function drop(id, upos, lpos, deleted, uid, amount)
+    drop_id = drop_id + 1
+    if uid == nil then uid = string.format("00000000-0000-4000-8000-%012x", drop_id) end
+    if amount == nil then amount = 1 end
+    local fields = { ItemId = id, MyContext = mobj({ _ItemId = id, _Num = amount }) }
+    if deleted ~= "unreadable" then fields["<IsDeleted>k__BackingField"] = deleted == true end
+    local out = gim("app.Gm82_000_01", fields, upos, lpos)
+    local original_call = out.call
+    out.call = function(self, method, ...)
+      if method == "get_UniqId" then
+        if uid == false then return nil end
+        return { call = function(_, name) if name == "ToString()" then return uid end end }
+      end
+      return original_call(self, method, ...)
+    end
+    return out
   end
   local function box(ids, upos, lpos)
     local items = {}
@@ -2449,7 +2495,8 @@ do
   local function gmgr(o)
     return mobj({
       ["<ManagedGimmicksByIDs>k__BackingField"] = o.managed,
-      ["<DropItemGimmicks>k__BackingField"] = o.drops and ilist(o.drops) or nil,
+      ["<DropItemGimmicks>k__BackingField"] = o.drops and ilist(o.drops,
+        function() IS.loot_reads = IS.loot_reads + 1 end) or nil,
       ["<TreasureBoxGimmicks>k__BackingField"] = o.boxes and ilist(o.boxes) or nil,
     })
   end
@@ -2480,12 +2527,14 @@ do
     IS.qm_on, IS.im_on, IS.prog_nil, IS.drift = true, true, false, 0
     IS.prog = { 20090 }
     IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+    IS.task_index = 0
     IS.dict = storage({ { key = PL, value = ilist({}) } })
     IS.icons = { [300] = 2017 }
     IS.icon_fail = {}
     IS.gm = gmgr({ managed = managed({ hset({ placed(300, V, L) }) }),
       drops = {}, boxes = {} })
     IS.gets = {}
+    IS.loot_reads = 0
     IS.data_calls, IS.dict_reads, IS.cls_reads = 0, 0, 0
     IS.started_reads, IS.count_reads = 0, 0
   end
@@ -2567,7 +2616,7 @@ do
   ai.reset_session_caches()                 -- primes the session owner
   ai.item_name(300)
   dc = IS.data_calls
-  iqlm = { call = iqlm.call }
+  iqlm = { call = iqlm.call, get_field = iqlm.get_field }
   assert(ai.reset_session_caches() == true, "NM6 session reset ran")
   ai.item_name(300)
   assert(IS.data_calls == dc + 1, "NM6 reset_runtime_caches clears the name cache")
@@ -2675,10 +2724,221 @@ do
   local nd = needs_of(ai, 20090)
   assert(nd ~= nil and #nd == 1 and nd[1].id == 300 and nd[1].num == 1,
     "IW1 need committed")
+  local task_snapshot = ai.objective_task_snapshot({ 20090 })
+  local need_snapshot = ai.objective_need_groups(task_snapshot)
+  assert(need_snapshot.status == "ok" and need_snapshot.complete
+    and #need_snapshot.groups == 1 and need_snapshot.groups[1].qid == 20090
+    and need_snapshot.groups[1].task_index == 0
+    and need_snapshot.groups[1].remaining == 1
+    and #need_snapshot.groups[1].options == 1
+    and need_snapshot.groups[1].options[1].item_id == 300,
+    "IW1 objective groups are co-published with verified zero-based task snapshot")
+  local live_drop = drop(300, V, L, false,
+    "00000000-0000-4000-8000-000000000101", 2)
+  IS.gm = gmgr({ managed = managed({}), drops = { live_drop }, boxes = {} })
+  local source_views = ai.objective_item_source_snapshots(nil, task_snapshot)
+  local loot_view = source_views[3]
+  assert(loot_view.provider == "loot" and loot_view.status == "ok"
+    and loot_view.complete and #loot_view.candidates == 1,
+    "IW1 current focused loot publishes one complete source")
+  local loot_candidate = loot_view.candidates[1]
+  assert(loot_candidate.source_id[1] == "source"
+    and loot_candidate.source_id[2] == "loot"
+    and loot_candidate.source_id[3] == "00000000-0000-4000-8000-000000000101"
+    and loot_candidate.outputs[1].item_id == 300 and loot_candidate.outputs[1].count == 2
+    and loot_candidate.target.kind == "loot"
+    and loot_candidate.target.uid == "00000000-0000-4000-8000-000000000101"
+    and loot_candidate.target.pos.x == V.x
+    and loot_candidate.capacity_kind == "finite"
+    and loot_candidate.available_acquisitions == 1
+    and loot_candidate.capacity_pool_id[1] == "capacity"
+    and loot_candidate.capacity_pool_id[2] == "loot"
+    and loot_candidate.certainty == "guaranteed"
+    and loot_candidate.eligibility == "eligible"
+    and loot_candidate.evidence.deleted == false
+    and loot_candidate.generation == task_snapshot.need_generation,
+    "IW1 loot observation carries UID, exact output, position and capacity")
+  local native_uid = "00000000-0000-4000-8000-000000000105_0"
+  IS.gm = gmgr({ managed = managed({}),
+    drops = { drop(300, V, L, false, native_uid, 2) }, boxes = {} })
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "ok" and #loot_view.candidates == 1
+    and loot_view.candidates[1].target.uid == native_uid
+    and loot_view.candidates[1].source_id[3] == native_uid,
+    "IW1 native indexed GUID UID is accepted and preserved")
+  local duplicate_uid = "00000000-0000-4000-8000-000000000106_0"
+  IS.gm = gmgr({ managed = managed({}), drops = {
+    drop(999, V, L, true, duplicate_uid, 1),
+    drop(300, V, L, false, duplicate_uid, 2) }, boxes = {} })
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "unknown" and not loot_view.complete
+    and #loot_view.candidates == 0,
+    "IW1 duplicate UID across unwanted and deleted rows invalidates loot atomically")
+  local loot_count_reads = IS.loot_reads
+  ai.objective_item_source_snapshots(nil, task_snapshot)
+  assert(IS.loot_reads == loot_count_reads,
+    "IW1 repeated snapshot reuses the bounded loot observation")
+  IS.gm = gmgr({ managed = managed({}), drops = { live_drop }, boxes = {} })
+  live_drop["<IsDeleted>k__BackingField"] = true
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "ok" and loot_view.complete
+    and #loot_view.candidates == 0, "IW1 collected loot disappears on refresh")
+  local function loot_unknown(next_drop, label)
+    IS.gm = gmgr({ managed = managed({}), drops = { next_drop }, boxes = {} })
+    iclk = iclk + 0.6
+    local view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+    assert(view.status == "unknown" and not view.complete and #view.candidates == 0,
+      "IW1 " .. label .. " fails closed without retained loot")
+  end
+  loot_unknown(drop(300, V, L, false, false, 1), "UID unreadable")
+  loot_unknown(drop(300, nil, nil, false, "00000000-0000-4000-8000-000000000102", 1),
+    "position unreadable")
+  loot_unknown(drop(300, V, L, "unreadable",
+    "00000000-0000-4000-8000-000000000103", 1), "deletion state unreadable")
+  loot_unknown(drop(300, V, L, false,
+    "00000000-0000-4000-8000-000000000104", 0), "nonpositive count")
+  local too_many_drops = {}
+  for i = 1, 65 do too_many_drops[i] = drop(999, V, L, false) end
+  IS.gm = gmgr({ managed = managed({}), drops = too_many_drops, boxes = {} })
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "unknown" and loot_view.reason == "loot_rows_truncated"
+    and #loot_view.candidates == 0, "IW1 over-limit loot list is unknown")
   local s = ai.item_stats()
   assert(s.needs == 1 and s.ids == 1 and s.located == 1 and s.rounds == 1
     and s.skipped == 0 and s.ignored == 0 and s.failed_total == 0,
     "IW1 stats (rounds re-counted after the owner reset)")
+  IS.gm = gmgr({ managed = managed({}), drops = { drop(300, V, L, false) }, boxes = {} })
+  iclk = iclk + 0.6
+  source_views = ai.objective_item_source_snapshots(nil, task_snapshot)
+  assert(#source_views[3].candidates == 1, "IW1 loot is present before task change")
+  IS.task_index = 1
+  local changed_task = ai.objective_task_snapshot({ 20090 })
+  loot_view = ai.objective_item_source_snapshots(nil, changed_task)[3]
+  assert(loot_view.status == "unknown" and #loot_view.candidates == 0,
+    "IW1 task change invalidates cached loot candidates")
+  IS.task_index = 0
+  ai.invalidate_items()
+  local changed_needs = ai.objective_task_snapshot({ 20090 })
+  loot_view = ai.objective_item_source_snapshots(nil, changed_needs)[3]
+  assert(loot_view.status == "unknown" and #loot_view.candidates == 0,
+    "IW1 need invalidation removes cached loot candidates")
+  IS.task_index = 1
+  changed_task = ai.objective_task_snapshot({ 20090 })
+  local invalidated = ai.objective_need_groups(changed_task)
+  assert(invalidated.status == "unknown" and not invalidated.complete
+    and #invalidated.groups == 0, "IW1 task change immediately invalidates old groups")
+  -- A skipped processor row makes the current-objective walk incomplete even
+  -- when other rows produced usable groups.
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }),
+    iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }, { unread_started = true }) }
+  ai.refresh_items()
+  local skipped_group_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(skipped_group_snapshot.status == "unknown" and not skipped_group_snapshot.complete
+    and #skipped_group_snapshot.groups == 0,
+    "IW1 skipped processor row empties objective groups")
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+  local exact_held = {}
+  for i = 1, 512 do exact_held[i] = sd(900 + i, 1) end
+  IS.dict = storage({ { key = PL, value = ilist(exact_held) } })
+  ai.refresh_items()
+  assert(ai.objective_need_groups(ai.objective_task_snapshot({ 20090 })).status == "ok",
+    "IW1 exact held-owner cap remains complete")
+  local over_held = {}
+  for i = 1, 513 do over_held[i] = sd(900 + i, 1) end
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+  IS.dict = storage({ { key = PL, value = ilist(over_held) } })
+  ai.refresh_items()
+  local over_held_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(over_held_snapshot.status == "unknown" and #over_held_snapshot.groups == 0
+    and #needs_of(ai, 20090) == 1, "IW1 over-cap held list only invalidates objective groups")
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+  IS.dict = storage({ { key = PL, value = ilist({ sd(300, 1), sd(false, 1) }) } })
+  ai.refresh_items()
+  local unreadable_held_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(unreadable_held_snapshot.status == "unknown" and #unreadable_held_snapshot.groups == 0,
+    "IW1 unreadable held entry invalidates objective groups")
+  ifresh()
+  ai.refresh_items()
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  IS.task_index = 1
+  ai.objective_task_snapshot({ 20090 })
+  IS.task_index = 0
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  local returned_task_groups = ai.objective_need_groups(task_snapshot)
+  assert(returned_task_groups.status == "unknown" and #returned_task_groups.groups == 0,
+    "IW1 task change away and back invalidates groups until a fresh item scan")
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  assert(ai.objective_need_groups(task_snapshot).status == "ok",
+    "IW1 fresh item scan republishes groups for the observed current task")
+  IS.task_index_unreadable = true
+  ai.objective_task_snapshot({ 20090 })
+  IS.task_index_unreadable = false
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  local recovered_task_groups = ai.objective_need_groups(task_snapshot)
+  assert(recovered_task_groups.status == "unknown" and #recovered_task_groups.groups == 0,
+    "IW1 unreadable task observation invalidates groups until a fresh item scan")
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  assert(ai.objective_need_groups(task_snapshot).status == "ok",
+    "IW1 fresh item scan recovers after unreadable task observation")
+  IS.task_index = 0
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }),
+    deliver(nil, 1, 4) }) }
+  ai.refresh_items()
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  need_snapshot = ai.objective_need_groups(task_snapshot)
+  assert(need_snapshot.status == "unknown" and not need_snapshot.complete
+    and #need_snapshot.groups == 0 and #needs_of(ai, 20090) == 1,
+    "IW1 incomplete sibling expression empties objective groups and preserves legacy need")
+  ifresh()
+  ai.refresh_items()
+  IS.prog_nil = true
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  need_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(need_snapshot.status == "unknown" and #need_snapshot.groups == 0,
+    "IW1 failed refresh immediately clears objective groups")
+  local function other_conditions(n)
+    local out = {}
+    for _ = 1, n do out[#out + 1] = typed("app.quest.condition.Other", {}) end
+    return out
+  end
+  local function objective_after_lists(outer_count, inner_count)
+    ifresh()
+    local lists = {}
+    if outer_count == 1 then
+      lists[1] = ilist(other_conditions(inner_count))
+    else
+      for i = 1, outer_count do lists[i] = ilist({}) end
+    end
+    IS.procs = { iproc(20090, {}, { condition_lists = lists }) }
+    ai.refresh_items()
+    return ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  end
+  local exact_inner = objective_after_lists(1, 16)
+  assert(exact_inner.status == "ok" and exact_inner.complete
+    and #exact_inner.groups == 0, "IW1 exact inner condition limit remains complete")
+  local over_inner = objective_after_lists(1, 17)
+  assert(over_inner.status == "unknown" and not over_inner.complete
+    and #over_inner.groups == 0, "IW1 over-limit inner list empties objective groups")
+  local exact_outer = objective_after_lists(16, 0)
+  assert(exact_outer.status == "ok" and exact_outer.complete,
+    "IW1 exact outer condition limit remains complete")
+  local over_outer = objective_after_lists(17, 0)
+  assert(over_outer.status == "unknown" and not over_outer.complete
+    and #over_outer.groups == 0, "IW1 over-limit outer list empties objective groups")
   ifresh()
   IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } },
     "app.quest.condition.CheckHasItemParam") }) }
@@ -2760,6 +3020,26 @@ do
     { fin = true }) }
   ai.refresh_items()
   assert(next(ai.item_needs()) == nil, "IW1 finished processor contributes nothing")
+  local excluded = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(excluded.status == "ok" and excluded.complete and #excluded.groups == 0,
+    "IW1 finished processor contributes no current objective group")
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) },
+    { started = false }) }
+  ai.refresh_items()
+  excluded = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(excluded.status == "ok" and excluded.complete and #excluded.groups == 0,
+    "IW1 unstarted processor contributes no current objective group")
+  ifresh()
+  IS.procs = {}
+  ai.refresh_items()
+  local no_need_task = ai.objective_task_snapshot({ 20090 })
+  IS.gm = gmgr({ managed = managed({}), drops = { drop(300, V, L, false) }, boxes = {} })
+  local no_need_reads = IS.loot_reads
+  loot_view = ai.objective_item_source_snapshots(nil, no_need_task)[3]
+  assert(loot_view.status == "ok" and loot_view.complete
+    and #loot_view.candidates == 0 and IS.loot_reads == no_need_reads,
+    "IW1 no focused item need skips the live loot scan")
   -- IW2 enum by name: Morethan 1 -> 2, Morethan 0 -> 1, Equal ignored
   ifresh()
   IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 5 },

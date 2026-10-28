@@ -1,5 +1,6 @@
 local A = {}
 local qnml_core = require("Clairvoyance.core")
+A.objective_need_builder = require("Clairvoyance.objective_needs")
 
 -- ===== debug flag =====
 local DEBUG = false
@@ -1796,6 +1797,31 @@ end
 -- v10 world tracker, which added none), so helpers are fields of this table
 -- or do-block locals, never new chunk-level locals.
 local items = {}
+items.observed_task_indices = {}
+items.task_observation_generation = 0
+
+-- Count observed changes to the live quest-log task, including a task that
+-- moves away and later returns to the same zero-based index.
+function items.observe_task_index(qid, task_index)
+    local previous = items.observed_task_indices[qid]
+    if task_index == nil then
+        if previous ~= false then
+            items.task_observation_generation = items.task_observation_generation + 1
+        end
+        items.observed_task_indices[qid] = false
+    elseif previous ~= nil and previous ~= task_index then
+        items.task_observation_generation = items.task_observation_generation + 1
+        items.observed_task_indices[qid] = task_index
+    else
+        items.observed_task_indices[qid] = task_index
+    end
+    return items.task_observation_generation
+end
+
+function items.reset_task_observations()
+    items.observed_task_indices = {}
+    items.task_observation_generation = items.task_observation_generation + 1
+end
 
 -- get_elements() returns a sol vector USERDATA in-game, not a Lua table
 -- (probe P17c, 2026-10-19): # and 1-based [i] work, type() is "userdata".
@@ -1830,12 +1856,18 @@ function items.empty_loc_failed() return { placed = false, drop = false, box = f
 local ITEM_NEEDS = nil           -- {[qid] = {{id, num}, ...}}; nil before any commit
 local ITEM_WANTED = {}           -- {[id] = true}, derived from ITEM_NEEDS
 local ITEM_COND_CACHE = {}       -- procid -> {{id, num, op}, ...} (clean reads only)
+items.objective_cond_cache = {}  -- procid -> complete expression rows (including empty)
 local ITEM_LOCS = items.empty_locs()
 local ITEM_LOC_FAILED = items.empty_loc_failed()   -- last top-level read failed
 local ITEM_NAME_CACHE = {}       -- item id -> name (readable icons only)
 local ITEM_FAILED_STREAK = 0
 local ITEM_STATS = items.new_stats()
 local ITEM_LAST_AT = -math.huge
+items.objective_group_state = { status = "unknown", complete = false,
+    generation = 0, task_generation = items.task_observation_generation,
+    groups = {}, task_index = {} }
+items.objective_loot_state = { status = "unknown", complete = false,
+    generation = 0, at = -math.huge, candidates = {} }
 
 -- Clears both location tables and the per-cadence skip/cap counts.
 function items.clear_locs()
@@ -1850,6 +1882,12 @@ end
 function items.invalidate()
     ITEM_NEEDS = nil
     ITEM_STATS.needs_fresh = false
+    items.objective_group_state = { status = "unknown", complete = false,
+        generation = items.objective_group_state.generation + 1,
+        groups = {}, task_index = {} }
+    items.objective_loot_state = { status = "unknown", complete = false,
+        generation = items.objective_loot_state.generation + 1,
+        at = -math.huge, candidates = {} }
     items.related, items.related_titles = nil, nil
     ITEM_WANTED = {}
     items.clear_locs()
@@ -1861,6 +1899,7 @@ end
 local function reset_item_state()
     items.invalidate()
     ITEM_COND_CACHE = {}
+    items.objective_cond_cache = {}
     ITEM_NAME_CACHE = {}
     ITEM_STATS = items.new_stats()
 end
@@ -2437,17 +2476,17 @@ end
 -- drops the index, rebuilds once and retries in the same call; a second
 -- nil drops again and calls on_fail. Returns pass's results, or nil.
 local function with_index_retry(list, n, pass, on_fail)
-    local r1, r2, r3 = pass(ensure_processor_index(list, n))
+    local r1, r2, r3, r4 = pass(ensure_processor_index(list, n))
     if r1 == nil then
         proc_index_drop()
-        r1, r2, r3 = pass(ensure_processor_index(list, n))
+        r1, r2, r3, r4 = pass(ensure_processor_index(list, n))
         if r1 == nil then
             proc_index_drop()
             on_fail()
             return nil
         end
     end
-    return r1, r2, r3
+    return r1, r2, r3, r4
 end
 
 local function refresh_objectives_body()
@@ -2984,37 +3023,69 @@ end
 -- failed read and a cached empty list would hide that processor's need
 -- for the whole session. Stores plain Lua values only.
 local function read_item_conditions(p)
-    local rows, skipped = {}, 0
+    local rows, skipped, objective_rows = {}, 0, {}
+    local objective_complete = true
     local cls = safe_field(p, "ConditionLists")
-    if cls == nil then return rows, 1 end
+    if cls == nil then return rows, 1, nil, false end
     local outer = safe_call(cls, "get_Count")
-    if type(outer) ~= "number" then return rows, 1 end
+    if type(outer) ~= "number" then return rows, 1, nil, false end
+    if outer < 0 or outer ~= math.floor(outer) or outer > 16 then
+        objective_complete = false
+    end
     if outer > 16 then outer = 16 end
     for a2 = 0, outer - 1 do
         local inner = safe_call(cls, "get_Item", a2)
         local m = inner ~= nil and safe_call(inner, "get_Count") or nil
-        if type(m) ~= "number" then skipped = skipped + 1
+        if type(m) ~= "number" then
+            skipped = skipped + 1
+            objective_complete = false
         else
+            if m < 0 or m ~= math.floor(m) or m > 16 then objective_complete = false end
             if m > 16 then m = 16 end
             for b = 0, m - 1 do
                 local c = safe_call(inner, "get_Item", b)
-                if c == nil then skipped = skipped + 1
+                if c == nil then
+                    skipped = skipped + 1
+                    objective_complete = false
                 else
                     local tn = nil
-                    pcall(function()
+                    local ok_type = pcall(function()
                         tn = c:get_type_definition():get_full_name()
                     end)
-                    if tn == nil then skipped = skipped + 1
-                    elseif tn == K.COND_HAS_ITEM then
-                        skipped = skipped + items.read_has_item_rows(c, rows)
-                    elseif tn == K.COND_DELIVER then
-                        skipped = skipped + items.read_deliver_rows(c, rows)
+                    if not ok_type or tn == nil then
+                        skipped = skipped + 1
+                        objective_complete = false
+                    elseif tn == K.COND_HAS_ITEM or tn == K.COND_DELIVER then
+                        local before = #rows
+                        local missed = tn == K.COND_HAS_ITEM
+                            and items.read_has_item_rows(c, rows)
+                            or items.read_deliver_rows(c, rows)
+                        skipped = skipped + missed
+                        if missed > 0 then objective_complete = false
+                        elseif #rows > before then
+                            local options = {}
+                            for i = before + 1, #rows do
+                                local row = rows[i]
+                                if row.op ~= "more" and row.op ~= "morethan" then
+                                    objective_complete = false
+                                else
+                                    options[#options + 1] = { item_id = row.id,
+                                        required = row.num, op = row.op }
+                                end
+                            end
+                            if #options > 0 then
+                                objective_rows[#objective_rows + 1] = {
+                                    list_index = a2, condition_index = b,
+                                    options = options }
+                            end
+                        end
                     end
                 end
             end
         end
     end
-    return rows, skipped
+    if skipped > 0 then objective_complete = false end
+    return rows, skipped, objective_rows, objective_complete
 end
 
 -- SPEC 15.3d: held count over getStorageDict's owner lists (player +
@@ -3029,18 +3100,23 @@ local function read_held(ids)
     local en = safe_field(dict, "_entries")
     local entries = items.elements(en)
     if entries == nil then return nil end
-    local held, skipped = {}, 0
+    local held, skipped, complete = {}, 0, true
     for i = 1, #entries do
         local ok = pcall(function()
             local e = entries[i]
             local list = safe_field(e, "value")
             if list == nil then return end          -- free slot: uncounted
             local key = int_value(safe_field(e, "key"))
-            if key == nil then skipped = skipped + 1 return end
+            if key == nil then skipped = skipped + 1; complete = false; return end
             if key == K.STORAGE_BOX_KEY then return end
             local cnt = safe_call(list, "get_Count")
-            if type(cnt) ~= "number" then skipped = skipped + 1 return end
-            if cnt > K.HELD_OWNER_CAP then cnt = K.HELD_OWNER_CAP end
+            if type(cnt) ~= "number" or cnt < 0 or cnt ~= math.floor(cnt) then
+                skipped = skipped + 1; complete = false; return
+            end
+            if cnt > K.HELD_OWNER_CAP then
+                complete = false
+                cnt = K.HELD_OWNER_CAP
+            end
             for k = 0, cnt - 1 do
                 local okd = pcall(function()
                     local sd = safe_call(list, "get_Item", k)
@@ -3048,16 +3124,17 @@ local function read_held(ids)
                     local num = int_value(safe_field(sd, "_Num"))
                     if id == nil or num == nil then
                         skipped = skipped + 1
+                        complete = false
                         return
                     end
                     if ids[id] then held[id] = (held[id] or 0) + num end
                 end)
-                if not okd then skipped = skipped + 1 end
+                if not okd then skipped = skipped + 1; complete = false end
             end
         end)
-        if not ok then skipped = skipped + 1 end
+        if not ok then skipped = skipped + 1; complete = false end
     end
-    return held, skipped
+    return held, skipped, complete
 end
 
 -- Installs a need table and derives ITEM_WANTED. An empty table clears
@@ -3082,6 +3159,9 @@ local function item_round_failed()
     ITEM_FAILED_STREAK = ITEM_FAILED_STREAK + 1
     ITEM_STATS.failed_total = ITEM_STATS.failed_total + 1
     ITEM_STATS.needs_fresh = false
+    items.objective_group_state = { status = "unknown", complete = false,
+        generation = items.objective_group_state.generation + 1,
+        groups = {}, task_index = {} }
     if ITEM_FAILED_STREAK >= 3 then commit_item_needs({}) end
 end
 
@@ -3096,6 +3176,117 @@ local function gimmick_pos(g)
     local lx, ly, lz = vec_xyz(safe_call(tr, "get_Position"))
     if lx ~= nil then live = { x = lx, y = ly, z = lz } end
     return { x = x, y = y, z = z }, live
+end
+
+-- Runtime loot is joined only to focused current need options. The exact
+-- runtime list is bounded, cached for half a second, and replaced atomically.
+function items.objective_loot_observations(wanted, generation)
+    local state = items.objective_loot_state
+    local ids, key = {}, ""
+    if type(wanted) ~= "table" or type(generation) ~= "number" then
+        state = { provider = "loot", status = "unknown", complete = false,
+            generation = generation, at = os.clock(), candidates = {},
+            reason = "current_need_snapshot_unavailable" }
+        items.objective_loot_state = state
+        return state
+    end
+    for id, needed in pairs(wanted) do
+        if needed == true and type(id) == "number" and id > 0
+            and id == math.floor(id) then ids[#ids + 1] = id end
+    end
+    table.sort(ids)
+    local key_parts = {}
+    for i, id in ipairs(ids) do key_parts[i] = tostring(id) end
+    key = table.concat(key_parts, ",")
+    local now = os.clock()
+    if state.generation == generation and state.wanted_key == key
+        and now - state.at < 0.5 then
+        return state
+    end
+    local result = { provider = "loot", status = "unknown", complete = false,
+        generation = generation, at = now, wanted_key = key, candidates = {},
+        reason = "loot_scan_unavailable" }
+    if #ids == 0 then
+        result.status, result.complete, result.reason = "ok", true, nil
+        items.objective_loot_state = result
+        return result
+    end
+    local gm = sdk.get_managed_singleton("app.GimmickManager")
+    local list = gm ~= nil and safe_field(gm, "<DropItemGimmicks>k__BackingField") or nil
+    local count = safe_call(list, "get_Count")
+    if type(count) ~= "number" or count < 0 or count ~= math.floor(count) then
+        result.reason = "loot_rows_unreadable"
+    elseif count > 64 then
+        result.reason = "loot_rows_truncated"
+    else
+        local by_id, candidates, seen_uid = {}, {}, {}
+        for _, id in ipairs(ids) do by_id[id] = true end
+        local complete, reason = true, nil
+        for i = 0, count - 1 do
+            local drop = safe_call(list, "get_Item", i)
+            if drop == nil then complete, reason = false, "loot_row_unreadable" break end
+            local unique_id = safe_call(drop, "get_UniqId")
+            local uid = safe_call(unique_id, "ToString()")
+            local uid_a, uid_b, uid_c, uid_d, uid_e
+            if type(uid) == "string" then
+                uid_a, uid_b, uid_c, uid_d, uid_e = uid:match(
+                    "^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)_[0-9]+$")
+                if uid_a == nil then
+                    uid_a, uid_b, uid_c, uid_d, uid_e = uid:match(
+                        "^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)$")
+                end
+            end
+            if uid_a == nil or #uid_a ~= 8 or #uid_b ~= 4 or #uid_c ~= 4
+                or #uid_d ~= 4 or #uid_e ~= 12 then
+                complete, reason = false, "loot_identity_unreadable" break
+            end
+            uid = uid:lower()
+            if seen_uid[uid] then
+                complete, reason = false, "loot_identity_duplicated" break
+            end
+            seen_uid[uid] = true
+            local context = safe_field(drop, "MyContext")
+            local id = int_value(safe_field(context, "_ItemId"))
+            if type(id) ~= "number" or id <= 0 or id ~= math.floor(id) then
+                complete, reason = false, "loot_item_id_unreadable" break
+            end
+            if by_id[id] then
+                local deleted = safe_field(drop, "<IsDeleted>k__BackingField")
+                if type(deleted) ~= "boolean" then
+                    complete, reason = false, "loot_deletion_state_unreadable" break
+                elseif deleted == false then
+                    local amount = int_value(safe_field(context, "_Num"))
+                    local pos = gimmick_pos(drop)
+                    if type(amount) ~= "number" or amount <= 0 or amount ~= math.floor(amount) then
+                        complete, reason = false, "loot_count_unreadable" break
+                    elseif pos == nil then
+                        complete, reason = false, "loot_position_unreadable" break
+                    else
+                        local source_id = { "source", "loot", uid }
+                        candidates[#candidates + 1] = {
+                            source_id = source_id,
+                            provider = "loot", target = { kind = "loot", uid = uid, pos = pos },
+                            outputs = { { item_id = id, count = amount } },
+                            capacity_pool_id = { "capacity", "loot", uid },
+                            capacity_kind = "finite", available_acquisitions = 1,
+                            certainty = "guaranteed", eligibility = "eligible",
+                            generation = generation,
+                            evidence = { uid = uid, item_id = id, count = amount,
+                                deleted = false },
+                        }
+                    end
+                end
+            end
+        end
+        if complete then
+            result.status, result.complete, result.reason = "ok", true, nil
+            result.candidates = candidates
+        else
+            result.reason = reason
+        end
+    end
+    items.objective_loot_state = result
+    return result
 end
 
 -- v14 (SPEC 22.11.3): read the masquerade passage leaf. The full fingerprint
@@ -3288,53 +3479,93 @@ local function item_round_needs(now)
     end
     if next(wanted) == nil then
         commit_item_needs({})
+        items.objective_group_state = { status = "ok", complete = true,
+            generation = ITEM_STATS.rounds, groups = {}, task_index = {} }
         ITEM_FAILED_STREAK = 0
         ITEM_STATS.ignored = 0
         return
     end
     local function pass(cur)
-        local records = {}
+        local records, objective_records = {}, {}
+        local pending_reads = {}
+        local objective_complete = true
         local skipped = visit_verified_entries(cur, list, wanted,
             function(p, qid, skip, procid)
                 local rows = ITEM_COND_CACHE[procid]
+                local grouped = items.objective_cond_cache[procid]
                 if rows == nil then
-                    local sk
-                    rows, sk = read_item_conditions(p)
+                    local sk, complete
+                    local pending = pending_reads[procid]
+                    if pending ~= nil then
+                        rows, sk, grouped, complete = pending.rows, pending.skipped,
+                            pending.groups, pending.complete
+                    else
+                        rows, sk, grouped, complete = read_item_conditions(p)
+                    end
                     if sk == 0 then
                         ITEM_COND_CACHE[procid] = rows
+                        items.objective_cond_cache[procid] = complete and grouped or false
                     else
                         for _ = 1, sk do skip() end
+                        objective_complete = false
                     end
                 end
                 for _, r in ipairs(rows) do
                     records[#records + 1] = { qid = qid, id = r.id,
                         num = r.num, op = r.op }
                 end
+                if grouped == false or grouped == nil then objective_complete = false
+                else
+                    for _, group in ipairs(grouped) do
+                        objective_records[#objective_records + 1] = {
+                            qid = qid, processor_id = procid,
+                            list_index = group.list_index,
+                            condition_index = group.condition_index,
+                            complete = true, current_work = true,
+                            options = group.options }
+                    end
+                end
             end,
-            -- SPEC 15.3c.3: ProcID first; a processor whose CACHED row
-            -- list is empty contributes nothing, so its IsStarted /
-            -- ProcessFinished reads are skipped
-            function(p, _, skip)
+            -- ProcID first. Read static condition data once so a complete
+            -- empty legacy cache can still be skipped; publish no groups
+            -- until visit_verified_entries proves started and unfinished.
+            function(p, qid, skip)
                 local procid = int_value(safe_field(p, "ProcID"))
                 if procid == nil then skip() return false end
-                local rows = ITEM_COND_CACHE[procid]
-                if rows ~= nil and #rows == 0 then return false end
+                local grouped = items.objective_cond_cache[procid]
+                if ITEM_COND_CACHE[procid] == nil then
+                    local rows, missed, objective_rows, complete = read_item_conditions(p)
+                    pending_reads[procid] = { rows = rows, skipped = missed,
+                        groups = objective_rows, complete = complete }
+                    if missed == 0 then
+                        ITEM_COND_CACHE[procid] = rows
+                        items.objective_cond_cache[procid] = complete and objective_rows or false
+                        pending_reads[procid] = nil
+                        grouped = items.objective_cond_cache[procid]
+                    end
+                end
+                if grouped ~= nil and grouped ~= false and #grouped == 0 then return false end
                 return procid
             end)
         if skipped == nil then return nil end
-        return records, skipped
+        return records, skipped, objective_records, objective_complete
     end
-    local records, skipped = with_index_retry(list, n, pass, item_round_failed)
+    local records, skipped, objective_records, objective_complete =
+        with_index_retry(list, n, pass, item_round_failed)
     if records == nil then return end
-    local held, ids = {}, {}
+    local held, ids, held_complete = {}, {}, true
     for _, r in ipairs(records) do
         if r.op == "more" or r.op == "morethan" then ids[r.id] = true end
     end
+    for _, group in ipairs(objective_records or {}) do
+        for _, option in ipairs(group.options) do ids[option.item_id] = true end
+    end
     if next(ids) ~= nil then
-        local h, hsk = read_held(ids)
+        local h, hsk, hcomplete = read_held(ids)
         if h == nil then item_round_failed() return end
         held = h
         skipped = skipped + hsk
+        held_complete = hcomplete == true
     end
     -- v14: quest-related items from the same records, before the need table
     -- a raise here must not fail the need round: keep the previous map
@@ -3342,6 +3573,36 @@ local function item_round_needs(now)
     if not okr then rel = items.related end
     local t, ignored = qnml_core.item_need_table(records, held)
     if type(t) ~= "table" then error("item_need_table: bad result") end
+    local task_index, tasks_complete = {}, true
+    local qlm = sdk.get_managed_singleton("app.QuestLogManager")
+    local qdict = qlm ~= nil and safe_field(qlm, "_QuestLogInfoDict") or nil
+    if qdict == nil then tasks_complete = false end
+    if tasks_complete then
+        for qid in pairs(wanted) do
+            local info = safe_call(qdict, "get_Item", qid)
+            local ti = info ~= nil and int_value(safe_call(info, "get_CurrentTaskIndex")) or nil
+            if ti == nil and info ~= nil then
+                ti = int_value(safe_field(info, "<CurrentTaskIndex>k__BackingField"))
+            end
+            if ti == nil or ti < 0 then tasks_complete = false
+            else
+                task_index[qid] = ti
+                items.observe_task_index(qid, ti)
+            end
+        end
+    end
+    local objective_groups, groups_complete = {}, false
+    local group_generation = ITEM_STATS.rounds
+    objective_complete = objective_complete and skipped == 0 and held_complete
+    if objective_complete and tasks_complete then
+        objective_groups, groups_complete = A.objective_need_builder.build(objective_records,
+            held, { generation = group_generation, task_generation = group_generation,
+                task_index = task_index })
+    end
+    items.objective_group_state = { status = groups_complete and "ok" or "unknown",
+        complete = groups_complete, generation = group_generation,
+        task_generation = items.task_observation_generation,
+        groups = groups_complete and objective_groups or {}, task_index = task_index }
     commit_item_needs(t)
     if type(rel) == "table" then items.related = rel end
     ITEM_FAILED_STREAK = 0
@@ -3624,6 +3885,45 @@ function A.make()
   a.refresh_items = items.refresh
   function a.invalidate_items() items.invalidate() end
   function a.item_needs() return ITEM_NEEDS end
+  -- Pure expression grouper used by the objective adapter scan. Kept beside
+  -- the legacy item API so callers can migrate without changing item_needs().
+  function a.objective_need_groups(task_snapshot)
+    local state = items.objective_group_state
+    local qrows, qseen, groups = {}, {}, {}
+    if type(task_snapshot) ~= "table" or type(task_snapshot.need_generation) ~= "number"
+        or type(task_snapshot.quests) ~= "table" or not ITEM_STATS.needs_fresh
+        or state.complete ~= true or state.status ~= "ok" then
+      return { status = "unknown", complete = false, groups = {},
+        generation = type(task_snapshot) == "table" and task_snapshot.need_generation or nil,
+        source_generation = state.generation, reason = "need_or_task_observation_unknown" }
+    end
+    for _, row in ipairs(task_snapshot.quests) do
+      if type(row) == "table" and type(row.qid) == "number" then
+        qrows[row.qid] = row
+        qseen[row.qid] = true
+      end
+    end
+    if state.task_generation ~= items.task_observation_generation then
+      return { status = "unknown", complete = false, groups = {},
+        generation = task_snapshot.need_generation,
+        source_generation = state.generation, reason = "task_observation_changed" }
+    end
+    for _, group in ipairs(state.groups) do
+      if qseen[group.qid] then
+        local row = qrows[group.qid]
+        if row.read_status ~= "ok" or row.task_index ~= state.task_index[group.qid]
+            or group.task_index ~= row.task_index then
+          return { status = "unknown", complete = false, groups = {},
+            generation = task_snapshot.need_generation,
+            source_generation = state.generation, reason = "current_task_changed" }
+        end
+        groups[#groups + 1] = group
+      end
+    end
+    return { status = "ok", complete = true, groups = groups,
+      generation = task_snapshot.need_generation, source_generation = state.generation,
+      task_generation = state.task_generation }
+  end
   -- v14 (SPEC 22.10.1): { [item_id] = { quest title, ... } }, cached until
   -- the next commit
   function a.item_related(reveal)
@@ -4149,6 +4449,7 @@ function A.make()
     end
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")
     if qlm ~= objective_task_state.owner then
+      items.reset_task_observations()
       objective_task_state.owner = qlm
       objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
@@ -4187,12 +4488,27 @@ function A.make()
           task_destinations = {}, guidance = {}, item_ownership = {},
           live_destination = live.live_destination }
       end
+      items.observe_task_index(qid,
+        row.read_status == "ok" and type(row.task_index) == "number" and row.task_index or nil)
       quests[#quests + 1] = row
       local journal_row = clone(row)
       journal_row.item_ownership = {}
       journal_rows[#journal_rows + 1] = journal_row
+      local objective_groups, objective_status = {}, "unknown"
+      if ITEM_STATS.needs_fresh and items.objective_group_state.complete
+          and items.objective_group_state.task_generation == items.task_observation_generation
+          and row.read_status == "ok"
+          and row.task_index == items.objective_group_state.task_index[qid] then
+        objective_status = "ok"
+        for _, group in ipairs(items.objective_group_state.groups) do
+          if group.qid == qid and group.task_index == row.task_index then
+            objective_groups[#objective_groups + 1] = clone(group)
+          end
+        end
+      end
       need_rows[qid] = { status = (ITEM_NEEDS == nil or not ITEM_STATS.needs_fresh) and "unknown" or "ok",
         current = clone(ITEM_STATS.needs_fresh and ITEM_NEEDS and ITEM_NEEDS[qid] or {}),
+        objective = { status = objective_status, groups = objective_groups },
         ownership = clone(row.item_ownership) }
     end
     if not same(journal_rows, objective_task_state.journal) then
@@ -4254,12 +4570,26 @@ function A.make()
       end
     end
     local providers = {}
-    for _, name in ipairs({ "placed", "chest", "loot" }) do
+    for _, name in ipairs({ "placed", "chest" }) do
       providers[#providers + 1] = { provider = name, generation = generation,
         status = "unknown", reason = "objective_source_scan_not_performed", candidates = {},
         catalog_version = version, source_descriptors = copy(descriptors),
         signal_evidence = copy(signals), guidance_delivery_refs = copy(deliveries) }
     end
+    local need_snapshot = a.objective_need_groups(task_snapshot)
+    local wanted = nil
+    if need_snapshot.complete then
+      wanted = {}
+      for _, group in ipairs(need_snapshot.groups) do
+        for _, option in ipairs(group.options) do wanted[option.item_id] = true end
+      end
+    end
+    local loot = copy(items.objective_loot_observations(wanted, generation))
+    loot.catalog_version = version
+    loot.source_descriptors = copy(descriptors)
+    loot.signal_evidence = copy(signals)
+    loot.guidance_delivery_refs = copy(deliveries)
+    providers[#providers + 1] = loot
     return providers
   end
   function a.reset_session_caches()
@@ -4267,6 +4597,7 @@ function A.make()
     if qlm ~= QUEST_SESSION_OWNER then
       QUEST_SESSION_OWNER = qlm
       reset_runtime_caches()
+      items.reset_task_observations()
       objective_task_state.owner = qlm
       objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
