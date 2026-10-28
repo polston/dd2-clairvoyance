@@ -96,3 +96,42 @@ print(string.format("  difference: %.3f ms (target <= 1.000)", search - none))
 -- the mean over the 20 ticks (one clock pair around all of them) is exact to ~0.05 ms.
 print(string.format("  mean of %d: no search %.3f ms, minotaur %.3f ms, difference %.3f ms",
   RUNS, mean_none, mean_search, mean_search - mean_none))
+
+-- ROADMAP 93: marker claim/index scaling at the native projection boundary.
+local function make_objectives(n)
+  local base, targets = {}, {}
+  local need_key = core.target_key({ "need", 60, 770, 0, 1 })
+  for i = 1, n do
+    local source_key = core.target_key({ "source", "scale", i })
+    base[i] = { key = "scale:" .. tostring(i), cat = "world", qids = {}, pos = P(i) }
+    targets[i] = { key = source_key, source_id = source_key,
+      source_tuple = { "source", "scale", i },
+      capacity_key = core.target_key({ "capacity", "scale", i }),
+      capacity_pool_id = { "capacity", "scale", i }, ordinal = i, kind = "source",
+      target = { pos = P(i), marker_key = base[i].key },
+      owners = { { qid = 60, task_index = 0 } }, item_ids = { 5 },
+      outputs = { { item_id = 5, count = 1 } }, groups = {
+        { key = need_key, qid = 60, task_index = 0, remaining = 1,
+          contribution = 1, item_ids = { 5 } },
+      }, capacity_kind = "finite", available_acquisitions = 1,
+      certainty = "guaranteed", eligibility = "eligible", generation = 90 }
+  end
+  return base, { generation = 90, grouped_needs = true, need_groups = {}, targets = targets }
+end
+
+print("  objective markers at cap 128:")
+for _, n in ipairs({ 128, 256, 512, 1024 }) do
+  local base, snapshot = make_objectives(n)
+  local samples, operations = {}, nil
+  collectgarbage(); collectgarbage("stop")
+  for i = 1, RUNS do
+    local t0 = os.clock()
+    local _, _, projection = core.objective_markers(base, nil, snapshot,
+      { marker_cap = 128, focus_order = { 60 }, origin = origin })
+    samples[i] = (os.clock() - t0) * 1000
+    operations = projection.operations
+  end
+  collectgarbage("restart")
+  print(string.format("    %4d inputs: %.3f ms median, %d index/claim operations",
+    n, median(samples), operations or -1))
+end
