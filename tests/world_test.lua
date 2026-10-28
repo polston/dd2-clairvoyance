@@ -1870,9 +1870,16 @@ do
       local dict_row = obj({ key = shop_id, value = param })
       local shop_table = obj({ _entries = array({ dict_row }), _count = 1 }, {
         get_Count = function() return 1 end,
+        get_Item = function(id) return id == shop_id and param or nil end,
       })
+      local catalog_reads = 0
+      local base_get_field = shop_table.get_field
+      function shop_table:get_field(name)
+        if name == "_entries" then catalog_reads = catalog_reads + 1 end
+        return base_get_field(self, name)
+      end
       local schedule = {}
-      if opts.position ~= false then schedule[cid] = obj({ Pos = P(50, 0, 60) }) end
+      if opts.position ~= false then schedule[cid] = obj({ Pos = opts.schedule_pos or P(50, 0, 60) }) end
       local schedule_dict = obj(nil, {
         ContainsKey = function(key) return schedule[key] ~= nil end,
         get_Item = function(key) return schedule[key] end,
@@ -1880,7 +1887,11 @@ do
       local holder_reads = 0
       local npc_manager = obj({ NPCHolderDic = obj(nil, {
         get_Length = function() return #holders end,
-        get_element = function(index) holder_reads = holder_reads + 1; return holders[index + 1] end,
+        get_element = function(index)
+          holder_reads = holder_reads + 1
+          if opts.slot_error == index then error("slot read failed") end
+          return holders[index + 1]
+        end,
       }), ["<NPCScheduleCurrentDict>k__BackingField"] = schedule_dict }, {
         getNPCCharacterData = function() return {} end,
         isDead = function() return opts.dead == true end,
@@ -1897,11 +1908,14 @@ do
       singletons["app.NPCManager"] = npc_manager
       singletons["app.TalkEventManager"] = talk_manager
       singletons["app.ItemManager"] = item_manager
-      return buy, function() return holder_reads end
+      return buy, function() return holder_reads end, function() return catalog_reads end
     end
-    local function seller_holder(cid, dead)
+    local function seller_holder(cid, dead, has_position)
+      if has_position == nil then has_position = true end
       local chara = obj(nil, {
-        get_Transform = function() return "tf" end,
+        get_Transform = function() return has_position and obj(nil, {
+          get_UniversalPosition = function() return P(50, 0, 60) end,
+        }) or nil end,
         get_AIBlackBoardController = function() return {} end,
         get_IsDead = function() return dead == true end,
       })
@@ -1934,6 +1948,32 @@ do
         and finite_shop.rows[1].released == true and finite_shop.rows[1].talk_available == true
         and finite_shop.rows[1].interactable == true and finite_shop.rows[1].alive == true
         and finite_shop.rows[1].pos.x == 50)
+    install_shop_fake({ seller_holder(30) }, true, 1, { schedule_pos = P(900, 0, 900) })
+    local live_position = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
+    check("reads: objective shop uses current seller transform position over schedule position",
+      live_position.complete and #live_position.rows == 1
+        and live_position.rows[1].pos.x == 50 and live_position.rows[1].pos.z == 60)
+    install_shop_fake({ seller_holder(30) }, true, 1, { slot_error = 0 })
+    local unreadable_slot = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
+    check("reads: objective shop fails closed on an unreadable holder slot",
+      unreadable_slot.complete == false and #unreadable_slot.rows == 0
+        and unreadable_slot.reason == "shop_holder_slot_unreadable")
+    local function unreadable_holder_field(name)
+      local holder = seller_holder(30)
+      local read_field = holder.get_field
+      function holder:get_field(field)
+        if field == name then error("holder field read failed") end
+        return read_field(self, field)
+      end
+      return holder
+    end
+    for _, field in ipairs({ "_chara", "CharaID" }) do
+      install_shop_fake({ unreadable_holder_field(field) }, true, 1)
+      local unreadable_identity = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
+      check("reads: objective shop fails closed on unreadable holder " .. field,
+        unreadable_identity.complete == false and #unreadable_identity.rows == 0
+          and unreadable_identity.reason == "shop_holder_slot_unreadable")
+    end
     install_shop_fake({ seller_holder(30) }, false, -1)
     local unsupported_shop = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
     check("reads: non-stock shop offers stay unknown",
@@ -1957,7 +1997,7 @@ do
     local unreadable_restock = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
     check("reads: negative finite stock is unknown",
       unreadable_restock.complete == false and #unreadable_restock.rows == 0)
-    install_shop_fake({ seller_holder(30) }, true, 1, { position = false })
+    install_shop_fake({ seller_holder(30, false, false) }, true, 1, { position = false })
     local unreadable_position = read_shop_snapshot(world.game_reads(), focused_task, focused_need)
     check("reads: missing seller position is unknown",
       unreadable_position.complete == false and #unreadable_position.rows == 0)
@@ -1997,6 +2037,24 @@ do
         and bounded_final.holder_count == 257 and bounded_final.fingerprint ~= nil
         and reads_first == 256 and reads_second == 1
         and reads_third == 256 and reads_final == 1)
+    local _, _, catalog_reads = install_shop_fake(many_holders, true, 1,
+      { shop_by_cid = shop_by_cid })
+    local cached_reader = world.game_reads()
+    for _ = 1, 4 do cached_reader.objective_shop_rows(focused_task, nil, focused_need) end
+    check("reads: objective shop catalog index builds once across bounded slices and verification",
+      catalog_reads() == 1)
+    local changed_need = { status = "ok", complete = true, generation = 1,
+      source_generation = 1, groups = { { qid = 1001, task_index = 0, remaining = 1,
+        options = { { item_id = 999, accepted_count = 1 } }, complete = true,
+        generation = 1, status = "eligible" } } }
+    cached_reader.objective_shop_rows(focused_task, nil, changed_need)
+    check("reads: objective shop rebuilds the catalog index after need invalidation",
+      catalog_reads() == 2)
+    local _, _, replacement_catalog_reads = install_shop_fake(many_holders, true, 1,
+      { shop_by_cid = shop_by_cid })
+    cached_reader.objective_shop_rows(focused_task, nil, focused_need)
+    check("reads: objective shop rebuilds the catalog index after catalog identity changes",
+      replacement_catalog_reads() == 1)
     local mutable_holders = { seller_holder(201) }
     local mutable_map = { [201] = 0, [202] = 0 }
     install_shop_fake(mutable_holders, true, 1, { shop_by_cid = mutable_map })
@@ -6925,6 +6983,24 @@ do
     { need_generation = 50, quests = { { qid = "bad", task_index = 1, read_status = "ok" } } },
     { status = "ok", complete = true, generation = 50, source_generation = 5,
       groups = { { qid = 1, task_index = 1, remaining = 1,
+        options = { { item_id = 501, accepted_count = 1 } }, complete = true,
+        generation = 5, status = "eligible" } } })
+  rejected_current_work("mixed valid and unreadable quest rows",
+    { need_generation = 50, quests = {
+      { qid = 1001, task_index = 1, read_status = "ok" },
+      { qid = 1002, task_index = 1, read_status = "unknown" },
+    } },
+    { status = "ok", complete = true, generation = 50, source_generation = 5,
+      groups = { { qid = 1001, task_index = 1, remaining = 1,
+        options = { { item_id = 501, accepted_count = 1 } }, complete = true,
+        generation = 5, status = "eligible" } } })
+  rejected_current_work("duplicate focused quest rows",
+    { need_generation = 50, quests = {
+      { qid = 1001, task_index = 1, read_status = "ok" },
+      { qid = 1001, task_index = 1, read_status = "ok" },
+    } },
+    { status = "ok", complete = true, generation = 50, source_generation = 5,
+      groups = { { qid = 1001, task_index = 1, remaining = 1,
         options = { { item_id = 501, accepted_count = 1 } }, complete = true,
         generation = 5, status = "eligible" } } })
   rejected_current_work("stale need groups",
