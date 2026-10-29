@@ -5051,9 +5051,30 @@ function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
     if obj.kind == "source" then index.source_claim[marker] = obj.key end
   end
   local function make_marker(obj)
+    local caption = objective_name(policy, obj)
+    if caption == "Objective" then
+      local quest_names = type(policy.quest_names) == "table" and policy.quest_names or {}
+      local owners = objective_array(obj.owners) or {}
+      for _, focused_qid in ipairs(objective_array(policy.focus_order) or {}) do
+        for _, owner in ipairs(owners) do
+          if owner.qid == focused_qid and type(quest_names[focused_qid]) == "string"
+              and quest_names[focused_qid] ~= "" then
+            caption = quest_names[focused_qid]
+            break
+          end
+        end
+        if caption ~= "Objective" then break end
+      end
+      if caption == "Objective" then
+        for _, owner in ipairs(owners) do
+          local name = quest_names[owner.qid]
+          if type(name) == "string" and name ~= "" then caption = name; break end
+        end
+      end
+    end
     local marker = { key = "objective:" .. tostring(obj.ordinal), cat = "objective",
       cid = obj.target.cid, qids = {}, pos = objective_copy_pos(obj.target.pos),
-      label = "Objective: " .. objective_name(policy, obj), objective_qids = {} }
+      label = "Objective: " .. caption, objective_qids = {} }
     return marker
   end
   local function attach_or_add(list, index, obj)
@@ -5177,8 +5198,11 @@ function M.objective_route_member_equal(route, member)
       or route.capacity_key ~= member.capacity_key
       or route.capacity_kind ~= member.capacity_kind then return false end
   local function same_values(a, b)
+    if a == nil or b == nil then
+      local other = a == nil and b or a
+      return other == nil or (type(other) == "table" and next(other) == nil)
+    end
     if type(a) ~= type(b) then return false end
-    if a == nil then return true end
     if #a ~= #b then return false end
     for i, value in ipairs(a) do if value ~= b[i] then return false end end
     return true

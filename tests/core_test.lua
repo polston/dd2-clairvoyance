@@ -5166,6 +5166,16 @@ do
     route.capacity_key = member.capacity_key
     route.group_keys = { core.target_key({ "need", 30150, 0, "item", 378, "exact" }) }
     check("objective route member comparator checks groups", not route_member_equal(route, member))
+
+    local npc_member = { route_id = 260732951, qid = 30100, kind = "npc",
+      direct = false, target_key = core.target_key({ 30100, "task", 1, 0, "npc" }), ordinal = 1,
+      name = "Silas", objective = true, objective_generation = 9 }
+    local npc_route = { cid = npc_member.route_id, qid = npc_member.qid,
+      kind = "npc", target_key = npc_member.target_key, ordinal = npc_member.ordinal,
+      name = npc_member.name, objective = true, objective_generation = 8,
+      item_ids = {}, group_keys = {} }
+    check("objective route member comparator treats absent and empty optional lists equally",
+      route_member_equal(npc_route, npc_member))
   end
   if type(route_id_fn) == "function" then
     local route_ids = {}
@@ -5672,6 +5682,15 @@ do
       named_marker[1].label == "Objective: Wakestone"
         and named_routes.members[1].name == "Objective: Wakestone (for The Stolen Throne)"
         and named_shown == 1 and named_total == 1)
+    local unnamed_place_snapshot = { generation = 92, targets = { {
+      key = tk({ 10, "task", 0, 0, "place" }), ordinal = 1, kind = "place",
+      generation = 92, target = { pos = pos(3) },
+      owners = { { qid = 10, task_index = 0 } }, item_ids = {}, eligibility = "eligible" } } }
+    local unnamed_place_markers = core.objective_markers({}, nil, unnamed_place_snapshot,
+      { quest_names = { [10] = "The Stolen Throne" }, focus_order = { 10 } })
+    check("objective place marker falls back to its quest name instead of Objective",
+      #unnamed_place_markers == 1
+        and unnamed_place_markers[1].label == "Objective: The Stolen Throne")
     local named_npc_snapshot = { generation = 91, targets = { {
       key = tk({ 10, "issued_npc", 78 }), ordinal = 1, kind = "npc", generation = 91,
       target = { cid = 78, pos = pos(1) }, owners = { { qid = 10, task_index = 0 } },
