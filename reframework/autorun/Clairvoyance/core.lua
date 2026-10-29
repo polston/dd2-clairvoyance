@@ -5166,6 +5166,31 @@ function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
   return out, want_full and full or nil, projection
 end
 
+function M.objective_route_member_equal(route, member)
+  if type(route) ~= "table" or type(member) ~= "table"
+      or route.cid ~= member.route_id or route.qid ~= member.qid
+      or route.kind ~= (member.kind == "source" and "item" or member.kind)
+      or (route.direct == true) ~= (member.direct == true)
+      or route.target_key ~= member.target_key or route.ordinal ~= member.ordinal
+      or route.name ~= member.name or route.objective ~= member.objective
+      or route.certainty ~= member.certainty or route.probability ~= member.probability
+      or route.capacity_key ~= member.capacity_key
+      or route.capacity_kind ~= member.capacity_kind then return false end
+  local function same_values(a, b)
+    if type(a) ~= type(b) then return false end
+    if a == nil then return true end
+    if #a ~= #b then return false end
+    for i, value in ipairs(a) do if value ~= b[i] then return false end end
+    return true
+  end
+  if not same_values(route.item_ids, member.item_ids)
+      or not same_values(route.group_keys, member.group_keys) then return false end
+  if member.direct ~= true then return true end
+  return route.place == member.place and type(route.pos) == "table"
+    and type(member.pos) == "table" and route.pos.x == member.pos.x
+    and route.pos.y == member.pos.y and route.pos.z == member.pos.z
+end
+
 local function objective_grouped_routes(snapshot, player_origin, policy)
   local members, by_endpoint = {}, {}
   local generation = snapshot.generation

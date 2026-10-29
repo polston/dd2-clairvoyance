@@ -5267,6 +5267,8 @@ function A.make()
   local objective_task_state = { owner = nil, focus = nil, journal = nil,
     needs = nil, focus_epoch = 0, journal_generation = 0, need_generation = 0,
     source_generation = 1, source_catalog = nil, source_observation = nil,
+    filtered_source_owner = nil, filtered_source_signature = nil,
+    filtered_source_catalog = nil,
     source_at = -math.huge, talk_generation = 1, talk_observation = nil,
     talk_at = -math.huge, forgery_generation = 1, forgery_observation = nil,
     forgery_at = -math.huge, reward_observation = nil }
@@ -5689,39 +5691,58 @@ function A.make()
       local ok, name = pcall(function()
         return object:get_type_definition():get_full_name()
       end)
-      return ok and type(name) == "string" and name or nil
+      if not ok then return nil, false end
+      return type(name) == "string" and name or nil, true
     end
-    local function native_guidance_cid(value)
+    local function native_guidance_cid(destination)
+      local ok, value = pcall(function() return destination:call("get_CharaID") end)
+      if not ok then return nil, false end
       local cid = int_value(value)
       -- The extractor normalizes the CharacterID enum's Invalid and player
       -- sentinels to no character; the live join must use the same identity.
-      if cid == 0 or cid == 1857826560 or cid == 2891076981 then return nil end
-      return cid
+      if cid == 0 or cid == 1857826560 or cid == 2891076981 then return nil, true end
+      return cid, true
     end
     local function native_guidance_place(destination)
-      local guidance = safe_field(destination, "_GuidancePos")
-      if managed_type_name(guidance) == "app.ClassSelector`1<app.GuidanceData>" then
-        guidance = safe_field(guidance, "_Process")
+      local guidance_ok, guidance = pcall(function() return destination:get_field("_GuidancePos") end)
+      if not guidance_ok then return nil, false end
+      local guidance_kind, kind_readable
+      if guidance ~= nil then guidance_kind, kind_readable = managed_type_name(guidance) end
+      if guidance ~= nil and not kind_readable then return nil, false end
+      if guidance_kind == "app.ClassSelector`1<app.GuidanceData>" then
+        local process_ok
+        process_ok, guidance = pcall(function() return guidance:get_field("_Process") end)
+        if not process_ok then return nil, false end
       end
-      local kind = managed_type_name(guidance)
+      local kind, readable = nil, true
+      if guidance ~= nil then kind, readable = managed_type_name(guidance) end
+      if not readable then return nil, false end
       if kind == "app.GuidanceKeyLocation" then
-        local key = int_value(safe_field(guidance, "_KeyLocation"))
+        local ok, value = pcall(function() return guidance:get_field("_KeyLocation") end)
+        if not ok then return nil, false end
+        local key = int_value(value)
         return type(key) == "number" and key > 0
-          and { kind = "key_location", key = key } or nil
+          and { kind = "key_location", key = key } or nil, true
       elseif kind == "app.GuidanceLocalArea" then
-        local local_area = int_value(safe_field(guidance, "LocalArea"))
+        local ok, value = pcall(function() return guidance:get_field("LocalArea") end)
+        if not ok then return nil, false end
+        local local_area = int_value(value)
         return type(local_area) == "number" and local_area >= 0
-          and { kind = "local_area", local_area = local_area } or nil
+          and { kind = "local_area", local_area = local_area } or nil, true
       end
-      local key = int_value(safe_call(destination, "get_KeyLocation"))
+      local key_ok, key_value = pcall(function() return destination:call("get_KeyLocation") end)
+      if not key_ok then return nil, false end
+      local key = int_value(key_value)
       if type(key) == "number" and key > 0 then
-        return { kind = "key_location", key = key }
+        return { kind = "key_location", key = key }, true
       end
-      local local_area = int_value(safe_call(destination, "get_LocalArea"))
+      local area_ok, area_value = pcall(function() return destination:call("get_LocalArea") end)
+      if not area_ok then return nil, false end
+      local local_area = int_value(area_value)
       if type(local_area) == "number" and local_area >= 0 then
-        return { kind = "local_area", local_area = local_area }
+        return { kind = "local_area", local_area = local_area }, true
       end
-      return nil
+      return nil, true
     end
     local function native_item_condition_owner(parsed_conditions, destination, qid)
       if type(parsed_conditions) ~= "table" then return nil end
@@ -5960,9 +5981,9 @@ function A.make()
                   local status_ok, status = pcall(function() return native:call("evaluate", qid) end)
                   local register_call_ok, register = pcall(function() return native:call("evaluateRegisterCondition", qid) end)
                   local status_num = status_ok and int_value(status) or nil
-                  local native_cid = native_guidance_cid(safe_call(native, "get_CharaID"))
+                  local native_cid, cid_readable = native_guidance_cid(native)
                   local target
-                  local native_place = native_guidance_place(native)
+                  local native_place, place_readable = native_guidance_place(native)
                   local parsed_cid, parsed_place = concierge_identity(parsed)
                   local place_ok = parsed_place == nil and native_place == nil
                     or (type(parsed_place) == "table" and type(native_place) == "table"
@@ -5977,7 +5998,9 @@ function A.make()
                     local x, y, z = objective_pos(target.cid)
                     if x ~= nil then target.pos = { x = x, y = y, z = z } end
                   end
-                  if parsed_cid ~= native_cid or not place_ok then
+                  if not cid_readable or not place_readable then
+                    destination_reason = "concierge_destination_identity_unreadable"
+                  elseif parsed_cid ~= native_cid or not place_ok then
                     destination_reason = "concierge_destination_mismatch"
                   elseif not status_ok then
                     destination_reason = "concierge_status_exception"
@@ -6076,6 +6099,9 @@ function A.make()
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
         objective_task_state.need_generation = 0, 0, 0
       objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
+      objective_task_state.filtered_source_owner = nil
+      objective_task_state.filtered_source_signature = nil
+      objective_task_state.filtered_source_catalog = nil
       objective_task_state.source_at = -math.huge
       objective_task_state.source_generation = objective_task_state.source_generation + 1
       objective_task_state.talk_observation, objective_task_state.forgery_observation = nil, nil
@@ -6218,31 +6244,42 @@ function A.make()
         for _, option in ipairs(group.options) do wanted[option.item_id] = true end
       end
     end
+    local wanted_list = {}
+    if wanted ~= nil then
+      for item_id in pairs(wanted) do wanted_list[#wanted_list + 1] = item_id end
+      table.sort(wanted_list)
+    end
+    local wanted_signature = wanted ~= nil and table.concat(wanted_list, ",") or nil
     local scan_catalog = source_catalog
     local source_catalog_is_filtered = wanted ~= nil and type(source_catalog) == "table"
     if source_catalog_is_filtered then
-      scan_catalog = {}
-      for key, value in pairs(source_catalog) do
-        if key ~= "placements" and key ~= "chests" then scan_catalog[key] = copy(value) end
-      end
-      local function matching_rows(rows)
-        local out = {}
-        for _, row in ipairs(type(rows) == "table" and rows or {}) do
-          local matches = false
-          for _, output in ipairs(type(row) == "table" and row.outputs or {}) do
-            if wanted[output.item_id] then matches = true; break end
-          end
-          if matches then out[#out + 1] = copy(row) end
+      if objective_task_state.filtered_source_owner == source_catalog
+          and objective_task_state.filtered_source_signature == wanted_signature then
+        scan_catalog = objective_task_state.filtered_source_catalog
+      else
+        scan_catalog = {}
+        for key, value in pairs(source_catalog) do
+          if key ~= "placements" and key ~= "chests" then scan_catalog[key] = copy(value) end
         end
-        return out
+        local function matching_rows(rows)
+          local out = {}
+          for _, row in ipairs(type(rows) == "table" and rows or {}) do
+            local matches = false
+            for _, output in ipairs(type(row) == "table" and row.outputs or {}) do
+              if wanted[output.item_id] then matches = true; break end
+            end
+            if matches then out[#out + 1] = copy(row) end
+          end
+          return out
+        end
+        scan_catalog.placements = matching_rows(source_catalog.placements)
+        scan_catalog.chests = matching_rows(source_catalog.chests)
+        objective_task_state.filtered_source_owner = source_catalog
+        objective_task_state.filtered_source_signature = wanted_signature
+        objective_task_state.filtered_source_catalog = scan_catalog
       end
-      scan_catalog.placements = matching_rows(source_catalog.placements)
-      scan_catalog.chests = matching_rows(source_catalog.chests)
     end
     local function source_catalog_matches()
-      if source_catalog_is_filtered then
-        return same(objective_task_state.source_catalog, scan_catalog)
-      end
       return objective_task_state.source_catalog == scan_catalog
     end
     local now = os.clock()
@@ -6265,8 +6302,7 @@ function A.make()
         objective_task_state.source_generation = math.min(2147483647,
           objective_task_state.source_generation + 1)
       end
-      objective_task_state.source_catalog = source_catalog_is_filtered and copy(scan_catalog)
-        or scan_catalog
+      objective_task_state.source_catalog = scan_catalog
       objective_task_state.source_observation = copy(observation)
     end
     if source_scanned then objective_task_state.source_at = now end
@@ -6285,11 +6321,6 @@ function A.make()
     loot.signal_evidence = copy(signals)
     loot.guidance_delivery_refs = copy(deliveries)
     providers[#providers + 1] = loot
-    local wanted_list = {}
-    if wanted ~= nil then
-      for item_id in pairs(wanted) do wanted_list[#wanted_list + 1] = item_id end
-      table.sort(wanted_list)
-    end
     local function provider_observation(kind)
       local state_key, generation_key, at_key, reader
       if kind == "talk_grant" then

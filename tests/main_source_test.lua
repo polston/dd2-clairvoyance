@@ -201,7 +201,9 @@ check("current-route validation tolerates one-tick generation lag",
   route_current_block:find(
     "route.objective_generation ~= route_publication.objective_generation", 1, true) == nil
     and route_current_block:find(
-      "route.objective_generation == route_publication.objective_generation", 1, true) == nil)
+      "route.objective_generation == route_publication.objective_generation", 1, true) == nil
+    and route_current_block:find(
+      "core.objective_route_member_equal(route, member)", 1, true) ~= nil)
 check("lead calibration records are isolated, last, zero-size and uncounted",
   src:find("if m.calibration == true then", 1, true) ~= nil
     and src:find("and not m.calibration", 1, true) ~= nil
@@ -213,10 +215,9 @@ check("lead calibration records are isolated, last, zero-size and uncounted",
 check("native map icons provide zero-cost route transform anchors",
   src:find("native.pool == pool", 1, true) ~= nil
     and src:find("marker = { pos = { x = x, y = y, z = z }, calibration = true }", 1, true) ~= nil)
-check("current-route validation compares endpoint coordinates",
-  route_current_block:find("route.pos.x == member.pos.x", 1, true) ~= nil
-    and route_current_block:find("route.pos.y == member.pos.y", 1, true) ~= nil
-    and route_current_block:find("route.pos.z == member.pos.z", 1, true) ~= nil)
+check("current-route validation delegates the complete endpoint comparison",
+  route_current_block:find("core.objective_route_member_equal(route, member)", 1, true) ~= nil
+    and route_current_block:find("route.pos.x == member.pos.x", 1, true) == nil)
 local set_routes_n = 0
 for _ in src:gmatch('wt%.q%("set_routes"') do set_routes_n = set_routes_n + 1 end
 check("main has exactly one set_routes handoff", set_routes_n == 1)

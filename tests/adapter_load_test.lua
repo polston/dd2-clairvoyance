@@ -1035,9 +1035,10 @@ do
     "an unrelated unproved pickup cannot suppress a proven current-needed pickup")
 
   local saved_source_reader, saved_source_clock = A.read_objective_source_observation, os.clock
-  local scan_count, fake_now = 0, 100
-  A.read_objective_source_observation = function()
+  local scan_count, scanned_catalogs, fake_now = 0, {}, 100
+  A.read_objective_source_observation = function(catalog)
     scan_count = scan_count + 1
+    scanned_catalogs[#scanned_catalogs + 1] = catalog
     return base_observation()
   end
   os.clock = function() return fake_now end
@@ -1056,6 +1057,8 @@ do
   A.read_objective_source_observation, os.clock = saved_source_reader, saved_source_clock
   assert(scan_count == 2,
     "cached frame calls cannot move the fresh-scan timestamp and suppress a required rescan")
+  assert(scanned_catalogs[1] == scanned_catalogs[2],
+    "timed rescans reuse the exact filtered static-catalog table")
 
   -- The native reader reconciles sparse persisted records and exact loaded
   -- identities before the pure classifier sees them.
@@ -5491,6 +5494,18 @@ do
     and wrong_key.reason == "concierge_destination_mismatch",
     "OT3c a matching CID with the wrong place key is not joined")
   original_guidance[1].target = saved_guidance_target
+  concierge_dest._calls.get_CharaID = "RAISE"
+  local unreadable_cid = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(unreadable_cid.eligibility == "unknown"
+    and unreadable_cid.reason == "concierge_destination_identity_unreadable",
+    "OT3g a raised native CID read fails closed instead of becoming absent")
+  concierge_dest._calls.get_CharaID = saved_concierge_cid
+  concierge_dest._calls.get_KeyLocation = "RAISE"
+  local unreadable_place = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(unreadable_place.eligibility == "unknown"
+    and unreadable_place.reason == "concierge_destination_identity_unreadable",
+    "OT3g a raised native place read fails closed instead of becoming absent")
+  concierge_dest._calls.get_KeyLocation = saved_key
   local saved_delivery = original_guidance[1].delivery
   original_guidance[1].delivery = false
   local false_delivery = oa.objective_task_snapshot({ qid }, catalog).quests[1]

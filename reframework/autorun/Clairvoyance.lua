@@ -1476,18 +1476,10 @@ re.on_frame(function()
       for _, member in ipairs(route_publication.members or {}) do
         expected_routes[member.route_id] = member
       end
-      local function route_matches_member(route, member)
-        if route.cid ~= member.route_id or route.target_key ~= member.target_key
-            or route.ordinal ~= member.ordinal or route.name ~= member.name then return false end
-        if member.direct ~= true then return true end
-        return type(route.pos) == "table" and type(member.pos) == "table"
-          and route.pos.x == member.pos.x and route.pos.y == member.pos.y
-          and route.pos.z == member.pos.z
-      end
       for _, route in ipairs(show.routes or {}) do
         if route.objective_generation ~= nil then
           local member = expected_routes[route.cid]
-          if member == nil or not route_matches_member(route, member) then
+          if member == nil or not core.objective_route_member_equal(route, member) then
             routes_current = false
             break
           end
@@ -1497,7 +1489,7 @@ re.on_frame(function()
         for route_id, member in pairs(expected_routes) do
           local found = false
           for _, route in ipairs(show.routes or {}) do
-            if route_matches_member(route, member)
+            if core.objective_route_member_equal(route, member)
                 or (route.cid == wt.route_cid and route.cid == member.cid
                   and route.objective_generation == nil) then
               found = true

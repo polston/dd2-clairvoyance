@@ -5139,6 +5139,34 @@ do
       and route_id_fn(math.huge, "place") == nil and route_id_fn(0 / 0, "item") == nil
       and route_id_fn(0x80000000, "place") == nil
       and route_id_fn(1, "npc") == nil)
+  local route_member_equal = core.objective_route_member_equal
+  check("objective route member comparator exists", type(route_member_equal) == "function")
+  if type(route_member_equal) == "function" then
+    local member = { route_id = core.objective_direct_route_id(4), place = 0, qid = 30150,
+      kind = "source", direct = true, target_key = core.target_key(
+        { "source", "placed", "fixture", 0 }), ordinal = 4,
+      name = "Objective: Item", objective = true, objective_generation = 8,
+      pos = pos(1, 2, 3), item_ids = { 377, 378 }, certainty = "guaranteed",
+      capacity_key = core.target_key({ "capacity", "placed", "fixture", 0 }),
+      capacity_kind = "finite", group_keys = {
+        core.target_key({ "need", 30150, 0, "item", 377, "exact" }) } }
+    local route = { cid = member.route_id, place = 0, qid = member.qid,
+      kind = "item", direct = true, target_key = member.target_key,
+      ordinal = member.ordinal, name = member.name, objective = true,
+      objective_generation = 7, pos = pos(1, 2, 3), item_ids = { 377, 378 },
+      certainty = member.certainty, capacity_key = member.capacity_key,
+      capacity_kind = member.capacity_kind, group_keys = { member.group_keys[1] } }
+    check("objective route member comparator ignores generation only",
+      route_member_equal(route, member))
+    route.qid = route.qid + 1
+    check("objective route member comparator checks qid", not route_member_equal(route, member))
+    route.qid = member.qid
+    route.capacity_key = core.target_key({ "capacity", "placed", "other", 0 })
+    check("objective route member comparator checks capacity", not route_member_equal(route, member))
+    route.capacity_key = member.capacity_key
+    route.group_keys = { core.target_key({ "need", 30150, 0, "item", 378, "exact" }) }
+    check("objective route member comparator checks groups", not route_member_equal(route, member))
+  end
   if type(route_id_fn) == "function" then
     local route_ids = {}
     for _, qid in ipairs({ 1, 2, 3, 999, 0x7FFFFFFF }) do
