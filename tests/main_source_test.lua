@@ -245,6 +245,11 @@ local path_frame = slice("route path frame", "wt.path_frame = function()",
 check("fresh walking routes start path work before any line is drawable",
   path_frame:find("(wt.routes_n or 0) > 0", 1, true) ~= nil
     and path_frame:find("wt.route_on and settings.route_path == 1", 1, true) == nil)
+local world_path = slice("world walking path", "wt.world_path = function(",
+  "wt.route_frame = function()")
+check("world walking paths use the same filtered render projection as map paths",
+  world_path:find("local routes = wt.render_routes", 1, true) ~= nil
+    and world_path:find('wt.q("input", nil)', 1, true) == nil)
 check("route status is visible in both quest tree and open-map legend",
   src:find('wt.q("route_status", nil, settings.route_path, settings.world_undiscovered)', 1, true) ~= nil
     and src:find('"Route paths: %d/%d ready', 1, true) ~= nil

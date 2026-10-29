@@ -4485,7 +4485,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
   local grouped_needs = task_snapshot.objective_needs ~= nil
   local item_owners, current_tasks, need_groups, targets, by_key = {}, {}, {}, {}, {}
   local grouped_need_items = {}
-  local checklist_specs, checklist_delivery_qids, checklist = {}, {}, {}
+  local checklist_specs, checklist = {}, {}
   local diagnostics = {}
   local function diagnostic(provider, reason, id)
     diagnostics[#diagnostics + 1] = { provider = provider, reason = reason, id = id }
@@ -4548,6 +4548,8 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         if type(owner) == "table" and owner.proof_kind == "delivery"
             and (owner.task_index == nil or owner.task_index == task_index)
             and type(owner.delivery) == "table" then
+          local selected_group = objective_index(owner.delivery.group_id, 2147483647)
+            and owner.delivery.group_id or nil
           for _, ref in ipairs(objective_array(owner.delivery.groups) or {}) do
             local delivery = type(ref) == "table" and ref.delivery or nil
             for _, group in ipairs(type(delivery) == "table"
@@ -4556,6 +4558,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
                 and objective_array(group.item_ids) or nil
               local valid = type(group) == "table"
                 and objective_index(group.index, 2147483647)
+                and (selected_group == nil or group.index == selected_group)
                 and objective_uint(group.count, 2147483647) and group.count > 0
                 and group.is_all_item == false and group.is_infinite == false
                 and group_items ~= nil and #group_items > 0
@@ -4575,7 +4578,6 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
                   task_index = task_index, check_index = group.index + 1,
                   item_id = item_ids[1], item_ids = item_ids,
                   required = group.count, source = "delivery" }
-                checklist_delivery_qids[qid] = true
               end
             end
           end
@@ -4764,21 +4766,19 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
     if grouped_needs_valid and type(snapshot.held) == "table" then
       local by_row, ambiguous = {}, {}
       for _, row in ipairs(checklist_specs) do
-        if row.source == "delivery" or not checklist_delivery_qids[row.qid] then
-          local key = table.concat({ tostring(row.qid), tostring(row.task_index),
-            tostring(row.check_index) }, ":")
-          local previous = by_row[key]
-          if previous == nil then by_row[key] = row
-          else
-            local same = previous.required == row.required
-              and #previous.item_ids == #row.item_ids
-            if same then
-              for i, item_id in ipairs(row.item_ids) do
-                if previous.item_ids[i] ~= item_id then same = false; break end
-              end
+        local key = table.concat({ tostring(row.qid), tostring(row.task_index),
+          tostring(row.check_index) }, ":")
+        local previous = by_row[key]
+        if previous == nil then by_row[key] = row
+        else
+          local same = previous.required == row.required
+            and #previous.item_ids == #row.item_ids
+          if same then
+            for i, item_id in ipairs(row.item_ids) do
+              if previous.item_ids[i] ~= item_id then same = false; break end
             end
-            if not same then ambiguous[key] = true end
           end
+          if not same then ambiguous[key] = true end
         end
       end
       for key, row in pairs(by_row) do
@@ -5187,7 +5187,7 @@ function M.objective_label(policy, obj, explicit_npc_name)
     parts[#parts + 1] = npc
   elseif obj.kind == "source" then
     local target_name = objective_lookup(names.targets, obj.key, "key")
-    parts[#parts + 1] = target_name or item
+    parts[#parts + 1] = (#item_names > 1 and item) or target_name or item
       or ("Item " .. tostring((objective_array(obj.item_ids) or {})[1] or "?"))
     parts[#parts + 1] = OBJECTIVE_PROVIDER_LABEL[obj.provider]
       or tostring(obj.provider or "Source")
@@ -5370,7 +5370,14 @@ function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
       end
     end
     if obj.kind == "source" then index.source_claim[marker] = obj.key end
-    marker.label = M.objective_label(policy, obj)
+    local label = M.objective_label(policy, obj)
+    marker.objective_labels = objective_array(marker.objective_labels) or {}
+    local label_seen = false
+    for _, previous in ipairs(marker.objective_labels) do
+      if previous == label then label_seen = true; break end
+    end
+    if not label_seen then marker.objective_labels[#marker.objective_labels + 1] = label end
+    marker.label = table.concat(marker.objective_labels, " / ")
   end
   local function make_marker(obj)
     local marker = { key = "objective:" .. tostring(obj.ordinal), cat = "objective",

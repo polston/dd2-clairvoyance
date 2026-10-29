@@ -4681,6 +4681,19 @@ do
     and #owned_snapshot._natural_groups.groups == 1
     and owned_snapshot._natural_groups.groups[1].options[1].item_id == 9001,
     "native item-condition ownership unlocks the matching current need without test injection")
+  reward_fixture.prior_storage = IS.dict
+  own_catalog.quests[20040].guidance[1].destinations[1].delivery.group_id = 0
+  reward_fixture.delivery_group = own_catalog.quests[777].deliveries[1].groups[1]
+  reward_fixture.delivery_group.item_ids = { 9002, 9003 }
+  reward_fixture.delivery_group.is_all_item = false
+  IS.dict = storage({ { key = 65535, value = ilist({ sd(9003, 1) }) } })
+  owned_snapshot._alternative_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  owned_snapshot._alternative_needs = ai.objective_need_groups(owned_snapshot._alternative_snapshot)
+  assert(owned_snapshot._alternative_needs.status == "ok"
+      and owned_snapshot._alternative_needs.complete
+      and owned_snapshot._alternative_needs.held[9003] == 1,
+    "structured delivery alternatives extend the coherent held snapshot")
+  IS.dict = reward_fixture.prior_storage
   IS.prog = { 20040, 20090 }
   IS.procs = {
     iproc(20040, { has_item({ { id = 9001, num = 1, lv = 4 } }) }),

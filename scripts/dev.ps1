@@ -39,11 +39,19 @@ function Resolve-Python {
     return $candidate
 }
 
+function ConvertTo-WindowsCommandLineArgument([string]$Argument) {
+    if ($Argument.Length -eq 0) { return '""' }
+    if ($Argument -notmatch '[\s"]') { return $Argument }
+    $escaped = $Argument -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
 function Invoke-ProjectPowerShell([string]$Script, [string[]]$Arguments) {
     $processArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-        ('"' + $Script.Replace('"', '\"') + '"'))
+        (ConvertTo-WindowsCommandLineArgument $Script))
     foreach ($argument in $Arguments) {
-        $processArgs += ('"' + $argument.Replace('"', '\"') + '"')
+        $processArgs += (ConvertTo-WindowsCommandLineArgument $argument)
     }
     $process = Start-Process -FilePath "powershell.exe" -ArgumentList $processArgs `
         -NoNewWindow -Wait -PassThru

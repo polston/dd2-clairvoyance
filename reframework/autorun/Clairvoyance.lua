@@ -3676,8 +3676,7 @@ end)
 -- A node out of range or off screen is a break; one buffer per route, drawn leg by leg.
 wt.world_path = function(cx, cy, cz, ox, oy, oz, max_d2)
   local pairs_ = wt.q("route_paths", nil, settings.world_undiscovered)
-  local inp = wt.q("input", nil)
-  local routes = inp ~= nil and inp.routes or nil
+  local routes = wt.render_routes
   if pairs_ == nil or routes == nil then return end
   local t0 = os.clock()
   local bufs, startss = wt.path_bufs, wt.path_starts

@@ -98,6 +98,10 @@ try {
         ($invokeBlock.Contains("Start-Process") -and $invokeBlock.Contains("-Wait") -and
          $invokeBlock.Contains("-PassThru")) `
         "Invoke-ProjectPowerShell does not explicitly wait for the nested process tree"
+    Assert-True "deploy_wrapper_quotes_windows_arguments" `
+        ($devSource.Contains("function ConvertTo-WindowsCommandLineArgument") -and
+         $invokeBlock.Contains("ConvertTo-WindowsCommandLineArgument")) `
+        "Invoke-ProjectPowerShell does not use Windows-correct argv quoting"
 
     $requiredSources = @(
         @{

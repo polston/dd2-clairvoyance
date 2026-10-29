@@ -1878,6 +1878,7 @@ local ITEM_LAST_AT = -math.huge
 items.objective_group_state = { status = "unknown", complete = false,
     generation = 0, task_generation = items.task_observation_generation,
     groups = {}, records = {}, held = {}, task_index = {}, task_versions = {} }
+items.objective_checklist_held_state = nil
 items.objective_loot_state = { status = "unknown", complete = false,
     generation = 0, at = -math.huge, candidates = {} }
 
@@ -1900,6 +1901,7 @@ function items.invalidate()
     items.objective_loot_state = { status = "unknown", complete = false,
         generation = items.objective_loot_state.generation + 1,
         at = -math.huge, candidates = {} }
+    items.objective_checklist_held_state = nil
     items.related, items.related_titles = nil, nil
     ITEM_WANTED = {}
     items.clear_locs()
@@ -5496,6 +5498,54 @@ function A.make()
     end)
     local held = {}
     for item_id, count in pairs(state.held or {}) do held[item_id] = count end
+    local checklist_ids = {}
+    for _, row in ipairs(task_snapshot.quests) do
+      for _, owner in ipairs(type(row) == "table" and type(row.item_ownership) == "table"
+          and row.item_ownership or {}) do
+        if type(owner) == "table" and owner.proof_kind == "delivery"
+            and type(owner.delivery) == "table" then
+          local selected = type(owner.delivery.group_id) == "number"
+            and owner.delivery.group_id >= 0 and owner.delivery.group_id == math.floor(owner.delivery.group_id)
+            and owner.delivery.group_id or nil
+          for _, ref in ipairs(type(owner.delivery.groups) == "table"
+              and owner.delivery.groups or {}) do
+            local delivery = type(ref) == "table" and ref.delivery or nil
+            for _, group in ipairs(type(delivery) == "table"
+                and type(delivery.groups) == "table" and delivery.groups or {}) do
+              if type(group) == "table" and (selected == nil or group.index == selected) then
+                for _, item_id in ipairs(type(group.item_ids) == "table" and group.item_ids or {}) do
+                  if type(item_id) == "number" and item_id > 0
+                      and item_id == math.floor(item_id) then checklist_ids[item_id] = true end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    local checklist_list = {}
+    for item_id in pairs(checklist_ids) do checklist_list[#checklist_list + 1] = item_id end
+    table.sort(checklist_list)
+    if #checklist_list > 0 then
+      local parts = {}
+      for i, item_id in ipairs(checklist_list) do parts[i] = tostring(item_id) end
+      local signature = table.concat(parts, ",")
+      local extra = items.objective_checklist_held_state
+      if type(extra) ~= "table" or extra.generation ~= state.generation
+          or extra.signature ~= signature then
+        local extra_held, skipped, complete = items.read_held(checklist_ids)
+        extra = { generation = state.generation, signature = signature,
+          held = type(extra_held) == "table" and extra_held or {},
+          complete = type(extra_held) == "table" and complete == true and skipped == 0 }
+        items.objective_checklist_held_state = extra
+      end
+      if not extra.complete then
+        return { status = "unknown", complete = false, groups = {},
+          generation = task_snapshot.need_generation,
+          source_generation = state.generation, reason = "checklist_held_unreadable" }
+      end
+      for item_id, count in pairs(extra.held) do held[item_id] = count end
+    end
     return { status = "ok", complete = true, groups = groups, held = held,
       generation = task_snapshot.need_generation, source_generation = state.generation,
       task_generation = state.task_generation }

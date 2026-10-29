@@ -6111,13 +6111,16 @@ do
                     is_all_item = false, is_infinite = false },
                 } } },
               } } },
+            { proof_kind = "condition", eligibility = "eligible", task_index = 0,
+              destination_index = 4, item_id = 804, count = 1 },
           } },
       }, objective_needs = { status = "ok", complete = true, generation = 1,
-        source_generation = 2, groups = {}, held = { [801] = 1, [802] = 1, [803] = 1 } } }
+        source_generation = 2, groups = {},
+        held = { [801] = 1, [802] = 1, [803] = 1, [804] = 1 } } }
     current_task._delivery_snapshot = core.objective_snapshot(current_task._delivery,
       nil, {}, core.target_registry_new())
     check("objective checklist: structured delivery groups map alternatives to exact checklist rows",
-      current_task._delivery_snapshot and #current_task._delivery_snapshot.checklist == 2
+      current_task._delivery_snapshot and #current_task._delivery_snapshot.checklist == 3
         and current_task._delivery_snapshot.checklist[1].check_index == 1
         and current_task._delivery_snapshot.checklist[1].item_id == 800
         and table.concat(current_task._delivery_snapshot.checklist[1].item_ids, ",") == "800,801"
@@ -6127,7 +6130,33 @@ do
         and current_task._delivery_snapshot.checklist[2].item_id == 802
         and table.concat(current_task._delivery_snapshot.checklist[2].item_ids, ",") == "802,803"
         and current_task._delivery_snapshot.checklist[2].held == 2
-        and current_task._delivery_snapshot.checklist[2].inventory_done == true)
+        and current_task._delivery_snapshot.checklist[2].inventory_done == true
+        and current_task._delivery_snapshot.checklist[3].check_index == 5
+        and current_task._delivery_snapshot.checklist[3].item_id == 804
+        and current_task._delivery_snapshot.checklist[3].inventory_done == true)
+    current_task._selected_delivery = { catalog_version = 2, focus_epoch = 1,
+      journal_generation = 1, need_generation = 1, quests = {
+        { qid = 43, task_index = 0, read_status = "ok", issued_npcs = {},
+          task_destinations = {}, guidance = {}, item_ownership = {
+            { proof_kind = "delivery", eligibility = "unknown", task_index = 0,
+              delivery = { group_id = 1, groups = {
+                { delivery = { groups = {
+                  { index = 0, item_ids = { 810 }, count = 1,
+                    is_all_item = false, is_infinite = false },
+                  { index = 1, item_ids = { 811 }, count = 1,
+                    is_all_item = false, is_infinite = false },
+                } } },
+              } } },
+          } },
+      }, objective_needs = { status = "ok", complete = true, generation = 1,
+        source_generation = 2, groups = {}, held = { [810] = 1, [811] = 1 } } }
+    current_task._selected_delivery_snapshot = core.objective_snapshot(
+      current_task._selected_delivery, nil, {}, core.target_registry_new())
+    check("objective checklist: delivery group id selects only its exact checklist row",
+      current_task._selected_delivery_snapshot
+        and #current_task._selected_delivery_snapshot.checklist == 1
+        and current_task._selected_delivery_snapshot.checklist[1].check_index == 2
+        and current_task._selected_delivery_snapshot.checklist[1].item_id == 811)
     local observed_task = {
       catalog_version = current_task.catalog_version, focus_epoch = current_task.focus_epoch,
       journal_generation = current_task.journal_generation,
@@ -6302,7 +6331,18 @@ do
     check("objective markers: shared covering marker unions owner qids",
       multi_cover[1] ~= nil and type(multi_cover[1].objective_qids) == "table"
         and table.concat(multi_cover[1].objective_qids, ",") == "40,41"
+        and multi_cover[1].label:find("Quest 40", 1, true) ~= nil
+        and multi_cover[1].label:find("Quest 41", 1, true) ~= nil
         and #multi_cover_input[1].qids == 0)
+    check("objective labels: multi-item sources name every matched output",
+      core.objective_label({ names = {
+        items = { { item_id = 900, name = "First" },
+          { item_id = 901, name = "Second" } },
+        targets = { { key = "source", name = "First" } },
+      }, quest_names = { [50] = "Shared Quest" } }, {
+        key = "source", kind = "source", provider = "placed",
+        item_ids = { 900, 901 }, owners = { { qid = 50 } },
+      }) == "First / Second - Pickup - Shared Quest")
 
     local route_cid_source = core.objective_routes(matched, nil,
       { npc_route_mode = 0, objective_places = true, focus_order = { 50 },
