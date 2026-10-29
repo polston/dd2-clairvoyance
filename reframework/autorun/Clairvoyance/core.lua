@@ -2984,7 +2984,7 @@ function M.compute(adapter, show)
 
   -- v10 (SPEC 17.4): world markers, appended AFTER every item marker. The
   -- seller merge runs here, once the quest markers exist.
-  local world_panel, fullmap_world
+  local world_panel, fullmap_world, fullmap_calibration
   local npc_rows, npc_match_cids = {}, {}
   if show.world then
     local boxes, quest_by_cid = {}, {}
@@ -3027,7 +3027,17 @@ function M.compute(adapter, show)
     if type(route) == "table" and type(route.stops) == "table"
       and type(route.cid) == "number" and route.place == nil then
       for n, s in ipairs(route.stops) do
-        if type(s) == "table" and s.lead ~= true and valid_pos(s.pos)
+        if type(s) == "table" and s.lead == true and valid_pos(s.pos) then
+          -- The player lead is not a visible stop, but the full-map route
+          -- transform needs its layout position when no other marker is on
+          -- screen. The renderer consumes this private calibration record.
+          fullmap_calibration = fullmap_calibration or {}
+          fullmap_calibration[#fullmap_calibration + 1] = {
+            key = string.format("r:%d:0", math.floor(route.cid)),
+            cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
+            label = "", cid = route.cid, stop = n, num = 0,
+            slot = route.slot, calibration = true }
+        elseif type(s) == "table" and valid_pos(s.pos)
           and (s.discovered ~= false or undisc) then
           -- SPEC 32.14.11.4: num is the number shown; a lead entry's first
           -- stop is the player, so its stops count from 1 after it.
@@ -3431,6 +3441,7 @@ function M.compute(adapter, show)
     item_capped = item_capped,
     world = world_panel,
     fullmap_world = fullmap_world,
+    fullmap_calibration = fullmap_calibration,
     tracked_qid = tracked_qid,
     nearest_qid = nearest_qid,
     journal = journal,

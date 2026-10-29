@@ -3978,10 +3978,18 @@ do
       local function direct_member(kind, name, pos, ordinal, generation)
         local key = kind == "item" and core.target_key({ "source", "seller:test" })
           or core.target_key({ 30040, "task", 0, ordinal or 1, "place" })
-        return { route_id = core.objective_direct_route_id(ordinal or 1), place = 0,
+        local member = { route_id = core.objective_direct_route_id(ordinal or 1), place = 0,
           direct = true, qid = 30040, kind = kind == "item" and "source" or "place",
           target_key = key, ordinal = ordinal or 1, name = name, pos = pos,
           item_ids = {}, objective_generation = generation or 1 }
+        if kind == "item" then
+          member.item_ids = { 5 }
+          member.certainty = "guaranteed"
+          member.capacity_key = core.target_key({ "capacity", "seller", "test" })
+          member.capacity_kind = "finite"
+          member.group_keys = { core.target_key({ "need", 30040, 0, "item", 5 }) }
+        end
+        return member
       end
       local function objective_npc(cid, name, pos)
         return { route_id = cid, cid = cid, place = cid, qid = 30040, kind = "npc",
@@ -4045,7 +4053,9 @@ do
         changed and got ~= nil and got.stops[2].pos.z == -820.2)
       changed, got = replace({ kind = "item" })
       check("direct route: kind change pokes and replaces published metadata",
-        changed and got ~= nil and got.kind == "item")
+        changed and got ~= nil and got.kind == "item"
+          and got.certainty == "guaranteed" and got.capacity_kind == "finite"
+          and type(got.capacity_key) == "string" and #(got.group_keys or {}) == 1)
       changed, got = replace({ name = "Objective: New Hall" })
       check("direct route: name change pokes and replaces published metadata",
         changed and got ~= nil and got.name == "Objective: New Hall")
@@ -4906,6 +4916,80 @@ do
       and calls.pairs == pairs_before)
     check("hour: still ready", w:path_status(1, 2001) == "path ready"
       and w:route_paths(true)[2001][1].pts ~= nil)
+  end
+
+  -- Focus lifecycle integration: the exact objective publication is cleared,
+  -- then restored from a moved player origin.  Success is not merely a route
+  -- entry or a settled job: the walking-path pair must feed intermediate
+  -- points to the map polyline again instead of the straight two-end fallback.
+  do
+    local f = gfix()
+    f.tick = 0.001
+    local w = f.new()
+    local route_id = core.objective_direct_route_id(1)
+    local function publication(generation, members)
+      return { objective_generation = generation, total = #members, omitted = 0,
+        members = members }
+    end
+    local function member(generation)
+      return { route_id = route_id, place = 0, qid = 30150, kind = "place",
+        direct = true, target_key = "t5:i30150;s8:guidancei0;i0;s5:place",
+        ordinal = 1, name = "Objective", pos = P(40, 0, 0), item_ids = {},
+        objective = true, objective_generation = generation }
+    end
+    local tg = on("search")
+    tg.player = P(0, 0, 0)
+    local function rendered(limit)
+      for frame = 1, limit do
+        w:path_step(2, 1, true)
+        local route = route_in(w, route_id)
+        local pair = route and w:route_paths(true)[route_id] or nil
+        if pair ~= nil and pair[1] ~= nil and pair[1].pts ~= nil then
+          local stops = route.stops
+          local ends = {
+            { lx = stops[1].pos.x, ly = stops[1].pos.z },
+            { lx = stops[2].pos.x, ly = stops[2].pos.z },
+          }
+          local out = {}
+          local n = real.route_polyline(pair, ends,
+            { a = 1, b = 0, c = 0, d = 1, ox = 0, oy = 0 }, 1, out)
+          return frame, n, out
+        end
+      end
+      return nil, 0, {}
+    end
+
+    w:set_routes(publication(1, { member(1) }))
+    w:refresh(0, true, tg)
+    check("focus route render lifecycle: initial objective route publishes",
+      route_in(w, route_id) ~= nil)
+    local first_frames, first_n = rendered(32)
+    check("focus route render lifecycle: initial walking path draws intermediate points",
+      first_frames ~= nil and first_frames <= 32 and first_n > 4)
+
+    w:set_routes(publication(2, {}))
+    local cleared = w:route_paths(true)
+    check("focus route render lifecycle: focus off draws no route",
+      route_in(w, route_id) == nil and next(cleared) == nil)
+
+    -- A slightly moved player has a new stop key but resolves to the same
+    -- nearest graph node.  Query once before that nearest-node job settles:
+    -- this is the live sequence that used to leave a cached straight line.
+    tg.player = P(0.1, 0, 0)
+    w:set_routes(publication(3, { member(3) }))
+    w:refresh(1, true, tg)
+    check("focus route render lifecycle: restored objective route republishes",
+      route_in(w, route_id) ~= nil)
+    local pending = w:route_paths(true)[route_id]
+    check("focus route render lifecycle: restore begins with a pending walking path",
+      pending ~= nil and pending[1] ~= nil and pending[1].pts == nil)
+    local restored_frames, restored_n = rendered(16)
+    check("focus route render lifecycle: focus restore redraws walking path within frame bound",
+      restored_frames ~= nil and restored_frames <= 16 and restored_n > 4)
+    if os.getenv("CLV_BENCH_ROUTE") == "1" then
+      print(string.format("route_render_bench: initial=%s restored=%s 2ms_frames",
+        tostring(first_frames), tostring(restored_frames)))
+    end
   end
 
   -- cancellation of a running search
@@ -6725,12 +6809,29 @@ do
   } }
   local route_tg = { search = true, player = P(0, 0, 0), focus_keys = {} }
   w:set_routes(envelope)
+  w:refresh(0, true, route_tg)
   check("objective routes: accepts the core publication count metadata",
     w.route_gen > 0)
   local generation = w.route_gen
   w:set_routes(envelope)
   check("objective routes: same generation and membership is idempotent",
     w.route_gen == generation)
+  local refreshed_envelope = { objective_generation = 10, total = 2, omitted = 0,
+    members = {} }
+  for index, member in ipairs(envelope.members) do
+    local refreshed = {}
+    for key, value in pairs(member) do refreshed[key] = value end
+    refreshed.objective_generation = 10
+    refreshed_envelope.members[index] = refreshed
+  end
+  local stable_route = core.objective_direct_route_id(1)
+  w.path_job, w.rps[stable_route] = { cid = stable_route }, true
+  w:set_routes(refreshed_envelope)
+  check("objective routes: generation-only refresh keeps published paths and route identity",
+    w.route_gen == generation and route_in(w, stable_route) ~= nil
+      and route_in(w, stable_route).objective_generation == 10
+      and w.path_job ~= nil and w.path_job.cid == stable_route and w.rps[stable_route] == true)
+  w:set_routes(envelope)
   local allocations, old_allocate = 0, core.target_registry_allocate
   core.target_registry_allocate = function(...)
     allocations = allocations + 1

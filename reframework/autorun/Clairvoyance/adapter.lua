@@ -5690,6 +5690,38 @@ function A.make()
       end)
       return ok and type(name) == "string" and name or nil
     end
+    local function native_guidance_cid(value)
+      local cid = int_value(value)
+      -- The extractor normalizes the CharacterID enum's Invalid and player
+      -- sentinels to no character; the live join must use the same identity.
+      if cid == 0 or cid == 1857826560 or cid == 2891076981 then return nil end
+      return cid
+    end
+    local function native_guidance_place(destination)
+      local guidance = safe_field(destination, "_GuidancePos")
+      if managed_type_name(guidance) == "app.ClassSelector`1<app.GuidanceData>" then
+        guidance = safe_field(guidance, "_Process")
+      end
+      local kind = managed_type_name(guidance)
+      if kind == "app.GuidanceKeyLocation" then
+        local key = int_value(safe_field(guidance, "_KeyLocation"))
+        return type(key) == "number" and key > 0
+          and { kind = "key_location", key = key } or nil
+      elseif kind == "app.GuidanceLocalArea" then
+        local local_area = int_value(safe_field(guidance, "LocalArea"))
+        return type(local_area) == "number" and local_area >= 0
+          and { kind = "local_area", local_area = local_area } or nil
+      end
+      local key = int_value(safe_call(destination, "get_KeyLocation"))
+      if type(key) == "number" and key > 0 then
+        return { kind = "key_location", key = key }
+      end
+      local local_area = int_value(safe_call(destination, "get_LocalArea"))
+      if type(local_area) == "number" and local_area >= 0 then
+        return { kind = "local_area", local_area = local_area }
+      end
+      return nil
+    end
     local function native_item_condition_owner(parsed_conditions, destination, qid)
       if type(parsed_conditions) ~= "table" then return nil end
       local parsed, parsed_index
@@ -5927,15 +5959,15 @@ function A.make()
                   local status_ok, status = pcall(function() return native:call("evaluate", qid) end)
                   local register_call_ok, register = pcall(function() return native:call("evaluateRegisterCondition", qid) end)
                   local status_num = status_ok and int_value(status) or nil
-                  local native_cid = int_value(safe_call(native, "get_CharaID"))
-                  if native_cid == 0 then native_cid = nil end
+                  local native_cid = native_guidance_cid(safe_call(native, "get_CharaID"))
                   local target
-                  local native_key = int_value(safe_call(native, "get_KeyLocation"))
-                  local native_area = int_value(safe_call(native, "get_LocalArea"))
+                  local native_place = native_guidance_place(native)
                   local parsed_cid, parsed_place = concierge_identity(parsed)
-                  local place_ok = parsed_place == nil or (parsed_place.kind == "key_location"
-                    and native_key == parsed_place.key) or (parsed_place.kind == "local_area"
-                    and native_area == parsed_place.local_area)
+                  local place_ok = type(parsed_place) == "table" and type(native_place) == "table"
+                    and parsed_place.kind == native_place.kind
+                    and ((parsed_place.kind == "key_location" and parsed_place.key == native_place.key)
+                      or (parsed_place.kind == "local_area"
+                        and parsed_place.local_area == native_place.local_area))
                   target = { cid = parsed_cid,
                     place = parsed_place, pos = position(safe_call(native, "getDestination")) }
                   if target.pos == nil and target.cid ~= nil then

@@ -3568,8 +3568,19 @@ do
     end
     local leadr = { cid = 5, name = "N", slot = 1, lead = true, stops = {
       { pos = pl(0, 0), discovered = true, lead = true }, { pos = pl(10, 10), discovered = true } } }
-    local lm = stops_of(run({}, nil, { routes = { leadr } }))
+    local lead_result = run({}, nil, { routes = { leadr } })
+    local lm = stops_of(lead_result)
     check("rcc lead markers", #lm == 1 and lm[1].stop == 2 and lm[1].num == 1 and lm[1].key == "r:5:1")
+    local calibration = has(lead_result.fullmap_calibration, "r:5:0")
+    check("rcc lead keeps calibration separate from replacement world markers",
+      calibration ~= nil and calibration.calibration == true and calibration.stop == 1
+        and calibration.num == 0 and calibration.pos.x == 0 and calibration.pos.z == 0
+        and has(lead_result.fullmap_world, "r:5:0") == nil)
+    local lead_no_origin = run({ chests = { { uid = "keep", pos = pl(3, 3),
+      state = "unopened" } } }, nil, { routes = { leadr }, map_origin = false })
+    check("rcc calibration never replaces ordinary world markers without a map origin",
+      has(core.fullmap_order(lead_no_origin.markers, nil, lead_no_origin.fullmap_world),
+        "w:chest:keep") ~= nil and has(lead_no_origin.fullmap_calibration, "r:5:0") ~= nil)
     local plain = stops_of(run({}, nil, { routes = { { cid = 5, name = "N", slot = 1, stops = {
       { pos = pl(0, 0), discovered = true }, { pos = pl(10, 10), discovered = true } } } } }))
     check("rcc plain markers", #plain == 2 and plain[1].num == 1 and plain[2].num == 2

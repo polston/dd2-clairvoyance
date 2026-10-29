@@ -1764,6 +1764,9 @@ function M.new(a, reads, io)
     return { cid = m.cid, place = 0, direct = true, objective = m.objective,
       qid = m.qid, kind = m.kind, target_key = m.target_key, ordinal = m.ordinal,
       objective_generation = m.objective_generation, name = m.name, pos = pcopy(m.pos),
+      item_ids = m.item_ids, certainty = m.certainty, probability = m.probability,
+      capacity_key = m.capacity_key, capacity_kind = m.capacity_kind,
+      group_keys = m.group_keys,
       stops = { { pos = pcopy(pl), discovered = true },
                 { pos = pcopy(m.pos), discovered = true } } }
   end
@@ -1781,12 +1784,23 @@ function M.new(a, reads, io)
       and valid_pos(e.pos)
   end
 
+  local function same_values(a, b)
+    if type(a) ~= type(b) then return false end
+    if a == nil then return true end
+    if #a ~= #b then return false end
+    for i, value in ipairs(a) do if value ~= b[i] then return false end end
+    return true
+  end
+
   local function same_direct_payload(a, b)
     return type(a) == "table" and type(b) == "table"
       and a.direct == true and b.direct == true and a.name == b.name
       and a.qid == b.qid and a.kind == b.kind and a.objective == b.objective
       and a.target_key == b.target_key and a.ordinal == b.ordinal
       and a.objective_generation == b.objective_generation
+      and a.certainty == b.certainty and a.probability == b.probability
+      and a.capacity_key == b.capacity_key and a.capacity_kind == b.capacity_kind
+      and same_values(a.item_ids, b.item_ids) and same_values(a.group_keys, b.group_keys)
       and valid_pos(a.pos) and valid_pos(b.pos) and a.pos.x == b.pos.x
       and a.pos.y == b.pos.y and a.pos.z == b.pos.z
   end
@@ -3152,6 +3166,32 @@ function M.new(a, reads, io)
     for i, id in ipairs(ids or {}) do out[i] = id end
     return out
   end
+  local function route_keys_valid(keys)
+    keys = route_dense_array(keys)
+    if keys == nil then return false end
+    for _, key in ipairs(keys) do if not route_key_valid(key) then return false end end
+    return true
+  end
+  local function route_keys_copy(keys)
+    local out = {}
+    for i, key in ipairs(keys or {}) do out[i] = key end
+    return out
+  end
+  local function source_metadata_valid(e)
+    if e.kind ~= "source" then
+      return e.certainty == nil and e.probability == nil and e.capacity_key == nil
+        and e.capacity_kind == nil and e.group_keys == nil
+    end
+    local probabilistic = e.certainty == "probabilistic"
+    return (e.certainty == "guaranteed" or probabilistic)
+      and route_key_valid(e.capacity_key)
+      and (e.capacity_kind == "finite" or e.capacity_kind == "unlimited")
+      and route_keys_valid(e.group_keys)
+      and ((probabilistic and type(e.probability) == "number"
+          and e.probability == e.probability and e.probability > 0
+          and e.probability < math.huge)
+        or (not probabilistic and e.probability == nil))
+  end
   local function route_count_metadata_valid(publication, member_count)
     local total, omitted = rawget(publication, "total"), rawget(publication, "omitted")
     if total == nil and omitted == nil then return true end
@@ -3182,7 +3222,9 @@ function M.new(a, reads, io)
         if k ~= "route_id" and k ~= "cid" and k ~= "place" and k ~= "qid" and k ~= "kind"
             and k ~= "direct" and k ~= "target_key" and k ~= "ordinal" and k ~= "name"
             and k ~= "pos" and k ~= "item_ids" and k ~= "objective"
-            and k ~= "objective_generation" then
+            and k ~= "objective_generation" and k ~= "certainty"
+            and k ~= "probability" and k ~= "capacity_key"
+            and k ~= "capacity_kind" and k ~= "group_keys" then
           return nil, generation, false
         end
       end
@@ -3194,14 +3236,18 @@ function M.new(a, reads, io)
             or not route_positive(e.ordinal, 1099511627775)
             or core.objective_direct_route_id(e.ordinal) ~= e.route_id
             or e.cid ~= nil or e.place ~= 0 or not valid_pos(e.pos)
-            or (e.kind ~= "place" and e.kind ~= "source") then
+            or (e.kind ~= "place" and e.kind ~= "source")
+            or not source_metadata_valid(e) then
           return nil, generation, false
         end
         m = { cid = e.route_id, name = type(e.name) == "string" and e.name or "Objective",
           place = 0, direct = true, objective = true, qid = e.qid,
           kind = e.kind == "source" and "item" or e.kind,
           target_key = e.target_key, ordinal = e.ordinal,
-          objective_generation = generation, pos = pcopy(e.pos), item_ids = route_ids_copy(e.item_ids) }
+          objective_generation = generation, pos = pcopy(e.pos), item_ids = route_ids_copy(e.item_ids),
+          certainty = e.certainty, probability = e.probability,
+          capacity_key = e.capacity_key, capacity_kind = e.capacity_kind,
+          group_keys = e.group_keys and route_keys_copy(e.group_keys) or nil }
       elseif ancillary then
         if e.direct ~= false or e.kind ~= "npc" or not route_positive(e.cid, 4294967295)
             or e.route_id ~= e.cid or e.place ~= nil or #e.item_ids ~= 0
@@ -3241,9 +3287,11 @@ function M.new(a, reads, io)
   end
 
   local objective_member_scalars = { "route_id", "cid", "place", "qid", "kind", "direct",
-    "target_key", "ordinal", "name", "objective", "objective_generation" }
-  local function same_objective_publication(publication)
-    if S.objective_publication == nil or publication.objective_generation ~= S.objective_generation then
+    "target_key", "ordinal", "name", "objective", "objective_generation", "certainty",
+    "probability", "capacity_key", "capacity_kind" }
+  local function same_objective_publication(publication, ignore_generation)
+    if S.objective_publication == nil or (not ignore_generation
+        and publication.objective_generation ~= S.objective_generation) then
       return false
     end
     for k in pairs(publication) do
@@ -3260,11 +3308,14 @@ function M.new(a, reads, io)
         if k ~= "route_id" and k ~= "cid" and k ~= "place" and k ~= "qid" and k ~= "kind"
             and k ~= "direct" and k ~= "target_key" and k ~= "ordinal" and k ~= "name"
             and k ~= "pos" and k ~= "item_ids" and k ~= "objective"
-            and k ~= "objective_generation" then return false end
+            and k ~= "objective_generation" and k ~= "certainty"
+            and k ~= "probability" and k ~= "capacity_key"
+            and k ~= "capacity_kind" and k ~= "group_keys" then return false end
       end
       for k in pairs(old) do if rawget(member, k) == nil then return false end end
       for _, key in ipairs(objective_member_scalars) do
-        if member[key] ~= old[key] then return false end
+        if (not ignore_generation or key ~= "objective_generation")
+            and member[key] ~= old[key] then return false end
       end
       local pos, old_pos = member.pos, old.pos
       if type(pos) ~= type(old_pos) then return false end
@@ -3277,6 +3328,13 @@ function M.new(a, reads, io)
       local ids, old_ids = route_dense_array(member.item_ids), old.item_ids
       if ids == nil or #ids ~= #old_ids then return false end
       for j, id in ipairs(ids) do if id ~= old_ids[j] then return false end end
+      local keys, old_keys = member.group_keys, old.group_keys
+      if type(keys) ~= type(old_keys) then return false end
+      if keys ~= nil then
+        keys = route_dense_array(keys)
+        if keys == nil or #keys ~= #old_keys then return false end
+        for j, key in ipairs(keys) do if key ~= old_keys[j] then return false end end
+      end
     end
     return true
   end
@@ -3319,6 +3377,16 @@ function M.new(a, reads, io)
         return
       end
       list = normalized
+      if S.objective_generation ~= generation
+          and same_objective_publication(publication, true) then
+        S.objective_generation = generation
+        S.objective_publication = objective_clone(publication)
+        for _, member in ipairs(S.members) do member.objective_generation = generation end
+        for _, route in ipairs(input_tbl and input_tbl.routes or {}) do
+          if route.objective_generation ~= nil then route.objective_generation = generation end
+        end
+        return
+      end
       S.objective_publication = objective_clone(publication)
     elseif type(publication) == "table" then
       local legacy = legacy_publication_array(publication)
@@ -3387,6 +3455,10 @@ function M.new(a, reads, io)
             m.target_key, m.ordinal = e.target_key, e.ordinal
             m.objective_generation = e.objective_generation
             m.pos = pcopy(e.pos)
+            m.item_ids = route_ids_copy(e.item_ids)
+            m.certainty, m.probability = e.certainty, e.probability
+            m.capacity_key, m.capacity_kind = e.capacity_key, e.capacity_kind
+            m.group_keys = e.group_keys and route_keys_copy(e.group_keys) or nil
           elseif is_envelope then
             m.objective, m.qid, m.kind = e.objective, e.qid, e.kind
             m.target_key, m.ordinal = e.target_key, e.ordinal
@@ -3821,6 +3893,10 @@ function M.new(a, reads, io)
       end
       if npcs.nearest_step(j.job, budget_ms, clock) == "done" then
         w.near[k] = j.job.best or false
+        -- A new stop key can resolve to nodes whose pair path is already in
+        -- w.paths.  No store_path call follows in that case, so invalidate
+        -- route_list's earlier pending result here as well.
+        w.pver = w.pver + 1
         w.path_job = nil
       end
     else

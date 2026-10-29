@@ -247,13 +247,16 @@ function M.create(opt)
     for i = 1, #records do
       local rec = records[i]
       local ok, x, y = pcall(read, rec)
-      if ok and type(x) == "number" and type(y) == "number" and type(rec.argb) == "number"
-          and type(rec.size) == "number" and rec.id ~= nil then
-        local cat = rec.cat
-        local style = opt.style_of ~= nil and opt.style_of(cat) or nil
-        local scale = opt.scale_of ~= nil and opt.scale_of(cat) or 1
+      if ok and type(x) == "number" and type(y) == "number"
+          and (rec.calibration == true or (type(rec.argb) == "number"
+            and type(rec.size) == "number" and rec.id ~= nil)) then
         rec.lx, rec.ly, rec.read_at = x, y, t0
-        self:push("map", rec.id, x, y, rec.size * scale, rec.argb, 1, style)
+        if not rec.calibration then
+          local cat = rec.cat
+          local style = opt.style_of ~= nil and opt.style_of(cat) or nil
+          local scale = opt.scale_of ~= nil and opt.scale_of(cat) or 1
+          self:push("map", rec.id, x, y, rec.size * scale, rec.argb, 1, style)
+        end
       end
     end
     self.fill_at = t0

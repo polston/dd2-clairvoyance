@@ -4466,7 +4466,9 @@ do
   local od = nobj({}, { get_DestType = 3, get_CharaID = 101,
     get_KeyLocation = 2308, get_LocalArea = 0, getDestination = { x = 1, y = 2, z = 3 } })
   local ot = nobj({ _Destinations = mcoll({ od }) }, { getActiveDestinations = mcoll({ od }) })
-  local og = nobj({ _Conditions = mcoll({
+  local og = nobj({ _GuidancePos = nobj({ _Process = nobj({ _KeyLocation = 2308 }, nil,
+      "app.GuidanceKeyLocation") }, nil, "app.ClassSelector`1<app.GuidanceData>"),
+    _Conditions = mcoll({
     nobj({ _Process = nobj({ _ItemID = 9001, _SetNum = false, _Num = 1,
       _IsEnabled = true, _IsNot = true }, { evaluate = true },
       "app.ConciergeConditionItem") }, nil,
@@ -4475,7 +4477,7 @@ do
       "app.ConciergeConditionQuestVariable") }, nil,
       "app.ClassSelector`1<app.ConciergeConditionBase>") }) },
     { evaluate = 0, evaluateRegisterCondition = true,
-    get_CharaID = 101, get_KeyLocation = 2308 })
+    get_CharaID = 1857826560 })
   og.test_selector = og.fields._Conditions:call("get_element", 0)
   og.test_process = og.test_selector:get_field("_Process")
   local oc = nobj({ _TaskIndex = 0 }, { get_TaskIndex = 0,
@@ -4512,7 +4514,7 @@ do
         local_area = 0, has_show_conditions = false, show_conditions = {},
         is_update_condition = false, has_display_conditions = false, display_conditions = {} },
     } } }, guidance = { { index = 0, task_index = 0, destination_index = 0,
-      destinations = { { index = 0, cid = 101, target = { kind = "key_location", key = 2308 },
+      destinations = { { index = 0, cid = nil, target = { kind = "key_location", key = 2308 },
         conditions = {
           { kind = "item", enabled = true, is_not = true, item_id = 9001, set_num = false, num = 1 },
           { kind = "quest_variable", enabled = true, is_not = false, qid = 20040,

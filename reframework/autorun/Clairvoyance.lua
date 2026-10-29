@@ -666,7 +666,7 @@ do
         local row = fp[nf]
         if row == nil then row = {}; fp[nf] = row end
         row[1], row[2], row[3], row[4] = m.pos.x, m.pos.z, rec.lx, rec.ly
-        local li = m.cat == "route_stop" and type(m.stop) == "number"
+        local li = m.cat == "route_stop" and not m.calibration and type(m.stop) == "number"
           and slot_of[m.cid] or nil
         if li ~= nil then
           nrr = nrr + 1
@@ -1452,7 +1452,9 @@ re.on_frame(function()
       local route_publication, routes_n, routes_total = core.objective_routes(
         result.objective_snapshot, show.origin, policy)
       result.objective_routes = route_publication
-      local route_parts = { tostring(result.objective_routes.objective_generation or 0) }
+      -- Fresh evidence may advance the objective generation without changing
+      -- any drawable route. Only route content belongs in the render gate.
+      local route_parts = {}
       for _, member in ipairs(result.objective_routes.members or {}) do
         local pos = member.pos or {}
         route_parts[#route_parts + 1] = table.concat({ tostring(member.route_id),
@@ -1474,12 +1476,18 @@ re.on_frame(function()
       for _, member in ipairs(route_publication.members or {}) do
         expected_routes[member.route_id] = member
       end
+      local function route_matches_member(route, member)
+        if route.cid ~= member.route_id or route.target_key ~= member.target_key
+            or route.ordinal ~= member.ordinal or route.name ~= member.name then return false end
+        if member.direct ~= true then return true end
+        return type(route.pos) == "table" and type(member.pos) == "table"
+          and route.pos.x == member.pos.x and route.pos.y == member.pos.y
+          and route.pos.z == member.pos.z
+      end
       for _, route in ipairs(show.routes or {}) do
         if route.objective_generation ~= nil then
           local member = expected_routes[route.cid]
-          if member == nil or route.objective_generation ~= route_publication.objective_generation
-              or route.target_key ~= member.target_key or route.ordinal ~= member.ordinal
-              or route.name ~= member.name then
+          if member == nil or not route_matches_member(route, member) then
             routes_current = false
             break
           end
@@ -1489,9 +1497,7 @@ re.on_frame(function()
         for route_id, member in pairs(expected_routes) do
           local found = false
           for _, route in ipairs(show.routes or {}) do
-            if (route.cid == route_id and route.objective_generation == route_publication.objective_generation
-                and route.target_key == member.target_key and route.ordinal == member.ordinal
-                and route.name == member.name)
+            if route_matches_member(route, member)
                 or (route.cid == wt.route_cid and route.cid == member.cid
                   and route.objective_generation == nil) then
               found = true
@@ -1512,6 +1518,7 @@ re.on_frame(function()
         end
         result.markers = without_stale_route_stops(result.markers)
         result.fullmap_world = without_stale_route_stops(result.fullmap_world)
+        result.fullmap_calibration = without_stale_route_stops(result.fullmap_calibration)
       end
       local route_on, has_pts, route_pts = core.route_point_state(result,
         routes_current and show.routes or nil,
@@ -1533,6 +1540,14 @@ re.on_frame(function()
       all = {}
       for _, m in ipairs(result.markers) do all[#all + 1] = m end
       for _, m in ipairs(fw) do all[#all + 1] = m end
+    end
+    local fc = result.fullmap_calibration
+    if fc ~= nil and #fc > 0 then
+      if all == result.markers then
+        all = {}
+        for _, m in ipairs(result.markers) do all[#all + 1] = m end
+      end
+      for _, m in ipairs(fc) do all[#all + 1] = m end
     end
     local sig, new_committed = core.signature(all, committed)
     committed = new_committed
@@ -1602,8 +1617,8 @@ do
     return A.new_unique_id(A.map_marker_guid(m))
   end
   local function note_added(icon, m)
-    added_count = added_count + 1
-    hover_labels[icon:get_address()] = m.hover or m.label
+    if m.calibration ~= true then added_count = added_count + 1 end
+    if m.calibration ~= true then hover_labels[icon:get_address()] = m.hover or m.label end
   end
   local function marker_argb(m)
     return su.marker_color(settings, m)
@@ -1612,10 +1627,16 @@ do
   -- true means the game glyph is hidden (alpha byte 0).
   local function note_picture(pool, ref, m)
     if pool.label ~= "sprite" or not icons.read_ok then return false end
-    local pid = su.icon_for(settings, m, "head", m.step, icons.never)
-    if not icons:drawable(pid) then return false end
     local sprite = ref.Sprite
     if sprite == nil then return false end
+    if m.calibration == true then
+      local recs = icons.recs
+      recs[#recs + 1] = { marker = m, ref = ref, sprite = sprite,
+        calibration = true }
+      return true
+    end
+    local pid = su.icon_for(settings, m, "head", m.step, icons.never)
+    if not icons:drawable(pid) then return false end
     local recs = icons.recs
     local group = wt.style.group_of_marker(m) or m.cat
     recs[#recs + 1] = { marker = m, id = pid, ref = ref, sprite = sprite,
@@ -1647,12 +1668,15 @@ do
     native_max_prio = top
     local cursor = used
     idx_obj:write_dword(INT_OFF, cursor)
-    for _, m in ipairs(core.fullmap_order(snapshot.markers,
-      wt.map_origin or wt.world_origin, snapshot.fullmap_world)) do
+    local ordered = core.fullmap_order(snapshot.markers,
+      wt.map_origin or wt.world_origin, snapshot.fullmap_world)
+    for _, m in ipairs(snapshot.fullmap_calibration or {}) do ordered[#ordered + 1] = m end
+    for _, m in ipairs(ordered) do
       local pos = Vector3f.new(m.pos.x, m.pos.y, m.pos.z)
-      if this:isInDispRange(pos) then
+      local usable = m.calibration ~= true or (pool.label == "sprite" and icons.read_ok)
+      if usable and this:isInDispRange(pos) then
         if cursor >= limit then
-          note_dropped()
+          if m.calibration ~= true then note_dropped() end
         else
           local info = A.new_map_icon_info()
           info.IconType = marker_icon_type(m)
@@ -1668,7 +1692,8 @@ do
             local okc, col = pcall(function() return ref:get_Color() end)
             saved_styles[#saved_styles + 1] = {
               ref = ref, scale = ref:get_Scale(), prio = ref:get_Prio(),
-              color = okc and col or nil }
+              color = okc and col or nil, calibration = m.calibration == true }
+            if m.calibration == true then ref:set_Scale(0) end
             local argb = marker_argb(m)
             local okn, hidden = pcall(note_picture, pool, ref, m)
             if okn and hidden then argb = argb & 0x00FFFFFF end
@@ -1755,7 +1780,7 @@ end
 local function apply_styles(this)
   local scale = this.IconScale
   for _, rec in ipairs(saved_styles) do
-    rec.ref:set_Scale(scale)
+    rec.ref:set_Scale(rec.calibration and 0 or scale)
     rec.ref:set_Prio(native_max_prio + 1)
   end
   pcall(icons.resize)
