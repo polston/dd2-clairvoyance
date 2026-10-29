@@ -6224,6 +6224,10 @@ do
         and grouped.need_groups[1].generation == 20
         and grouped.stamp.need_generation == 10
         and grouped.stamp.need_source_generation == 20)
+    local refreshed_grouped = core.objective_snapshot(grouped_task(grouped_needs, 10, 21), nil,
+      grouped_providers, core.target_registry_new())
+    check("objective grouped snapshot: identical fresh need rounds keep route generation stable",
+      grouped and refreshed_grouped and refreshed_grouped.generation == grouped.generation)
     local mismatched_group_task = grouped_task(grouped_needs, 10, 20)
     mismatched_group_task.objective_needs.groups[1].generation = 19
     local mismatched_group_snapshot = core.objective_snapshot(mismatched_group_task, nil,

@@ -4320,10 +4320,10 @@ end
 local function objective_need_signatures(task_snapshot)
   local snapshot = type(task_snapshot) == "table" and task_snapshot.objective_needs or nil
   if type(snapshot) ~= "table" then return {} end
+  -- Freshness counters prove one atomic read below; they are not semantic
+  -- route identity. The item scanner advances them for identical needs.
   local signatures = { "status=" .. tostring(snapshot.status),
-    "complete=" .. tostring(snapshot.complete), "generation=" .. tostring(snapshot.generation),
-    "source_generation=" .. tostring(snapshot.source_generation),
-    "task_generation=" .. tostring(snapshot.task_generation) }
+    "complete=" .. tostring(snapshot.complete), "generation=" .. tostring(snapshot.generation) }
   local groups = {}
   for _, group in ipairs(objective_array(snapshot.groups) or {}) do
     if type(group) == "table" then
@@ -4338,7 +4338,7 @@ local function objective_need_signatures(task_snapshot)
       table.sort(options)
       groups[#groups + 1] = table.concat({ M.target_key(group.id) or "invalid",
         tostring(group.qid), tostring(group.task_index), tostring(group.remaining),
-        tostring(group.status), tostring(group.complete), tostring(group.generation),
+        tostring(group.status), tostring(group.complete),
         table.concat(options, ",") }, "|")
     else
       groups[#groups + 1] = "invalid"
