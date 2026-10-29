@@ -6715,7 +6715,7 @@ do
       and invalid_need[1].generation > content_changed[1].generation)
   source_task.need_generation = 4
 
-  local envelope = { objective_generation = 9, members = {
+  local envelope = { objective_generation = 9, total = 2, omitted = 0, members = {
     { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
       direct = false, target_key = core.target_key({ 30040, "issued_npc", 2001 }),
       ordinal = 1, pos = P(1, 0, 1), item_ids = {}, objective_generation = 9 },
@@ -6725,6 +6725,8 @@ do
   } }
   local route_tg = { search = true, player = P(0, 0, 0), focus_keys = {} }
   w:set_routes(envelope)
+  check("objective routes: accepts the core publication count metadata",
+    w.route_gen > 0)
   local generation = w.route_gen
   w:set_routes(envelope)
   check("objective routes: same generation and membership is idempotent",
@@ -6743,6 +6745,12 @@ do
   core.target_registry_allocate = old_allocate
   check("objective routes: identical publication fast path avoids registry allocation",
     allocations == 0 and mem_growth < 1)
+  local before_bad_counts = w.route_gen
+  w:set_routes({ objective_generation = 9, total = 3, omitted = 0,
+    members = envelope.members })
+  check("objective routes: inconsistent core count metadata fails closed",
+    w.route_gen > before_bad_counts)
+  w:set_routes(envelope)
   local mixed = { objective_generation = 10, members = {
     { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
       direct = false, target_key = core.target_key({ 30040, "issued_npc", 2001 }),
