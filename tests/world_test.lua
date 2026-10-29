@@ -3985,9 +3985,9 @@ do
         if kind == "item" then
           member.item_ids = { 5 }
           member.certainty = "guaranteed"
-          member.capacity_key = core.target_key({ "capacity", "seller", "test" })
+          member.capacity_key = core.target_key({ "capacity", "seller", "test", "variant", 1, 2 })
           member.capacity_kind = "finite"
-          member.group_keys = { core.target_key({ "need", 30040, 0, "item", 5 }) }
+          member.group_keys = { core.target_key({ "need", 30040, 0, "item", 5, "alternate" }) }
         end
         return member
       end
@@ -4059,6 +4059,13 @@ do
       changed, got = replace({ name = "Objective: New Hall" })
       check("direct route: name change pokes and replaces published metadata",
         changed and got ~= nil and got.name == "Objective: New Hall")
+
+      local empty_source = direct_member("item", "Objective: Empty", original)
+      empty_source.item_ids, empty_source.group_keys = {}, {}
+      w:set_routes(publication({ empty_source }))
+      w:refresh(1, true, tg)
+      check("direct route: source without item and need-group ownership fails closed",
+        route_in(w, direct_id) == nil)
 
       -- Pending NPC routes retain their slots before a direct objective takes one.
       do

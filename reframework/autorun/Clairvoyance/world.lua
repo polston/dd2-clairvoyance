@@ -3121,39 +3121,45 @@ function M.new(a, reads, io)
     return type(value) == "number" and math.type(value) == "integer"
       and value >= 1 and value <= maximum
   end
-  local function route_key_valid(key)
-    if type(key) ~= "string" or key:sub(1, 1) ~= "t" then return false end
+  local function route_key_tuple(key, maximum)
+    if type(key) ~= "string" or key:sub(1, 1) ~= "t" then return nil end
     local sep = key:find(":", 2, true)
-    if sep == nil then return false end
+    if sep == nil then return nil end
     local count_text = key:sub(2, sep - 1)
     local count = tonumber(count_text)
-    if count == nil or count < 1 or count > 5 or count % 1 ~= 0
-        or count_text ~= tostring(count) then return false end
+    if count == nil or count < 1 or count > maximum or count % 1 ~= 0
+        or count_text ~= tostring(count) then return nil end
     local tuple, at = {}, sep + 1
     for i = 1, count do
       local tag = key:sub(at, at)
       if tag == "i" then
         local stop = key:find(";", at + 1, true)
-        if stop == nil then return false end
+        if stop == nil then return nil end
         local raw = key:sub(at + 1, stop - 1)
         local value = tonumber(raw)
-        if value == nil or math.type(value) ~= "integer" or tostring(value) ~= raw then return false end
+        if value == nil or math.type(value) ~= "integer" or tostring(value) ~= raw then return nil end
         tuple[i], at = value, stop + 1
       elseif tag == "s" then
         local colon = key:find(":", at + 1, true)
-        if colon == nil then return false end
+        if colon == nil then return nil end
         local length_text = key:sub(at + 1, colon - 1)
         local length = tonumber(length_text)
         if length == nil or length < 0 or length % 1 ~= 0
-            or length_text ~= tostring(length) then return false end
+            or length_text ~= tostring(length) then return nil end
         local first, last = colon + 1, colon + length
-        if last > #key then return false end
+        if last > #key then return nil end
         tuple[i], at = key:sub(first, last), last + 1
       else
-        return false
+        return nil
       end
     end
-    return at == #key + 1 and core.target_key(tuple) == key
+    if at ~= #key + 1 or core.target_key(tuple) ~= key then return nil end
+    return tuple
+  end
+  local function route_key_valid(key) return route_key_tuple(key, 5) ~= nil end
+  local function route_family_key_valid(key, family)
+    local tuple = route_key_tuple(key, 32)
+    return tuple ~= nil and tuple[1] == family
   end
   local function route_ids_valid(ids)
     ids = route_dense_array(ids)
@@ -3166,10 +3172,12 @@ function M.new(a, reads, io)
     for i, id in ipairs(ids or {}) do out[i] = id end
     return out
   end
-  local function route_keys_valid(keys)
+  local function route_keys_valid(keys, family)
     keys = route_dense_array(keys)
-    if keys == nil then return false end
-    for _, key in ipairs(keys) do if not route_key_valid(key) then return false end end
+    if keys == nil or #keys == 0 then return false end
+    for _, key in ipairs(keys) do
+      if not route_family_key_valid(key, family) then return false end
+    end
     return true
   end
   local function route_keys_copy(keys)
@@ -3183,10 +3191,10 @@ function M.new(a, reads, io)
         and e.capacity_kind == nil and e.group_keys == nil
     end
     local probabilistic = e.certainty == "probabilistic"
-    return (e.certainty == "guaranteed" or probabilistic)
-      and route_key_valid(e.capacity_key)
+    return #e.item_ids > 0 and (e.certainty == "guaranteed" or probabilistic)
+      and route_family_key_valid(e.capacity_key, "capacity")
       and (e.capacity_kind == "finite" or e.capacity_kind == "unlimited")
-      and route_keys_valid(e.group_keys)
+      and route_keys_valid(e.group_keys, "need")
       and ((probabilistic and type(e.probability) == "number"
           and e.probability == e.probability and e.probability > 0
           and e.probability < math.huge)
