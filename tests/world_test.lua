@@ -7031,6 +7031,9 @@ do
       index = 0, table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
       src = "normal", gate = { check = 0, conditions = {
         { kind = "quest", qid = 1234, finish = true } } } },
+    { k = "item", uid = "quest-pickup-1", id = 503, n = 1, x = 2, y = 3, z = 4,
+      index = 0, table_id = "dddddddd-dddd-dddd-dddd-dddddddddddd", layer = 2,
+      src = "subquest" },
     { k = "chest", uid = "chest-1", id = 10, x = 4, y = 5, z = 6,
       index = 0, table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", layer = 0,
       unlock_item = 0, is_seal = false, fake_unlock_item = 0, quest_override = false,
@@ -7048,7 +7051,7 @@ do
     f.places_load_n == 1 and catalog == same_catalog and catalog.status == "ok"
       and catalog.complete == true and catalog.generation == 1)
   check("static catalog: typed placement and multi-output chest are exposed",
-    catalog.placements[1].uid == "pickup-1"
+    #catalog.placements == 2 and catalog.placements[1].uid == "pickup-1"
       and catalog.placements[1].source_id[1] == "source"
       and catalog.placements[1].source_id[2] == "placed"
       and catalog.placements[1].source_id[4] == 0
@@ -7058,6 +7061,9 @@ do
       and catalog.placements[1].outputs[1].item_id == 501
       and catalog.placements[1].outputs[1].count == 2 and catalog.placements[1].pos.x == 1
       and catalog.placements[1].gate.conditions[1].qid == 1234
+      and catalog.placements[2].uid == "quest-pickup-1"
+      and catalog.placements[2].layer == 2
+      and catalog.placements[2].outputs[1].item_id == 503
       and #catalog.chests == 2 and catalog.chests[1].uid == "chest-1"
       and #catalog.chests[1].outputs == 2
       and catalog.chests[1].source_id[2] == "chest"

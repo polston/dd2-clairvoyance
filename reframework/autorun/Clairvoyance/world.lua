@@ -415,7 +415,7 @@ function M.new(a, reads, io)
           local item_id, count = to_int(r.item or r.id), to_int(r.n or r.count)
           if item_id == nil or item_id <= 0 or count == nil or count <= 0
             or source_index == nil or source_table == nil or source_layer == nil
-            or type(r.src) ~= "string" or not normal_src(r.src) then
+            or type(r.src) ~= "string" then
             source_catalog_bad = source_catalog_bad or "malformed_placement"
           else
             new_placements[#new_placements + 1] = { uid = uid,
