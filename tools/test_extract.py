@@ -141,6 +141,91 @@ def add_source_metadata(insts, table_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 
 
 
 class RowTests(unittest.TestCase):
+    def test_quest_scene_references_discover_quest_only_generation_tables(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+
+        class FakePak:
+            @staticmethod
+            def read(path):
+                if path.endswith("qu010000/Resident.scn.21"):
+                    return b"main-scene"
+                if path.endswith("qu010001/Resident.scn.21"):
+                    return b"sub-scene"
+                return None
+
+        scenes = {
+            b"main-scene": [
+                inst(1, "app.GenerateTableData",
+                     path="AppData/Generate/ManualSet/Content/TWN/MainQuest/qu010000/a.user"),
+                inst(2, "app.GenerateTableData",
+                     path="AppData/Generate/ManualSet/Content/TWN/Enemy/Normal/b.user"),
+            ],
+            b"sub-scene": [
+                inst(1, "app.GenerateTableData",
+                     path="AppData/Generate/ManualSet/Content/TWN/Gimmick/SubQuest/qu020090/c.user"),
+            ],
+        }
+        with mock.patch.object(ew, "QUEST_FIRST", 10000), \
+                mock.patch.object(ew, "QUEST_LAST", 10001), \
+                mock.patch.object(qnml_rsz, "decode", side_effect=lambda data, _layouts: scenes[data]):
+            overrides, override_count, sources = ew.quest_scene_references(FakePak(), {})
+        self.assertEqual(overrides, set())
+        self.assertEqual(override_count, 0)
+        self.assertEqual(sources, {
+            "AppData/Generate/ManualSet/Content/TWN/MainQuest/qu010000/a.user": "mainquest",
+            "AppData/Generate/ManualSet/Content/TWN/Gimmick/SubQuest/qu020090/c.user": "subquest",
+        })
+
+    def test_enumerate_files_seeds_quest_only_generation_tables(self):
+        class FakePak:
+            def __init__(self):
+                self.entries = {qnml_pak.path_hash(ew._full("global.user")): object()}
+
+            @staticmethod
+            def read(path):
+                files = {
+                    ew._full("global.user"): b"global",
+                    ew._full("quest-only.user"): b"quest",
+                }
+                return files.get(path)
+
+        with mock.patch.object(ew, "_seeds", return_value=["global.user"]):
+            files, seed_hits, dangling = ew.enumerate_files(
+                FakePak(), {}, extra_seeds=["quest-only.user"])
+        self.assertEqual(files, {"global.user": b"global", "quest-only.user": b"quest"})
+        self.assertEqual((seed_hits, dangling), (1, 0))
+
+    def test_quest_scene_source_classifies_quest_only_pickup(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        path = "AppData/Generate/ManualSet/Content/TWN/Gimmick/SubQuest/qu020090/item.user"
+        table = [
+            inst(1, "app.GenerateTable", _LayerType=2, _GimmickSetInfo=R(2)),
+            inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3)]),
+            inst(3, "app.GenerateRowData",
+                 _ManualSetGuid="713067a2-f243-49ca-85bb-d368ec0709a9",
+                 _GimmickID=163, _ManualPos=(571.018, 19.753, -1012.515), _Container=R(4)),
+            inst(4, "app.Container", _GimmickSetting=R(5)),
+            inst(5, "app.GimmickSetting", _ParamId=29),
+            inst(6, "app.GenerateTableData", path=path, _Table=R(1),
+                 _TableID="18a7a5cf-5607-4eaa-8d8b-39c5cef78b0e"),
+        ]
+        rows, *_ = ew.collect_rows(
+            {path: table}, {}, set(), {}, pickup_params={29: {"item": 300, "count": 1}},
+            quest_sources={path: "subquest"})
+        self.assertEqual(rows, [{
+            "k": "item", "uid": "713067a2-f243-49ca-85bb-d368ec0709a9", "index": 0,
+            "table_id": "18a7a5cf-5607-4eaa-8d8b-39c5cef78b0e", "layer": 2,
+            "id": 300, "n": 1, "x": 571.0, "y": 19.8, "z": -1012.5,
+            "src": "subquest",
+        }])
+
     def test_non_chest_item_placement_relation(self):
         def inst(i, t, path=None, **fields):
             n = qnml_rsz.Inst(i, t, path)
@@ -542,13 +627,13 @@ class RowTests(unittest.TestCase):
             data = json.load(f)
         self.assertEqual(data["version"], 2)
         chara = [row for row in data["rows"] if row["k"] == "chara"]
-        self.assertEqual(len(chara), 3248)
+        self.assertEqual(len(chara), 3306)
         source_counts = collections.Counter(row["src"] for row in chara)
         self.assertEqual(source_counts["normal"], 3035)
-        self.assertEqual(source_counts["subquest"] + source_counts["mainquest"], 213)
+        self.assertEqual((source_counts["subquest"], source_counts["mainquest"]), (222, 49))
         quest_rows = [row for row in chara if row["src"] in ("subquest", "mainquest")]
         self.assertTrue(all(type(row.get("table_qid")) is int for row in quest_rows))
-        self.assertEqual(len({row["table_qid"] for row in quest_rows}), 29)
+        self.assertEqual(len({row["table_qid"] for row in quest_rows}), 37)
         self.assertFalse(any(row.get("phase") == "season5" for row in chara))
         phase_rows = [row for row in chara if "phase" in row]
         self.assertEqual(len(phase_rows), 351)
@@ -567,13 +652,21 @@ class RowTests(unittest.TestCase):
         self.assertEqual(len(variable_gates), 15)
         pickups = [row for row in data["rows"] if row["k"] == "item"]
         chests = [row for row in data["rows"] if row["k"] == "chest"]
-        # 690 native pickup rows exist; one has no exact positive Gm82 output join,
-        # so the generated item-source catalog correctly retains 689.
-        self.assertEqual((len(pickups), len(chests)), (689, 922))
+        # 702 reachable native pickup rows exist; one has no exact positive Gm82 output join,
+        # so the generated item-source catalog correctly retains 701.
+        self.assertEqual((len(pickups), len(chests)), (701, 922))
         self.assertTrue(all(row["index"] == 0 and isinstance(row["table_id"], str)
-                            and row["layer"] in (0, 2) for row in pickups + chests))
-        self.assertEqual(collections.Counter(row["layer"] for row in pickups), {0: 681, 2: 8})
+                            and row["layer"] in (0, 2, 3) for row in pickups + chests))
+        self.assertEqual(collections.Counter(row["layer"] for row in pickups),
+                         {0: 681, 2: 19, 3: 1})
         self.assertEqual(collections.Counter(row["layer"] for row in chests), {0: 919, 2: 3})
+        garb = [row for row in pickups if row["id"] == 300]
+        self.assertEqual(garb, [{
+            "k": "item", "uid": "713067a2-f243-49ca-85bb-d368ec0709a9", "index": 0,
+            "table_id": "18a7a5cf-5607-4eaa-8d8b-39c5cef78b0e", "layer": 2,
+            "id": 300, "n": 1, "x": 571.0, "y": 19.8, "z": -1012.5,
+            "src": "subquest",
+        }])
         self.assertTrue(all(row["unlock_item"] == 0 and row["is_seal"] is False
                             and row["fake_unlock_item"] == 0
                             and row["quest_override"] is False for row in chests))

@@ -1799,26 +1799,38 @@ end
 local items = {}
 items.observed_task_indices = {}
 items.task_observation_generation = 0
+items.task_observation_versions = {}
 
 -- Count observed changes to the live quest-log task, including a task that
 -- moves away and later returns to the same zero-based index.
 function items.observe_task_index(qid, task_index)
     local previous = items.observed_task_indices[qid]
+    local changed = false
     if task_index == nil then
         if previous ~= false then
             items.task_observation_generation = items.task_observation_generation + 1
+            changed = true
         end
         items.observed_task_indices[qid] = false
     elseif previous ~= nil and previous ~= task_index then
         items.task_observation_generation = items.task_observation_generation + 1
+        changed = true
         items.observed_task_indices[qid] = task_index
     else
         items.observed_task_indices[qid] = task_index
+    end
+    if changed then
+        items.task_observation_versions[qid]
+            = (items.task_observation_versions[qid] or 0) + 1
     end
     return items.task_observation_generation
 end
 
 function items.reset_task_observations()
+    for qid in pairs(items.observed_task_indices) do
+        items.task_observation_versions[qid]
+            = (items.task_observation_versions[qid] or 0) + 1
+    end
     items.observed_task_indices = {}
     items.task_observation_generation = items.task_observation_generation + 1
 end
@@ -1865,7 +1877,7 @@ local ITEM_STATS = items.new_stats()
 local ITEM_LAST_AT = -math.huge
 items.objective_group_state = { status = "unknown", complete = false,
     generation = 0, task_generation = items.task_observation_generation,
-    groups = {}, records = {}, held = {}, task_index = {} }
+    groups = {}, records = {}, held = {}, task_index = {}, task_versions = {} }
 items.objective_loot_state = { status = "unknown", complete = false,
     generation = 0, at = -math.huge, candidates = {} }
 
@@ -1884,7 +1896,7 @@ function items.invalidate()
     ITEM_STATS.needs_fresh = false
     items.objective_group_state = { status = "unknown", complete = false,
         generation = items.objective_group_state.generation + 1,
-        groups = {}, records = {}, held = {}, task_index = {} }
+        groups = {}, records = {}, held = {}, task_index = {}, task_versions = {} }
     items.objective_loot_state = { status = "unknown", complete = false,
         generation = items.objective_loot_state.generation + 1,
         at = -math.huge, candidates = {} }
@@ -3088,8 +3100,8 @@ local function read_item_conditions(p)
     return rows, skipped, objective_rows, objective_complete
 end
 
--- SPEC 15.3d: held count over getStorageDict's owner lists (player +
--- pawns; the storage box, key 65535, is skipped). Returns held
+-- SPEC 15.3d: owned count over getStorageDict's owner lists (player,
+-- pawns and the storage box). Returns held
 -- {[id] = n} for the wanted ids plus a skipped count, or nil when the
 -- manager, the dictionary or its _entries is unreadable (failed round).
 function items.read_held(ids)
@@ -3108,7 +3120,6 @@ function items.read_held(ids)
             if list == nil then return end          -- free slot: uncounted
             local key = int_value(safe_field(e, "key"))
             if key == nil then skipped = skipped + 1; complete = false; return end
-            if key == K.STORAGE_BOX_KEY then return end
             local cnt = safe_call(list, "get_Count")
             if type(cnt) ~= "number" or cnt < 0 or cnt ~= math.floor(cnt) then
                 skipped = skipped + 1; complete = false; return
@@ -3161,7 +3172,7 @@ local function item_round_failed()
     ITEM_STATS.needs_fresh = false
     items.objective_group_state = { status = "unknown", complete = false,
         generation = items.objective_group_state.generation + 1,
-        groups = {}, records = {}, held = {}, task_index = {} }
+        groups = {}, records = {}, held = {}, task_index = {}, task_versions = {} }
     if ITEM_FAILED_STREAK >= 3 then commit_item_needs({}) end
 end
 
@@ -3482,7 +3493,7 @@ local function item_round_needs(now)
         items.objective_group_state = { status = "ok", complete = true,
             generation = ITEM_STATS.rounds,
             task_generation = items.task_observation_generation,
-            groups = {}, records = {}, held = {}, task_index = {} }
+            groups = {}, records = {}, held = {}, task_index = {}, task_versions = {} }
         ITEM_FAILED_STREAK = 0
         ITEM_STATS.ignored = 0
         return
@@ -3578,7 +3589,7 @@ local function item_round_needs(now)
     if not okr then rel = items.related end
     local t, ignored = qnml_core.item_need_table(records, held)
     if type(t) ~= "table" then error("item_need_table: bad result") end
-    local task_index, tasks_complete = {}, true
+    local task_index, task_versions, tasks_complete = {}, {}, true
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")
     local qdict = qlm ~= nil and safe_field(qlm, "_QuestLogInfoDict") or nil
     if qdict == nil then tasks_complete = false end
@@ -3593,6 +3604,7 @@ local function item_round_needs(now)
             else
                 task_index[qid] = ti
                 items.observe_task_index(qid, ti)
+                task_versions[qid] = items.task_observation_versions[qid] or 0
             end
         end
     end
@@ -3603,7 +3615,8 @@ local function item_round_needs(now)
         complete = records_complete, generation = group_generation,
         task_generation = items.task_observation_generation,
         groups = {}, records = records_complete and objective_records or {},
-        held = records_complete and held or {}, task_index = task_index }
+        held = records_complete and held or {}, task_index = task_index,
+        task_versions = task_versions }
     commit_item_needs(t)
     if type(rel) == "table" then items.related = rel end
     ITEM_FAILED_STREAK = 0
@@ -4203,7 +4216,7 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
       local outputs = type(row) == "table" and dense(row.outputs) or nil
       local pos = type(row) == "table" and row.pos or nil
       if uid == nil or not integer(index, 0) or table_id == nil
-          or (row.layer ~= 0 and row.layer ~= 2) or outputs == nil or #outputs == 0
+          or not integer(row.layer, 0) or outputs == nil or #outputs == 0
           or type(pos) ~= "table" or not finite(pos.x) or not finite(pos.y) or not finite(pos.z) then
         return envelope(provider, "unknown", provider .. "_catalog_row_malformed")
       end
@@ -4231,7 +4244,7 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
           or observation.blacklist[uid] or observation.disabled_tables[table_id] then
         eligible = false
       end
-      if row.layer == 2 then
+      if row.layer ~= 0 then
         local request = observation.requested_tables[table_id]
         if request == nil then
           eligible = false
@@ -5404,13 +5417,15 @@ function A.make()
         qseen[row.qid] = true
       end
     end
-    if state.task_generation ~= items.task_observation_generation then
-      return { status = "unknown", complete = false, groups = {},
-        generation = task_snapshot.need_generation,
-        source_generation = state.generation, reason = "task_observation_changed" }
-    end
     for qid in pairs(qseen) do
       local row = qrows[qid]
+      if state.task_index[qid] ~= nil
+          and ((state.task_versions and state.task_versions[qid] or 0)
+            ~= (items.task_observation_versions[qid] or 0)) then
+        return { status = "unknown", complete = false, groups = {},
+          generation = task_snapshot.need_generation,
+          source_generation = state.generation, reason = "task_observation_changed" }
+      end
       if state.task_index[qid] ~= nil and (row.read_status ~= "ok"
           or row.task_index ~= state.task_index[qid]) then
         return { status = "unknown", complete = false, groups = {},
@@ -5419,11 +5434,6 @@ function A.make()
       end
     end
     local records = objective_owned_records(task_snapshot, state)
-    if #state.records > 0 and #records == 0 then
-      return { status = "unknown", complete = false, groups = {},
-        generation = task_snapshot.need_generation,
-        source_generation = state.generation, reason = "current_task_ownership_unproven" }
-    end
     local groups, complete = A.objective_need_builder.build(records, state.held,
       { generation = state.generation, task_generation = state.generation,
         task_index = state.task_index })
@@ -5432,7 +5442,61 @@ function A.make()
         generation = task_snapshot.need_generation,
         source_generation = state.generation, reason = "owned_need_invalid" }
     end
-    return { status = "ok", complete = true, groups = groups,
+    local structured_qids = {}
+    for _, record in ipairs(records) do structured_qids[record.qid] = true end
+    local fallback_valid = true
+    if #state.records > 0 then
+      for _, row in ipairs(task_snapshot.quests) do
+        local ownership = type(row) == "table" and row.item_ownership or nil
+        local needs = type(row) == "table" and ITEM_NEEDS and ITEM_NEEDS[row.qid] or nil
+        if type(ownership) ~= "table" then fallback_valid = false; break end
+        local relevant_owner = false
+        if not structured_qids[row.qid] then
+          for _, owner in ipairs(ownership) do
+            for _, need in ipairs(type(needs) == "table" and needs or {}) do
+              if owner.item_id == need.id then relevant_owner = true; break end
+            end
+            if relevant_owner then break end
+          end
+        end
+        if relevant_owner then fallback_valid = false; break end
+        if not structured_qids[row.qid]
+            and row.read_status == "ok" and state.task_index[row.qid] == row.task_index then
+          for _, need in ipairs(type(needs) == "table" and needs or {}) do
+            local held = state.held[need.id] or 0
+            local remaining = type(need.num) == "number" and need.num - held or nil
+            if type(need.id) ~= "number" or need.id <= 0 or need.id ~= math.floor(need.id)
+                or type(need.num) ~= "number" or need.num <= 0
+                or need.num ~= math.floor(need.num) or type(held) ~= "number" or held < 0
+                or held ~= math.floor(held) or remaining == nil or remaining <= 0 then
+              fallback_valid = false; break
+            end
+            groups[#groups + 1] = {
+              id = { "need", row.qid, "legacy", need.id }, qid = row.qid,
+              task_index = row.task_index, remaining = remaining,
+              options = { { item_id = need.id, accepted_count = need.num } },
+              complete = true, generation = state.generation, status = "eligible",
+            }
+          end
+        end
+        if not fallback_valid then break end
+      end
+    end
+    if not fallback_valid or (#state.records > 0 and #records == 0 and #groups == 0) then
+      return { status = "unknown", complete = false, groups = {},
+        generation = task_snapshot.need_generation,
+        source_generation = state.generation, reason = "current_task_ownership_unproven" }
+    end
+    table.sort(groups, function(left, right)
+      if left.qid ~= right.qid then return left.qid < right.qid end
+      if left.task_index ~= right.task_index then return left.task_index < right.task_index end
+      local li = left.options[1] and left.options[1].item_id or 0
+      local ri = right.options[1] and right.options[1].item_id or 0
+      return li < ri
+    end)
+    local held = {}
+    for item_id, count in pairs(state.held or {}) do held[item_id] = count end
+    return { status = "ok", complete = true, groups = groups, held = held,
       generation = task_snapshot.need_generation, source_generation = state.generation,
       task_generation = state.task_generation }
   end
@@ -6156,7 +6220,9 @@ function A.make()
       journal_rows[#journal_rows + 1] = journal_row
       local objective_groups, objective_status = {}, "unknown"
       if ITEM_STATS.needs_fresh and items.objective_group_state.complete
-          and items.objective_group_state.task_generation == items.task_observation_generation
+          and (items.objective_group_state.task_versions
+              and items.objective_group_state.task_versions[qid] or 0)
+            == (items.task_observation_versions[qid] or 0)
           and row.read_status == "ok"
           and row.task_index == items.objective_group_state.task_index[qid] then
         objective_status = "ok"

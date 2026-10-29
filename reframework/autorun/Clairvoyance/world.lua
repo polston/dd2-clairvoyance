@@ -400,7 +400,7 @@ function M.new(a, reads, io)
           source_index, source_table, source_layer = to_int(r.index), source_guid(r.table_id),
             to_int(r.layer)
           if source_index == nil or source_index < 0 or source_table == nil
-              or (source_layer ~= 0 and source_layer ~= 2) then
+              or source_layer == nil or source_layer < 0 then
             source_catalog_bad = source_catalog_bad or "malformed_source_native_metadata"
           else
             local identity = uid .. ":" .. source_index
@@ -1597,6 +1597,19 @@ function M.new(a, reads, io)
         cur = copy
       end
     end
+    -- Use the same current map-space position as NPC/quest markers for the
+    -- active stop. NPCScheduleCurrent.Pos can be a destination anchor while
+    -- the holder position is where the marker is actually published, which
+    -- otherwise leaves the named NPC visibly off the walking route.
+    if cur ~= nil then
+      local okp, current_pos = pcall(seller_pos, cid)
+      if okp and valid_pos(current_pos) and not near_zero(current_pos) then
+        local copy = {}
+        for k, v in pairs(cur) do copy[k] = v end
+        copy.pos = pcopy(current_pos)
+        cur = copy
+      end
+    end
     local function area_pos(row)
       -- a key location wins; a -1/-1 row without one has no place (spec 25.4.3)
       if type(row.key) == "number" and row.key > 0 and type(reads.key_pos) == "function" then
@@ -1664,6 +1677,8 @@ function M.new(a, reads, io)
       entry.objective, entry.qid, entry.kind = member.objective == true, member.qid, member.kind
       entry.target_key, entry.ordinal = member.target_key, member.ordinal
       entry.objective_generation = member.objective_generation
+      entry.item_ids = {}
+      for i, id in ipairs(member.item_ids or {}) do entry.item_ids[i] = id end
     end
     return entry
   end
@@ -3969,6 +3984,33 @@ function M.new(a, reads, io)
       return "path: finding"
     end
     return "path ready"
+  end
+
+  function w:route_status(route_path, undisc)
+    local routes, total = input_tbl and input_tbl.routes or {}, 0
+    for _, route in ipairs(routes) do if has_stops(route) then total = total + 1 end end
+    if total == 0 or route_path ~= 1 then return nil end
+    local status = { total = total, ready = 0, state = "waiting" }
+    if w.copy ~= nil then
+      status.state = "copying"
+      status.percent = w.copy.nb ~= nil and (100 * w.copy.b) // w.copy.nb or 0
+      return status
+    end
+    if w.graph == nil then
+      status.state = copy_failed and "unavailable" or "waiting"
+      return status
+    end
+    for _, route in ipairs(routes) do
+      if has_stops(route) then
+        local rp = rp_get(route.cid, route.stops, undisc and true or false)
+        if next_target(rp) == nil then status.ready = status.ready + 1 end
+      end
+    end
+    if status.ready == total then status.state = "ready"
+    elseif w.path_job ~= nil and w.path_job.kind == "near" then status.state = "locating"
+    elseif w.path_job ~= nil and w.path_job.kind == "path" then status.state = "finding"
+    end
+    return status
   end
 
   -- per pair { i, j, pts }: pts a flat x, y, z list (map space), nil while

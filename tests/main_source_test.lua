@@ -138,17 +138,19 @@ ordered("objective inputs flow through one snapshot before compute", tick_body, 
   "pcall(adapter.refresh_objectives)",
   "pcall(adapter.refresh_items, mode)",
   "adapter.objective_task_snapshot,",
-  "pcall(adapter.objective_need_groups, task_snapshot)",
+  "pcall(adapter.objective_need_groups,",
+  "observed_task_snapshot.objective_needs = observed_need_snapshot",
+  "core.objective_task_projection(",
   "task_snapshot.objective_needs = need_snapshot",
   'wt.q("objective_place_snapshot",',
   'wt.q("objective_source_snapshots",',
   "core.objective_snapshot(",
-  "local objective_names = { npcs = {}, targets = {} }",
+  "local objective_names = { npcs = {}, targets = {}, items = {} }",
   "category_visibility =",
   "local result = core.compute(adapter, show)",
 })
 check("objective need grouping fails closed before provider and core processing",
-  tick_body:find('local need_snapshot = { status = "unknown", complete = false,', 1, true) ~= nil
+  tick_body:find('local observed_need_snapshot = { status = "unknown", complete = false,', 1, true) ~= nil
     and tick_body:find('reason = "need_snapshot_failed"', 1, true) ~= nil)
 local compute_at = tick_body:find("local result = core.compute(adapter, show)", 1, true)
 local route_at = tick_body:find('wt.q("set_routes", nil, result.objective_routes)', 1, true)
@@ -159,18 +161,31 @@ check("routes come from the exact post-compute objective snapshot",
     and tick_body:find("wt.route_members", 1, true) == nil)
 check("objective route policy preserves search, names and capped route counts",
   tick_body:find("objective_policy.search_target", 1, true) ~= nil
-    and tick_body:find("local objective_names = { npcs = {}, targets = {} }", 1, true) ~= nil
+    and tick_body:find("local objective_names = { npcs = {}, targets = {}, items = {} }", 1, true) ~= nil
+    and tick_body:find("pcall(adapter.item_name, item_id)", 1, true) ~= nil
     and tick_body:find("objective_policy.route_cap", 1, true) ~= nil
     and tick_body:find("(objective_policy.npc_route_mode or 0) < 1", 1, true) ~= nil
     and tick_body:find("category_visibility =", 1, true) ~= nil
     and tick_body:find("core.objective_routes(", 1, true) ~= nil
-    and tick_body:find("routes_current", 1, true) ~= nil
+    and tick_body:find("route_render_projection", 1, true) ~= nil
     and tick_body:find("core.route_members", 1, true) == nil
     and tick_body:find("wt.routes_n", 1, true) ~= nil
     and tick_body:find("wt.routes_total", 1, true) ~= nil)
-check("objective task reads are limited to progressing focused quests",
+check("objective target reads are limited to progressing focused quests",
   tick_body:find("adapter.progressing_ids", 1, true) ~= nil
     and tick_body:find("progressing_seen[qid]", 1, true) ~= nil)
+check("tree checklist separately observes visible progressing quests without publishing targets",
+  tick_body:find("local checklist_qids", 1, true) ~= nil
+    and tick_body:find("if tree_live and type(show.objective_snapshot)", 1, true) ~= nil
+    and tick_body:find("pcall(core.objective_checklist,", 1, true) ~= nil
+    and tick_body:find("show.objective_snapshot.checklist = tree_checklist", 1, true) ~= nil)
+local objective_task_reads = 0
+for _ in tick_body:gmatch("adapter%.objective_task_snapshot") do
+  objective_task_reads = objective_task_reads + 1
+end
+check("tree checklist and focused targets share one task observation per tick",
+  objective_task_reads == 1
+    and tick_body:find("core.objective_task_projection(", 1, true) ~= nil)
 check("localized objective names cover every target owner",
   tick_body:find("for _, owner in ipairs(target.owners or {}) do", 1, true) ~= nil)
 check("shown ancillary routes use the semantic route list without requiring markers",
@@ -184,26 +199,22 @@ check("progressing-only publication carries positioned startable givers as a bou
 check("world search target keeps its reserved route slot when a shown ancillary shares its CID",
   tick_body:find("if cid ~= wt.route_cid then", 1, true) ~= nil
     and tick_body:find("policy.route_cap = 8", 1, true) == nil)
-check("world target-first route can satisfy a matching objective member",
-  tick_body:find("route.cid == wt.route_cid and route.cid == member.cid", 1, true) ~= nil
+check("world target-first route keeps its reserved slot and render projection",
+  tick_body:find("core.route_render_projection(show.routes, route_publication)", 1, true) ~= nil
     and tick_body:find("reserved_search", 1, true) ~= nil)
-check("stale route publication removes route-stop markers before point and signature work",
-  tick_body:find("if not routes_current then", 1, true) ~= nil
-    and tick_body:find("without_stale_route_stops(result.markers)", 1, true) ~= nil
-    and tick_body:find("without_stale_route_stops(result.fullmap_world)", 1, true) ~= nil
-    and tick_body:find("if type(list) ~= \"table\" then return list end", 1, true) ~= nil
-    and tick_body:find("local route_on, has_pts, route_pts = core.route_point_state(result,", 1, true) ~= nil)
+check("stale objective routes are filtered individually without suppressing manual routes",
+  tick_body:find("core.route_render_projection(show.routes, route_publication)", 1, true) ~= nil
+    and tick_body:find("core.filter_route_points(result.markers", 1, true) ~= nil
+    and tick_body:find("core.filter_route_points(result.fullmap_world", 1, true) ~= nil
+    and tick_body:find("wt.render_routes = render_routes", 1, true) ~= nil
+    and tick_body:find("routes_current and show.routes or nil", 1, true) == nil
+    and tick_body:find("route_on, has_pts = false", 1, true) == nil)
 check("generation-only objective refresh does not disable stable route rendering",
-  tick_body:find("local route_parts = {}", 1, true) ~= nil
-    and tick_body:find("local route_changed = route_sig ~= wt.objective_route_sig", 1, true) ~= nil)
-local route_current_block = tick_body:match("local expected_routes.-if not routes_current then") or ""
-check("current-route validation tolerates one-tick generation lag",
-  route_current_block:find(
-    "route.objective_generation ~= route_publication.objective_generation", 1, true) == nil
-    and route_current_block:find(
-      "route.objective_generation == route_publication.objective_generation", 1, true) == nil
-    and route_current_block:find(
-      "core.objective_route_member_equal(route, member)", 1, true) ~= nil)
+  tick_body:find("local route_changed", 1, true) == nil
+    and tick_body:find("wt.objective_route_sig = route_sig", 1, true) == nil)
+check("route drawing and legend consume the filtered render projection",
+  src:find("local routes = wt.render_routes", 1, true) ~= nil
+    and src:find("icons.cur_routes = routes", 1, true) ~= nil)
 check("lead calibration records are isolated, last, zero-size and uncounted",
   src:find("if m.calibration == true then", 1, true) ~= nil
     and src:find("and not m.calibration", 1, true) ~= nil
@@ -216,8 +227,8 @@ check("native map icons provide zero-cost route transform anchors",
   src:find("native.pool == pool", 1, true) ~= nil
     and src:find("marker = { pos = { x = x, y = y, z = z }, calibration = true }", 1, true) ~= nil)
 check("current-route validation delegates the complete endpoint comparison",
-  route_current_block:find("core.objective_route_member_equal(route, member)", 1, true) ~= nil
-    and route_current_block:find("route.pos.x == member.pos.x", 1, true) == nil)
+  src:find("function M.route_render_projection", 1, true) == nil
+    and tick_body:find("core.route_render_projection(show.routes, route_publication)", 1, true) ~= nil)
 local set_routes_n = 0
 for _ in src:gmatch('wt%.q%("set_routes"') do set_routes_n = set_routes_n + 1 end
 check("main has exactly one set_routes handoff", set_routes_n == 1)
@@ -229,6 +240,15 @@ check("objective route labels are explicit",
   src:find('"Current objective NPCs"', 1, true) ~= nil
     and src:find('"Objective + shown related NPCs"', 1, true) ~= nil
     and src:find('"Routes to objective places/items##focus_place_routes"', 1, true) ~= nil)
+local path_frame = slice("route path frame", "wt.path_frame = function()",
+  "re.on_frame(function() wt.layer_run(wt.path_layer")
+check("fresh walking routes start path work before any line is drawable",
+  path_frame:find("(wt.routes_n or 0) > 0", 1, true) ~= nil
+    and path_frame:find("wt.route_on and settings.route_path == 1", 1, true) == nil)
+check("route status is visible in both quest tree and open-map legend",
+  src:find('wt.q("route_status", nil, settings.route_path, settings.world_undiscovered)', 1, true) ~= nil
+    and src:find('"Route paths: %d/%d ready', 1, true) ~= nil
+    and src:find('wt.layer_run(wt.legend_layer, "route legend", icons.legend)', 1, true) ~= nil)
 check("related NPC controls and pruning are wired",
   src:find("wt.focus_prune_related = function(active)", 1, true) ~= nil
     and src:find("wt.related_toggle = function(qid, on, rec)", 1, true) ~= nil

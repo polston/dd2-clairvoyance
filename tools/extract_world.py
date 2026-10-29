@@ -109,13 +109,14 @@ def _seeds(layouts):
     return seeds
 
 
-def enumerate_files(pak, layouts):
+def enumerate_files(pak, layouts, extra_seeds=()):
     """Follow every .user path named inside the seed files to a fixed point.
 
     Returns (files {rel: bytes}, seed hit count, dangling reference count).
     """
     queue = [s for s in _seeds(layouts) if pak.entries.get(qnml_pak.path_hash(_full(s)))]
     seed_hits = len(queue)
+    queue.extend(s for s in extra_seeds if isinstance(s, str) and s)
     files, dangling = {}, set()
     while queue:
         rel = queue.pop()
@@ -306,9 +307,21 @@ def _normalized_resource(path):
     return value.lower()
 
 
-def quest_override_paths(pak, layouts):
-    """(target resource paths, option count) for structured treasure overrides."""
-    paths, count = set(), 0
+def _quest_source_of(path):
+    """Quest source class encoded by an explicit path segment, else None."""
+    if not isinstance(path, str):
+        return None
+    segments = path.replace("\\", "/").lower().split("/")
+    if "subquest" in segments:
+        return "subquest"
+    if "mainquest" in segments:
+        return "mainquest"
+    return None
+
+
+def quest_scene_references(pak, layouts):
+    """Treasure overrides and explicitly classified generation tables in quest scenes."""
+    paths, count, sources = set(), 0, {}
     for qid in range(QUEST_FIRST, QUEST_LAST + 1):
         rel = "AppData/Quest/qu%02d/qu%06d/Resident.scn.21" % (qid // 10000, qid)
         data = pak.read(PREFIX + rel)
@@ -319,15 +332,22 @@ def quest_override_paths(pak, layouts):
         except qnml_rsz.DecodeError:
             continue
         for inst in insts:
-            if inst.type != "app.quest.gimmick.OptionTreasureBoxParam":
-                continue
-            count += 1
-            resource = qnml_rsz.deref(insts, inst.fields.get("_ResourceData"))
-            path = _normalized_resource(resource.path if resource else None)
-            if path is None:
-                raise ExtractError("a quest treasure override has an unreadable resource")
-            paths.add(path)
-    return paths, count
+            if inst.type == "app.quest.gimmick.OptionTreasureBoxParam":
+                count += 1
+                resource = qnml_rsz.deref(insts, inst.fields.get("_ResourceData"))
+                path = _normalized_resource(resource.path if resource else None)
+                if path is None:
+                    raise ExtractError("a quest treasure override has an unreadable resource")
+                paths.add(path)
+            elif inst.type == "app.GenerateTableData" and inst.path:
+                source = _quest_source_of(inst.path)
+                if source is None:
+                    continue
+                previous = sources.get(inst.path)
+                if previous is not None and previous != source:
+                    raise ExtractError("a quest generation resource has conflicting source classes")
+                sources[inst.path] = source
+    return paths, count, sources
 
 
 def _placement_item_row(insts, row, src, params, metadata):
@@ -361,13 +381,23 @@ def _placement_item_row(insts, row, src, params, metadata):
 
 
 def collect_rows(decoded, params, conflicts, chara_names, pickup_params=None,
-                 quest_override_paths=None):
+                 quest_override_paths=None, quest_sources=None):
     """Rows of the tracked kinds from decoded table files {rel: instances}.
 
     Returns (rows, count of chest rows without an item list, gimmick id counts,
     Counter of quest, trap, pawn and key location chest rows).
     """
     src_of = {}
+
+    def add_source(path, source):
+        key = _normalized_resource(path)
+        if key is None:
+            return
+        previous = src_of.get(key)
+        if previous is not None and previous != source:
+            raise ExtractError("a table file has conflicting source classes")
+        src_of[key] = source
+
     for insts in decoded.values():
         for inst in insts:
             if inst.type != "app.GenerateTableListData":
@@ -376,7 +406,9 @@ def collect_rows(decoded, params, conflicts, chara_names, pickup_params=None,
                 for r in inst.fields.get(field, []):
                     ref = qnml_rsz.deref(insts, r)
                     if ref is not None and ref.path:
-                        src_of.setdefault(ref.path, src)
+                        add_source(ref.path, src)
+    for path, source in (quest_sources or {}).items():
+        add_source(path, source)
     rows, seen = [], {}
     quest_override_paths = quest_override_paths or set()
     gimmick_ids = collections.Counter()
@@ -399,7 +431,7 @@ def collect_rows(decoded, params, conflicts, chara_names, pickup_params=None,
                 gimmick_ids[rid] += 1
             else:
                 continue
-            src = src_of.get(rel)
+            src = src_of.get(_normalized_resource(rel))
             if src is None:
                 raise ExtractError("a table file is not referenced by any list")
             x, y, z = _round1(f["_ManualPos"])
@@ -494,10 +526,10 @@ def extract(game, key_hex, layouts):
     except qnml_pak.PakError as e:
         raise ExtractError(str(e))
     try:
-        files, seed_hits, dangling = enumerate_files(pak, layouts)
+        override_paths, override_count, quest_sources = quest_scene_references(pak, layouts)
+        files, seed_hits, dangling = enumerate_files(pak, layouts, quest_sources)
         gm = pak.read(_full(GMDATA))
         pickup_gm = pak.read(_full(PICKUP_GMDATA))
-        override_paths, override_count = quest_override_paths(pak, layouts)
     except qnml_pak.PakError as e:
         raise ExtractError(str(e))
     finally:
@@ -519,7 +551,7 @@ def extract(game, key_hex, layouts):
     decoded = {rel: _decode(data, layouts) for rel, data in files.items()}
     rows, unjoined, gimmick_ids, kinds = collect_rows(
         decoded, params, conflicts, layouts["enums"]["CharacterID"], pickup_params,
-        override_paths)
+        override_paths, quest_sources)
     by_k = collections.Counter(r["k"] for r in rows)
     for k in ("token", "beetle", "chest"):
         gid = FIRST_GIMMICK[k]
@@ -542,6 +574,9 @@ def extract(game, key_hex, layouts):
             kinds["gate"], kinds["trap"], kinds["pawn"], kinds["key locations"]),
         "structured treasure overrides %d, catalog matches %d" % (
             override_count, sum(r.get("quest_override") is True for r in rows)),
+        "quest generation resources %d (%s)" % (
+            len(quest_sources), ", ".join("%s %d" % (source, count)
+                for source, count in sorted(collections.Counter(quest_sources.values()).items()))),
         "chara rows %d, ids %d" % (len(chara), len({r["id"] for r in chara})),
         "chara src: " + ", ".join("%s %d" % (s, sum(1 for r in chara if r["src"] == s))
                                   for s in ("normal", "subquest", "mainquest", "random")),

@@ -647,7 +647,7 @@ do
       end
     end
     local input = wt.q("input", nil)
-    local routes = input ~= nil and input.routes or nil
+    local routes = wt.render_routes
     local nroutes = routes ~= nil and math.min(#routes, su.ROUTE_SLOTS) or 0
     wt.leg_calls = 0
     icons.cur_routes = routes
@@ -743,6 +743,20 @@ do
       wt.copy_ms_max or 0, wt.search_ms_max or 0, tostring(wt.last_expanded),
       tostring(wt.last_pair), wt.path_draw_ms, wt.outline_ms_shown)
   end
+  wt.route_status_text = function()
+    local status = wt.q("route_status", nil, settings.route_path, settings.world_undiscovered)
+    if status == nil then return nil end
+    local detail = status.state
+    if status.state == "copying" then
+      detail = "copying navigation graph " .. tostring(status.percent or 0) .. "%"
+    elseif status.state == "locating" then detail = "locating route endpoints"
+    elseif status.state == "finding" then detail = "finding walking paths"
+    elseif status.state == "waiting" then detail = "waiting to start"
+    elseif status.state == "unavailable" then detail = "navigation graph unavailable"
+    end
+    return string.format("Route paths: %d/%d ready - %s",
+      status.ready or 0, status.total or 0, detail)
+  end
 
   -- Route legend (SPEC 32.14.8): one row per route that drew a leg or a stop
   -- this frame, in slot order, top left; rows are reused tables.
@@ -752,7 +766,7 @@ do
     for k = 1, su.ROUTE_SLOTS do rows[k].on = false end
     wt.legend_n = 0
     if not settings.route_legend then return end
-    local routes = icons.cur_routes
+    local routes = wt.render_routes or icons.cur_routes
     local drew = icons.drew
     for i = 1, routes ~= nil and math.min(#routes, su.ROUTE_SLOTS) or 0 do
       local r = routes[i]
@@ -787,6 +801,11 @@ do
     local dk = wt.dk
     local o = wt.style.offset(st.width, dk)
     local x, y, n = 24 * dk, 150 * dk, 0
+    local status = wt.route_status_text()
+    if status ~= nil then
+      wt.style.text(draw, status, x, y, 0xFFFFFFFF, st.on, st.color, o, 1)
+      y = y + 18 * dk
+    end
     for k = 1, su.ROUTE_SLOTS do
       local row = rows[k]
       if row.on then
@@ -806,10 +825,10 @@ do
       icons:fill(icons.recs, icons.read)
       if wt.route_on then
         wt.layer_run(wt.lines_layer, "route lines", icons.route_lines)
-        wt.layer_run(wt.legend_layer, "route legend", icons.legend)
-      else
-        wt.legend_n = 0
       end
+      if settings.route_legend and ((wt.routes_n or 0) > 0 or wt.route_on) then
+        wt.layer_run(wt.legend_layer, "route legend", icons.legend)
+      else wt.legend_n = 0 end
     else
       wt.legend_n = 0
     end
@@ -1300,22 +1319,62 @@ re.on_frame(function()
     if type(tracked) == "number" and progressing_seen[tracked] and not objective_seen[tracked] then
       objective_qids[#objective_qids + 1] = tracked
     end
-    local ok_objective, task_snapshot = pcall(adapter.objective_task_snapshot,
-      objective_qids, wt.quest_catalog)
-    if not ok_objective or type(task_snapshot) ~= "table"
-        or type(task_snapshot.quests) ~= "table" then task_snapshot = { quests = {} } end
-    local need_snapshot = { status = "unknown", complete = false,
-      generation = task_snapshot.need_generation, groups = {}, reason = "need_snapshot_failed" }
-    local ok_needs, observed_needs = pcall(adapter.objective_need_groups, task_snapshot)
-    if ok_needs and type(observed_needs) == "table" then need_snapshot = observed_needs end
+    local checklist_qids, checklist_seen, checklist_extra = {}, {}, {}
+    local function checklist_add(qid)
+      if type(qid) == "number" and progressing_seen[qid] and not checklist_seen[qid] then
+        checklist_seen[qid] = true
+        checklist_qids[#checklist_qids + 1] = qid
+      end
+    end
+    for _, qid in ipairs(objective_qids) do checklist_add(qid) end
+    if tree_live then
+      for qid, on in pairs(show.expanded or {}) do
+        if on and progressing_seen[qid] and not checklist_seen[qid] then
+          checklist_extra[#checklist_extra + 1] = qid
+        end
+      end
+      table.sort(checklist_extra)
+      for _, qid in ipairs(checklist_extra) do checklist_add(qid) end
+      checklist_add(snapshot and snapshot.tracked_qid)
+      checklist_add(snapshot and snapshot.nearest_qid)
+    end
+    local ok_objective, observed_task_snapshot = pcall(adapter.objective_task_snapshot,
+      checklist_qids, wt.quest_catalog)
+    if not ok_objective or type(observed_task_snapshot) ~= "table"
+        or type(observed_task_snapshot.quests) ~= "table" then
+      observed_task_snapshot = { quests = {} }
+    end
+    local observed_need_snapshot = { status = "unknown", complete = false,
+      generation = observed_task_snapshot.need_generation, groups = {},
+      reason = "need_snapshot_failed" }
+    local ok_needs, observed_needs = pcall(adapter.objective_need_groups,
+      observed_task_snapshot)
+    if ok_needs and type(observed_needs) == "table" then
+      observed_need_snapshot = observed_needs
+    end
+    observed_task_snapshot.objective_needs = observed_need_snapshot
+    local task_snapshot, need_snapshot = core.objective_task_projection(
+      observed_task_snapshot, observed_need_snapshot, objective_qids)
     task_snapshot.objective_needs = need_snapshot
     local place_snapshot = wt.q("objective_place_snapshot",
       { generation = 0, status = "unknown", places = {} }, task_snapshot)
     local source_snapshots = wt.q("objective_source_snapshots", {}, wt.quest_catalog, task_snapshot)
-    show.objective_snapshot = core.objective_snapshot(task_snapshot, place_snapshot,
+    local objective_candidate = core.objective_snapshot(task_snapshot, place_snapshot,
       source_snapshots, wt.objective_registry)
-    local objective_names = { npcs = {}, targets = {} }
-    local named_npcs, named_targets, objective_quest_names = {}, {}, {}
+    show.objective_snapshot, wt.objective_snapshot_cache, wt.objective_snapshot_held =
+      core.objective_snapshot_stabilize(wt.objective_snapshot_cache,
+        task_snapshot, need_snapshot, objective_candidate)
+    local ok_tree_checklist, tree_checklist = false, nil
+    if tree_live then
+      ok_tree_checklist, tree_checklist = pcall(core.objective_checklist,
+        observed_task_snapshot)
+    end
+    if tree_live and type(show.objective_snapshot) == "table"
+        and ok_tree_checklist and type(tree_checklist) == "table" then
+      show.objective_snapshot.checklist = tree_checklist
+    end
+    local objective_names = { npcs = {}, targets = {}, items = {} }
+    local named_npcs, named_targets, named_items, objective_quest_names = {}, {}, {}, {}
     for _, target in ipairs(show.objective_snapshot ~= nil
         and show.objective_snapshot.targets or {}) do
       for _, owner in ipairs(target.owners or {}) do
@@ -1326,7 +1385,15 @@ re.on_frame(function()
           end
         end
       end
-      local owner = target.owners ~= nil and target.owners[1] or nil
+      for _, item_id in ipairs(target.item_ids or {}) do
+        if not named_items[item_id] then
+          local ok_name, item_name = pcall(adapter.item_name, item_id)
+          objective_names.items[#objective_names.items + 1] = { item_id = item_id,
+            name = ok_name and type(item_name) == "string" and item_name ~= ""
+              and item_name or ("Item " .. tostring(item_id)) }
+          named_items[item_id] = true
+        end
+      end
       if target.target ~= nil and target.target.cid ~= nil
           and not named_npcs[target.target.cid] then
         local ok_name, name = pcall(adapter.npc_name, target.target.cid)
@@ -1340,12 +1407,10 @@ re.on_frame(function()
         local name
         if target.kind == "source" then
           local item_id = target.item_ids ~= nil and target.item_ids[1] or nil
-          local ok_name, item_name = false, nil
-          if item_id ~= nil then ok_name, item_name = pcall(adapter.item_name, item_id) end
-          if type(item_name) == "string" and item_name ~= "" then name = item_name end
+          for _, row in ipairs(objective_names.items) do
+            if row.item_id == item_id then name = row.name; break end
+          end
           if name == nil then name = "Item " .. tostring(item_id or "?") end
-        elseif owner ~= nil then
-          name = objective_quest_names[owner.qid] or ("Quest " .. tostring(owner.qid))
         end
         if name ~= nil then
           objective_names.targets[#objective_names.targets + 1] = { key = target.key, name = name }
@@ -1452,19 +1517,6 @@ re.on_frame(function()
       local route_publication, routes_n, routes_total = core.objective_routes(
         result.objective_snapshot, show.origin, policy)
       result.objective_routes = route_publication
-      -- Fresh evidence may advance the objective generation without changing
-      -- any drawable route. Only route content belongs in the render gate.
-      local route_parts = {}
-      for _, member in ipairs(result.objective_routes.members or {}) do
-        local pos = member.pos or {}
-        route_parts[#route_parts + 1] = table.concat({ tostring(member.route_id),
-          tostring(member.qid), tostring(member.kind), tostring(member.name),
-          tostring(member.target_key), tostring(member.ordinal),
-          tostring(pos.x), tostring(pos.y), tostring(pos.z) }, ":")
-      end
-      local route_sig = table.concat(route_parts, "|")
-      local route_changed = route_sig ~= wt.objective_route_sig
-      wt.objective_route_sig = route_sig
       local includes_route_cid = false
       for _, member in ipairs(route_publication.members or {}) do
         if member.cid == wt.route_cid then includes_route_cid = true end
@@ -1472,53 +1524,19 @@ re.on_frame(function()
       local reserved_search = wt.route_cid ~= nil and not includes_route_cid and 1 or 0
       wt.routes_n = (routes_n or #(route_publication.members or {})) + reserved_search
       wt.routes_total = (routes_total or wt.routes_n) + reserved_search
-      local expected_routes, routes_current = {}, true
-      for _, member in ipairs(route_publication.members or {}) do
-        expected_routes[member.route_id] = member
-      end
-      for _, route in ipairs(show.routes or {}) do
-        if route.objective_generation ~= nil then
-          local member = expected_routes[route.cid]
-          if member == nil or not core.objective_route_member_equal(route, member) then
-            routes_current = false
-            break
-          end
-        end
-      end
-      if routes_current then
-        for route_id, member in pairs(expected_routes) do
-          local found = false
-          for _, route in ipairs(show.routes or {}) do
-            if core.objective_route_member_equal(route, member)
-                or (route.cid == wt.route_cid and route.cid == member.cid
-                  and route.objective_generation == nil) then
-              found = true
-              break
-            end
-          end
-          if not found then routes_current = false; break end
-        end
-      end
-      if not routes_current then
-        local function without_stale_route_stops(list)
-          if type(list) ~= "table" then return list end
-          local kept = {}
-          for _, marker in ipairs(list or {}) do
-            if marker.cat ~= "route_stop" then kept[#kept + 1] = marker end
-          end
-          return kept
-        end
-        result.markers = without_stale_route_stops(result.markers)
-        result.fullmap_world = without_stale_route_stops(result.fullmap_world)
-        result.fullmap_calibration = without_stale_route_stops(result.fullmap_calibration)
-      end
-      local route_on, has_pts, route_pts = core.route_point_state(result,
-        routes_current and show.routes or nil,
+      local render_routes, current_objectives =
+        core.route_render_projection(show.routes, route_publication)
+      wt.render_routes = render_routes
+      result.markers = core.filter_route_points(result.markers, current_objectives)
+      result.fullmap_world = core.filter_route_points(result.fullmap_world, current_objectives)
+      result.fullmap_calibration = core.filter_route_points(
+        result.fullmap_calibration, current_objectives)
+      local route_on, has_pts, route_pts = core.route_point_state(result, render_routes,
         wt.route_on, wt.has_pts, snapshot ~= nil and snapshot.route_pts or nil)
-      if route_changed or not routes_current then route_on, has_pts = false, #route_pts > 0 end
       result.route_pts = route_pts
       wt.route_on, wt.has_pts = route_on, has_pts
     else
+      wt.render_routes = show.routes
       local route_on, has_pts, route_pts = core.route_point_state(result, show.routes,
         wt.route_on, wt.has_pts, snapshot ~= nil and snapshot.route_pts or nil)
       wt.route_on, wt.has_pts = route_on, has_pts
@@ -3177,6 +3195,8 @@ do
             if settings.focus_routes > 0 or settings.focus_place_routes then
               imgui.text(string.format("Routes: %d of %d",
                 wt.routes_n or 0, wt.routes_total or 0))
+              local route_status = wt.route_status_text()
+              if route_status ~= nil then imgui.text(route_status) end
             end
           end
           local order = { "Melve", "Vernworth", "Checkpoint Rest Town",
@@ -3737,7 +3757,7 @@ re.on_frame(function() wt.layer_run(wt.route_layer, "route points", wt.route_fra
 -- v14 (SPEC 23.6.3): walking-path copy and search, 2 ms a frame, only while a
 -- path route is shown or a copy is still running.
 wt.path_frame = function()
-  if (wt.route_on and settings.route_path == 1) or wt.q("path_busy", false) then
+  if (settings.route_path == 1 and (wt.routes_n or 0) > 0) or wt.q("path_busy", false) then
     wt.q("path_step", nil, 2, settings.route_path, settings.world_undiscovered)
   end
 end

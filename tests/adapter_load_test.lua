@@ -931,6 +931,11 @@ do
   placed = classify(subquest_catalog, requested)
   assert(placed.status == "ok" and #placed.candidates == 1,
     "active complete requested subquest table admits its exact UID")
+  local mainquest_catalog = base_catalog()
+  mainquest_catalog.placements[1].layer = 3
+  placed = classify(mainquest_catalog, requested)
+  assert(placed.status == "ok" and #placed.candidates == 1,
+    "active complete requested mainquest table admits its exact UID")
   requested.requested_tables["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"].uids = {}
   placed = classify(subquest_catalog, requested)
   assert(placed.status == "ok" and #placed.candidates == 0,
@@ -3685,9 +3690,14 @@ do
     "IW1 need committed")
   local task_snapshot = ai.objective_task_snapshot({ 20090 })
   local need_snapshot = ai.objective_need_groups(task_snapshot)
-  assert(need_snapshot.status == "unknown" and not need_snapshot.complete
-    and #need_snapshot.groups == 0 and nd ~= nil and #nd == 1,
-    "IW1 processor need without exact current-task ownership stays unrouted")
+  assert(need_snapshot.status == "ok" and need_snapshot.complete
+    and #need_snapshot.groups == 1 and nd ~= nil and #nd == 1
+    and need_snapshot.groups[1].qid == 20090
+    and need_snapshot.groups[1].task_index == 0
+    and need_snapshot.groups[1].remaining == 1
+    and need_snapshot.groups[1].options[1].item_id == 300
+    and need_snapshot.groups[1].options[1].accepted_count == 1,
+    "IW1 fresh focused legacy need supplies a current-task fallback group")
   task_snapshot.quests[1].item_ownership = { {
     proof_kind = "condition", eligibility = "unknown",
     reason = "native_item_condition_leaf_unread", item_id = 300, count = 1,
@@ -3705,7 +3715,9 @@ do
     and owned_need_snapshot.groups[1].qid == 20090
     and owned_need_snapshot.groups[1].task_index == 0
     and owned_need_snapshot.groups[1].remaining == 1
-    and owned_need_snapshot.groups[1].options[1].item_id == 300,
+    and owned_need_snapshot.groups[1].options[1].item_id == 300
+    and type(owned_need_snapshot.held) == "table"
+    and (owned_need_snapshot.held[300] or 0) == 0,
     "IW1 exact current concierge item ownership unlocks the matching processor need")
   task_snapshot.quests[1].item_ownership = {}
   -- The loot reader tests below exercise provider behavior independently of
@@ -3841,9 +3853,10 @@ do
   IS.dict = storage({ { key = PL, value = ilist(exact_held) } })
   ai.refresh_items()
   need_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
-  assert(need_snapshot.status == "unknown" and #need_snapshot.groups == 0
+  assert(need_snapshot.status == "ok" and need_snapshot.complete
+      and #need_snapshot.groups == 1 and need_snapshot.groups[1].options[1].item_id == 300
       and #needs_of(ai, 20090) == 1,
-    "IW1 exact held-owner cap preserves legacy need without ownership proof")
+    "IW1 exact held-owner cap retains the focused legacy fallback group")
   local over_held = {}
   for i = 1, 513 do over_held[i] = sd(900 + i, 1) end
   ifresh()
@@ -3864,6 +3877,14 @@ do
   ai.refresh_items()
   task_snapshot = ai.objective_task_snapshot({ 20090 })
   IS.task_index = 1
+  ai.objective_task_snapshot({ 20100 })
+  IS.task_index = 0
+  ai.objective_task_snapshot({ 20100 })
+  task_snapshot._unrelated_task_groups = ai.objective_need_groups(task_snapshot)
+  assert(task_snapshot._unrelated_task_groups.status == "ok"
+      and #task_snapshot._unrelated_task_groups.groups == 1,
+    "IW1 unrelated task churn does not invalidate a coherent focused need")
+  IS.task_index = 1
   ai.objective_task_snapshot({ 20090 })
   IS.task_index = 0
   task_snapshot = ai.objective_task_snapshot({ 20090 })
@@ -3873,8 +3894,8 @@ do
   iclk = iclk + 10
   ai.refresh_items("needs")
   task_snapshot = ai.objective_task_snapshot({ 20090 })
-  assert(ai.objective_need_groups(task_snapshot).status == "unknown",
-    "IW1 fresh item scan does not invent current-task ownership")
+  assert(ai.objective_need_groups(task_snapshot).status == "ok",
+    "IW1 fresh item scan restores the focused legacy fallback")
   IS.task_index_unreadable = true
   ai.objective_task_snapshot({ 20090 })
   IS.task_index_unreadable = false
@@ -3885,8 +3906,8 @@ do
   iclk = iclk + 10
   ai.refresh_items("needs")
   task_snapshot = ai.objective_task_snapshot({ 20090 })
-  assert(ai.objective_need_groups(task_snapshot).status == "unknown",
-    "IW1 fresh item scan still requires exact current-task ownership")
+  assert(ai.objective_need_groups(task_snapshot).status == "ok",
+    "IW1 fresh item scan restores fallback after task observation recovers")
   IS.task_index = 0
   ifresh()
   IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }),
@@ -4062,7 +4083,8 @@ do
   IS.dict = storage({ { key = PL, value = ilist({ sd(1, 5) }) },
     { key = BOXK, value = ilist({ sd(300, 1) }) } })
   ai.refresh_items()
-  assert(#(needs_of(ai, 20090) or {}) == 1, "IW3 storage box (65535) not counted")
+  assert(next(ai.item_needs()) == nil,
+    "IW3 storage-box copy satisfies the owned-item need")
   ifresh()
   IS.dict = storage({ { key = PL, value = ilist({}) }, { key = 0 },
     { key = PAWN, value = ilist({ sd(300, 1) }) } })
@@ -4558,10 +4580,10 @@ do
   local own_native_catalog = nobj({}, { getCount = 1,
     getValues = arr({ own_resource }) })
   local oq = nobj({ _QuestLogInfoDict = nobj({}, { get_Item = function(q)
-    if q == 20040 then return oi end
+    if q == 20040 or q == 20090 then return oi end
   end }), _Catalog = own_native_catalog }, {
     getProgressingQuestIds = function() return mcoll(IS.prog) end,
-    getCurrentTask = function(q) if q == 20040 then return ot end end })
+    getCurrentTask = function(q) if q == 20040 or q == 20090 then return ot end end })
   oq.address = 0x202
   sdk.get_managed_singleton = function(n)
     if n == "app.QuestLogManager" then return oq end
@@ -4630,7 +4652,7 @@ do
   }, "entries")
   reward_fixture.previous_singleton = sdk.get_managed_singleton
   reward_fixture.calls = { get_Count = 2 }
-  sdk.get_managed_singleton = function(name)
+  reward_fixture.singleton = function(name)
     if name == "app.QuestManager" then return reward_fixture.managed({
       RewardDict = reward_fixture.managed({ _entries = reward_fixture.entries,
         _count = 3, _freeCount = 1 }, reward_fixture.calls),
@@ -4638,6 +4660,7 @@ do
         reward_fixture.managed({ ProcID = 40 }), reward_fixture.managed({ ProcID = 41 }) }, "processors") }) end
     return reward_fixture.previous_singleton(name)
   end
+  sdk.get_managed_singleton = reward_fixture.singleton
   reward_fixture.previous_need_groups = ai.objective_need_groups
   own_catalog.quests[890] = { reward_diagnostics = { false } }
   local owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
@@ -4658,6 +4681,26 @@ do
     and #owned_snapshot._natural_groups.groups == 1
     and owned_snapshot._natural_groups.groups[1].options[1].item_id == 9001,
     "native item-condition ownership unlocks the matching current need without test injection")
+  IS.prog = { 20040, 20090 }
+  IS.procs = {
+    iproc(20040, { has_item({ { id = 9001, num = 1, lv = 4 } }) }),
+    iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }),
+  }
+  iclk = iclk + 10
+  sdk.get_managed_singleton = reward_fixture.previous_singleton
+  ai.refresh_items("needs")
+  owned_snapshot = ai.objective_task_snapshot({ 20040, 20090 }, own_catalog)
+  owned_snapshot._mixed = ai.objective_need_groups(owned_snapshot)
+  owned = owned_snapshot._mixed.groups
+  assert(owned_snapshot._mixed.status == "ok" and owned_snapshot._mixed.complete
+      and #owned == 2 and owned[1].qid == 20040 and owned[1].options[1].item_id == 9001
+      and owned[2].qid == 20090 and owned[2].options[1].item_id == 300,
+    "mixed structured and legacy quests retain both exact current need groups")
+  IS.prog = { 20040 }
+  IS.procs = { iproc(20040, { has_item({ { id = 9001, num = 1, lv = 4 } }) }) }
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   og.test_process.calls.evaluate = false
   owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
   assert(owned_snapshot._condition_case.item_ownership[1].eligibility == "ineligible"
@@ -4723,6 +4766,7 @@ do
   og.fields._Conditions = mcoll({ og.test_selector })
   owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   reward_fixture.original_need_generation = owned_snapshot.need_generation
+  sdk.get_managed_singleton = reward_fixture.singleton
   ai.objective_need_groups = function()
     return { status = "ok", complete = true, groups = { { options = { { item_id = 9001 } } } } }
   end
