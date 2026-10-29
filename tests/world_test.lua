@@ -3976,7 +3976,8 @@ do
         return { objective_generation = generation or 1, members = members }
       end
       local function direct_member(kind, name, pos, ordinal, generation)
-        local key = kind == "item" and core.target_key({ "source", "seller:test" })
+        local key = kind == "item" and core.target_key(
+          { "source", "seller", "test", "variant", 1, 2 })
           or core.target_key({ 30040, "task", 0, ordinal or 1, "place" })
         local member = { route_id = core.objective_direct_route_id(ordinal or 1), place = 0,
           direct = true, qid = 30040, kind = kind == "item" and "source" or "place",
@@ -4017,6 +4018,7 @@ do
       local e = route_in(w, direct_id)
       check("direct route: publishes two stops from player to copied target",
         e ~= nil and e.place == 0 and #e.stops == 2
+        and e.lead == true and e.stops[1].lead == true
         and e.stops[1].pos.x == 5 and e.stops[1].pos.y == 1 and e.stops[1].pos.z == 5
         and e.stops[2].pos.x == 410.5 and e.stops[2].pos.y == 73.5
         and e.stops[2].pos.z == -821.2)
@@ -4066,6 +4068,14 @@ do
       w:refresh(1, true, tg)
       check("direct route: source without item and need-group ownership fails closed",
         route_in(w, direct_id) == nil)
+
+      local legacy_source = direct_member("item", "Objective: Legacy", original)
+      legacy_source.certainty, legacy_source.capacity_key, legacy_source.capacity_kind,
+        legacy_source.group_keys = nil, nil, nil, nil
+      w:set_routes(publication({ legacy_source }))
+      w:refresh(2, true, tg)
+      check("direct route: official ungrouped source publication remains compatible",
+        route_in(w, direct_id) ~= nil)
 
       -- Pending NPC routes retain their slots before a direct objective takes one.
       do

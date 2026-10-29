@@ -1645,7 +1645,7 @@ get_icon_pool = function(this)
         local widget = info[pool.ref]
         if widget ~= nil then
           used[pi] = used[pi] + 1
-          native_refs[#native_refs + 1] = widget
+          native_refs[#native_refs + 1] = { ref = widget, pos = info.Pos, pool = pool }
         end
       end
     end
@@ -5963,11 +5963,13 @@ function A.make()
                   local target
                   local native_place = native_guidance_place(native)
                   local parsed_cid, parsed_place = concierge_identity(parsed)
-                  local place_ok = type(parsed_place) == "table" and type(native_place) == "table"
-                    and parsed_place.kind == native_place.kind
-                    and ((parsed_place.kind == "key_location" and parsed_place.key == native_place.key)
-                      or (parsed_place.kind == "local_area"
-                        and parsed_place.local_area == native_place.local_area))
+                  local place_ok = parsed_place == nil and native_place == nil
+                    or (type(parsed_place) == "table" and type(native_place) == "table"
+                      and parsed_place.kind == native_place.kind
+                      and ((parsed_place.kind == "key_location"
+                          and parsed_place.key == native_place.key)
+                        or (parsed_place.kind == "local_area"
+                          and parsed_place.local_area == native_place.local_area)))
                   target = { cid = parsed_cid,
                     place = parsed_place, pos = position(safe_call(native, "getDestination")) }
                   if target.pos == nil and target.cid ~= nil then

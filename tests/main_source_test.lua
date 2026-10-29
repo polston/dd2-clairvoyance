@@ -210,6 +210,9 @@ check("lead calibration records are isolated, last, zero-size and uncounted",
     and src:find("if m.calibration == true then ref:set_Scale(0) end", 1, true) ~= nil
     and src:find("rec.calibration and 0 or scale", 1, true) ~= nil
     and src:find("if m.calibration ~= true then note_dropped() end", 1, true) ~= nil)
+check("native map icons provide zero-cost route transform anchors",
+  src:find("native.pool == pool", 1, true) ~= nil
+    and src:find("marker = { pos = { x = x, y = y, z = z }, calibration = true }", 1, true) ~= nil)
 check("current-route validation compares endpoint coordinates",
   route_current_block:find("route.pos.x == member.pos.x", 1, true) ~= nil
     and route_current_block:find("route.pos.y == member.pos.y", 1, true) ~= nil

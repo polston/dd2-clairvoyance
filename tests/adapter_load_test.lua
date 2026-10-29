@@ -133,6 +133,29 @@ local guid_ok, guid_error = pcall(A.guid_parse, malformed_guid)
 assert(not guid_ok and tostring(guid_error):find("malformed GUID '" .. malformed_guid .. "'", 1, true),
   "guid_parse preserves malformed input in its error")
 
+do
+  local old_pools = A.icon_pools
+  local panel, sprite = { label = "panel", array = "Panels", ref = "Panel" },
+    { label = "sprite", array = "Sprites", ref = "Sprite" }
+  A.icon_pools = { panel, sprite }
+  local panel_ref, sprite_ref = {}, {}
+  local pos = { x = 10, y = 2, z = 30 }
+  local info = { Panel = panel_ref, Sprite = sprite_ref, Pos = pos }
+  local this = {
+    MapIconInfoList = { get_Count = function() return 1 end,
+      get_Item = function(_, i) return i == 0 and info or nil end },
+    Panels = { get_Length = function() return 2 end },
+    Sprites = { get_Length = function() return 4 end },
+  }
+  local selected, used, capacity, native = A.get_icon_pool(this)
+  assert(selected == sprite and used == 1 and capacity == 4
+    and #native == 2 and native[1].ref == panel_ref and native[1].pos == pos
+    and native[1].pool == panel and native[2].ref == sprite_ref
+    and native[2].pool == sprite,
+    "get_icon_pool returns each native ref with its map position and owning pool")
+  A.icon_pools = old_pools
+end
+
 -- giver_audit_step (SPEC 18.5.1.4)
 do
   assert(A.giver_audit_step(nil, {}, nil, nil, nil, nil) == false, "nil ids")
@@ -5411,6 +5434,15 @@ do
     "OT3c native CID zero is normalized and place-only evidence remains usable")
   original_guidance[1].cid = saved_guidance_cid
   concierge_dest._calls.get_CharaID = saved_concierge_cid
+  local saved_key, saved_area = concierge_dest._calls.get_KeyLocation,
+    concierge_dest._calls.get_LocalArea
+  original_guidance[1].target = nil
+  concierge_dest._calls.get_KeyLocation, concierge_dest._calls.get_LocalArea = nil, nil
+  local npc_only = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(npc_only.eligibility == "eligible" and #npc_only.signals == 1
+    and npc_only.signals[1].kind == "npc" and npc_only.signals[1].target.cid == cid,
+    "OT3c NPC-only guidance matches when both catalog and live place identities are absent")
+  concierge_dest._calls.get_KeyLocation, concierge_dest._calls.get_LocalArea = saved_key, saved_area
   original_guidance[1].target = { kind = "key_location", key = key + 1 }
   local wrong_key = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
   assert(wrong_key.eligibility == "unknown"

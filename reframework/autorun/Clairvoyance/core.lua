@@ -3025,7 +3025,7 @@ function M.compute(adapter, show)
   local undisc = show.world_undiscovered == true
   for _, route in ipairs(type(show.routes) == "table" and show.routes or {}) do
     if type(route) == "table" and type(route.stops) == "table"
-      and type(route.cid) == "number" and route.place == nil then
+      and type(route.cid) == "number" and (route.place == nil or route.direct == true) then
       for n, s in ipairs(route.stops) do
         if type(s) == "table" and s.lead == true and valid_pos(s.pos) then
           -- The player lead is not a visible stop, but the full-map route
@@ -3037,7 +3037,7 @@ function M.compute(adapter, show)
             cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
             label = "", cid = route.cid, stop = n, num = 0,
             slot = route.slot, calibration = true }
-        elseif type(s) == "table" and valid_pos(s.pos)
+        elseif route.direct ~= true and type(s) == "table" and valid_pos(s.pos)
           and (s.discovered ~= false or undisc) then
           -- SPEC 32.14.11.4: num is the number shown; a lead entry's first
           -- stop is the player, so its stops count from 1 after it.

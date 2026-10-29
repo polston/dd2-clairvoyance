@@ -3597,6 +3597,14 @@ do
     local lb = stops_of(run({}, nil, { routes = { leadb } }))
     check("rcc non-number idx falls back", #lb == 1 and lb[1].num == 1)
     check("rcc lead signature", core.signature(lm, {}) ~= core.signature(one, {}))
+    local direct_lead = { cid = -4398046511104, name = "Objective: Item", slot = 1,
+      place = 0, direct = true, lead = true, stops = {
+        { pos = pl(0, 0), discovered = true, lead = true },
+        { pos = pl(10, 10), discovered = true } } }
+    local direct_result = run({}, nil, { routes = { direct_lead } })
+    check("rcc direct objective keeps only a private player calibration anchor",
+      has(direct_result.fullmap_calibration, "r:-4398046511104:0") ~= nil
+        and #stops_of(direct_result) == 0)
   end
 
   -- hint pins, with a query active, outside the cap

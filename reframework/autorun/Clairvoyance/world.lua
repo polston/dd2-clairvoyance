@@ -1761,13 +1761,13 @@ function M.new(a, reads, io)
       return nil
     end
     set_from(m.cid, pl)
-    return { cid = m.cid, place = 0, direct = true, objective = m.objective,
+    return { cid = m.cid, place = 0, direct = true, lead = true, objective = m.objective,
       qid = m.qid, kind = m.kind, target_key = m.target_key, ordinal = m.ordinal,
       objective_generation = m.objective_generation, name = m.name, pos = pcopy(m.pos),
       item_ids = m.item_ids, certainty = m.certainty, probability = m.probability,
       capacity_key = m.capacity_key, capacity_kind = m.capacity_kind,
       group_keys = m.group_keys,
-      stops = { { pos = pcopy(pl), discovered = true },
+      stops = { { pos = pcopy(pl), discovered = true, lead = true },
                 { pos = pcopy(m.pos), discovered = true } } }
   end
 
@@ -3190,6 +3190,9 @@ function M.new(a, reads, io)
       return e.certainty == nil and e.probability == nil and e.capacity_key == nil
         and e.capacity_kind == nil and e.group_keys == nil
     end
+    local legacy = e.certainty == nil and e.probability == nil and e.capacity_key == nil
+      and e.capacity_kind == nil and e.group_keys == nil
+    if legacy then return #e.item_ids > 0 end
     local probabilistic = e.certainty == "probabilistic"
     return #e.item_ids > 0 and (e.certainty == "guaranteed" or probabilistic)
       and route_family_key_valid(e.capacity_key, "capacity")
@@ -3239,8 +3242,11 @@ function M.new(a, reads, io)
       local ancillary = e.target_key == nil and e.ordinal == nil
       local m
       if e.direct == true then
+        local target_key_ok = e.kind == "source"
+          and route_family_key_valid(e.target_key, "source")
+          or (e.kind ~= "source" and route_key_valid(e.target_key))
         if ancillary or (e.objective ~= nil and e.objective ~= true)
-            or not route_key_valid(e.target_key)
+            or not target_key_ok
             or not route_positive(e.ordinal, 1099511627775)
             or core.objective_direct_route_id(e.ordinal) ~= e.route_id
             or e.cid ~= nil or e.place ~= 0 or not valid_pos(e.pos)

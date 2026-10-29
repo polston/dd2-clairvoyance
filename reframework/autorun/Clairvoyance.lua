@@ -1623,6 +1623,25 @@ do
   local function marker_argb(m)
     return su.marker_color(settings, m)
   end
+  local function note_native_anchors(pool, native_refs)
+    if pool.label ~= "sprite" or not icons.read_ok then return end
+    for _, native in ipairs(native_refs) do
+      if native.pool == pool then
+        local ok, ref, sprite, x, y, z = pcall(function()
+          local r, p = native.ref, native.pos
+          return r, r.Sprite, p.x, p.y, p.z
+        end)
+        if ok and sprite ~= nil and type(x) == "number" and x == x
+            and type(y) == "number" and y == y and type(z) == "number" and z == z
+            and math.abs(x) < math.huge and math.abs(y) < math.huge
+            and math.abs(z) < math.huge then
+          local recs = icons.recs
+          recs[#recs + 1] = { marker = { pos = { x = x, y = y, z = z }, calibration = true },
+            ref = ref, sprite = sprite, calibration = true }
+        end
+      end
+    end
+  end
   -- Queues the marker's picture for the draw pass when it can be drawn;
   -- true means the game glyph is hidden (alpha byte 0).
   local function note_picture(pool, ref, m)
@@ -1662,10 +1681,11 @@ do
     if pool == nil then return end
     local top = 0
     for _, r in ipairs(native_refs) do
-      local p = r:get_Prio()
+      local p = r.ref:get_Prio()
       if p > top then top = p end
     end
     native_max_prio = top
+    note_native_anchors(pool, native_refs)
     local cursor = used
     idx_obj:write_dword(INT_OFF, cursor)
     local ordered = core.fullmap_order(snapshot.markers,
