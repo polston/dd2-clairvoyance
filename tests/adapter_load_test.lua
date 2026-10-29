@@ -113,7 +113,7 @@ local exports = {
   "save_learned_names", "catalog_stats", "quest_log_is_end", "catalog_ids",
   "learn_names", "npc_live_pos", "probe_lookup", "refresh_objectives",
   "refresh_gates", "refresh_tree_gates", "refresh_items",
-  "read_masquerade_door_closed",
+  "read_world_access_gates",
   "overhead_block_reason",
 }
 for _, name in ipairs(exports) do
@@ -201,7 +201,7 @@ local contract = {
   "refresh_items", "item_related", "reset_item_throttle", "quest_steps_text",
   "tracked_qid", "journal_now", "journal_all", "npc_name", "journal_stats",
   "map_open", "map_jump_apply", "journal_note_jump", "map_cursor",
-  "quest_step", "masquerade_door_closed",
+  "quest_step", "filter_access_targets",
   "overhead_block_reason",
 }
 assert(#contract == 54)
@@ -1410,6 +1410,7 @@ debug.setmetatable(coroutine.create(function() end), {
 })
 local function arr(elems)
   return { get_field = function() return nil end,
+    get_element = function(_, index) return elems[index + 1] end,
     get_elements = function()
       local co = coroutine.create(function() end)
       vec_of[co] = elems
@@ -3439,19 +3440,77 @@ do
   end
   local function hset(gs)        -- false = free slot
     local elems = {}
+    local count, free = 0, 0
     for i, g in ipairs(gs) do
-      elems[i] = (g == false) and mobj({}) or mobj({ Value = g })
+      if g == false then
+        elems[i], free = mobj({ next = -2 }), free + 1
+      else
+        elems[i], count = mobj({ Value = g, next = -1 }), count + 1
+      end
     end
-    return mobj({ _entries = arr(elems) })
+    local collection = mobj({ _entries = arr(elems), _count = #elems,
+      _freeCount = free })
+    collection.call = function(_, method)
+      if method == "get_Count" then return count end
+    end
+    return collection
   end
   local function managed(sets)   -- false = free outer slot
     local elems = {}
+    local count, free = 0, 0
     for i, s in ipairs(sets) do
-      elems[i] = (s == false) and mobj({}) or mobj({ value = s })
+      if s == false then
+        elems[i], free = mobj({ next = -2 }), free + 1
+      else
+        elems[i], count = mobj({ key = i, value = s, next = -1 }), count + 1
+      end
     end
-    return mobj({ _entries = arr(elems) })
+    local collection = mobj({ _entries = arr(elems), _count = #elems,
+      _freeCount = free })
+    collection.call = function(_, method)
+      if method == "get_Count" then return count end
+    end
+    return collection
   end
-  local function gmgr(o)
+  local function gmgr(o, access_locked, omit_access)
+    local outer = {}
+    local raw = o.managed and o.managed._entries and o.managed._entries:get_elements() or {}
+    local has_garb = false
+    for i = 1, #raw do
+      outer[#outer + 1] = raw[i]
+      local set = raw[i] and raw[i].value
+      local entries = set and set._entries and set._entries:get_elements() or {}
+      for _, entry in ipairs(entries) do
+        local gimmick = entry and (entry.Value or entry.value) or nil
+        if gimmick and gimmick.ItemId == 300 then has_garb = true end
+      end
+    end
+    if has_garb and omit_access ~= true then
+      local leaf = mobj({ IsClose = true, IsLock = access_locked == true })
+      local leaf_list = ilist({ leaf })
+      local pos = { x = 568.247, y = 19.779, z = -1014.327 }
+      local transform = { call = function(_, method)
+        if method == "get_UniversalPosition" then return pos end
+      end }
+      local game_object = { call = function(_, method)
+        if method == "get_Name" then return "gm05_046" end
+        if method == "get_Transform" then return transform end
+      end }
+      local gate_door = typed("app.gm05_046", { CompDoorList = leaf_list })
+      gate_door.call = function(_, method)
+        if method == "get_GameObject" then return game_object end
+      end
+      outer[#outer + 1] = mobj({ key = 74, value = hset({ gate_door }), next = -1 })
+    end
+    local occupied = 0
+    for _, entry in ipairs(outer) do
+      if type(entry.next) == "number" and entry.next >= -1 then occupied = occupied + 1 end
+    end
+    o.managed = mobj({ _entries = arr(outer), _count = #outer,
+      _freeCount = #outer - occupied })
+    o.managed.call = function(_, method)
+      if method == "get_Count" then return occupied end
+    end
     return mobj({
       ["<ManagedGimmicksByIDs>k__BackingField"] = o.managed,
       ["<DropItemGimmicks>k__BackingField"] = o.drops and ilist(o.drops,
@@ -3541,6 +3600,24 @@ do
   assert(ai.item_needs() == nil and #ai.item_locations() == 0
     and ai.item_stats().rounds == 0 and ai.item_stats().needs == 0,
     "ST1 no commit before the first round")
+  ;(function()
+    ifresh()
+    IS.gm = gmgr({ managed = managed({ hset({ placed(300, V, L) }) }),
+      drops = {}, boxes = {} }, true)
+    ai.refresh_items()
+    assert(#ai.item_locations() == 0, "locked Garb placement is omitted before item commit")
+    ifresh()
+    IS.gm = gmgr({ managed = managed({ hset({ placed(300, V, L) }) }),
+      drops = {}, boxes = {} }, nil, true)
+    ai.refresh_items()
+    assert(#ai.item_locations() == 0, "unknown Garb placement is omitted before item commit")
+    ifresh()
+    IS.gm = gmgr({ managed = managed({ hset({ placed(300, V, L) }) }),
+      drops = {}, boxes = {} })
+    ai.refresh_items()
+    assert(#ai.item_locations() == 1, "closed and unlocked Garb placement remains available")
+  end)()
+  ifresh()
   -- NM1-NM4 name cache
   assert(ai.item_name(300) == "Beggar's Garb" and IS.data_calls == 1,
     "NM1 icon route")
@@ -3801,7 +3878,8 @@ do
   local s = ai.item_stats()
   assert(s.needs == 1 and s.ids == 1 and s.located == 1 and s.rounds == 1
     and s.skipped == 0 and s.ignored == 0 and s.failed_total == 0,
-    "IW1 stats (rounds re-counted after the owner reset)")
+    "IW1 stats (rounds re-counted after the owner reset): " .. table.concat({ s.needs,
+      s.ids, s.located, s.rounds, s.skipped, s.ignored, s.failed_total }, "/"))
   IS.gm = gmgr({ managed = managed({}), drops = { drop(300, V, L, false) }, boxes = {} })
   iclk = iclk + 0.6
   source_views = ai.objective_item_source_snapshots(nil, task_snapshot)
@@ -5215,90 +5293,318 @@ do
   sdk.get_managed_singleton, sdk.find_type_definition, Vector3f = prev_gms, prev_ftd, prev_v3
 end
 
--- v14: the masquerade passage leaf is selected by the full fingerprint.
-do
+-- SPEC 40.22: generic bounded door-leaf observation and source gating.
+(function()
+  assert(type(A.read_world_access_gates) == "function",
+    "generic world-access reader is exported")
+  assert(type(A.read_masquerade_door_closed) ~= "function",
+    "masquerade-only reader is removed")
+  local reads, outer_reads = 0, 0
   local function obj(fields, calls, tn)
     return {
-      get_field = function(_, n)
-        local v = fields and fields[n]
-        if v == "RAISE" then error("field") end
-        return v
-      end,
-      call = function(_, n, ...)
-        local f = calls and calls[n]
-        if f == "RAISE" then error("call") end
-        return type(f) == "function" and f(...) or f
+      get_field = function(_, name) reads = reads + 1; return fields and fields[name] end,
+      call = function(_, name, ...)
+        reads = reads + 1
+        local value = calls and calls[name]
+        if type(value) == "function" then return value(...) end
+        return value
       end,
       get_type_definition = function()
-        return { get_full_name = function() return tn end }
+        reads = reads + 1
+        return { get_full_name = function() reads = reads + 1; return tn end }
       end,
     }
   end
-  local function arr(values)
-    return { get_elements = function() return values end }
+  local function arr(values, fail, outer)
+    return { get_element = function(_, index)
+      reads = reads + 1
+      if outer then outer_reads = outer_reads + 1 end
+      if fail then error("partial collection") end
+      return values[index + 1]
+    end }
   end
-  local function manager(x, closed, opt)
-    opt = opt or {}
-    local leaf = obj({ IsClose = closed })
-    local list = obj(nil, {
-      get_Count = function() return opt.leaf_count or 1 end,
-      get_Item = function() return leaf end,
+  local function door(bucket, x, name, closed, locked, options)
+    options = options or {}
+    local leaf = obj(options.leaf_fields or { IsClose = closed, IsLock = locked })
+    local leaves = obj(nil, {
+      get_Count = options.leaf_count or 1,
+      get_Item = function(index) return index == 0 and leaf or nil end,
     })
-    local pos = opt.pos or { x = x, y = 73.5, z = -819.250 }
-    local tr = obj(nil, { get_UniversalPosition = function() return pos end })
-    local go = obj(nil, {
-      get_Name = function() return opt.name or "gm80_026" end,
-      get_Transform = function() return tr end,
-    })
-    local g = obj({ CompDoorList = list }, { get_GameObject = function() return go end },
-      opt.type_name or "app.gm05_046")
-    local inner = { obj({ Value = g }) }
-    if opt.duplicate then inner[2] = obj({ Value = g }) end
-    local hs = obj({ _entries = arr(inner) })
-    local outer = { obj({ key = opt.gid or 85, value = hs }) }
-    return obj({ ["<ManagedGimmicksByIDs>k__BackingField"] = obj({ _entries = arr(outer) }) })
+    local pos = options.pos or { x = x, y = bucket == 74 and 19.779 or 73.5,
+      z = bucket == 74 and -1014.327 or -819.250 }
+    local tr = obj(nil, { get_UniversalPosition = pos })
+    local go = obj(nil, { get_Name = name, get_Transform = tr })
+    local native = obj({ CompDoorList = leaves },
+      { get_GameObject = go }, options.type_name or "app.gm05_046")
+    return native
   end
-
-  assert(A.read_masquerade_door_closed(manager(396.075, true)) == true,
-    "DR1 closed fingerprint")
-  assert(A.read_masquerade_door_closed(manager(396.075, false)) == false,
-    "DR2 opening/open fingerprint")
-  assert(A.read_masquerade_door_closed(manager(396.325, true)) == true,
-    "DR3 inclusive 0.25 boundary")
-  assert(A.read_masquerade_door_closed(manager(396.3251, true)) == nil,
-    "DR4 outside tolerance")
-  assert(A.read_masquerade_door_closed(manager(396.075, true, { gid = 86 })) == nil,
-    "DR5 gid mismatch")
-  assert(A.read_masquerade_door_closed(manager(396.075, true, { name = "other" })) == nil,
-    "DR6 name mismatch")
-  assert(A.read_masquerade_door_closed(manager(396.075, true,
-      { type_name = "app.OtherDoor" })) == nil, "DR7 type mismatch")
-  assert(A.read_masquerade_door_closed(manager(396.075, true, { leaf_count = 0 })) == nil,
-    "DR8 empty leaf list")
-  assert(A.read_masquerade_door_closed(manager(396.075, true, { leaf_count = 2 })) == nil,
-    "DR9 multiple leaves")
-  assert(A.read_masquerade_door_closed(manager(396.075, true, { duplicate = true })) == nil,
-    "DR10 duplicate match is unknown")
-  assert(A.read_masquerade_door_closed(manager(396.075, true,
-      { pos = { x = 0 / 0, y = 73.5, z = -819.250 } })) == nil, "DR11 malformed position")
-
-  local old_gms = sdk.get_managed_singleton
-  local qowner, gm = {}, manager(396.075, false)
-  sdk.get_managed_singleton = function(n)
-    if n == "app.QuestLogManager" then return qowner end
-    if n == "app.GimmickManager" then return gm end
+  local function manager(rows, fail_outer)
+    local buckets = {}
+    for _, row in ipairs(rows or {}) do
+      local values = {}
+      for _, native in ipairs(row.doors or {}) do
+        values[#values + 1] = obj({ Value = native, next = -1 })
+      end
+      local set = obj({ _entries = arr(values, row.fail_inner), _count = #values,
+        _freeCount = 0 }, { get_Count = #values })
+      buckets[#buckets + 1] = obj({ key = row.bucket, value = set, next = -1 })
+    end
+    local dict = obj({ _entries = arr(buckets, fail_outer, true), _count = #buckets,
+      _freeCount = 0 }, { get_Count = #buckets })
+    return obj({ ["<ManagedGimmicksByIDs>k__BackingField"] = dict })
   end
+  local requested = { "masquerade_passage", "beggars_garb_entrance" }
+  reads = 0
+  local empty, complete = A.read_world_access_gates(nil, {})
+  assert(complete == true and next(empty) == nil and reads == 0,
+    "empty requested gate set performs zero managed reads")
+  local both = manager({
+    { bucket = 85, doors = { door(85, 396.075, "gm80_026", true, true) } },
+    { bucket = 74, doors = { door(74, 568.247, "gm05_046", true, false) } },
+  })
+  local observed, scan_complete = A.read_world_access_gates(both, requested)
+  assert(scan_complete == true
+    and observed.masquerade_passage.status == "known"
+    and observed.masquerade_passage.values.closed == true
+    and observed.masquerade_passage.values.locked == true
+    and observed.beggars_garb_entrance.status == "known"
+    and observed.beggars_garb_entrance.values.closed == true
+    and observed.beggars_garb_entrance.values.locked == false,
+    "both requested gates are observed in one scan with IsClose and IsLock")
+  local none = A.read_world_access_gates(manager({}), requested)
+  assert(none.masquerade_passage.status == "unknown"
+    and none.beggars_garb_entrance.status == "unknown", "no matching leaf is unknown")
+  local duplicate = A.read_world_access_gates(manager({
+    { bucket = 85, doors = { door(85, 396.075, "gm80_026", true, false),
+      door(85, 396.075, "gm80_026", true, false) } },
+  }), { "masquerade_passage" })
+  assert(duplicate.masquerade_passage.status == "unknown", "duplicate leaf is unknown")
+  local malformed = A.read_world_access_gates(manager({
+    { bucket = 85, doors = { door(85, 396.075, "gm80_026", true, false,
+      { leaf_fields = { IsClose = true } }) } },
+  }), { "masquerade_passage" })
+  assert(malformed.masquerade_passage.status == "unknown", "missing lock state is unknown")
+  local partial_outer = A.read_world_access_gates(manager({}, true), requested)
+  assert(partial_outer.masquerade_passage.status == "unknown"
+    and partial_outer.beggars_garb_entrance.status == "unknown",
+    "partial outer collection atomically invalidates requested gates")
+  local partial_inner = A.read_world_access_gates(manager({
+    { bucket = 85, doors = { door(85, 396.075, "gm80_026", true, false) } },
+    { bucket = 74, doors = { door(74, 568.247, "gm05_046", true, false) },
+      fail_inner = true },
+  }), requested)
+  assert(partial_inner.masquerade_passage.status == "unknown"
+    and partial_inner.beggars_garb_entrance.status == "unknown",
+    "partial inner collection atomically invalidates requested gates")
+  local valid_native = door(85, 396.075, "gm80_026", true, false)
+  local sparse_values = {
+    [1] = obj({ Value = valid_native, next = -1 }),
+    [3] = obj({ Value = valid_native, next = -1 }),
+  }
+  local sparse_set = obj({ _entries = arr(sparse_values), _count = 3, _freeCount = 1 },
+    { get_Count = 2 })
+  local sparse_bucket = obj({ key = 85, value = sparse_set, next = -1 })
+  local sparse_dict = obj({ _entries = arr({ sparse_bucket }), _count = 1, _freeCount = 0 },
+    { get_Count = 1 })
+  local sparse, sparse_complete = A.read_world_access_gates(
+    obj({ ["<ManagedGimmicksByIDs>k__BackingField"] = sparse_dict }),
+    { "masquerade_passage" })
+  assert(sparse_complete == false and sparse.masquerade_passage.status == "unknown",
+    "sparse inner collection cannot hide a duplicate match")
+  local raising_entry = {
+    get_field = function() error("partial entry") end,
+  }
+  local raising_set = obj({ _entries = arr({ obj({ Value = valid_native, next = -1 }),
+      raising_entry }), _count = 2, _freeCount = 0 }, { get_Count = 2 })
+  local raising_bucket = obj({ key = 85, value = raising_set, next = -1 })
+  local raising_dict = obj({ _entries = arr({ raising_bucket }), _count = 1, _freeCount = 0 },
+    { get_Count = 1 })
+  local raising, raising_complete = A.read_world_access_gates(
+    obj({ ["<ManagedGimmicksByIDs>k__BackingField"] = raising_dict }),
+    { "masquerade_passage" })
+  assert(raising_complete == false and raising.masquerade_passage.status == "unknown",
+    "unreadable occupied entry atomically fails closed")
+  outer_reads = 0
+  local oversized_dict = obj({ _entries = arr({}, false, true), _count = 4097,
+    _freeCount = 0 }, { get_Count = 4097 })
+  local oversized, oversized_complete = A.read_world_access_gates(
+    obj({ ["<ManagedGimmicksByIDs>k__BackingField"] = oversized_dict }),
+    { "masquerade_passage" })
+  assert(oversized_complete == false and oversized.masquerade_passage.status == "unknown"
+    and outer_reads == 0,
+    "over-cap collection is rejected before entry materialization")
+  local exact = {}
+  for i = 1, 4095 do exact[#exact + 1] = door(85, 0, "other", false, false,
+    { type_name = "app.OtherDoor" }) end
+  exact[#exact + 1] = door(85, 396.075, "gm80_026", false, true)
+  local at_cap = A.read_world_access_gates(manager({ { bucket = 85, doors = exact } }, false),
+    { "masquerade_passage" })
+  assert(at_cap.masquerade_passage.status == "known", "exact managed-object cap is complete")
+  exact[#exact + 1] = door(85, 0, "other", false, false, { type_name = "app.OtherDoor" })
+  local over_cap = A.read_world_access_gates(manager({ { bucket = 85, doors = exact } }, false),
+    { "masquerade_passage" })
+  assert(over_cap.masquerade_passage.status == "unknown", "cap plus one fails closed")
+
+  local hint = { target_kind = "hint_pin", quest_id = 30040, pin_index = 1 }
+  local garb = { target_kind = "placed_item", type_name = "app.Gm82_000", item_id = 300,
+    position = { x = 571.018, y = 19.753, z = -1012.515 } }
+  local unrelated = { target_kind = "placed_item", type_name = "app.Gm82_000", item_id = 301,
+    position = { x = 0, y = 0, z = 0 } }
+  local old_gms, old_clock = sdk.get_managed_singleton, os.clock
+  local owner, gm, now = {}, both, 100
+  sdk.get_managed_singleton = function(name)
+    if name == "app.QuestLogManager" then return owner end
+    if name == "app.GimmickManager" then return gm end
+  end
+  os.clock = function() return now end
   a.reset_session_caches()
-  assert(a.masquerade_door_closed() == false, "DR12 open commits last-known")
+  outer_reads = 0
+  local filtered, decisions = a.filter_access_targets({ hint, garb, unrelated })
+  assert(outer_reads == 2 and #filtered == 3 and filtered[1] == hint
+    and filtered[2] == garb and filtered[3] == unrelated and #decisions == 2,
+    "target filter batches both gates in one scan and preserves unbound membership")
+  local candidate = { source_id = { "source", "placed", "garb", 0 },
+    provider = "placed", outputs = { { item_id = 300, count = 1 } },
+    target = { kind = "placed", uid = "garb", index = 0, pos = garb.position },
+    capacity_pool_id = { "capacity", "placed", "garb", 0 },
+    capacity_kind = "finite", available_acquisitions = 1,
+    certainty = "guaranteed", eligibility = "eligible", generation = 7 }
+  local other_candidate = { source_id = { "source", "placed", "other", 0 },
+    provider = "placed", outputs = { { item_id = 301, count = 1 } },
+    target = { kind = "placed", uid = "other", index = 0, pos = unrelated.position },
+    capacity_pool_id = { "capacity", "placed", "other", 0 },
+    capacity_kind = "finite", available_acquisitions = 1,
+    certainty = "guaranteed", eligibility = "eligible", generation = 7 }
+  local provider = { provider = "placed", status = "ok", complete = true, generation = 7,
+    candidates = { candidate, other_candidate } }
+  local positive = a.filter_placed_provider_snapshot(provider)
+  assert(positive ~= provider and positive.status == "ok" and positive.complete
+    and positive.generation == 7 and #positive.candidates == 2
+    and positive.candidates[1] == candidate and positive.candidates[2] == other_candidate,
+    "closed but unlocked Garb source remains in the complete provider snapshot")
+  gm = manager({
+    { bucket = 85, doors = { door(85, 396.075, "gm80_026", true, true) } },
+    { bucket = 74, doors = { door(74, 568.247, "gm05_046", true, true) } },
+  })
+  now = now + 11
+  filtered, decisions = a.filter_access_targets({ hint, garb, unrelated })
+  local locked_provider = a.filter_placed_provider_snapshot(provider)
+  assert(#filtered == 2 and filtered[1] == hint and filtered[2] == unrelated
+    and #locked_provider.candidates == 1 and locked_provider.candidates[1] == other_candidate
+    and locked_provider.complete and locked_provider.generation == 7,
+    "locked Garb source is absent while unrelated item and provider rows pass through")
   gm = nil
-  assert(a.masquerade_door_closed() == false, "DR13 unreadable keeps last-known")
-  qowner = {}
-  assert(a.reset_session_caches() == true, "DR14 owner reset")
-  assert(a.masquerade_door_closed() == nil, "DR15 reset returns unknown")
-  gm = manager(396.075, true)
-  assert(a.masquerade_door_closed() == true, "DR16 confirmed close restores")
-  sdk.get_managed_singleton = old_gms
-end
+  now = now + 11
+  filtered, decisions = a.filter_access_targets({ hint, garb, unrelated })
+  local unknown_provider = a.filter_placed_provider_snapshot(provider)
+  assert(#filtered == 2 and filtered[1] == hint and filtered[2] == unrelated
+    and decisions[1].used_last_known == true
+    and #unknown_provider.candidates == 1 and unknown_provider.candidates[1] == other_candidate
+    and unknown_provider.complete and unknown_provider.generation == 7,
+    "unknown source fails closed while hint uses last-known state")
+  local integration_core = require("Clairvoyance.core")
+  local task_snapshot = { focus_epoch = 1, journal_generation = 1, need_generation = 9,
+    objective_needs = { status = "ok", complete = true, generation = 9,
+      source_generation = 9, groups = {
+        { id = { "need", 20090, 1, 0, 1 }, qid = 20090, task_index = 0,
+          remaining = 1, options = { { item_id = 300, accepted_count = 1 } },
+          status = "eligible", complete = true, generation = 9 },
+      } },
+    quests = { { qid = 20090, task_index = 0, read_status = "ok",
+      issued_npcs = {}, task_destinations = {}, guidance = {}, item_ownership = {
+        { item_id = 300, count = 1, proof_kind = "condition", eligibility = "eligible" },
+      } } } }
+  local function projected(provider_snapshots)
+    if provider_snapshots.provider ~= nil then provider_snapshots = { provider_snapshots } end
+    local snapshot = integration_core.objective_snapshot(task_snapshot, nil,
+      provider_snapshots, integration_core.target_registry_new())
+    local base = {}
+    if snapshot.targets[1] ~= nil then
+      base[1] = { key = "garb-marker", source_key = snapshot.targets[1].key,
+        cat = "quest_item", pos = garb.position,
+        live = { x = 0, y = 0, z = 0 }, qids = {}, label = "Beggar's Garb" }
+    end
+    local markers, full = integration_core.objective_markers(base, base, snapshot,
+      { objective_places = true, focus_order = { 20090 } })
+    local minimap = integration_core.minimap_markers(markers, garb.position, 10, 12)
+    local overhead = integration_core.overhead_points(markers, { x = 0, y = 0, z = 0 }, 10)
+    local routes = integration_core.objective_routes(snapshot, { x = 0, y = 0, z = 0 },
+      { objective_places = true, focus_order = { 20090 } })
+    return snapshot, markers, full, minimap, overhead, routes
+  end
+  local ps, pm, pf, pmini, po, pr = projected(positive)
+  assert(#ps.targets == 1 and #pm == 1 and #pf == 1 and #pmini == 1
+    and #po == 1 and #pr.members == 1,
+    "unlocked real filter output reaches map, full map, minimap, overhead and route")
+  for label, denied in pairs({ locked = locked_provider, unknown = unknown_provider }) do
+    local ds, dm, df, dmini, doh, dr = projected(denied)
+    assert(#ds.targets == 0 and #dm == 0 and #df == 0 and #dmini == 0
+      and #doh == 0 and #dr.members == 0,
+      label .. " real filter output cannot reappear on any presentation surface")
+  end
+  local source_uid = "11111111-1111-1111-1111-111111111111"
+  local source_catalog = { version = 2, status = "ok", complete = true, generation = 1,
+    placements = { { uid = source_uid, index = 0,
+      table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
+      source_id = { "source", "placed", source_uid, 0 },
+      capacity_pool_id = { "capacity", "placed", source_uid, 0 },
+      outputs = { { item_id = 300, count = 1 } }, pos = garb.position } },
+    chests = {} }
+  local source_observation = { complete = true, persisted_complete = true,
+    generation_complete = true, requested_complete = true, loaded_complete = true,
+    persisted = { [source_uid .. ":0"] = { family = "placed", freebit = 0 } },
+    never = {}, dead = {}, disabled_tables = {}, blacklist = {},
+    requested_tables = {}, loaded = {}, gate_results = {} }
+  local saved_need_groups = a.objective_need_groups
+  a.objective_need_groups = function()
+    return { status = "ok", complete = true, generation = 9, groups = {
+      { qid = 20090, task_index = 0, remaining = 1,
+        options = { { item_id = 300, accepted_count = 1 } } },
+    } }
+  end
+  gm = manager({
+    { bucket = 74, doors = { door(74, 568.247, "gm05_046", true, false) } },
+  })
+  now = now + 11
+  local published_unlocked = a.objective_item_source_snapshots(nil,
+    { need_generation = 9, quests = {} }, source_catalog, source_observation, {})
+  gm = manager({
+    { bucket = 74, doors = { door(74, 568.247, "gm05_046", true, true) } },
+  })
+  now = now + 11
+  local published_locked = a.objective_item_source_snapshots(nil,
+    { need_generation = 9, quests = {} }, source_catalog, source_observation, {})
+  gm = nil
+  now = now + 11
+  local published_unknown = a.objective_item_source_snapshots(nil,
+    { need_generation = 9, quests = {} }, source_catalog, source_observation, {})
+  a.objective_need_groups = saved_need_groups
+  assert(#published_unlocked[1].candidates == 1
+    and #published_locked[1].candidates == 0
+    and #published_unknown[1].candidates == 0,
+    "objective provider publication applies unlocked, locked and unknown access membership")
+  local us, um, uf, umini, uoh, ur = projected(published_unlocked)
+  assert(#us.targets == 1 and #um == 1 and #uf == 1 and #umini == 1
+    and #uoh == 1 and #ur.members == 1,
+    "unlocked published envelope reaches every presentation surface")
+  for label, denied in pairs({ locked = published_locked, unknown = published_unknown }) do
+    local ds, dm, df, dmini, doh, dr = projected(denied)
+    assert(#ds.targets == 0 and #dm == 0 and #df == 0 and #dmini == 0
+      and #doh == 0 and #dr.members == 0,
+      label .. " published envelope cannot reappear on any presentation surface")
+  end
+  a.invalidate_items()
+  now = now + 11
+  filtered, decisions = a.filter_access_targets({ hint, garb })
+  assert(#filtered == 1 and filtered[1] == hint and decisions[1].used_last_known == true,
+    "ordinary item invalidation retains session last-known hint observation")
+  owner = {}
+  assert(a.reset_session_caches() == true, "session owner reset executes")
+  filtered, decisions = a.filter_access_targets({ hint, garb })
+  assert(#filtered == 1 and filtered[1] == hint and decisions[1].used_last_known == false,
+    "session reset clears current and last-known observations")
+  sdk.get_managed_singleton, os.clock = old_gms, old_clock
+end)()
 
 -- General objective task snapshots: native membership and concierge status
 -- are authoritative; generated catalog rows only supply their exact indices.
