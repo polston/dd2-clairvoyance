@@ -3622,6 +3622,12 @@ do
     reason = "native_item_condition_leaf_unread", item_id = 300, count = 1,
     task_index = 0, concierge_index = 0, destination_index = 0,
   } }
+  need_snapshot = ai.objective_need_groups(task_snapshot)
+  assert(need_snapshot.status == "unknown"
+    and not need_snapshot.complete and #need_snapshot.groups == 0,
+    "IW1 unread native item ownership remains unrouted")
+  task_snapshot.quests[1].item_ownership[1].eligibility = "eligible"
+  task_snapshot.quests[1].item_ownership[1].reason = nil
   local owned_need_snapshot = ai.objective_need_groups(task_snapshot)
   assert(owned_need_snapshot.status == "ok" and owned_need_snapshot.complete
     and #owned_need_snapshot.groups == 1

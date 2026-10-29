@@ -5337,7 +5337,7 @@ function A.make()
   end
   local function objective_owner_matches(owner, record, task_index)
     if type(owner) ~= "table" or owner.task_index ~= task_index
-        or (owner.eligibility ~= "eligible" and owner.eligibility ~= "unknown") then
+        or owner.eligibility ~= "eligible" or owner.proof_kind ~= "condition" then
       return false
     end
     local option_ids, option_count, required = {}, 0, nil
@@ -5348,39 +5348,8 @@ function A.make()
           or (required ~= nil and required ~= count) then return false end
       option_ids[option.item_id], option_count, required = true, option_count + 1, count
     end
-    if owner.proof_kind == "condition" then
-      return option_ids[owner.item_id] == true
-        and owner.count == required
-        and (owner.eligibility == "eligible"
-          or owner.reason == "native_item_condition_leaf_unread")
-    end
-    if owner.proof_kind ~= "delivery" or type(owner.delivery) ~= "table"
-        or owner.delivery.is_not == true or owner.delivery.native_readable ~= true
-        or (owner.eligibility ~= "eligible"
-          and owner.reason ~= "delivery_group_item_join_unproven") then
-      return false
-    end
-    for _, resolved in ipairs(type(owner.delivery.groups) == "table"
-        and owner.delivery.groups or {}) do
-      local delivery = type(resolved) == "table" and resolved.delivery or nil
-      for _, group in ipairs(type(delivery) == "table" and type(delivery.groups) == "table"
-          and delivery.groups or {}) do
-        local ids, count = {}, 0
-        for _, item_id in ipairs(type(group.item_ids) == "table" and group.item_ids or {}) do
-          if type(item_id) ~= "number" or ids[item_id] then count = -1; break end
-          ids[item_id], count = true, count + 1
-        end
-        local exact = count == option_count and group.count == required
-          and (count == 1 or group.is_all_item == false)
-        if exact then
-          for item_id in pairs(option_ids) do
-            if not ids[item_id] then exact = false; break end
-          end
-        end
-        if exact then return true end
-      end
-    end
-    return false
+    return option_count == 1 and option_ids[owner.item_id] == true
+      and owner.count == required
   end
   local function objective_owned_records(task_snapshot, state)
     local qrows, owned, matches, owner_uses = {}, {}, {}, {}
