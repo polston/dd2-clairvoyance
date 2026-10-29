@@ -1009,6 +1009,31 @@ do
     and #wired_changed[1].candidates == 0 and #wired_changed[2].candidates == 1,
     "a changed atomic source observation advances generation and removes stale pickup")
 
+  local focused_catalog, focused_observation = base_catalog(), base_observation()
+  focused_catalog.placements[#focused_catalog.placements + 1] = {
+    uid = "33333333-3333-3333-3333-333333333333", index = 0,
+    table_id = "cccccccc-cccc-cccc-cccc-cccccccccccc", layer = 0,
+    source_id = { "source", "placed", "33333333-3333-3333-3333-333333333333", 0 },
+    capacity_pool_id = { "capacity", "placed", "33333333-3333-3333-3333-333333333333", 0 },
+    outputs = { { item_id = 999, count = 1 } }, pos = { x = 7, y = 8, z = 9 },
+  }
+  focused_observation.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 0 }
+  local saved_need_groups = a.objective_need_groups
+  a.objective_need_groups = function()
+    return { status = "ok", complete = true, generation = 12, groups = {
+      { qid = 20090, task_index = 0, remaining = 1,
+        options = { { item_id = 501, accepted_count = 1 } } },
+    } }
+  end
+  local focused = a.objective_item_source_snapshots(nil,
+    { need_generation = 12, quests = {} }, focused_catalog, focused_observation)
+  a.objective_need_groups = saved_need_groups
+  assert(focused[1].status == "ok" and focused[1].complete
+    and #focused[1].candidates == 1
+    and focused[1].candidates[1].outputs[1].item_id == 501,
+    "an unrelated unproved pickup cannot suppress a proven current-needed pickup")
+
   local saved_source_reader, saved_source_clock = A.read_objective_source_observation, os.clock
   local scan_count, fake_now = 0, 100
   A.read_objective_source_observation = function()
@@ -1017,6 +1042,12 @@ do
   end
   os.clock = function() return fake_now end
   local cache_adapter, cache_catalog = A.make(), base_catalog()
+  cache_adapter.objective_need_groups = function()
+    return { status = "ok", complete = true, generation = 1, groups = {
+      { qid = 20090, task_index = 0, remaining = 1,
+        options = { { item_id = 501, accepted_count = 1 } } },
+    } }
+  end
   cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
   fake_now = 100.4
   cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
@@ -1055,8 +1086,8 @@ do
       { get_Count = #entries })
   end
   local function rguid(text) return robj({}, { ["ToString()"] = text }) end
-  local function ruid(text)
-    return robj({ _RowID = rguid(text), _Index = 0 })
+  local function ruid(text, index)
+    return robj({ _RowID = rguid(text), _Index = index or 0 })
   end
   local function holder(contexts)
     local rows = {}
@@ -1073,6 +1104,12 @@ do
     robj({ UniqueID = ruid(chest_uid) }, nil, "app.UniqueIDContext"), chest_item,
   }) })
   local chest_record_info = robj({ ["<Record>k__BackingField"] = chest_record })
+  local unrelated_uid = "33333333-3333-3333-3333-333333333333"
+  local unrelated_record = robj({ Contexts = rlist({
+    robj({ UniqueID = ruid(unrelated_uid, -7) }, nil, "app.UniqueIDContext"),
+    robj({}, nil, "app.CharacterIDContext"),
+  }) })
+  local unrelated_record_info = robj({ ["<Record>k__BackingField"] = unrelated_record })
   local gen_context = robj({ _IsGenerated = true, _IsDisableGenerate = false }, nil,
     "app.GenerateInfoContext")
   local live_holder = holder({ gen_context, chest_item })
@@ -1087,12 +1124,17 @@ do
       _IsPawnRestrict = false },
     { get_IsOpenedFreeBit = false, get_IsUnlockFreeBit = false }, "app.gm80_001")
   local empty_set = function() return rdict({}) end
+  local unrelated_table = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+  local unrelated_request = robj({ _IsFailedAllRequest = false,
+    _IsFinishAllRequestForGenerateTable = true,
+    _Requests = rdict({ { "character", ruid(unrelated_uid, -7) } }) })
   local generation_manager = robj({ _NeverGenetateID = empty_set(),
     _NeverGenerateIDByDeadRequests = empty_set(), _DisableGenerateRequests = empty_set(),
-    _GenerateBlacklistUniqueIDHashSet = empty_set(), _RequestedTableInfos = empty_set() })
+    _GenerateBlacklistUniqueIDHashSet = empty_set(), _RequestedTableInfos = rdict({ {
+      robj({ _TableID = rguid(unrelated_table), _ExtraID = 0 }), unrelated_request } }) })
   local game_managers = {
     ["app.ContextDBMS"] = robj({ OfflineDB = robj({
-      Records = rlist({ nil, chest_record_info }, 2) }) }),
+      Records = rlist({ nil, unrelated_record_info, chest_record_info }, 3) }) }),
     ["app.GenerateManager"] = generation_manager,
     ["app.GimmickManager"] = robj({
       ["<ManagedGimmicksByIDs>k__BackingField"] = rdict({ { 80,

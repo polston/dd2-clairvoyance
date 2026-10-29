@@ -3832,13 +3832,14 @@ function A.read_objective_source_observation(catalog)
     generation_complete = false, requested_complete = false, loaded_complete = false,
     persisted = {}, never = {}, dead = {}, disabled_tables = {}, blacklist = {},
     requested_tables = {}, loaded = {}, gate_results = {} }
-  local by_identity = {}
+  local by_identity, catalog_tables = {}, {}
   local function catalog_rows(rows, family)
     if type(rows) ~= "table" then return false end
     for _, row in ipairs(rows) do
       if type(row) ~= "table" or type(row.uid) ~= "string"
-          or type(row.index) ~= "number" then return false end
+          or type(row.index) ~= "number" or type(row.table_id) ~= "string" then return false end
       by_identity[row.uid:lower() .. ":" .. tostring(row.index)] = family
+      catalog_tables[row.table_id:lower()] = true
     end
     return true
   end
@@ -3866,9 +3867,8 @@ function A.read_objective_source_observation(catalog)
   local function identity(value)
     local uid = guid_text(safe_field(value, "_RowID"))
     local index = int_value(safe_field(value, "_Index"))
-    if uid == nil or type(index) ~= "number" or index < 0 or index ~= math.floor(index) then
-      return nil
-    end
+    if uid == nil or type(index) ~= "number" or index ~= math.floor(index) then return nil end
+    if index < 0 then return nil, uid, index end
     return uid .. ":" .. tostring(index), uid, index
   end
   local function list(value, cap, visit)
@@ -3938,8 +3938,8 @@ function A.read_objective_source_observation(catalog)
       local map = context_map(safe_field(info, "<Record>k__BackingField"),
         safe_field(info, "SaveData"))
       if map == nil then return false end
-      local key = identity(safe_field(map["app.UniqueIDContext"], "UniqueID"))
-      if key == nil then return false end
+      local key, uid, index = identity(safe_field(map["app.UniqueIDContext"], "UniqueID"))
+      if key == nil then return uid ~= nil and type(index) == "number" and index < 0 end
       local family = by_identity[key]
       if family == "placed" then
         local freebit = int_value(safe_field(map["app.GimmickContext"], "_FreeBit"))
@@ -3988,6 +3988,7 @@ function A.read_objective_source_observation(catalog)
         local finished = safe_field(info, "_IsFinishAllRequestForGenerateTable")
         if table_id == nil or type(extra) ~= "number" or type(failed) ~= "boolean"
             or type(finished) ~= "boolean" then return false end
+        if not catalog_tables[table_id] then return true end
         local state = out.requested_tables[table_id]
         if state == nil then
           state = { active = true, failed = false, finished = true, uids = {} }
@@ -3996,8 +3997,8 @@ function A.read_objective_source_observation(catalog)
         state.failed = state.failed or failed
         state.finished = state.finished and finished
         return entries(safe_field(info, "_Requests"), 32768, function(uid_value)
-          local key = identity(uid_value)
-          if key == nil then return false end
+          local key, uid, index = identity(uid_value)
+          if key == nil then return uid ~= nil and type(index) == "number" and index < 0 end
           state.uids[key] = true
           return true
         end)
@@ -6209,39 +6210,6 @@ function A.make()
       for k in pairs(y) do if x[k] == nil then return false end end
       return true
     end
-    local now = os.clock()
-    local observation = supplied_source_observation
-    local source_scanned = false
-    if observation == nil and type(source_catalog) == "table" then
-      if objective_task_state.source_catalog == source_catalog
-          and objective_task_state.source_observation ~= nil
-          and now - objective_task_state.source_at < 0.5 then
-        observation = objective_task_state.source_observation
-      else
-        observation = A.read_objective_source_observation(source_catalog)
-        source_scanned = true
-      end
-    end
-    if objective_task_state.source_catalog ~= source_catalog
-        or not same(objective_task_state.source_observation, observation) then
-      if objective_task_state.source_catalog ~= nil
-          or objective_task_state.source_observation ~= nil then
-        objective_task_state.source_generation = math.min(2147483647,
-          objective_task_state.source_generation + 1)
-      end
-      objective_task_state.source_catalog = source_catalog
-      objective_task_state.source_observation = copy(observation)
-    end
-    if source_scanned then objective_task_state.source_at = now end
-    local providers = A.objective_source_provider_snapshots(source_catalog, observation,
-      objective_task_state.source_generation)
-    for _, provider in ipairs(providers) do
-      provider.catalog_version = version
-      provider.source_catalog_version = type(source_catalog) == "table" and source_catalog.version or nil
-      provider.source_descriptors = copy(descriptors)
-      provider.signal_evidence = copy(signals)
-      provider.guidance_delivery_refs = copy(deliveries)
-    end
     local need_snapshot = a.objective_need_groups(task_snapshot)
     local wanted = nil
     if need_snapshot.complete then
@@ -6249,6 +6217,67 @@ function A.make()
       for _, group in ipairs(need_snapshot.groups) do
         for _, option in ipairs(group.options) do wanted[option.item_id] = true end
       end
+    end
+    local scan_catalog = source_catalog
+    local source_catalog_is_filtered = wanted ~= nil and type(source_catalog) == "table"
+    if source_catalog_is_filtered then
+      scan_catalog = {}
+      for key, value in pairs(source_catalog) do
+        if key ~= "placements" and key ~= "chests" then scan_catalog[key] = copy(value) end
+      end
+      local function matching_rows(rows)
+        local out = {}
+        for _, row in ipairs(type(rows) == "table" and rows or {}) do
+          local matches = false
+          for _, output in ipairs(type(row) == "table" and row.outputs or {}) do
+            if wanted[output.item_id] then matches = true; break end
+          end
+          if matches then out[#out + 1] = copy(row) end
+        end
+        return out
+      end
+      scan_catalog.placements = matching_rows(source_catalog.placements)
+      scan_catalog.chests = matching_rows(source_catalog.chests)
+    end
+    local function source_catalog_matches()
+      if source_catalog_is_filtered then
+        return same(objective_task_state.source_catalog, scan_catalog)
+      end
+      return objective_task_state.source_catalog == scan_catalog
+    end
+    local now = os.clock()
+    local observation = supplied_source_observation
+    local source_scanned = false
+    if observation == nil and type(scan_catalog) == "table" then
+      if source_catalog_matches()
+          and objective_task_state.source_observation ~= nil
+          and now - objective_task_state.source_at < 0.5 then
+        observation = objective_task_state.source_observation
+      else
+        observation = A.read_objective_source_observation(scan_catalog)
+        source_scanned = true
+      end
+    end
+    if not source_catalog_matches()
+        or not same(objective_task_state.source_observation, observation) then
+      if objective_task_state.source_catalog ~= nil
+          or objective_task_state.source_observation ~= nil then
+        objective_task_state.source_generation = math.min(2147483647,
+          objective_task_state.source_generation + 1)
+      end
+      objective_task_state.source_catalog = source_catalog_is_filtered and copy(scan_catalog)
+        or scan_catalog
+      objective_task_state.source_observation = copy(observation)
+    end
+    if source_scanned then objective_task_state.source_at = now end
+    local providers = A.objective_source_provider_snapshots(scan_catalog, observation,
+      objective_task_state.source_generation)
+    for _, provider in ipairs(providers) do
+      provider.catalog_version = version
+      provider.source_catalog_version = type(source_catalog) == "table" and source_catalog.version or nil
+      provider.source_descriptors = copy(descriptors)
+      provider.signal_evidence = copy(signals)
+      provider.guidance_delivery_refs = copy(deliveries)
     end
     local loot = copy(items.objective_loot_observations(wanted, generation))
     loot.catalog_version = version
