@@ -4470,6 +4470,9 @@ do
     nobj({ _Process = nobj({ _ItemID = 9001, _SetNum = false, _Num = 1,
       _IsEnabled = true, _IsNot = true }, { evaluate = true },
       "app.ConciergeConditionItem") }, nil,
+      "app.ClassSelector`1<app.ConciergeConditionBase>"),
+    nobj({ _Process = nobj({}, { evaluate = true },
+      "app.ConciergeConditionQuestVariable") }, nil,
       "app.ClassSelector`1<app.ConciergeConditionBase>") }) },
     { evaluate = 0, evaluateRegisterCondition = true,
     get_CharaID = 101, get_KeyLocation = 2308 })
@@ -4512,6 +4515,8 @@ do
       destinations = { { index = 0, cid = 101, target = { kind = "key_location", key = 2308 },
         conditions = {
           { kind = "item", enabled = true, is_not = true, item_id = 9001, set_num = false, num = 1 },
+          { kind = "quest_variable", enabled = true, is_not = false, qid = 20040,
+            name_hash = 123, value_type = 2, compare_type = 0, bool_value = true, int_value = 0 },
         }, delivery = { is_not = false, check_storage = true, group_id = 3,
           refs = { { qid = 777, key = 2, serial = 2 } } } } } } },
     deliveries = {}, sources = { { id = "fixture-source", kind = "placed" } },
@@ -4569,7 +4574,7 @@ do
     and owned[1].proof_kind == "condition" and owned[1].eligibility == "eligible"
     and owned[1].task_index == 0
     and owned[1].concierge_index == 0 and owned[1].destination_index == 0,
-    "objective task owner uses an exact true native item leaf and defaults unset quantity to one")
+    "objective task owner accepts one exact true native item leaf beside non-item conditions")
   assert(owned[2].proof_kind == "delivery" and owned[2].eligibility == "unknown"
     and owned[2].delivery.group_id == 3 and owned[2].delivery.check_storage == true
     and #owned[2].delivery.refs == 1 and #owned[2].delivery.groups == 1
@@ -4642,6 +4647,7 @@ do
   own_catalog.quests[20040].guidance[1].destinations[1].conditions = { {
     kind = "item", enabled = true, is_not = true, item_id = 9001,
     set_num = false, num = 1 } }
+  og.fields._Conditions = mcoll({ og.test_selector })
   owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   reward_fixture.original_need_generation = owned_snapshot.need_generation
   ai.objective_need_groups = function()
