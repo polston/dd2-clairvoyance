@@ -5684,6 +5684,67 @@ function A.make()
       end
       return cid, nil
     end
+    local function managed_type_name(object)
+      local ok, name = pcall(function()
+        return object:get_type_definition():get_full_name()
+      end)
+      return ok and type(name) == "string" and name or nil
+    end
+    local function native_item_condition_owner(parsed_conditions, destination, qid)
+      if type(parsed_conditions) ~= "table" or #parsed_conditions ~= 1 then return nil end
+      local parsed = parsed_conditions[1]
+      if type(parsed) ~= "table" or parsed.kind ~= "item" then return nil end
+      local owner = {
+        item_id = type(parsed.item_id) == "number" and parsed.item_id or nil,
+        count = parsed.set_num == true and type(parsed.num) == "number" and parsed.num or 1,
+        proof_kind = "condition", eligibility = "unknown",
+        reason = "native_item_condition_leaf_unread" }
+      if type(parsed.enabled) ~= "boolean" or type(parsed.is_not) ~= "boolean"
+          or type(parsed.set_num) ~= "boolean" or type(parsed.num) ~= "number"
+          or owner.item_id == nil then return owner end
+      local native_rows, readable, truncated = list(safe_field(destination, "_Conditions"), 64)
+      if not readable then
+        owner.reason = truncated and "native_item_condition_list_truncated"
+          or "native_item_condition_list_unreadable"
+        return owner
+      end
+      if #native_rows ~= 1 then owner.reason = "native_item_condition_not_singleton"; return owner end
+      local selector = native_rows[1]
+      if managed_type_name(selector) ~= "app.ClassSelector`1<app.ConciergeConditionBase>" then
+        owner.reason = "native_item_condition_selector_mismatch"; return owner
+      end
+      local process = safe_field(selector, "_Process")
+      if managed_type_name(process) ~= "app.ConciergeConditionItem" then
+        owner.reason = "native_item_condition_process_mismatch"; return owner
+      end
+      local item_id = int_value(safe_field(process, "_ItemID"))
+      local set_num = safe_field(process, "_SetNum")
+      local num = int_value(safe_field(process, "_Num"))
+      local enabled = safe_field(process, "_IsEnabled")
+      local is_not = safe_field(process, "_IsNot")
+      if item_id ~= parsed.item_id or set_num ~= parsed.set_num or num ~= parsed.num
+          or enabled ~= parsed.enabled or is_not ~= parsed.is_not then
+        owner.reason = "native_item_condition_catalog_mismatch"; return owner
+      end
+      if not enabled then
+        owner.eligibility, owner.reason = "ineligible", "native_item_condition_disabled"
+        return owner
+      end
+      if not is_not then
+        owner.eligibility, owner.reason = "ineligible", "native_item_condition_not_missing"
+        return owner
+      end
+      local evaluate_ok, evaluated = pcall(function() return process:call("evaluate", qid) end)
+      if not evaluate_ok or type(evaluated) ~= "boolean" then
+        owner.reason = evaluate_ok and "native_item_condition_result_unreadable"
+          or "native_item_condition_evaluate_exception"
+      elseif evaluated then
+        owner.eligibility, owner.reason = "eligible", nil
+      else
+        owner.eligibility, owner.reason = "ineligible", "native_item_condition_false"
+      end
+      return owner
+    end
     local function read_quest(qid, entry, catalog_quests)
       local result = { qid = qid, read_status = "unknown", issued_npcs = {},
         source_descriptors = type(entry.sources) == "table" and clone(entry.sources) or {},
@@ -5904,16 +5965,12 @@ function A.make()
                         evidence = { provider = "guidance", concierge_index = g.index,
                           destination_index = parsed.index }, eligibility = "eligible" }
                     end
-                    for _, condition in ipairs(type(parsed.conditions) == "table" and parsed.conditions or {}) do
-                      if condition.kind == "item" and condition.enabled and not condition.is_not then
-                        result.item_ownership[#result.item_ownership + 1] = {
-                          item_id = type(condition.item_id) == "number" and condition.item_id or nil,
-                          count = condition.set_num == true and type(condition.num) == "number"
-                            and condition.num or nil,
-                          proof_kind = "condition", eligibility = "unknown",
-                          reason = "native_item_condition_leaf_unread", task_index = ti,
-                          concierge_index = g.index, destination_index = parsed.index }
-                      end
+                    local condition_owner = native_item_condition_owner(parsed.conditions, native, qid)
+                    if condition_owner ~= nil then
+                      condition_owner.task_index = ti
+                      condition_owner.concierge_index = g.index
+                      condition_owner.destination_index = parsed.index
+                      result.item_ownership[#result.item_ownership + 1] = condition_owner
                     end
                     local delivery = parsed.delivery
                     if type(delivery) == "table" and type(delivery.refs) == "table" and #delivery.refs > 0 then
