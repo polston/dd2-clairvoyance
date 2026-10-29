@@ -2827,7 +2827,8 @@ function M.new(a, reads, io)
           end
         end
       end
-      local out = observe(name, status, row ~= nil and row.complete or false, reason, evidence)
+      local out = observe(name, status,
+        status == "ok" and row ~= nil and row.complete == true, reason, evidence)
       out.candidates = candidates
       for _, candidate in ipairs(out.candidates) do
         if type(candidate) == "table" then candidate.generation = out.generation end

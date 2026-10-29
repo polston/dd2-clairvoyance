@@ -1865,7 +1865,7 @@ local ITEM_STATS = items.new_stats()
 local ITEM_LAST_AT = -math.huge
 items.objective_group_state = { status = "unknown", complete = false,
     generation = 0, task_generation = items.task_observation_generation,
-    groups = {}, task_index = {} }
+    groups = {}, records = {}, held = {}, task_index = {} }
 items.objective_loot_state = { status = "unknown", complete = false,
     generation = 0, at = -math.huge, candidates = {} }
 
@@ -1884,7 +1884,7 @@ function items.invalidate()
     ITEM_STATS.needs_fresh = false
     items.objective_group_state = { status = "unknown", complete = false,
         generation = items.objective_group_state.generation + 1,
-        groups = {}, task_index = {} }
+        groups = {}, records = {}, held = {}, task_index = {} }
     items.objective_loot_state = { status = "unknown", complete = false,
         generation = items.objective_loot_state.generation + 1,
         at = -math.huge, candidates = {} }
@@ -3161,7 +3161,7 @@ local function item_round_failed()
     ITEM_STATS.needs_fresh = false
     items.objective_group_state = { status = "unknown", complete = false,
         generation = items.objective_group_state.generation + 1,
-        groups = {}, task_index = {} }
+        groups = {}, records = {}, held = {}, task_index = {} }
     if ITEM_FAILED_STREAK >= 3 then commit_item_needs({}) end
 end
 
@@ -3480,7 +3480,9 @@ local function item_round_needs(now)
     if next(wanted) == nil then
         commit_item_needs({})
         items.objective_group_state = { status = "ok", complete = true,
-            generation = ITEM_STATS.rounds, groups = {}, task_index = {} }
+            generation = ITEM_STATS.rounds,
+            task_generation = items.task_observation_generation,
+            groups = {}, records = {}, held = {}, task_index = {} }
         ITEM_FAILED_STREAK = 0
         ITEM_STATS.ignored = 0
         return
@@ -3594,18 +3596,14 @@ local function item_round_needs(now)
             end
         end
     end
-    local objective_groups, groups_complete = {}, false
     local group_generation = ITEM_STATS.rounds
     objective_complete = objective_complete and skipped == 0 and held_complete
-    if objective_complete and tasks_complete then
-        objective_groups, groups_complete = A.objective_need_builder.build(objective_records,
-            held, { generation = group_generation, task_generation = group_generation,
-                task_index = task_index })
-    end
-    items.objective_group_state = { status = groups_complete and "ok" or "unknown",
-        complete = groups_complete, generation = group_generation,
+    local records_complete = objective_complete and tasks_complete
+    items.objective_group_state = { status = records_complete and "ok" or "unknown",
+        complete = records_complete, generation = group_generation,
         task_generation = items.task_observation_generation,
-        groups = groups_complete and objective_groups or {}, task_index = task_index }
+        groups = {}, records = records_complete and objective_records or {},
+        held = records_complete and held or {}, task_index = task_index }
     commit_item_needs(t)
     if type(rel) == "table" then items.related = rel end
     ITEM_FAILED_STREAK = 0
@@ -5331,9 +5329,95 @@ function A.make()
   function a.item_needs() return ITEM_NEEDS end
   -- Pure expression grouper used by the objective adapter scan. Kept beside
   -- the legacy item API so callers can migrate without changing item_needs().
+  local function objective_copy(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for key, nested in pairs(value) do out[key] = objective_copy(nested) end
+    return out
+  end
+  local function objective_owner_matches(owner, record, task_index)
+    if type(owner) ~= "table" or owner.task_index ~= task_index
+        or (owner.eligibility ~= "eligible" and owner.eligibility ~= "unknown") then
+      return false
+    end
+    local option_ids, option_count, required = {}, 0, nil
+    for _, option in ipairs(type(record.options) == "table" and record.options or {}) do
+      local count = option.required
+      if option.op == "morethan" and type(count) == "number" then count = count + 1 end
+      if type(option.item_id) ~= "number" or type(count) ~= "number"
+          or (required ~= nil and required ~= count) then return false end
+      option_ids[option.item_id], option_count, required = true, option_count + 1, count
+    end
+    if owner.proof_kind == "condition" then
+      return option_ids[owner.item_id] == true
+        and owner.count == required
+        and (owner.eligibility == "eligible"
+          or owner.reason == "native_item_condition_leaf_unread")
+    end
+    if owner.proof_kind ~= "delivery" or type(owner.delivery) ~= "table"
+        or owner.delivery.is_not == true or owner.delivery.native_readable ~= true
+        or (owner.eligibility ~= "eligible"
+          and owner.reason ~= "delivery_group_item_join_unproven") then
+      return false
+    end
+    for _, resolved in ipairs(type(owner.delivery.groups) == "table"
+        and owner.delivery.groups or {}) do
+      local delivery = type(resolved) == "table" and resolved.delivery or nil
+      for _, group in ipairs(type(delivery) == "table" and type(delivery.groups) == "table"
+          and delivery.groups or {}) do
+        local ids, count = {}, 0
+        for _, item_id in ipairs(type(group.item_ids) == "table" and group.item_ids or {}) do
+          if type(item_id) ~= "number" or ids[item_id] then count = -1; break end
+          ids[item_id], count = true, count + 1
+        end
+        local exact = count == option_count and group.count == required
+          and (count == 1 or group.is_all_item == false)
+        if exact then
+          for item_id in pairs(option_ids) do
+            if not ids[item_id] then exact = false; break end
+          end
+        end
+        if exact then return true end
+      end
+    end
+    return false
+  end
+  local function objective_owned_records(task_snapshot, state)
+    local qrows, owned, matches, owner_uses = {}, {}, {}, {}
+    for _, row in ipairs(task_snapshot.quests) do
+      if type(row) == "table" and type(row.qid) == "number" then qrows[row.qid] = row end
+    end
+    for record_index, record in ipairs(state.records) do
+      local row = qrows[record.qid]
+      if type(row) == "table" and row.read_status == "ok"
+          and row.task_index == state.task_index[record.qid] then
+        for owner_index, owner in ipairs(type(row.item_ownership) == "table"
+            and row.item_ownership or {}) do
+          if objective_owner_matches(owner, record, row.task_index) then
+            local owner_key = tostring(record.qid) .. ":" .. tostring(owner_index)
+            local list = matches[record_index]
+            if list == nil then list = {}; matches[record_index] = list end
+            list[#list + 1] = owner_key
+            owner_uses[owner_key] = (owner_uses[owner_key] or 0) + 1
+          end
+        end
+      end
+    end
+    for record_index, record in ipairs(state.records) do
+      for _, owner_key in ipairs(matches[record_index] or {}) do
+        if owner_uses[owner_key] == 1 then
+          local proven = objective_copy(record)
+          proven.current_work = true
+          owned[#owned + 1] = proven
+          break
+        end
+      end
+    end
+    return owned
+  end
   function a.objective_need_groups(task_snapshot)
     local state = items.objective_group_state
-    local qrows, qseen, groups = {}, {}, {}
+    local qrows, qseen = {}, {}
     if type(task_snapshot) ~= "table" or type(task_snapshot.need_generation) ~= "number"
         or type(task_snapshot.quests) ~= "table" or not ITEM_STATS.needs_fresh
         or state.complete ~= true or state.status ~= "ok" then
@@ -5352,17 +5436,28 @@ function A.make()
         generation = task_snapshot.need_generation,
         source_generation = state.generation, reason = "task_observation_changed" }
     end
-    for _, group in ipairs(state.groups) do
-      if qseen[group.qid] then
-        local row = qrows[group.qid]
-        if row.read_status ~= "ok" or row.task_index ~= state.task_index[group.qid]
-            or group.task_index ~= row.task_index then
-          return { status = "unknown", complete = false, groups = {},
-            generation = task_snapshot.need_generation,
-            source_generation = state.generation, reason = "current_task_changed" }
-        end
-        groups[#groups + 1] = group
+    for qid in pairs(qseen) do
+      local row = qrows[qid]
+      if state.task_index[qid] ~= nil and (row.read_status ~= "ok"
+          or row.task_index ~= state.task_index[qid]) then
+        return { status = "unknown", complete = false, groups = {},
+          generation = task_snapshot.need_generation,
+          source_generation = state.generation, reason = "current_task_changed" }
       end
+    end
+    local records = objective_owned_records(task_snapshot, state)
+    if #state.records > 0 and #records == 0 then
+      return { status = "unknown", complete = false, groups = {},
+        generation = task_snapshot.need_generation,
+        source_generation = state.generation, reason = "current_task_ownership_unproven" }
+    end
+    local groups, complete = A.objective_need_builder.build(records, state.held,
+      { generation = state.generation, task_generation = state.generation,
+        task_index = state.task_index })
+    if not complete then
+      return { status = "unknown", complete = false, groups = {},
+        generation = task_snapshot.need_generation,
+        source_generation = state.generation, reason = "owned_need_invalid" }
     end
     return { status = "ok", complete = true, groups = groups,
       generation = task_snapshot.need_generation, source_generation = state.generation,
@@ -5844,6 +5939,8 @@ function A.make()
                       if condition.kind == "item" and condition.enabled and not condition.is_not then
                         result.item_ownership[#result.item_ownership + 1] = {
                           item_id = type(condition.item_id) == "number" and condition.item_id or nil,
+                          count = condition.set_num == true and type(condition.num) == "number"
+                            and condition.num or nil,
                           proof_kind = "condition", eligibility = "unknown",
                           reason = "native_item_condition_leaf_unread", task_index = ti,
                           concierge_index = g.index, destination_index = parsed.index }

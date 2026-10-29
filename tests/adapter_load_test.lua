@@ -3617,6 +3617,20 @@ do
   assert(need_snapshot.status == "unknown" and not need_snapshot.complete
     and #need_snapshot.groups == 0 and nd ~= nil and #nd == 1,
     "IW1 processor need without exact current-task ownership stays unrouted")
+  task_snapshot.quests[1].item_ownership = { {
+    proof_kind = "condition", eligibility = "unknown",
+    reason = "native_item_condition_leaf_unread", item_id = 300, count = 1,
+    task_index = 0, concierge_index = 0, destination_index = 0,
+  } }
+  local owned_need_snapshot = ai.objective_need_groups(task_snapshot)
+  assert(owned_need_snapshot.status == "ok" and owned_need_snapshot.complete
+    and #owned_need_snapshot.groups == 1
+    and owned_need_snapshot.groups[1].qid == 20090
+    and owned_need_snapshot.groups[1].task_index == 0
+    and owned_need_snapshot.groups[1].remaining == 1
+    and owned_need_snapshot.groups[1].options[1].item_id == 300,
+    "IW1 exact current concierge item ownership unlocks the matching processor need")
+  task_snapshot.quests[1].item_ownership = {}
   -- The loot reader tests below exercise provider behavior independently of
   -- processor-to-task ownership. Supply the proven need snapshot they require.
   ai._test_real_objective_need_groups = ai.objective_need_groups
@@ -4536,11 +4550,11 @@ do
   local owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   reward_fixture.original_need_generation = owned_snapshot.need_generation
   local owned = owned_snapshot.quests[1].item_ownership
-  assert(#owned == 2 and owned[1].item_id == 9001 and owned[1].count == nil
+  assert(#owned == 2 and owned[1].item_id == 9001 and owned[1].count == 2
     and owned[1].proof_kind == "condition" and owned[1].eligibility == "unknown"
     and owned[1].task_index == 0
     and owned[1].concierge_index == 0 and owned[1].destination_index == 0,
-    "objective task owner reports item evidence unknown until a native leaf is proven")
+    "objective task owner preserves exact catalog count while native leaf truth remains unknown")
   assert(owned[2].proof_kind == "delivery" and owned[2].eligibility == "unknown"
     and owned[2].delivery.group_id == 3 and owned[2].delivery.check_storage == true
     and #owned[2].delivery.refs == 1 and #owned[2].delivery.groups == 1

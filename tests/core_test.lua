@@ -6434,10 +6434,10 @@ do
     }, core.target_registry_new())
     local probability_routes = core.objective_routes(probability_snapshot, pos(0), {
       npc_route_mode = 0, objective_places = true, focus_order = { 60 }, route_cap = 8 })
-    check("objective grouped probability: one fallback orders by chance, distance and stable source ID",
-      #probability_routes.members == 1 and probability_routes.members[1].probability == 0.9
+    check("objective grouped probability: one fallback orders by distance then stable source ID",
+      #probability_routes.members == 1 and probability_routes.members[1].probability == 0.1
         and probability_routes.members[1].target_key
-          == tk({ "source", "monster", "a-near-high" }))
+          == tk({ "source", "monster", "near-low" }))
 
     local priority_markers, _, priority_projection = core.objective_markers({
       { key = "ordinary", cat = "world", qids = {}, pos = pos(20) },

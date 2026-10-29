@@ -6693,6 +6693,7 @@ do
   local placed_generation, chest_generation = observations[1].generation, observations[2].generation
   check("objective sources: adapter generation zero fails closed and drops eligible candidates",
     observations[1].status == "unknown" and #observations[1].candidates == 0
+      and observations[1].complete == false
       and placed_generation > 0 and placed_generation ~= 4)
   observed[1].generation = 4
   local normalized = observation_world:objective_source_snapshots(nil, source_task)

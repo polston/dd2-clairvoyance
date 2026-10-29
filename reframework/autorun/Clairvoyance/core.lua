@@ -5378,12 +5378,7 @@ local function objective_grouped_routes(snapshot, player_origin, policy)
           candidates[#candidates + 1] = pool
         end
       end
-      table.sort(candidates, function(a, b)
-        if (a.probability or 0) ~= (b.probability or 0) then
-          return (a.probability or 0) > (b.probability or 0)
-        end
-        return pool_less(a, b)
-      end)
+      table.sort(candidates, pool_less)
       if candidates[1] then select_pool(candidates[1], group) end
     end
   end
