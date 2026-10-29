@@ -1054,11 +1054,14 @@ do
   cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
   fake_now = 100.8
   cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
+  assert(scan_count == 1,
+    "stable current needs reuse the complete source observation across tick cadence")
+  cache_adapter.objective_item_source_snapshots(nil, { need_generation = 2 }, cache_catalog)
   A.read_objective_source_observation, os.clock = saved_source_reader, saved_source_clock
   assert(scan_count == 2,
-    "cached frame calls cannot move the fresh-scan timestamp and suppress a required rescan")
+    "a current-need generation change forces a complete source rescan")
   assert(scanned_catalogs[1] == scanned_catalogs[2],
-    "timed rescans reuse the exact filtered static-catalog table")
+    "need-driven rescans reuse the exact filtered static-catalog table")
 
   -- The native reader reconciles sparse persisted records and exact loaded
   -- identities before the pure classifier sees them.

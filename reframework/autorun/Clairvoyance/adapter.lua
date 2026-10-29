@@ -5267,9 +5267,10 @@ function A.make()
   local objective_task_state = { owner = nil, focus = nil, journal = nil,
     needs = nil, focus_epoch = 0, journal_generation = 0, need_generation = 0,
     source_generation = 1, source_catalog = nil, source_observation = nil,
+    source_need_generation = nil,
     filtered_source_owner = nil, filtered_source_signature = nil,
     filtered_source_catalog = nil,
-    source_at = -math.huge, talk_generation = 1, talk_observation = nil,
+    talk_generation = 1, talk_observation = nil,
     talk_at = -math.huge, forgery_generation = 1, forgery_observation = nil,
     forgery_at = -math.huge, reward_observation = nil }
   local LOC_KINDS = { "placed", "box", "drop" }   -- item_locations order
@@ -6099,10 +6100,10 @@ function A.make()
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
         objective_task_state.need_generation = 0, 0, 0
       objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
+      objective_task_state.source_need_generation = nil
       objective_task_state.filtered_source_owner = nil
       objective_task_state.filtered_source_signature = nil
       objective_task_state.filtered_source_catalog = nil
-      objective_task_state.source_at = -math.huge
       objective_task_state.source_generation = objective_task_state.source_generation + 1
       objective_task_state.talk_observation, objective_task_state.forgery_observation = nil, nil
       objective_task_state.talk_at, objective_task_state.forgery_at = -math.huge, -math.huge
@@ -6284,15 +6285,14 @@ function A.make()
     end
     local now = os.clock()
     local observation = supplied_source_observation
-    local source_scanned = false
     if observation == nil and type(scan_catalog) == "table" then
       if source_catalog_matches()
+          and objective_task_state.source_need_generation == generation
           and objective_task_state.source_observation ~= nil
-          and now - objective_task_state.source_at < 0.5 then
+      then
         observation = objective_task_state.source_observation
       else
         observation = A.read_objective_source_observation(scan_catalog)
-        source_scanned = true
       end
     end
     if not source_catalog_matches()
@@ -6305,7 +6305,7 @@ function A.make()
       objective_task_state.source_catalog = scan_catalog
       objective_task_state.source_observation = copy(observation)
     end
-    if source_scanned then objective_task_state.source_at = now end
+    objective_task_state.source_need_generation = generation
     local providers = A.objective_source_provider_snapshots(scan_catalog, observation,
       objective_task_state.source_generation)
     for _, provider in ipairs(providers) do
@@ -6663,7 +6663,10 @@ function A.make()
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
         objective_task_state.need_generation = 0, 0, 0
       objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
-      objective_task_state.source_at = -math.huge
+      objective_task_state.source_need_generation = nil
+      objective_task_state.filtered_source_owner = nil
+      objective_task_state.filtered_source_signature = nil
+      objective_task_state.filtered_source_catalog = nil
       objective_task_state.source_generation = objective_task_state.source_generation + 1
       objective_task_state.talk_observation, objective_task_state.forgery_observation = nil, nil
       objective_task_state.talk_at, objective_task_state.forgery_at = -math.huge, -math.huge
