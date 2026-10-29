@@ -9,6 +9,7 @@ import argparse
 import collections
 import glob
 import json
+import math
 import os
 import re
 import sys
@@ -25,7 +26,10 @@ KEY_MSG = "tools/pak_key.local.txt missing"
 PAK_NAME = "re_chunk_000.pak"
 PREFIX = "natives/STM/"
 GMDATA = "AppSystem/Gimmick/UserData/Gm80_001_GmData.user"
+PICKUP_GMDATA = "AppSystem/Gimmick/UserData/Gm82_000_GmData.user"
+PICKUP_GIMMICK_ID = 163
 MIN_FILES = 2000
+QUEST_FIRST, QUEST_LAST = 10000, 39999
 
 LIST_FIELDS = (("_NormalTableList", "normal"), ("_SubQuestTableList", "subquest"),
                ("_MainQuestTableList", "mainquest"), ("_RandomNormalTableList", "random"))
@@ -39,6 +43,7 @@ CHEST_GIMMICKS = sorted(g for g, k in KIND_OF_GIMMICK.items() if k == "chest")
 PHASES = ("beforeseason4", "season4")
 _STR = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
 _TABLE_QID = re.compile(r"/qu([0-9]{6})(?![0-9])")
+_GUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 class ExtractError(Exception):
@@ -144,6 +149,37 @@ def rows_of(insts):
             yield kind_of[inst.idx], inst
 
 
+def source_metadata_of(insts):
+    """Exact generated row -> (table GUID, layer) relations in one table resource."""
+    by_table = {}
+    for inst in insts:
+        if inst.type != "app.GenerateTableData":
+            continue
+        table = qnml_rsz.deref(insts, inst.fields.get("_Table"))
+        if table is None:
+            continue
+        value = (inst.fields.get("_TableID"), table.fields.get("_LayerType"))
+        if table.idx in by_table and by_table[table.idx] != value:
+            raise ExtractError("a generate table has conflicting native metadata")
+        by_table[table.idx] = value
+    parent = {}
+    for table in insts:
+        if table.type != "app.GenerateTable":
+            continue
+        for field, _kind in (("_EnemySetInfo", "enemy"), ("_NpcSetInfo", "npc"),
+                             ("_GimmickSetInfo", "gimmick"),
+                             ("_StrayPawnSetInfo", "stray")):
+            info = qnml_rsz.deref(insts, table.fields.get(field))
+            if info is None:
+                continue
+            for ref in info.fields.get("_BasicRowDatas", []):
+                if ref.idx in parent and parent[ref.idx] != table.idx:
+                    raise ExtractError("a generated row belongs to two tables")
+                parent[ref.idx] = table.idx
+    return {row_idx: by_table[table_idx] for row_idx, table_idx in parent.items()
+            if table_idx in by_table}
+
+
 def params_of(insts):
     """({ParamId: {"items": [(id, n)], "trap": bool, "pawn": bool}}, set of disagreeing ParamIds).
 
@@ -158,9 +194,14 @@ def params_of(insts):
         for r in inst.fields["ItemList"]:
             ip = qnml_rsz.deref(insts, r)
             lst.append((ip.fields["ItemId"], ip.fields["ItemNum"]))
+        unlock_item = inst.fields.get("UnlockItem")
+        is_seal = inst.fields.get("IsSeal")
+        if type(unlock_item) is not int or unlock_item < 0 or type(is_seal) is not bool:
+            raise ExtractError("a chest param has unreadable access metadata")
         entry = {"items": lst,
                  "trap": qnml_rsz.deref(insts, inst.fields["TrapGenerateData"]) is not None,
-                 "pawn": bool(inst.fields["IsPawnRestrict"])}
+                 "pawn": bool(inst.fields["IsPawnRestrict"]),
+                 "unlock_item": unlock_item, "is_seal": is_seal}
         if pid in params:
             if params[pid] != entry:
                 conflicts.add(pid)
@@ -172,6 +213,26 @@ def params_of(insts):
 def chest_items(data, layouts):
     """(params, conflicts) for the chest contents file; see params_of."""
     return params_of(_decode(data, layouts))
+
+
+def pickup_params_of(insts):
+    """Exact {ParamId: {item, count}} joins from Gm82_000Param only."""
+    params = {}
+    for inst in insts:
+        if inst.type != "app.Gm82_000Param":
+            continue
+        pid = inst.fields.get("ParamId")
+        item_id = inst.fields.get("ItemId")
+        count = inst.fields.get("ItemNum")
+        if type(pid) is not int or pid < 0 or type(item_id) is not int or type(count) is not int:
+            raise ExtractError("a placed-item param has an invalid identity or output")
+        if item_id <= 0 or count <= 0:
+            continue
+        entry = {"item": item_id, "count": count}
+        if pid in params and params[pid] != entry:
+            raise ExtractError("a placed-item ParamId has conflicting item outputs")
+        params[pid] = entry
+    return params
 
 
 QUEST_FLAG = "app.GenerateManager.QuestFlagInfos.QuestFlagInfo"
@@ -234,7 +295,73 @@ def _round1(pos):
     return [round(float(v), 1) for v in pos]
 
 
-def collect_rows(decoded, params, conflicts, chara_names):
+def _normalized_resource(path):
+    if not isinstance(path, str) or not path:
+        return None
+    value = path.replace("\\", "/")
+    if value.lower().startswith(PREFIX.lower()):
+        value = value[len(PREFIX):]
+    if value.lower().endswith(".3"):
+        value = value[:-2]
+    return value.lower()
+
+
+def quest_override_paths(pak, layouts):
+    """(target resource paths, option count) for structured treasure overrides."""
+    paths, count = set(), 0
+    for qid in range(QUEST_FIRST, QUEST_LAST + 1):
+        rel = "AppData/Quest/qu%02d/qu%06d/Resident.scn.21" % (qid // 10000, qid)
+        data = pak.read(PREFIX + rel)
+        if data is None:
+            continue
+        try:
+            insts = qnml_rsz.decode(data, layouts)
+        except qnml_rsz.DecodeError:
+            continue
+        for inst in insts:
+            if inst.type != "app.quest.gimmick.OptionTreasureBoxParam":
+                continue
+            count += 1
+            resource = qnml_rsz.deref(insts, inst.fields.get("_ResourceData"))
+            path = _normalized_resource(resource.path if resource else None)
+            if path is None:
+                raise ExtractError("a quest treasure override has an unreadable resource")
+            paths.add(path)
+    return paths, count
+
+
+def _placement_item_row(insts, row, src, params, metadata):
+    """Return a stable Gm82-backed placed-item row, or None without its exact join."""
+    cont = qnml_rsz.deref(insts, row.fields.get("_Container"))
+    gs = qnml_rsz.deref(insts, cont.fields.get("_GimmickSetting")) if cont else None
+    pid = gs.fields.get("_ParamId") if gs else None
+    param = params.get(pid)
+    if param is None:
+        return None
+    item_id, count = param["item"], param["count"]
+    uid = row.fields.get("_ManualSetGuid")
+    if not isinstance(uid, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", uid):
+        raise ExtractError("a placed-item row has an invalid uid")
+    if type(item_id) is not int or item_id <= 0 or type(count) is not int or count <= 0:
+        raise ExtractError("a placed-item row has an invalid item output")
+    position = row.fields.get("_ManualPos")
+    if not isinstance(position, (tuple, list)) or len(position) != 3 or any(
+            type(value) not in (int, float) or not math.isfinite(value) for value in position):
+        raise ExtractError("a placed-item row has an invalid position")
+    x, y, z = _round1(position)
+    table_id, layer = metadata
+    result = {"k": "item", "uid": uid.lower(), "index": 0,
+              "table_id": table_id, "layer": layer, "id": item_id, "n": count,
+              "x": x, "y": y, "z": z, "src": src}
+    gate = gate_of(insts, cont)
+    if gate:
+        result["gate"] = gate
+    return result
+
+
+def collect_rows(decoded, params, conflicts, chara_names, pickup_params=None,
+                 quest_override_paths=None):
     """Rows of the tracked kinds from decoded table files {rel: instances}.
 
     Returns (rows, count of chest rows without an item list, gimmick id counts,
@@ -251,18 +378,24 @@ def collect_rows(decoded, params, conflicts, chara_names):
                     if ref is not None and ref.path:
                         src_of.setdefault(ref.path, src)
     rows, seen = [], {}
+    quest_override_paths = quest_override_paths or set()
     gimmick_ids = collections.Counter()
     unjoined = 0
     kinds = collections.Counter()
     for rel in sorted(decoded):
         insts = decoded[rel]
+        source_metadata = source_metadata_of(insts)
         for kind, r in rows_of(insts):
             f = r.fields
             if kind == "enemy":
                 k, rid = "chara", f["_CharaID"] & 0xFFFFFFFF
-            elif kind == "gimmick" and f["_GimmickID"] in KIND_OF_GIMMICK:
+            elif kind == "gimmick":
                 rid = f["_GimmickID"]
-                k = KIND_OF_GIMMICK[rid]
+                k = KIND_OF_GIMMICK.get(rid)
+                if rid == PICKUP_GIMMICK_ID:
+                    k = "pickup"
+                elif k is None:
+                    continue
                 gimmick_ids[rid] += 1
             else:
                 continue
@@ -271,6 +404,17 @@ def collect_rows(decoded, params, conflicts, chara_names):
                 raise ExtractError("a table file is not referenced by any list")
             x, y, z = _round1(f["_ManualPos"])
             row = {"k": k, "uid": f["_ManualSetGuid"], "id": rid, "x": x, "y": y, "z": z, "src": src}
+            if k == "pickup" or k == "chest":
+                metadata = source_metadata.get(r.idx)
+                if metadata is None:
+                    raise ExtractError("a pickup or chest row has no parent table metadata")
+                table_id, layer = metadata
+                if not isinstance(table_id, str) or not _GUID.fullmatch(table_id.lower()) \
+                        or type(layer) is not int:
+                    raise ExtractError("a pickup or chest row has invalid parent table metadata")
+                table_id = table_id.lower()
+                metadata = (table_id, layer)
+                row.update({"index": 0, "table_id": table_id, "layer": layer})
             if k == "chest":
                 cont = qnml_rsz.deref(insts, f["_Container"])
                 gs = qnml_rsz.deref(insts, cont.fields.get("_GimmickSetting")) if cont else None
@@ -280,7 +424,14 @@ def collect_rows(decoded, params, conflicts, chara_names):
                 keyloc = bool(gs and gs.fields.get("_KeyLocationId"))
                 if pid in params:
                     p = params[pid]
+                    if type(p.get("unlock_item")) is not int or p["unlock_item"] < 0 \
+                            or type(p.get("is_seal")) is not bool:
+                        raise ExtractError("a chest row has unreadable access metadata")
                     row["items"] = [{"id": i, "n": n} for i, n in p["items"]]
+                    row.update({"unlock_item": p["unlock_item"], "is_seal": p["is_seal"],
+                                "fake_unlock_item": 0,
+                                "quest_override": _normalized_resource(rel)
+                                in quest_override_paths})
                     if p["trap"]:
                         row["trap"] = True
                     if p["pawn"]:
@@ -291,6 +442,15 @@ def collect_rows(decoded, params, conflicts, chara_names):
                 gate = gate_of(insts, cont)
                 if gate:
                     row["gate"] = gate
+            elif k == "pickup":
+                placement = _placement_item_row(insts, r, src, pickup_params or {}, metadata)
+                if placement is not None:
+                    key = ("item", placement["uid"])
+                    if key in seen:
+                        raise ExtractError("an item placement guid appears in two rows")
+                    seen[key] = True
+                    rows.append(placement)
+                continue
             if k == "chara":
                 if src in ("subquest", "mainquest"):
                     row["table_qid"] = table_qid_of(rel)
@@ -336,6 +496,8 @@ def extract(game, key_hex, layouts):
     try:
         files, seed_hits, dangling = enumerate_files(pak, layouts)
         gm = pak.read(_full(GMDATA))
+        pickup_gm = pak.read(_full(PICKUP_GMDATA))
+        override_paths, override_count = quest_override_paths(pak, layouts)
     except qnml_pak.PakError as e:
         raise ExtractError(str(e))
     finally:
@@ -348,17 +510,23 @@ def extract(game, key_hex, layouts):
         raise ExtractError("only %d generate files found (expected at least %d)" % (len(files), MIN_FILES))
     if gm is None:
         raise ExtractError("chest contents file missing from the archive")
+    if pickup_gm is None:
+        raise ExtractError("placed-item data file missing from the archive")
+    if override_count == 0:
+        raise ExtractError("no structured quest treasure overrides found")
     params, conflicts = chest_items(gm, layouts)
+    pickup_params = pickup_params_of(_decode(pickup_gm, layouts))
     decoded = {rel: _decode(data, layouts) for rel, data in files.items()}
     rows, unjoined, gimmick_ids, kinds = collect_rows(
-        decoded, params, conflicts, layouts["enums"]["CharacterID"])
+        decoded, params, conflicts, layouts["enums"]["CharacterID"], pickup_params,
+        override_paths)
     by_k = collections.Counter(r["k"] for r in rows)
     for k in ("token", "beetle", "chest"):
         gid = FIRST_GIMMICK[k]
         if gimmick_ids[gid] == 0:
             raise ExtractError("no %s rows (gimmick %d) found" % (k, gid))
-    order = {"chest": 0, "token": 1, "beetle": 2, "chara": 3}
-    rows.sort(key=lambda r: (order[r["k"]], r["uid"]))
+    order = {"chest": 0, "item": 1, "token": 2, "beetle": 3, "chara": 4}
+    rows.sort(key=lambda r: (order[r["k"]], r["uid"], r.get("id", 0)))
     out = {"version": 2, "pak": "%d:%d" % (pak.total, pak.fingerprint), "rows": rows}
 
     chara = [r for r in rows if r["k"] == "chara"]
@@ -372,6 +540,8 @@ def extract(game, key_hex, layouts):
             unjoined),
         "kinds: gated %d, trap %d, pawn %d, key locations %d" % (
             kinds["gate"], kinds["trap"], kinds["pawn"], kinds["key locations"]),
+        "structured treasure overrides %d, catalog matches %d" % (
+            override_count, sum(r.get("quest_override") is True for r in rows)),
         "chara rows %d, ids %d" % (len(chara), len({r["id"] for r in chara})),
         "chara src: " + ", ".join("%s %d" % (s, sum(1 for r in chara if r["src"] == s))
                                   for s in ("normal", "subquest", "mainquest", "random")),

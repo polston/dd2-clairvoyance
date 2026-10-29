@@ -228,3 +228,192 @@ end
 local st1 = w:stats()
 print(string.format("reserved: read rounds %.3f ms, reuse rounds %.3f ms, reads %d, reused %d",
   read_sum / 20, reuse_sum / 20, st1.reserved_reads - r0, st1.reserved_reused - u0))
+
+-- Objective providers run on the throttled world round. The empty case models
+-- no focused item need; the representative case feeds a bounded filtered
+-- source set into the existing downstream need join.
+local shop_rows = {}
+local shop_reads = 0
+f.reads.objective_shop_rows = function(task)
+  shop_reads = shop_reads + 1
+  if type(task) ~= "table" or type(task.focused_item_ids) ~= "table" then
+    return { complete = true, rows = shop_rows }
+  end
+  local filtered = {}
+  for _, row in ipairs(shop_rows) do
+    if task.focused_item_ids[row.item_id] then filtered[#filtered + 1] = row end
+  end
+  return { complete = true, rows = filtered }
+end
+local function source_bench(label, count, task)
+  shop_rows = {}
+  for i = 1, count do
+    shop_rows[i] = { shop_id = 100 + (i % 20), offer_ordinal = 1 + (i % 8),
+      seller_cid = 2000 + (i % 120), item_id = 100 + (i % 40), count = 1,
+      capacity_kind = "finite", unlimited = false, stock = 2, restock_readable = true,
+      released = true, talk_available = true, interactable = true,
+      pos = P(i % 3000 + 1, 0, i % 2800 + 1) }
+  end
+  local samples, provider_samples, reads_before = {}, {}, shop_reads
+  for i = 1, 20 do
+    local start, provider_total = os.clock(), 0
+    for _ = 1, 10 do
+      t = t + K.WORLD_ROUND
+      w:poke()
+      assert(w:refresh(t, true, TG), "source benchmark round did not run")
+      local read_before, provider_start = shop_reads, os.clock()
+      local proof = { status = "ok", complete = true, generation = task.need_generation,
+        source_generation = 1, groups = { { qid = 1, task_index = 0, remaining = 1,
+          options = { { item_id = 100, accepted_count = 1 } }, complete = true,
+          generation = 1, status = "eligible" } } }
+      local snapshot = w:objective_shop_observations(task, proof)
+      provider_total = provider_total + (os.clock() - provider_start) * 1000
+      local cached = w:objective_shop_observations(task, proof)
+      assert(snapshot.status == "ok" and #snapshot.candidates == task.expected_rows)
+      assert(cached.generation == snapshot.generation and shop_reads == read_before + 1,
+        "provider repeated a full scan inside one world round")
+    end
+    samples[i] = (os.clock() - start) * 1000 / 10
+    provider_samples[i] = provider_total / 10
+  end
+  local maximum = 0
+  for _, elapsed in ipairs(provider_samples) do if elapsed > maximum then maximum = elapsed end end
+  print(string.format("objective shop %s: input rows %d, matched %d, provider median %.3f ms, max %.3f ms, " ..
+    "world-round median %.3f ms, scans %d",
+    label, count, task.expected_rows, median(provider_samples), maximum, median(samples),
+    shop_reads - reads_before))
+end
+source_bench("no focused need", 60,
+  { need_generation = 1, focused_item_ids = {}, quests = { { qid = 1, task_index = 0,
+    read_status = "ok" } },
+    expected_rows = 0 })
+local focused_items = {}
+for i = 100, 109 do focused_items[i] = true end
+local expected_rows = 0
+for i = 1, 60 do if focused_items[100 + (i % 40)] then expected_rows = expected_rows + 1 end end
+source_bench("representative focused needs", 60,
+  { need_generation = 2, focused_item_ids = focused_items,
+    quests = { { qid = 1, task_index = 0, read_status = "ok" } }, expected_rows = expected_rows })
+
+local function managed_obj(fields, methods)
+  local o = {}
+  function o:get_field(name) return fields and fields[name] end
+  function o:call(name, ...)
+    local method = methods and methods[name]
+    if method then return method(...) end
+    return nil
+  end
+  return o
+end
+local function managed_array(items)
+  local o = managed_obj(nil, { get_Count = function() return #items end })
+  function o:get_elements() return items end
+  return o
+end
+local function managed_list(items)
+  return managed_obj(nil, { get_Count = function() return #items end,
+    get_Item = function(index) return items[index + 1] end })
+end
+local function managed_guid(text)
+  return managed_obj(nil, { ["ToString()"] = function() return text end })
+end
+local function managed_drop_dictionary(rows)
+  local slots = {}
+  for i, row in ipairs(rows) do
+    local item = managed_obj({ _Id = row.item_id, _Num = 1, _Rate = 2500 })
+    local drop_table = managed_obj({ _ItemList = managed_array({ item }) })
+    local value = managed_obj({ _CharaId = row.cid,
+      _TableList = managed_array({ drop_table }) })
+    slots[i] = managed_obj({ key = row.key, value = value })
+  end
+  return managed_obj({ _entries = managed_array(slots), _count = #slots },
+    { get_Count = function() return #rows end })
+end
+
+local monster_rows, live_monsters = {}, {}
+for i = 1, 100 do
+  local index, cid, item_id = i, 1000 + i, 100 + (i % 40)
+  monster_rows[index] = { key = 5000 + index, cid = cid, item_id = item_id }
+  local chara = managed_obj(nil, {
+    get_UniqId = function() return managed_guid("live-monster-" .. index) end,
+    get_CharaID = function() return cid end,
+    get_IsDead = function() return false end,
+    get_Transform = function() return managed_obj(nil, {
+      get_UniversalPosition = function() return P(index + 1, 0, index + 2) end }) end,
+  })
+  live_monsters[index] = managed_obj(nil, { get_Chara = function() return chara end })
+end
+local monster_singletons = {
+  ["app.EnemyManager"] = managed_obj({ _EnemyList = managed_list(live_monsters) }),
+  ["app.ItemManager"] = managed_obj({
+    EnemyDefaultItemDropDataDict = managed_drop_dictionary(monster_rows),
+    EnemyItemDropDataDict = managed_drop_dictionary({}),
+  }),
+}
+local saved_sdk = sdk
+sdk = { get_managed_singleton = function(name) return monster_singletons[name] end }
+local production_monster_rows = world.game_reads().objective_monster_rows
+local monster_reads, monster_raw_reason = 0, nil
+f.reads.objective_monster_rows = function(task, catalog, need)
+  monster_reads = monster_reads + 1
+  local ok, snapshot = pcall(production_monster_rows, task, catalog, need)
+  if not ok then monster_raw_reason = snapshot; error(snapshot) end
+  monster_raw_reason = snapshot.reason
+  for _, row in ipairs(snapshot.rows or {}) do
+    row.chance, row.accessible = 0.25, true
+  end
+  return snapshot
+end
+local function monster_bench(label, task)
+  local samples, provider_samples, reads_before = {}, {}, monster_reads
+  for i = 1, 20 do
+    local start, provider_total = os.clock(), 0
+    for _ = 1, 10 do
+      t = t + K.WORLD_ROUND
+      w:poke()
+      assert(w:refresh(t, true, TG), "monster benchmark round did not run")
+      local read_before, provider_start = monster_reads, os.clock()
+      local options = {}
+      for item_id in pairs(task.focused_item_ids) do
+        options[#options + 1] = { item_id = item_id, accepted_count = 1 }
+      end
+      table.sort(options, function(a, b) return a.item_id < b.item_id end)
+      local groups = #options > 0 and { { qid = 1, task_index = 0, remaining = 1,
+        options = options, complete = true, generation = 1, status = "eligible" } } or {}
+      local proof = { status = "ok", complete = true, generation = task.need_generation,
+        source_generation = 1, groups = groups }
+      local snapshot = w:objective_monster_observations(task, proof)
+      provider_total = provider_total + (os.clock() - provider_start) * 1000
+      local cached = w:objective_monster_observations(task, proof)
+      local expected_status = task.expect_scan and "ok" or "unknown"
+      local expected_reads = task.expect_scan and read_before + 1 or read_before
+      assert(snapshot.status == expected_status and #snapshot.candidates == task.expected_rows,
+        string.format("monster provider status=%s rows=%d expected_status=%s expected_rows=%d reason=%s raw=%s",
+          tostring(snapshot.status), #snapshot.candidates, expected_status, task.expected_rows,
+          tostring(snapshot.reason), tostring(monster_raw_reason)))
+      assert(cached.generation == snapshot.generation and monster_reads == expected_reads,
+        "monster provider repeated a full scan inside one world round")
+    end
+    samples[i] = (os.clock() - start) * 1000 / 10
+    provider_samples[i] = provider_total / 10
+  end
+  local maximum = 0
+  for _, elapsed in ipairs(provider_samples) do if elapsed > maximum then maximum = elapsed end end
+  print(string.format("objective monster %s: input rows %d, matched %d, provider median %.3f ms, " ..
+    "max %.3f ms, world-round median %.3f ms, scans %d",
+    label, #monster_rows, task.expected_rows, median(provider_samples), maximum,
+    median(samples), monster_reads - reads_before))
+end
+local monster_empty = { need_generation = 3, focused_item_ids = {},
+  quests = { { qid = 1, task_index = 0, read_status = "ok" } }, expected_rows = 0,
+  expect_scan = false }
+monster_bench("no focused need", monster_empty)
+local monster_expected = 0
+for _, row in ipairs(monster_rows) do
+  if focused_items[row.item_id] then monster_expected = monster_expected + 1 end
+end
+monster_bench("representative focused needs", { need_generation = 4,
+  focused_item_ids = focused_items,
+  quests = { { qid = 1, task_index = 0, read_status = "ok" } },
+  expected_rows = monster_expected, expect_scan = true })
+sdk = saved_sdk

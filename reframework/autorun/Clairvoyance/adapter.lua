@@ -1,5 +1,6 @@
 local A = {}
 local qnml_core = require("Clairvoyance.core")
+A.objective_need_builder = require("Clairvoyance.objective_needs")
 
 -- ===== debug flag =====
 local DEBUG = false
@@ -1796,6 +1797,31 @@ end
 -- v10 world tracker, which added none), so helpers are fields of this table
 -- or do-block locals, never new chunk-level locals.
 local items = {}
+items.observed_task_indices = {}
+items.task_observation_generation = 0
+
+-- Count observed changes to the live quest-log task, including a task that
+-- moves away and later returns to the same zero-based index.
+function items.observe_task_index(qid, task_index)
+    local previous = items.observed_task_indices[qid]
+    if task_index == nil then
+        if previous ~= false then
+            items.task_observation_generation = items.task_observation_generation + 1
+        end
+        items.observed_task_indices[qid] = false
+    elseif previous ~= nil and previous ~= task_index then
+        items.task_observation_generation = items.task_observation_generation + 1
+        items.observed_task_indices[qid] = task_index
+    else
+        items.observed_task_indices[qid] = task_index
+    end
+    return items.task_observation_generation
+end
+
+function items.reset_task_observations()
+    items.observed_task_indices = {}
+    items.task_observation_generation = items.task_observation_generation + 1
+end
 
 -- get_elements() returns a sol vector USERDATA in-game, not a Lua table
 -- (probe P17c, 2026-10-19): # and 1-based [i] work, type() is "userdata".
@@ -1830,12 +1856,18 @@ function items.empty_loc_failed() return { placed = false, drop = false, box = f
 local ITEM_NEEDS = nil           -- {[qid] = {{id, num}, ...}}; nil before any commit
 local ITEM_WANTED = {}           -- {[id] = true}, derived from ITEM_NEEDS
 local ITEM_COND_CACHE = {}       -- procid -> {{id, num, op}, ...} (clean reads only)
+items.objective_cond_cache = {}  -- procid -> complete expression rows (including empty)
 local ITEM_LOCS = items.empty_locs()
 local ITEM_LOC_FAILED = items.empty_loc_failed()   -- last top-level read failed
 local ITEM_NAME_CACHE = {}       -- item id -> name (readable icons only)
 local ITEM_FAILED_STREAK = 0
 local ITEM_STATS = items.new_stats()
 local ITEM_LAST_AT = -math.huge
+items.objective_group_state = { status = "unknown", complete = false,
+    generation = 0, task_generation = items.task_observation_generation,
+    groups = {}, records = {}, held = {}, task_index = {} }
+items.objective_loot_state = { status = "unknown", complete = false,
+    generation = 0, at = -math.huge, candidates = {} }
 
 -- Clears both location tables and the per-cadence skip/cap counts.
 function items.clear_locs()
@@ -1850,6 +1882,12 @@ end
 function items.invalidate()
     ITEM_NEEDS = nil
     ITEM_STATS.needs_fresh = false
+    items.objective_group_state = { status = "unknown", complete = false,
+        generation = items.objective_group_state.generation + 1,
+        groups = {}, records = {}, held = {}, task_index = {} }
+    items.objective_loot_state = { status = "unknown", complete = false,
+        generation = items.objective_loot_state.generation + 1,
+        at = -math.huge, candidates = {} }
     items.related, items.related_titles = nil, nil
     ITEM_WANTED = {}
     items.clear_locs()
@@ -1861,6 +1899,7 @@ end
 local function reset_item_state()
     items.invalidate()
     ITEM_COND_CACHE = {}
+    items.objective_cond_cache = {}
     ITEM_NAME_CACHE = {}
     ITEM_STATS = items.new_stats()
 end
@@ -2437,17 +2476,17 @@ end
 -- drops the index, rebuilds once and retries in the same call; a second
 -- nil drops again and calls on_fail. Returns pass's results, or nil.
 local function with_index_retry(list, n, pass, on_fail)
-    local r1, r2, r3 = pass(ensure_processor_index(list, n))
+    local r1, r2, r3, r4 = pass(ensure_processor_index(list, n))
     if r1 == nil then
         proc_index_drop()
-        r1, r2, r3 = pass(ensure_processor_index(list, n))
+        r1, r2, r3, r4 = pass(ensure_processor_index(list, n))
         if r1 == nil then
             proc_index_drop()
             on_fail()
             return nil
         end
     end
-    return r1, r2, r3
+    return r1, r2, r3, r4
 end
 
 local function refresh_objectives_body()
@@ -2984,44 +3023,76 @@ end
 -- failed read and a cached empty list would hide that processor's need
 -- for the whole session. Stores plain Lua values only.
 local function read_item_conditions(p)
-    local rows, skipped = {}, 0
+    local rows, skipped, objective_rows = {}, 0, {}
+    local objective_complete = true
     local cls = safe_field(p, "ConditionLists")
-    if cls == nil then return rows, 1 end
+    if cls == nil then return rows, 1, nil, false end
     local outer = safe_call(cls, "get_Count")
-    if type(outer) ~= "number" then return rows, 1 end
+    if type(outer) ~= "number" then return rows, 1, nil, false end
+    if outer < 0 or outer ~= math.floor(outer) or outer > 16 then
+        objective_complete = false
+    end
     if outer > 16 then outer = 16 end
     for a2 = 0, outer - 1 do
         local inner = safe_call(cls, "get_Item", a2)
         local m = inner ~= nil and safe_call(inner, "get_Count") or nil
-        if type(m) ~= "number" then skipped = skipped + 1
+        if type(m) ~= "number" then
+            skipped = skipped + 1
+            objective_complete = false
         else
+            if m < 0 or m ~= math.floor(m) or m > 16 then objective_complete = false end
             if m > 16 then m = 16 end
             for b = 0, m - 1 do
                 local c = safe_call(inner, "get_Item", b)
-                if c == nil then skipped = skipped + 1
+                if c == nil then
+                    skipped = skipped + 1
+                    objective_complete = false
                 else
                     local tn = nil
-                    pcall(function()
+                    local ok_type = pcall(function()
                         tn = c:get_type_definition():get_full_name()
                     end)
-                    if tn == nil then skipped = skipped + 1
-                    elseif tn == K.COND_HAS_ITEM then
-                        skipped = skipped + items.read_has_item_rows(c, rows)
-                    elseif tn == K.COND_DELIVER then
-                        skipped = skipped + items.read_deliver_rows(c, rows)
+                    if not ok_type or tn == nil then
+                        skipped = skipped + 1
+                        objective_complete = false
+                    elseif tn == K.COND_HAS_ITEM or tn == K.COND_DELIVER then
+                        local before = #rows
+                        local missed = tn == K.COND_HAS_ITEM
+                            and items.read_has_item_rows(c, rows)
+                            or items.read_deliver_rows(c, rows)
+                        skipped = skipped + missed
+                        if missed > 0 then objective_complete = false
+                        elseif #rows > before then
+                            local options = {}
+                            for i = before + 1, #rows do
+                                local row = rows[i]
+                                if row.op ~= "more" and row.op ~= "morethan" then
+                                    objective_complete = false
+                                else
+                                    options[#options + 1] = { item_id = row.id,
+                                        required = row.num, op = row.op }
+                                end
+                            end
+                            if #options > 0 then
+                                objective_rows[#objective_rows + 1] = {
+                                    list_index = a2, condition_index = b,
+                                    options = options }
+                            end
+                        end
                     end
                 end
             end
         end
     end
-    return rows, skipped
+    if skipped > 0 then objective_complete = false end
+    return rows, skipped, objective_rows, objective_complete
 end
 
 -- SPEC 15.3d: held count over getStorageDict's owner lists (player +
 -- pawns; the storage box, key 65535, is skipped). Returns held
 -- {[id] = n} for the wanted ids plus a skipped count, or nil when the
 -- manager, the dictionary or its _entries is unreadable (failed round).
-local function read_held(ids)
+function items.read_held(ids)
     local im = sdk.get_managed_singleton("app.ItemManager")
     if im == nil then return nil end
     local dict = safe_call(im, "getStorageDict")
@@ -3029,18 +3100,23 @@ local function read_held(ids)
     local en = safe_field(dict, "_entries")
     local entries = items.elements(en)
     if entries == nil then return nil end
-    local held, skipped = {}, 0
+    local held, skipped, complete = {}, 0, true
     for i = 1, #entries do
         local ok = pcall(function()
             local e = entries[i]
             local list = safe_field(e, "value")
             if list == nil then return end          -- free slot: uncounted
             local key = int_value(safe_field(e, "key"))
-            if key == nil then skipped = skipped + 1 return end
+            if key == nil then skipped = skipped + 1; complete = false; return end
             if key == K.STORAGE_BOX_KEY then return end
             local cnt = safe_call(list, "get_Count")
-            if type(cnt) ~= "number" then skipped = skipped + 1 return end
-            if cnt > K.HELD_OWNER_CAP then cnt = K.HELD_OWNER_CAP end
+            if type(cnt) ~= "number" or cnt < 0 or cnt ~= math.floor(cnt) then
+                skipped = skipped + 1; complete = false; return
+            end
+            if cnt > K.HELD_OWNER_CAP then
+                complete = false
+                cnt = K.HELD_OWNER_CAP
+            end
             for k = 0, cnt - 1 do
                 local okd = pcall(function()
                     local sd = safe_call(list, "get_Item", k)
@@ -3048,16 +3124,17 @@ local function read_held(ids)
                     local num = int_value(safe_field(sd, "_Num"))
                     if id == nil or num == nil then
                         skipped = skipped + 1
+                        complete = false
                         return
                     end
                     if ids[id] then held[id] = (held[id] or 0) + num end
                 end)
-                if not okd then skipped = skipped + 1 end
+                if not okd then skipped = skipped + 1; complete = false end
             end
         end)
-        if not ok then skipped = skipped + 1 end
+        if not ok then skipped = skipped + 1; complete = false end
     end
-    return held, skipped
+    return held, skipped, complete
 end
 
 -- Installs a need table and derives ITEM_WANTED. An empty table clears
@@ -3082,6 +3159,9 @@ local function item_round_failed()
     ITEM_FAILED_STREAK = ITEM_FAILED_STREAK + 1
     ITEM_STATS.failed_total = ITEM_STATS.failed_total + 1
     ITEM_STATS.needs_fresh = false
+    items.objective_group_state = { status = "unknown", complete = false,
+        generation = items.objective_group_state.generation + 1,
+        groups = {}, records = {}, held = {}, task_index = {} }
     if ITEM_FAILED_STREAK >= 3 then commit_item_needs({}) end
 end
 
@@ -3096,6 +3176,117 @@ local function gimmick_pos(g)
     local lx, ly, lz = vec_xyz(safe_call(tr, "get_Position"))
     if lx ~= nil then live = { x = lx, y = ly, z = lz } end
     return { x = x, y = y, z = z }, live
+end
+
+-- Runtime loot is joined only to focused current need options. The exact
+-- runtime list is bounded, cached for half a second, and replaced atomically.
+function items.objective_loot_observations(wanted, generation)
+    local state = items.objective_loot_state
+    local ids, key = {}, ""
+    if type(wanted) ~= "table" or type(generation) ~= "number" then
+        state = { provider = "loot", status = "unknown", complete = false,
+            generation = generation, at = os.clock(), candidates = {},
+            reason = "current_need_snapshot_unavailable" }
+        items.objective_loot_state = state
+        return state
+    end
+    for id, needed in pairs(wanted) do
+        if needed == true and type(id) == "number" and id > 0
+            and id == math.floor(id) then ids[#ids + 1] = id end
+    end
+    table.sort(ids)
+    local key_parts = {}
+    for i, id in ipairs(ids) do key_parts[i] = tostring(id) end
+    key = table.concat(key_parts, ",")
+    local now = os.clock()
+    if state.generation == generation and state.wanted_key == key
+        and now - state.at < 0.5 then
+        return state
+    end
+    local result = { provider = "loot", status = "unknown", complete = false,
+        generation = generation, at = now, wanted_key = key, candidates = {},
+        reason = "loot_scan_unavailable" }
+    if #ids == 0 then
+        result.status, result.complete, result.reason = "ok", true, nil
+        items.objective_loot_state = result
+        return result
+    end
+    local gm = sdk.get_managed_singleton("app.GimmickManager")
+    local list = gm ~= nil and safe_field(gm, "<DropItemGimmicks>k__BackingField") or nil
+    local count = safe_call(list, "get_Count")
+    if type(count) ~= "number" or count < 0 or count ~= math.floor(count) then
+        result.reason = "loot_rows_unreadable"
+    elseif count > 64 then
+        result.reason = "loot_rows_truncated"
+    else
+        local by_id, candidates, seen_uid = {}, {}, {}
+        for _, id in ipairs(ids) do by_id[id] = true end
+        local complete, reason = true, nil
+        for i = 0, count - 1 do
+            local drop = safe_call(list, "get_Item", i)
+            if drop == nil then complete, reason = false, "loot_row_unreadable" break end
+            local unique_id = safe_call(drop, "get_UniqId")
+            local uid = safe_call(unique_id, "ToString()")
+            local uid_a, uid_b, uid_c, uid_d, uid_e
+            if type(uid) == "string" then
+                uid_a, uid_b, uid_c, uid_d, uid_e = uid:match(
+                    "^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)_[0-9]+$")
+                if uid_a == nil then
+                    uid_a, uid_b, uid_c, uid_d, uid_e = uid:match(
+                        "^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)$")
+                end
+            end
+            if uid_a == nil or #uid_a ~= 8 or #uid_b ~= 4 or #uid_c ~= 4
+                or #uid_d ~= 4 or #uid_e ~= 12 then
+                complete, reason = false, "loot_identity_unreadable" break
+            end
+            uid = uid:lower()
+            if seen_uid[uid] then
+                complete, reason = false, "loot_identity_duplicated" break
+            end
+            seen_uid[uid] = true
+            local context = safe_field(drop, "MyContext")
+            local id = int_value(safe_field(context, "_ItemId"))
+            if type(id) ~= "number" or id <= 0 or id ~= math.floor(id) then
+                complete, reason = false, "loot_item_id_unreadable" break
+            end
+            if by_id[id] then
+                local deleted = safe_field(drop, "<IsDeleted>k__BackingField")
+                if type(deleted) ~= "boolean" then
+                    complete, reason = false, "loot_deletion_state_unreadable" break
+                elseif deleted == false then
+                    local amount = int_value(safe_field(context, "_Num"))
+                    local pos = gimmick_pos(drop)
+                    if type(amount) ~= "number" or amount <= 0 or amount ~= math.floor(amount) then
+                        complete, reason = false, "loot_count_unreadable" break
+                    elseif pos == nil then
+                        complete, reason = false, "loot_position_unreadable" break
+                    else
+                        local source_id = { "source", "loot", uid }
+                        candidates[#candidates + 1] = {
+                            source_id = source_id,
+                            provider = "loot", target = { kind = "loot", uid = uid, pos = pos },
+                            outputs = { { item_id = id, count = amount } },
+                            capacity_pool_id = { "capacity", "loot", uid },
+                            capacity_kind = "finite", available_acquisitions = 1,
+                            certainty = "guaranteed", eligibility = "eligible",
+                            generation = generation,
+                            evidence = { uid = uid, item_id = id, count = amount,
+                                deleted = false },
+                        }
+                    end
+                end
+            end
+        end
+        if complete then
+            result.status, result.complete, result.reason = "ok", true, nil
+            result.candidates = candidates
+        else
+            result.reason = reason
+        end
+    end
+    items.objective_loot_state = result
+    return result
 end
 
 -- v14 (SPEC 22.11.3): read the masquerade passage leaf. The full fingerprint
@@ -3288,53 +3479,98 @@ local function item_round_needs(now)
     end
     if next(wanted) == nil then
         commit_item_needs({})
+        items.objective_group_state = { status = "ok", complete = true,
+            generation = ITEM_STATS.rounds,
+            task_generation = items.task_observation_generation,
+            groups = {}, records = {}, held = {}, task_index = {} }
         ITEM_FAILED_STREAK = 0
         ITEM_STATS.ignored = 0
         return
     end
     local function pass(cur)
-        local records = {}
+        local records, objective_records = {}, {}
+        local pending_reads = {}
+        local objective_complete = true
         local skipped = visit_verified_entries(cur, list, wanted,
             function(p, qid, skip, procid)
                 local rows = ITEM_COND_CACHE[procid]
+                local grouped = items.objective_cond_cache[procid]
                 if rows == nil then
-                    local sk
-                    rows, sk = read_item_conditions(p)
+                    local sk, complete
+                    local pending = pending_reads[procid]
+                    if pending ~= nil then
+                        rows, sk, grouped, complete = pending.rows, pending.skipped,
+                            pending.groups, pending.complete
+                    else
+                        rows, sk, grouped, complete = read_item_conditions(p)
+                    end
                     if sk == 0 then
                         ITEM_COND_CACHE[procid] = rows
+                        items.objective_cond_cache[procid] = complete and grouped or false
                     else
                         for _ = 1, sk do skip() end
+                        objective_complete = false
                     end
                 end
                 for _, r in ipairs(rows) do
                     records[#records + 1] = { qid = qid, id = r.id,
                         num = r.num, op = r.op }
                 end
+                if grouped == false or grouped == nil then objective_complete = false
+                else
+                    for _, group in ipairs(grouped) do
+                        objective_records[#objective_records + 1] = {
+                            qid = qid, processor_id = procid,
+                            list_index = group.list_index,
+                            condition_index = group.condition_index,
+                            -- A progressing quest does not prove this processor
+                            -- belongs to its current task. Keep the expression
+                            -- unrouted until an exact structured join exists.
+                            complete = true, current_work = false,
+                            options = group.options }
+                    end
+                end
             end,
-            -- SPEC 15.3c.3: ProcID first; a processor whose CACHED row
-            -- list is empty contributes nothing, so its IsStarted /
-            -- ProcessFinished reads are skipped
-            function(p, _, skip)
+            -- ProcID first. Read static condition data once so a complete
+            -- empty legacy cache can still be skipped; publish no groups
+            -- until visit_verified_entries proves started and unfinished.
+            function(p, qid, skip)
                 local procid = int_value(safe_field(p, "ProcID"))
                 if procid == nil then skip() return false end
-                local rows = ITEM_COND_CACHE[procid]
-                if rows ~= nil and #rows == 0 then return false end
+                local grouped = items.objective_cond_cache[procid]
+                if ITEM_COND_CACHE[procid] == nil then
+                    local rows, missed, objective_rows, complete = read_item_conditions(p)
+                    pending_reads[procid] = { rows = rows, skipped = missed,
+                        groups = objective_rows, complete = complete }
+                    if missed == 0 then
+                        ITEM_COND_CACHE[procid] = rows
+                        items.objective_cond_cache[procid] = complete and objective_rows or false
+                        pending_reads[procid] = nil
+                        grouped = items.objective_cond_cache[procid]
+                    end
+                end
+                if grouped ~= nil and grouped ~= false and #grouped == 0 then return false end
                 return procid
             end)
         if skipped == nil then return nil end
-        return records, skipped
+        return records, skipped, objective_records, objective_complete
     end
-    local records, skipped = with_index_retry(list, n, pass, item_round_failed)
+    local records, skipped, objective_records, objective_complete =
+        with_index_retry(list, n, pass, item_round_failed)
     if records == nil then return end
-    local held, ids = {}, {}
+    local held, ids, held_complete = {}, {}, true
     for _, r in ipairs(records) do
         if r.op == "more" or r.op == "morethan" then ids[r.id] = true end
     end
+    for _, group in ipairs(objective_records or {}) do
+        for _, option in ipairs(group.options) do ids[option.item_id] = true end
+    end
     if next(ids) ~= nil then
-        local h, hsk = read_held(ids)
+        local h, hsk, hcomplete = items.read_held(ids)
         if h == nil then item_round_failed() return end
         held = h
         skipped = skipped + hsk
+        held_complete = hcomplete == true
     end
     -- v14: quest-related items from the same records, before the need table
     -- a raise here must not fail the need round: keep the previous map
@@ -3342,6 +3578,32 @@ local function item_round_needs(now)
     if not okr then rel = items.related end
     local t, ignored = qnml_core.item_need_table(records, held)
     if type(t) ~= "table" then error("item_need_table: bad result") end
+    local task_index, tasks_complete = {}, true
+    local qlm = sdk.get_managed_singleton("app.QuestLogManager")
+    local qdict = qlm ~= nil and safe_field(qlm, "_QuestLogInfoDict") or nil
+    if qdict == nil then tasks_complete = false end
+    if tasks_complete then
+        for qid in pairs(wanted) do
+            local info = safe_call(qdict, "get_Item", qid)
+            local ti = info ~= nil and int_value(safe_call(info, "get_CurrentTaskIndex")) or nil
+            if ti == nil and info ~= nil then
+                ti = int_value(safe_field(info, "<CurrentTaskIndex>k__BackingField"))
+            end
+            if ti == nil or ti < 0 then tasks_complete = false
+            else
+                task_index[qid] = ti
+                items.observe_task_index(qid, ti)
+            end
+        end
+    end
+    local group_generation = ITEM_STATS.rounds
+    objective_complete = objective_complete and skipped == 0 and held_complete
+    local records_complete = objective_complete and tasks_complete
+    items.objective_group_state = { status = records_complete and "ok" or "unknown",
+        complete = records_complete, generation = group_generation,
+        task_generation = items.task_observation_generation,
+        groups = {}, records = records_complete and objective_records or {},
+        held = records_complete and held or {}, task_index = task_index }
     commit_item_needs(t)
     if type(rel) == "table" then items.related = rel end
     ITEM_FAILED_STREAK = 0
@@ -3561,11 +3823,1452 @@ function A.overhead_block_reason()
   return nil
 end
 
+-- One bounded, read-only native observation for the placed/chest providers.
+-- Every collection is reconciled against its logical count.  Nil slots in the
+-- context record list are intentional sparse entries; absence of a matching
+-- UID after a complete pass is therefore meaningful.
+function A.read_objective_source_observation(catalog)
+  local out = { complete = false, persisted_complete = false,
+    generation_complete = false, requested_complete = false, loaded_complete = false,
+    persisted = {}, never = {}, dead = {}, disabled_tables = {}, blacklist = {},
+    requested_tables = {}, loaded = {}, gate_results = {} }
+  local by_identity = {}
+  local function catalog_rows(rows, family)
+    if type(rows) ~= "table" then return false end
+    for _, row in ipairs(rows) do
+      if type(row) ~= "table" or type(row.uid) ~= "string"
+          or type(row.index) ~= "number" then return false end
+      by_identity[row.uid:lower() .. ":" .. tostring(row.index)] = family
+    end
+    return true
+  end
+  if type(catalog) ~= "table" or not catalog_rows(catalog.placements, "placed")
+      or not catalog_rows(catalog.chests, "chest") then return out end
+  local function call(obj, method, ...)
+    if obj == nil then return false, nil end
+    return pcall(function(...) return obj:call(method, ...) end, ...)
+  end
+  local function type_name(obj)
+    local ok, value = pcall(function()
+      return obj:get_type_definition():get_full_name()
+    end)
+    if ok and type(value) == "string" then return value end
+  end
+  local function guid_text(value)
+    local ok, text = call(value, "ToString()")
+    if not ok or type(text) ~= "string" then return nil end
+    text = text:lower()
+    if not text:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") then
+      return nil
+    end
+    return text
+  end
+  local function identity(value)
+    local uid = guid_text(safe_field(value, "_RowID"))
+    local index = int_value(safe_field(value, "_Index"))
+    if uid == nil or type(index) ~= "number" or index < 0 or index ~= math.floor(index) then
+      return nil
+    end
+    return uid .. ":" .. tostring(index), uid, index
+  end
+  local function list(value, cap, visit)
+    local ok, count = call(value, "get_Count")
+    if not ok or type(count) ~= "number" or count < 0 or count ~= math.floor(count)
+        or count > cap then return false end
+    for i = 0, count - 1 do
+      local got, item = call(value, "get_Item", i)
+      if not got then return false end
+      if visit(item, i) == false then return false end
+    end
+    return true
+  end
+  local function entries(value, cap, visit)
+    if value == nil then return false end
+    local ok, expected = call(value, "get_Count")
+    local used = int_value(safe_field(value, "_count"))
+    local free = int_value(safe_field(value, "_freeCount"))
+    local array = safe_field(value, "_entries")
+    local elements
+    local copied = pcall(function()
+      local raw = array:get_elements()
+      elements = {}
+      for i = 1, #raw do elements[i] = raw[i] end
+    end)
+    if not ok or type(expected) ~= "number" or expected < 0 or expected ~= math.floor(expected)
+        or type(used) ~= "number" or used < 0 or used ~= math.floor(used)
+        or type(free) ~= "number" or free < 0 or free ~= math.floor(free)
+        or used > cap or not copied or type(elements) ~= "table" or used > #elements then
+      return false
+    end
+    local occupied = 0
+    for i = 1, used do
+      local entry = elements[i]
+      local next_index = safe_field(entry, "Next")
+      if next_index == nil then next_index = safe_field(entry, "next") end
+      if type(next_index) ~= "number" then return false end
+      if next_index >= -1 then
+        occupied = occupied + 1
+        local key = safe_field(entry, "Key")
+        if key == nil then key = safe_field(entry, "key") end
+        local value = safe_field(entry, "Value")
+        if value == nil then value = safe_field(entry, "value") end
+        if visit(key, value, entry) == false then return false end
+      end
+    end
+    return occupied == expected and occupied + free == used
+  end
+  local function context_map(record, save_data)
+    local map = {}
+    local function add(context)
+      if context == nil then return true end
+      local name = type_name(context)
+      if name == nil then return false end
+      if map[name] == nil then map[name] = context end
+      return true
+    end
+    if record == nil or not list(safe_field(record, "Contexts"), 128, add) then return nil end
+    local saved = safe_field(save_data, "Contexts")
+    if saved ~= nil and not list(saved, 128, add) then return nil end
+    return map
+  end
+  local function persisted_scan()
+    local db = safe_field(sdk.get_managed_singleton("app.ContextDBMS"), "OfflineDB")
+    return list(safe_field(db, "Records"), 32768, function(info)
+      if info == nil then return true end
+      local map = context_map(safe_field(info, "<Record>k__BackingField"),
+        safe_field(info, "SaveData"))
+      if map == nil then return false end
+      local key = identity(safe_field(map["app.UniqueIDContext"], "UniqueID"))
+      if key == nil then return false end
+      local family = by_identity[key]
+      if family == "placed" then
+        local freebit = int_value(safe_field(map["app.GimmickContext"], "_FreeBit"))
+        if type(freebit) ~= "number" then return false end
+        out.persisted[key] = { family = family, freebit = freebit }
+      elseif family == "chest" then
+        local item = map["app.GmItemContext"]
+        local pick, keep, unlock = safe_field(item, "_IsPick"),
+          safe_field(item, "_IsKeep"), safe_field(item, "_IsUnlock")
+        if type(pick) ~= "boolean" or type(keep) ~= "boolean"
+            or type(unlock) ~= "boolean" then return false end
+        local state = { family = family, pick = pick, keep = keep, unlock = unlock }
+        local treasure = map["app.TreasureBoxGimmickContext"]
+        if treasure ~= nil then
+          state.seal = safe_field(treasure, "_IsSeal")
+          if type(state.seal) ~= "boolean" then return false end
+        end
+        out.persisted[key] = state
+      end
+      return true
+    end)
+  end
+  local generation = sdk.get_managed_singleton("app.GenerateManager")
+  local function uid_set(field, target)
+    return entries(safe_field(generation, field), 32768, function(_, value)
+      local key = identity(value)
+      if key == nil then return false end
+      target[key] = true
+      return true
+    end)
+  end
+  local function guid_set(field, target)
+    return entries(safe_field(generation, field), 32768, function(_, value)
+      local key = guid_text(value)
+      if key == nil then return false end
+      target[key] = true
+      return true
+    end)
+  end
+  local function requested_scan()
+    return entries(safe_field(generation, "_RequestedTableInfos"), 32768,
+      function(generator_id, info)
+        local table_id = guid_text(safe_field(generator_id, "_TableID"))
+        local extra = int_value(safe_field(generator_id, "_ExtraID"))
+        local failed = safe_field(info, "_IsFailedAllRequest")
+        local finished = safe_field(info, "_IsFinishAllRequestForGenerateTable")
+        if table_id == nil or type(extra) ~= "number" or type(failed) ~= "boolean"
+            or type(finished) ~= "boolean" then return false end
+        local state = out.requested_tables[table_id]
+        if state == nil then
+          state = { active = true, failed = false, finished = true, uids = {} }
+          out.requested_tables[table_id] = state
+        end
+        state.failed = state.failed or failed
+        state.finished = state.finished and finished
+        return entries(safe_field(info, "_Requests"), 32768, function(uid_value)
+          local key = identity(uid_value)
+          if key == nil then return false end
+          state.uids[key] = true
+          return true
+        end)
+      end)
+  end
+  local function holder_contexts(holder)
+    local map = {}
+    local ok = entries(safe_field(holder, "Contexts"), 256, function(_, info)
+      local context = safe_field(info, "<CurrentContext>k__BackingField")
+      local name = type_name(context)
+      if name == nil then return false end
+      map[name] = context
+      return true
+    end)
+    if not ok then return nil end
+    ok = entries(safe_field(holder, "RestoredContexts"), 256, function(_, context)
+      local name = type_name(context)
+      if name == nil then return false end
+      if map[name] == nil then map[name] = context end
+      return true
+    end)
+    return ok and map or nil
+  end
+  local function loaded_source(object, family)
+    local key = identity(safe_field(object, "<UniqId>k__BackingField"))
+    if key == nil then return false end
+    if by_identity[key] ~= family then return true end
+    if out.loaded[key] ~= nil then return false end
+    local contexts = holder_contexts(safe_field(object, "<CompContext>k__BackingField"))
+    if contexts == nil then return false end
+    local common = safe_field(safe_field(object, "<CompGenerateInfo>k__BackingField"), "_Container")
+    common = safe_field(common, "_CommonInfo")
+    local table_id = guid_text(safe_field(safe_field(common, "_CustomGeneratorID"), "_TableID"))
+    local gen = contexts["app.GenerateInfoContext"]
+    local state = { family = family, table_id = table_id,
+      generated = safe_field(gen, "_IsGenerated"),
+      disabled = safe_field(gen, "_IsDisableGenerate") }
+    if table_id == nil or type(state.generated) ~= "boolean"
+        or type(state.disabled) ~= "boolean" then return false end
+    if family == "placed" then
+      local gimmick = safe_field(object, "<GmContext>k__BackingField")
+        or contexts["app.GimmickContext"]
+      state.freebit = int_value(safe_field(gimmick, "_FreeBit"))
+      state.broken, state.used = safe_field(object, "_IsBroken"), safe_field(object, "_IsUsed")
+    else
+      local item = safe_field(object, "ItemContext") or contexts["app.GmItemContext"]
+      state.pick, state.keep, state.unlock = safe_field(item, "_IsPick"),
+        safe_field(item, "_IsKeep"), safe_field(item, "_IsUnlock")
+      local opened_ok, opened = call(object, "get_IsOpenedFreeBit")
+      local unlock_ok, unlock_api = call(object, "get_IsUnlockFreeBit")
+      if opened_ok then state.opened = opened end
+      if unlock_ok then state.unlock_api = unlock_api end
+      state.unlock_item = int_value(safe_field(object, "UnlockItem"))
+      state.fake_unlock_item = int_value(safe_field(object, "FakeUnlockItem"))
+      state.pawn_restrict = safe_field(object, "_IsPawnRestrict")
+      local treasure = contexts["app.TreasureBoxGimmickContext"]
+      if treasure ~= nil then state.seal = safe_field(treasure, "_IsSeal") end
+    end
+    out.loaded[key] = state
+    return true
+  end
+  local function loaded_scan()
+    local gm = sdk.get_managed_singleton("app.GimmickManager")
+    return entries(safe_field(gm, "<ManagedGimmicksByIDs>k__BackingField"), 1024,
+      function(_, set)
+        return entries(set, 8192, function(_, object)
+          local name = type_name(object)
+          if name == nil then return false end
+          if name == "app.Gm82_000" then return loaded_source(object, "placed") end
+          if name == "app.gm80_001" then return loaded_source(object, "chest") end
+          return true
+        end)
+      end)
+  end
+  local function gate_scan()
+    local qm = sdk.get_managed_singleton("app.QuestManager")
+    local qlm = sdk.get_managed_singleton("app.QuestLogManager")
+    local method
+    local ok = pcall(function()
+      method = sdk.find_type_definition("app.QuestLogManager")
+        :get_method("isQuestLogEnd(app.QuestDefine.ID)")
+    end)
+    if not ok or method == nil then return false end
+    for _, spec in ipairs({ { "placed", catalog.placements }, { "chest", catalog.chests } }) do
+      for _, row in ipairs(spec[2]) do
+        if row.gate ~= nil then
+          if type(row.gate) ~= "table" or type(row.gate.conditions) ~= "table"
+              or (row.gate.check ~= 0 and row.gate.check ~= 1) then return false end
+          local matched = 0
+          for _, condition in ipairs(row.gate.conditions) do
+            if type(condition) ~= "table" or condition.kind ~= "quest"
+                or type(condition.qid) ~= "number" or type(condition.finish) ~= "boolean" then
+              return false
+            end
+            local active_ok, active = call(qm, "checkActivated", condition.qid)
+            local ended_ok, ended = pcall(function() return method:call(qlm, condition.qid) end)
+            if not active_ok or type(active) ~= "boolean" or not ended_ok
+                or type(ended) ~= "boolean" then return false end
+            if ended == condition.finish then matched = matched + 1
+            elseif row.gate.check == 0 then matched = -32768; break end
+          end
+          out.gate_results[spec[1] .. ":" .. row.uid:lower() .. ":" .. tostring(row.index)] =
+            row.gate.check == 0 and matched == #row.gate.conditions or matched > 0
+        end
+      end
+    end
+    return true
+  end
+  local ok, err = pcall(function()
+    out.persisted_complete = persisted_scan()
+    out.generation_complete = generation ~= nil
+      and uid_set("_NeverGenetateID", out.never)
+      and uid_set("_NeverGenerateIDByDeadRequests", out.dead)
+      and guid_set("_DisableGenerateRequests", out.disabled_tables)
+      and guid_set("_GenerateBlacklistUniqueIDHashSet", out.blacklist)
+    out.requested_complete = generation ~= nil and requested_scan()
+    out.loaded_complete = loaded_scan() and gate_scan()
+  end)
+  if not ok then return out, tostring(err) end
+  out.complete = out.persisted_complete and out.generation_complete
+    and out.requested_complete and out.loaded_complete
+  return out
+end
+
+-- Classifies the immutable places catalog against one atomic read of the
+-- persisted/generation/loaded managers.  This is deliberately pure: world.lua
+-- owns the static output/position catalog, while the adapter owns the native
+-- observation.  A partial shared scan makes both providers unknown and a
+-- family-local inconsistency clears that family's candidates.
+function A.objective_source_provider_snapshots(catalog, observation, generation)
+  local function envelope(provider, status, reason, candidates)
+    return { provider = provider, generation = generation, status = status,
+      complete = status == "ok", reason = reason, candidates = candidates or {} }
+  end
+  local function unknown_pair(reason)
+    return { envelope("placed", "unknown", reason), envelope("chest", "unknown", reason) }
+  end
+  local function finite(v)
+    return type(v) == "number" and v == v and v > -math.huge and v < math.huge
+  end
+  local function integer(v, minimum)
+    return finite(v) and v == math.floor(v) and v >= minimum
+  end
+  local function dense(value)
+    if type(value) ~= "table" then return nil end
+    local n, count = #value, 0
+    for k in pairs(value) do
+      if not integer(k, 1) or k > n then return nil end
+      count = count + 1
+    end
+    return count == n and value or nil
+  end
+  local function guid(value)
+    if type(value) ~= "string" then return nil end
+    local a, b, c, d, e = value:lower():match(
+      "^(%x%x%x%x%x%x%x%x)%-(%x%x%x%x)%-(%x%x%x%x)%-(%x%x%x%x)%-(%x%x%x%x%x%x%x%x%x%x%x%x)$")
+    if a == nil then return nil end
+    return table.concat({ a, b, c, d, e }, "-")
+  end
+  local function copy(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for k, v in pairs(value) do out[k] = copy(v) end
+    return out
+  end
+  if not integer(generation, 1) then return unknown_pair("source_generation_invalid") end
+  if type(catalog) ~= "table" or catalog.status ~= "ok" or catalog.complete ~= true
+      or dense(catalog.placements) == nil or dense(catalog.chests) == nil then
+    return unknown_pair("source_catalog_unavailable")
+  end
+  if type(observation) ~= "table" or observation.complete ~= true
+      or observation.persisted_complete ~= true or observation.generation_complete ~= true
+      or observation.requested_complete ~= true or observation.loaded_complete ~= true then
+    return unknown_pair("source_observation_incomplete")
+  end
+  for _, key in ipairs({ "persisted", "never", "dead", "disabled_tables", "blacklist",
+      "requested_tables", "loaded", "gate_results" }) do
+    if type(observation[key]) ~= "table" then return unknown_pair("source_observation_malformed") end
+  end
+
+  local catalog_identities = {}
+  for _, rows in ipairs({ catalog.placements, catalog.chests }) do
+    for _, row in ipairs(rows) do
+      local uid = type(row) == "table" and guid(row.uid) or nil
+      local index = type(row) == "table" and row.index or nil
+      if uid ~= nil and integer(index, 0) then
+        local identity = uid .. ":" .. tostring(index)
+        if catalog_identities[identity] then
+          return unknown_pair("source_catalog_identity_duplicate")
+        end
+        catalog_identities[identity] = true
+      end
+    end
+  end
+
+  local function classify(provider, rows)
+    local candidates = {}
+    for _, row in ipairs(rows) do
+      local uid = type(row) == "table" and guid(row.uid) or nil
+      local index = type(row) == "table" and row.index or nil
+      local table_id = type(row) == "table" and guid(row.table_id) or nil
+      local outputs = type(row) == "table" and dense(row.outputs) or nil
+      local pos = type(row) == "table" and row.pos or nil
+      if uid == nil or not integer(index, 0) or table_id == nil
+          or (row.layer ~= 0 and row.layer ~= 2) or outputs == nil or #outputs == 0
+          or type(pos) ~= "table" or not finite(pos.x) or not finite(pos.y) or not finite(pos.z) then
+        return envelope(provider, "unknown", provider .. "_catalog_row_malformed")
+      end
+      for _, output in ipairs(outputs) do
+        if type(output) ~= "table" or not integer(output.item_id, 1)
+            or not integer(output.count, 1) then
+          return envelope(provider, "unknown", provider .. "_catalog_output_malformed")
+        end
+      end
+      if provider == "chest" and (row.unlock_item ~= 0 or row.is_seal ~= false
+          or row.fake_unlock_item ~= 0 or row.quest_override ~= false) then
+        return envelope(provider, "unknown", "chest_access_domain_unmodeled")
+      end
+      local identity = uid .. ":" .. tostring(index)
+      local gate_key = provider .. ":" .. identity
+      local eligible = true
+      if row.gate ~= nil then
+        local gate = observation.gate_results[gate_key]
+        if type(gate) ~= "boolean" then
+          return envelope(provider, "unknown", provider .. "_gate_state_unreadable")
+        end
+        eligible = gate
+      end
+      if observation.never[identity] or observation.dead[identity]
+          or observation.blacklist[uid] or observation.disabled_tables[table_id] then
+        eligible = false
+      end
+      if row.layer == 2 then
+        local request = observation.requested_tables[table_id]
+        if request == nil then
+          eligible = false
+        elseif type(request) ~= "table" or type(request.active) ~= "boolean"
+            or type(request.failed) ~= "boolean" or type(request.finished) ~= "boolean"
+            or type(request.uids) ~= "table" then
+          return envelope(provider, "unknown", provider .. "_subquest_request_unreadable")
+        elseif request.failed or not request.active then
+          eligible = false
+        elseif not request.finished then
+          return envelope(provider, "unknown", provider .. "_subquest_request_pending")
+        elseif request.uids[identity] ~= true then
+          eligible = false
+        end
+      end
+
+      local persisted = observation.persisted[identity]
+      if persisted ~= nil then
+        if type(persisted) ~= "table" or persisted.family ~= provider then
+          return envelope(provider, "unknown", provider .. "_persisted_state_unreadable")
+        elseif provider == "placed" then
+          if not integer(persisted.freebit, 0) then
+            return envelope(provider, "unknown", "placed_persisted_state_unreadable")
+          end
+          if persisted.freebit & 3 ~= 0 then eligible = false end
+        else
+          if type(persisted.pick) ~= "boolean" or type(persisted.keep) ~= "boolean"
+              or type(persisted.unlock) ~= "boolean"
+              or (persisted.seal ~= nil and type(persisted.seal) ~= "boolean") then
+            return envelope(provider, "unknown", "chest_persisted_state_unreadable")
+          end
+          if persisted.pick or persisted.seal == true then eligible = false end
+        end
+      end
+
+      local loaded = observation.loaded[identity]
+      if loaded ~= nil then
+        if type(loaded) ~= "table" or loaded.family ~= provider
+            or guid(loaded.table_id) ~= table_id
+            or type(loaded.generated) ~= "boolean" or type(loaded.disabled) ~= "boolean" then
+          return envelope(provider, "unknown", provider .. "_loaded_identity_unreadable")
+        elseif not loaded.generated or loaded.disabled then
+          eligible = false
+        elseif provider == "placed" then
+          if not integer(loaded.freebit, 0) or type(loaded.broken) ~= "boolean"
+              or type(loaded.used) ~= "boolean" then
+            return envelope(provider, "unknown", "placed_loaded_state_unreadable")
+          elseif persisted ~= nil and loaded.freebit ~= persisted.freebit then
+            return envelope(provider, "unknown", "placed_loaded_state_inconsistent")
+          elseif loaded.freebit & 3 ~= 0 or loaded.broken or loaded.used then
+            eligible = false
+          end
+        else
+          if type(loaded.pick) ~= "boolean" or type(loaded.keep) ~= "boolean"
+              or type(loaded.unlock) ~= "boolean" or type(loaded.opened) ~= "boolean"
+              or type(loaded.unlock_api) ~= "boolean" or type(loaded.pawn_restrict) ~= "boolean"
+              or loaded.unlock_item ~= 0 or loaded.fake_unlock_item ~= 0
+              or (loaded.seal ~= nil and type(loaded.seal) ~= "boolean") then
+            return envelope(provider, "unknown", "chest_loaded_state_unreadable")
+          elseif loaded.opened ~= loaded.pick or loaded.unlock_api ~= loaded.unlock
+              or (persisted ~= nil and (loaded.pick ~= persisted.pick
+                or loaded.keep ~= persisted.keep or loaded.unlock ~= persisted.unlock
+                or (persisted.seal ~= nil and loaded.seal ~= persisted.seal))) then
+            return envelope(provider, "unknown", "chest_loaded_state_inconsistent")
+          elseif loaded.pick or loaded.seal == true then
+            eligible = false
+          end
+        end
+      end
+      if eligible and persisted == nil and loaded == nil then
+        return envelope(provider, "unknown", provider .. "_current_state_unproven")
+      end
+      if eligible then
+        candidates[#candidates + 1] = {
+          source_id = { "source", provider, uid, index },
+          provider = provider,
+          target = { kind = provider, uid = uid, index = index, pos = copy(pos) },
+          outputs = copy(outputs),
+          capacity_pool_id = { "capacity", provider, uid, index },
+          capacity_kind = "finite", available_acquisitions = 1,
+          certainty = "guaranteed", eligibility = "eligible", generation = generation,
+          evidence = { uid = uid, index = index, table_id = table_id, layer = row.layer,
+            persisted = persisted ~= nil, loaded = loaded ~= nil },
+        }
+      end
+    end
+    return envelope(provider, "ok", nil, candidates)
+  end
+  return { classify("placed", catalog.placements), classify("chest", catalog.chests) }
+end
+
+-- Bounded atomic scan of TalkEventManager's merged catalog.  Every matching
+-- ItemControlSegmentNode is retained with the complete event node/edge graph,
+-- but no managed object escapes this function.
+A.objective_provider_catalog_cache = {}
+function A.invalidate_objective_provider_catalogs()
+  A.objective_provider_catalog_cache = {}
+end
+
+function A.read_objective_talk_grant_observation(wanted)
+  local out = { complete = false, wanted = {}, events = {} }
+  local wanted_set = {}
+  for item_id, enabled in pairs(type(wanted) == "table" and wanted or {}) do
+    if enabled and type(item_id) == "number" and item_id == math.floor(item_id)
+        and item_id > 0 then
+      wanted_set[item_id] = true; out.wanted[#out.wanted + 1] = item_id
+    end
+  end
+  table.sort(out.wanted)
+  if #out.wanted == 0 then out.complete = true; return out end
+  local function fail(reason) out.reason, out.events = reason, {}; return out end
+  local function call(object, method, ...)
+    if object == nil then return false, nil end
+    return pcall(function(...) return object:call(method, ...) end, ...)
+  end
+  local function type_name(object)
+    local ok, name = pcall(function()
+      return object:get_type_definition():get_full_name()
+    end)
+    return ok and type(name) == "string" and name or nil
+  end
+  local function readable_boolean(ok, value)
+    if ok and type(value) == "boolean" then return value end
+    return nil
+  end
+  local function bounded_list(value, cap, prefix)
+    local array_ok, elements = pcall(function() return value:get_elements() end)
+    if array_ok and type(elements) == "table" then
+      local keys = {}
+      for key, row in pairs(elements) do
+        if type(key) ~= "number" or key ~= math.floor(key) or row == nil then
+          return nil, prefix .. "_unreadable"
+        end
+        keys[#keys + 1] = key
+      end
+      if #keys > cap then return nil, prefix .. "_truncated" end
+      table.sort(keys)
+      local rows = {}
+      for index, key in ipairs(keys) do
+        if key ~= index then return nil, prefix .. "_unreadable" end
+        rows[#rows + 1] = elements[key]
+      end
+      return rows
+    end
+    local ok, count = call(value, "get_Count")
+    count = ok and int_value(count) or nil
+    if type(count) ~= "number" or count < 0 or count ~= math.floor(count) then
+      return nil, prefix .. "_unreadable"
+    elseif count > cap then return nil, prefix .. "_truncated" end
+    local rows = {}
+    for index = 0, count - 1 do
+      local got, row = call(value, "get_Item", index)
+      if not got or row == nil then return nil, prefix .. "_unreadable" end
+      rows[#rows + 1] = row
+    end
+    return rows
+  end
+  local function bounded_entries(value, cap, prefix)
+    local ok, expected = call(value, "get_Count")
+    expected = ok and int_value(expected) or nil
+    local used, free = int_value(safe_field(value, "_count")),
+      int_value(safe_field(value, "_freeCount"))
+    local array, elements = safe_field(value, "_entries"), nil
+    local copied = pcall(function() elements = array:get_elements() end)
+    if type(expected) ~= "number" or expected < 0 or expected ~= math.floor(expected)
+        or type(used) ~= "number" or used < 0 or used ~= math.floor(used)
+        or type(free) ~= "number" or free < 0 or free ~= math.floor(free)
+        or used > cap or not copied or type(elements) ~= "table" or used > #elements then
+      return nil, used ~= nil and used > cap and prefix .. "_truncated"
+        or prefix .. "_unreadable"
+    end
+    local rows, occupied = {}, 0
+    for index = 1, used do
+      local entry = elements[index]
+      local next_index = safe_field(entry, "Next")
+      if next_index == nil then next_index = safe_field(entry, "next") end
+      if type(next_index) ~= "number" then return nil, prefix .. "_unreadable" end
+      if next_index >= -1 then
+        occupied = occupied + 1
+        local key = safe_field(entry, "Key")
+        if key == nil then key = safe_field(entry, "key") end
+        local value = safe_field(entry, "Value")
+        if value == nil then value = safe_field(entry, "value") end
+        rows[#rows + 1] = { key = key, value = value }
+      end
+    end
+    if occupied ~= expected or occupied + free ~= used then
+      return nil, prefix .. "_unreadable"
+    end
+    return rows
+  end
+  local function copy(value)
+    if type(value) ~= "table" then return value end
+    local result = {}
+    for key, child in pairs(value) do result[key] = copy(child) end
+    return result
+  end
+  local manager = sdk.get_managed_singleton("app.TalkEventManager")
+  local owner = manager ~= nil and tostring(manager) or nil
+  local cached = A.objective_provider_catalog_cache.talk
+  if cached == nil or cached.owner ~= owner then
+    local catalog = safe_field(safe_field(manager, "_ResourceCatalog"),
+      "<MergedCatalog>k__BackingField")
+    local entries, reason = bounded_entries(catalog, 8192, "talk_grant_catalog")
+    if entries == nil then return fail(reason) end
+    local static_events = {}
+    for _, entry in ipairs(entries) do
+      local event_id = int_value(entry.key)
+      local data = safe_field(entry.value, "_Item")
+      if type(event_id) ~= "number" or event_id <= 0 or event_id ~= math.floor(event_id)
+          or data == nil then return fail("talk_grant_event_data_unreadable") end
+      local native_nodes, node_reason = bounded_list(safe_field(data, "_SegmentNodes"),
+        1024, "talk_grant_nodes")
+      if native_nodes == nil then return fail(node_reason) end
+      local nodes, has_grant = {}, false
+      for node_index, native_node in ipairs(native_nodes) do
+        local kind = type_name(native_node)
+        if kind == nil then return fail("talk_grant_node_type_unreadable") end
+        local node_id = safe_field(native_node, "_NodeId")
+        if type(node_id) ~= "string" and type(node_id) ~= "number" then node_id = nil end
+        local node_name_hash = int_value(safe_field(native_node, "_NodeNameHash"))
+        if node_id == nil and type(node_name_hash) ~= "number" then
+          return fail("talk_grant_node_identity_unreadable")
+        end
+        local node = { index = node_index - 1, kind = kind,
+          node_id = node_id, node_name_hash = node_name_hash,
+          edges = {}, grants = {} }
+        local raw_edges = safe_field(native_node, "_NextNodesCandidates")
+        local native_edges = {}
+        if raw_edges ~= nil then
+          native_edges, reason = bounded_list(raw_edges, 128, "talk_grant_edges")
+          if native_edges == nil then return fail(reason) end
+        end
+        for edge_index, native_edge in ipairs(native_edges) do
+          local next_node_id = safe_field(native_edge, "_NextNodeId")
+          if type(next_node_id) ~= "string" and type(next_node_id) ~= "number" then
+            next_node_id = nil
+          end
+          local next_node_name_hash = int_value(safe_field(native_edge, "_NextNodeNameHash"))
+          if next_node_id == nil and type(next_node_name_hash) ~= "number" then
+            return fail("talk_grant_edge_identity_unreadable")
+          end
+          local raw_conditions = safe_field(native_edge, "_Conditions")
+          local condition_count = 0
+          if raw_conditions ~= nil then
+            local conditions, condition_reason = bounded_list(
+              safe_field(raw_conditions, "_ConditionList"), 128,
+              "talk_grant_edge_conditions")
+            if conditions == nil then return fail(condition_reason) end
+            condition_count = #conditions
+          end
+          node.edges[#node.edges + 1] = { index = edge_index - 1,
+            next_node_id = next_node_id, next_node_name_hash = next_node_name_hash,
+            condition_count = condition_count }
+        end
+        if kind == "app.ItemControlSegmentNode" then
+          local change = int_value(safe_field(native_node, "_ChangeType"))
+          if type(change) ~= "number" then return fail("talk_grant_change_type_unreadable") end
+          node.change_type = change
+          local native_items, item_reason = bounded_list(safe_field(native_node, "_Items"),
+            128, "talk_grant_items")
+          if native_items == nil then return fail(item_reason) end
+          for item_index, native_item in ipairs(native_items) do
+            local item_id, count = int_value(safe_field(native_item, "_ItemId")),
+              int_value(safe_field(native_item, "_Num"))
+            if type(item_id) ~= "number" or item_id <= 0 or item_id ~= math.floor(item_id)
+                or type(count) ~= "number" or count <= 0 or count ~= math.floor(count) then
+              return fail("talk_grant_item_unreadable")
+            end
+            if change == 0 then
+              has_grant = true
+              node.grants[#node.grants + 1] = { item_index = item_index - 1,
+                item_id = item_id, count = count }
+            end
+          end
+        end
+        nodes[#nodes + 1] = node
+      end
+      if has_grant then static_events[#static_events + 1] = {
+        event_id = event_id, nodes = nodes } end
+    end
+    cached = { owner = owner, events = static_events }
+    A.objective_provider_catalog_cache.talk = cached
+  end
+  local playing_rows = bounded_list(safe_field(manager, "_PlayingEventIDList"),
+    256, "talk_grant_playing_events")
+  local playing_set = nil
+  if playing_rows ~= nil then
+    playing_set = {}
+    for _, value in ipairs(playing_rows) do
+      local playing_id = int_value(value)
+      if type(playing_id) ~= "number" or playing_id <= 0
+          or playing_id ~= math.floor(playing_id) then
+        playing_set = nil; break
+      end
+      playing_set[playing_id] = true
+    end
+  end
+  local events = {}
+  for _, event in ipairs(cached.events) do
+    local relevant = false
+    for _, node in ipairs(event.nodes) do
+      for _, grant in ipairs(node.grants) do
+        if wanted_set[grant.item_id] then relevant = true; break end
+      end
+      if relevant then break end
+    end
+    if relevant then
+      local event_id = event.event_id
+      local speaker_ok, raw_speaker_cid = call(
+        manager, "getTalkEventInitialSpeaker", event_id)
+      local speaker_cid = speaker_ok and int_value(raw_speaker_cid) or nil
+      if type(speaker_cid) ~= "number" or speaker_cid <= 0
+          or speaker_cid ~= math.floor(speaker_cid) then speaker_cid = nil end
+      local playable_ok, playable = call(manager, "isEventPlayable", event_id)
+      local history_ok, history = call(manager, "getHistory", event_id)
+      local interaction_ok, interaction_disabled = false, nil
+      if speaker_cid ~= nil then
+        interaction_ok, interaction_disabled = call(
+          manager, "isTalkEventInteractDisabled", speaker_cid)
+      end
+      local npc_manager = sdk.get_managed_singleton("app.NPCManager")
+      local holder = speaker_cid ~= nil and safe_call(
+        safe_field(npc_manager, "NPCHolderDic"), "get_Item", speaker_cid) or nil
+      local character = holder ~= nil and (safe_call(holder, "get_chara")
+        or safe_field(holder, "_chara") or safe_field(holder, "Chara")) or nil
+      local px, py, pz
+      if character ~= nil then px, py, pz = extract_position(character) end
+      local playing = nil
+      if playing_set ~= nil then playing = playing_set[event_id] == true end
+      local interaction_enabled = nil
+      if interaction_ok and type(interaction_disabled) == "boolean" then
+        interaction_enabled = not interaction_disabled
+      end
+      events[#events + 1] = { event_id = event_id, nodes = copy(event.nodes),
+        playable = readable_boolean(playable_ok, playable),
+        playing_readable = playing_set ~= nil,
+        playing = playing,
+        speaker_cid_readable = speaker_cid ~= nil,
+        speaker_cid = speaker_cid,
+        speaker_present = character ~= nil,
+        speaker_type = character ~= nil and type_name(character) or nil,
+        speaker_position = px ~= nil and { x = px, y = py, z = pz } or nil,
+        interaction_readable = interaction_ok
+          and type(interaction_disabled) == "boolean",
+        interaction_enabled = interaction_enabled,
+        history_readable = history_ok, history_present = history_ok and history ~= nil,
+        history_played = history ~= nil and safe_field(history, "Played") or nil,
+        history_result = history ~= nil and int_value(safe_field(history, "ResultNum")) or nil }
+    end
+  end
+  out.events, out.complete = events, true
+  return out
+end
+
+-- Bounded atomic scan of the exact typed forgery service, item transforms and
+-- raw order getters.  Mapping enablement and order semantics remain explicit
+-- missing gates because their guarded live controls have not been proved.
+function A.read_objective_forgery_observation(wanted)
+  local out = { complete = false, wanted = {}, services = {}, mappings = {}, order = {} }
+  local wanted_set = {}
+  for item_id, enabled in pairs(type(wanted) == "table" and wanted or {}) do
+    if enabled and type(item_id) == "number" and item_id == math.floor(item_id)
+        and item_id > 0 then
+      wanted_set[item_id] = true; out.wanted[#out.wanted + 1] = item_id
+    end
+  end
+  table.sort(out.wanted)
+  if #out.wanted == 0 then out.complete = true; return out end
+  local function fail(reason)
+    out.reason, out.services, out.mappings, out.order = reason, {}, {}, {}
+    return out
+  end
+  local function call(object, method, ...)
+    if object == nil then return false, nil end
+    return pcall(function(...) return object:call(method, ...) end, ...)
+  end
+  local function type_name(object)
+    local ok, name = pcall(function()
+      return object:get_type_definition():get_full_name()
+    end)
+    return ok and type(name) == "string" and name or nil
+  end
+  local function readable_boolean(ok, value)
+    if ok and type(value) == "boolean" then return value end
+    return nil
+  end
+  local function bounded_list(value, cap, prefix)
+    local array_ok, elements = pcall(function() return value:get_elements() end)
+    if array_ok and type(elements) == "table" then
+      local keys = {}
+      for key, row in pairs(elements) do
+        if type(key) ~= "number" or key ~= math.floor(key) or row == nil then
+          return nil, prefix .. "_unreadable"
+        end
+        keys[#keys + 1] = key
+      end
+      if #keys > cap then return nil, prefix .. "_truncated" end
+      table.sort(keys)
+      local rows = {}
+      for index, key in ipairs(keys) do
+        if key ~= index then return nil, prefix .. "_unreadable" end
+        rows[#rows + 1] = elements[key]
+      end
+      return rows
+    end
+    local ok, count = call(value, "get_Count")
+    count = ok and int_value(count) or nil
+    if type(count) ~= "number" or count < 0 or count ~= math.floor(count) then
+      return nil, prefix .. "_unreadable"
+    elseif count > cap then return nil, prefix .. "_truncated" end
+    local rows = {}
+    for index = 0, count - 1 do
+      local got, row = call(value, "get_Item", index)
+      if not got or row == nil then return nil, prefix .. "_unreadable" end
+      rows[#rows + 1] = row
+    end
+    return rows
+  end
+  local function bounded_entries(value, cap, prefix)
+    local ok, expected = call(value, "get_Count")
+    expected = ok and int_value(expected) or nil
+    local used, free = int_value(safe_field(value, "_count")),
+      int_value(safe_field(value, "_freeCount"))
+    local array, elements = safe_field(value, "_entries"), nil
+    local copied = pcall(function() elements = array:get_elements() end)
+    if type(expected) ~= "number" or expected < 0 or expected ~= math.floor(expected)
+        or type(used) ~= "number" or used < 0 or used ~= math.floor(used)
+        or type(free) ~= "number" or free < 0 or free ~= math.floor(free)
+        or used > cap or not copied or type(elements) ~= "table" or used > #elements then
+      return nil, used ~= nil and used > cap and prefix .. "_truncated"
+        or prefix .. "_unreadable"
+    end
+    local rows, occupied = {}, 0
+    for index = 1, used do
+      local entry = elements[index]
+      local next_index = safe_field(entry, "Next")
+      if next_index == nil then next_index = safe_field(entry, "next") end
+      if type(next_index) ~= "number" then return nil, prefix .. "_unreadable" end
+      if next_index >= -1 then
+        occupied = occupied + 1
+        local key = safe_field(entry, "Key")
+        if key == nil then key = safe_field(entry, "key") end
+        local value = safe_field(entry, "Value")
+        if value == nil then value = safe_field(entry, "value") end
+        rows[#rows + 1] = { key = key, value = value }
+      end
+    end
+    if occupied ~= expected or occupied + free ~= used then
+      return nil, prefix .. "_unreadable"
+    end
+    return rows
+  end
+  local talk_manager = sdk.get_managed_singleton("app.TalkEventManager")
+  local item_manager = sdk.get_managed_singleton("app.ItemManager")
+  local talk_owner = talk_manager ~= nil and tostring(talk_manager) or nil
+  local item_owner = item_manager ~= nil and tostring(item_manager) or nil
+  local cached = A.objective_provider_catalog_cache.forgery
+  if cached == nil or cached.talk_owner ~= talk_owner or cached.item_owner ~= item_owner then
+    local shop_entries, reason = bounded_entries(
+      safe_field(talk_manager, "_ShopTalkEventDataCatalog"), 256,
+      "forgery_service_catalog")
+    if shop_entries == nil then return fail(reason) end
+    local static_services = {}
+    for _, entry in ipairs(shop_entries) do
+      local job, data = int_value(entry.key), entry.value
+      local talk_event_id = int_value(safe_field(data, "_TalkEventID"))
+      if type(job) ~= "number" or job < 0 or job ~= math.floor(job)
+          or type(talk_event_id) ~= "number" or talk_event_id <= 0
+          or talk_event_id ~= math.floor(talk_event_id) then
+        return fail("forgery_service_identity_unreadable")
+      end
+      local rows, row_reason = bounded_list(safe_field(data, "_CharacterShopData"),
+        64, "forgery_service_rows")
+      if rows == nil then return fail(row_reason) end
+      for service_index, service in ipairs(rows) do
+        local service_type = type_name(service)
+        if service_type == nil then return fail("forgery_service_type_unreadable") end
+        if service_type == "app.NpcShopForgeryParam" then
+          local chara_id, shop_id = int_value(safe_field(service, "_CharaID")),
+            int_value(safe_field(service, "_ShopID"))
+          if type(chara_id) ~= "number" or chara_id <= 0
+              or chara_id ~= math.floor(chara_id)
+              or type(shop_id) ~= "number" or shop_id <= 0
+              or shop_id ~= math.floor(shop_id) then
+            return fail("forgery_service_identity_unreadable")
+          end
+          local conditions, condition_reason = {}, nil
+          local raw_conditions = safe_field(service, "_Conditions")
+          if raw_conditions ~= nil then
+            local native_conditions
+            native_conditions, condition_reason = bounded_list(raw_conditions, 64,
+              "forgery_service_conditions")
+            if native_conditions == nil then return fail(condition_reason) end
+            for _, selector in ipairs(native_conditions) do
+              local process = safe_field(selector, "_Process") or safe_field(selector, "_Class")
+              conditions[#conditions + 1] = type_name(process) or "unknown"
+            end
+          end
+          static_services[#static_services + 1] = { job = job,
+            talk_event_id = talk_event_id, service_index = service_index - 1,
+            chara_id = chara_id, shop_id = shop_id, service_type = service_type,
+            conditions = conditions, condition_truth_readable = false,
+            condition_reason = "forgery_service_condition_evaluation_unproved" }
+        end
+      end
+    end
+    local item_entries
+    item_entries, reason = bounded_entries(safe_field(item_manager, "_ItemDataDict"),
+      8192, "forgery_mapping_catalog")
+    if item_entries == nil then return fail(reason) end
+    local static_mappings = {}
+    for _, entry in ipairs(item_entries) do
+      local item = entry.value
+      local output_item_id = int_value(safe_field(item, "_FakeItemId"))
+      if type(output_item_id) == "number" and output_item_id > 0 then
+        local input_item_id, price = int_value(safe_field(item, "_Id")),
+          int_value(safe_field(item, "_FakePrice"))
+        if type(input_item_id) ~= "number" or input_item_id <= 0
+            or input_item_id ~= math.floor(input_item_id)
+            or output_item_id ~= math.floor(output_item_id)
+            or type(price) ~= "number" or price <= 0 or price ~= math.floor(price)
+            or type_name(item) ~= "app.ItemDataParam" then
+          return fail("forgery_mapping_unreadable")
+        end
+        local enabled_ok, enabled = call(item, "get_IsEnableFake")
+        local enabled_readable = enabled_ok and type(enabled) == "boolean"
+        static_mappings[#static_mappings + 1] = { input_item_id = input_item_id,
+          output_item_id = output_item_id, price = price,
+          enabled_readable = enabled_readable,
+          enabled = readable_boolean(enabled_ok, enabled),
+          enabled_reason = enabled_readable and nil
+            or "forgery_mapping_enablement_read_failed" }
+      end
+    end
+    table.sort(static_mappings, function(left, right)
+      if left.output_item_id ~= right.output_item_id then
+        return left.output_item_id < right.output_item_id
+      end
+      return left.input_item_id < right.input_item_id
+    end)
+    cached = { talk_owner = talk_owner, item_owner = item_owner,
+      services = static_services, mappings = static_mappings }
+    A.objective_provider_catalog_cache.forgery = cached
+  end
+  local mappings = {}
+  for _, mapping in ipairs(cached.mappings) do
+    if wanted_set[mapping.output_item_id] then
+      local live_mapping = {}
+      for key, value in pairs(mapping) do live_mapping[key] = value end
+      mappings[#mappings + 1] = live_mapping
+    end
+  end
+  local services = {}
+  if #mappings > 0 then
+    local npc_manager = sdk.get_managed_singleton("app.NPCManager")
+    for _, static_service in ipairs(cached.services) do
+      local talk_event_id, chara_id = static_service.talk_event_id,
+        static_service.chara_id
+      local speaker_ok, raw_speaker_cid = call(
+        talk_manager, "getTalkEventInitialSpeaker", talk_event_id)
+      local playable_ok, playable = call(talk_manager, "isEventPlayable", talk_event_id)
+      local speaker_cid = speaker_ok and int_value(raw_speaker_cid) or nil
+      local speaker_cid_readable = type(speaker_cid) == "number"
+        and speaker_cid > 0 and speaker_cid == math.floor(speaker_cid)
+      local speaker_matches_service = speaker_cid_readable
+        and speaker_cid == chara_id or false
+      local holder = speaker_cid_readable and safe_call(
+        safe_field(npc_manager, "NPCHolderDic"), "get_Item", speaker_cid) or nil
+      local speaker = holder ~= nil and (safe_call(holder, "get_chara")
+        or safe_field(holder, "_chara") or safe_field(holder, "Chara")) or nil
+      local interact_ok, interactable = false, nil
+      if speaker ~= nil then
+        interact_ok, interactable = call(talk_manager, "canTalkEventInteract", speaker)
+      end
+      local character_data = speaker_matches_service
+        and safe_call(npc_manager, "getNPCCharacterData", chara_id) or nil
+      local blackboard = speaker_matches_service
+        and safe_call(speaker, "get_AIBlackBoardController") or nil
+      local available_ok, available = false, nil
+      if character_data ~= nil and blackboard ~= nil then
+        available_ok, available = call(talk_manager,
+          "isShopTalkEventAvailableForChara", character_data, blackboard)
+      end
+      local disabled_ok, disabled = call(talk_manager,
+        "isTalkEventInteractDisabled", chara_id)
+      local px, py, pz
+      if speaker ~= nil then px, py, pz = extract_position(speaker) end
+      local service = {}
+      for key, value in pairs(static_service) do service[key] = value end
+      service.playable = readable_boolean(playable_ok, playable)
+      service.speaker_present = speaker ~= nil
+      service.speaker_cid_readable = speaker_cid_readable
+      service.speaker_cid = speaker_cid_readable and speaker_cid or nil
+      service.speaker_matches_service = speaker_matches_service
+      service.character_data_readable = character_data ~= nil
+      service.blackboard_readable = blackboard ~= nil
+      service.availability_readable = available_ok and type(available) == "boolean"
+      service.available = readable_boolean(available_ok, available)
+      service.condition_truth_readable = service.availability_readable
+      service.condition_truth = service.available
+      if not speaker_matches_service then
+        service.join_reason = "forgery_service_speaker_join_unproven"
+      elseif not service.availability_readable then
+        service.join_reason = "forgery_service_availability_unproven"
+      else
+        service.join_reason = nil
+      end
+      service.speaker_position = px ~= nil and { x = px, y = py, z = pz } or nil
+      service.interactable = readable_boolean(interact_ok, interactable)
+      service.interaction_disabled = readable_boolean(disabled_ok, disabled)
+      services[#services + 1] = service
+    end
+  end
+  if #mappings > 0 then
+    local input_ids = {}
+    for _, mapping in ipairs(mappings) do input_ids[mapping.input_item_id] = true end
+    local held, _, held_complete = items.read_held(input_ids)
+    for _, mapping in ipairs(mappings) do
+      mapping.held_readable = held ~= nil and held_complete == true
+      mapping.held_count = mapping.held_readable and (held[mapping.input_item_id] or 0) or nil
+      mapping.held_reason = mapping.held_readable and nil
+        or "forgery_input_inventory_read_incomplete"
+      mapping.price_readable = false
+      mapping.price_reason = "forgery_currency_reader_unproved"
+    end
+  end
+  local order = {}
+  if #mappings > 0 then
+    local kept_ok, kept = call(item_manager, "get_FakeShopKeepedItem")
+    local time_ok, completion_time = call(item_manager, "get_FakeShopCompleteTime")
+    local kept_state_ok, kept_active = call(item_manager, "isFakeShopKeeped")
+    local completed_ok, completed = call(item_manager, "isFakeShopCompleted")
+    local remaining_ok, remaining = call(item_manager, "isFakeShopRemainingMinute")
+    local kept_item_id, kept_item_count = int_value(safe_field(kept, "_ItemId")),
+      int_value(safe_field(kept, "_Num"))
+    order = { kept_readable = kept_ok and kept ~= nil
+        and type(kept_item_id) == "number" and kept_item_id >= 0
+        and kept_item_id == math.floor(kept_item_id)
+        and type(kept_item_count) == "number" and kept_item_count >= 0
+        and kept_item_count == math.floor(kept_item_count),
+      kept_item_id = kept_item_id, kept_item_count = kept_item_count,
+      completion_time_readable = time_ok and type(completion_time) == "number"
+        and completion_time >= 0 and completion_time == math.floor(completion_time),
+      completion_time = completion_time,
+      kept_state_readable = kept_state_ok and type(kept_active) == "boolean",
+      kept_active = readable_boolean(kept_state_ok, kept_active),
+      completed_readable = completed_ok and type(completed) == "boolean",
+      completed = completed,
+      remaining_minutes_readable = remaining_ok and type(remaining) == "number"
+        and remaining >= 0 and remaining == math.floor(remaining),
+      remaining_minutes = remaining }
+  end
+  out.services, out.mappings, out.order, out.complete = services, mappings, order, true
+  return out
+end
+
+-- Production provider envelopes over atomic native observations.  The
+-- scanners below retain exact typed catalog/graph evidence, while these
+-- classifiers keep publication closed at the first game-semantic gate that
+-- has not yet been verified with positive and negative controls.
+function A.objective_talk_grant_provider_snapshot(observation, generation)
+  local function finite_integer(value, minimum)
+    return type(value) == "number" and value == value and value > -math.huge
+      and value < math.huge and value == math.floor(value) and value >= minimum
+  end
+  local function dense(value)
+    if type(value) ~= "table" then return nil end
+    local n, count = #value, 0
+    for key in pairs(value) do
+      if not finite_integer(key, 1) or key > n then return nil end
+      count = count + 1
+    end
+    return count == n and value or nil
+  end
+  local function copy(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for key, child in pairs(value) do out[key] = copy(child) end
+    return out
+  end
+  local out = { provider = "talk_grant", generation = generation,
+    status = "unknown", complete = false, candidates = {}, diagnostics = {} }
+  if not finite_integer(generation, 1) then
+    out.reason = "talk_grant_generation_invalid"; return out
+  end
+  if type(observation) ~= "table" then
+    out.reason = "talk_grant_observation_unavailable"; return out
+  end
+  if observation.complete ~= true then
+    out.reason = type(observation.reason) == "string" and observation.reason
+      or "talk_grant_observation_incomplete"
+    return out
+  end
+  local wanted, events = dense(observation.wanted), dense(observation.events)
+  if wanted == nil or events == nil then
+    out.reason = "talk_grant_observation_malformed"; return out
+  end
+  local wanted_set = {}
+  for _, item_id in ipairs(wanted) do
+    if not finite_integer(item_id, 1) then
+      out.reason = "talk_grant_observation_malformed"; return out
+    end
+    wanted_set[item_id] = true
+  end
+  for _, event in ipairs(events) do
+    if type(event) ~= "table" or not finite_integer(event.event_id, 1)
+        or dense(event.nodes) == nil then
+      out.reason = "talk_grant_observation_malformed"; return out
+    end
+    for _, node in ipairs(event.nodes) do
+      if type(node) ~= "table" or not finite_integer(node.index, 0)
+          or type(node.kind) ~= "string" or dense(node.edges) == nil
+          or (node.grants ~= nil and dense(node.grants) == nil) then
+        out.reason = "talk_grant_observation_malformed"; return out
+      end
+      if node.node_id == nil and not finite_integer(node.node_name_hash, 0) then
+        out.reason = "talk_grant_observation_malformed"; return out
+      end
+      if node.node_id ~= nil and type(node.node_id) ~= "string"
+          and not finite_integer(node.node_id, 0) then
+        out.reason = "talk_grant_observation_malformed"; return out
+      end
+      for _, edge in ipairs(node.edges) do
+        if type(edge) ~= "table" or not finite_integer(edge.index, 0)
+            or not finite_integer(edge.condition_count, 0)
+            or (edge.next_node_id == nil
+              and not finite_integer(edge.next_node_name_hash, 0)) then
+          out.reason = "talk_grant_observation_malformed"; return out
+        end
+      end
+      for _, grant in ipairs(node.grants or {}) do
+        if type(grant) ~= "table" or not finite_integer(grant.item_index, 0)
+            or not finite_integer(grant.item_id, 1)
+            or not finite_integer(grant.count, 1) then
+          out.reason = "talk_grant_observation_malformed"; return out
+        end
+      end
+    end
+  end
+  if #wanted == 0 or #events == 0 then
+    out.status, out.complete, out.reason = "ok", true, nil
+    return out
+  end
+  local function node_identity(node)
+    if node.node_id ~= nil then return node.node_id end
+    return node.node_name_hash
+  end
+  local function ref_key(prefix, value)
+    if value == nil then return nil end
+    return prefix .. type(value) .. ":" .. tostring(value)
+  end
+  local function valid_position(value)
+    if type(value) ~= "table" then return false end
+    local x, y, z = value.x, value.y, value.z
+    local function finite_number(number)
+      return type(number) == "number" and number == number
+        and number > -math.huge and number < math.huge
+    end
+    return finite_number(x) and finite_number(y) and finite_number(z)
+      and not (x == 0 and y == 0 and z == 0)
+  end
+  local function event_gate(event)
+    if type(event.playable) ~= "boolean" then
+      return "unknown", "talk_grant_playability_unreadable"
+    elseif not event.playable then
+      return "ineligible", "talk_grant_event_unavailable"
+    elseif type(event.playing) ~= "boolean" then
+      return "unknown", "talk_grant_playing_state_unreadable"
+    elseif event.playing then
+      return "ineligible", "talk_grant_event_playing"
+    elseif not finite_integer(event.speaker_cid, 1) then
+      return "unknown", "talk_grant_speaker_unreadable"
+    elseif not valid_position(event.speaker_position) then
+      return "unknown", "talk_grant_speaker_position_unreadable"
+    elseif event.interaction_readable ~= true
+        or type(event.interaction_enabled) ~= "boolean" then
+      return "unknown", "talk_grant_interaction_unreadable"
+    elseif not event.interaction_enabled then
+      return "ineligible", "talk_grant_interaction_disabled"
+    elseif event.history_readable ~= true then
+      return "unknown", "talk_grant_history_unreadable"
+    elseif type(event.history_present) ~= "boolean" then
+      return "unknown", "talk_grant_history_state_unreadable"
+    elseif event.history_present and type(event.history_played) ~= "boolean" then
+      return "unknown", "talk_grant_history_state_unreadable"
+    elseif event.history_present and event.history_played then
+      return "ineligible", "talk_grant_history_played"
+    -- ResultNum is branch evidence, not a success/cancel enum: the live catalog
+    -- has currently playable, unplayed records at -1, 0 and 60.  Require the
+    -- value to be readable without inventing meanings for those values.
+    elseif event.history_present and (type(event.history_result) ~= "number"
+        or event.history_result ~= event.history_result
+        or event.history_result <= -math.huge or event.history_result >= math.huge
+        or event.history_result ~= math.floor(event.history_result)) then
+      return "unknown", "talk_grant_history_result_unreadable"
+    end
+    return "eligible", nil
+  end
+  for _, event in ipairs(events) do
+    local by_id, by_hash, reach, reach_reason = {}, {}, {}, {}
+    local transparent_kind = { ["app.RootSegmentNode"] = true,
+      ["app.TalkSegmentNode"] = true }
+    local graph_reason = nil
+    for _, node in ipairs(event.nodes) do
+      local id_key = ref_key("id:", node.node_id)
+      local hash_key = ref_key("hash:", node.node_name_hash)
+      if id_key ~= nil then
+        by_id[id_key] = by_id[id_key] == nil and node or false
+      end
+      if hash_key ~= nil then
+        by_hash[hash_key] = by_hash[hash_key] == nil and node or false
+      end
+      if node.kind == "app.RootSegmentNode" then reach[node] = 2 end
+    end
+    if next(reach) == nil then graph_reason = "talk_grant_root_unreadable" end
+    local changed = true
+    for _ = 1, #event.nodes do
+      if not changed then break end
+      changed = false
+      for _, node in ipairs(event.nodes) do
+        local state = reach[node]
+        if state ~= nil then
+          for _, edge in ipairs(node.edges) do
+            local id_target, hash_target = nil, nil
+            if edge.next_node_id ~= nil then
+              id_target = by_id[ref_key("id:", edge.next_node_id)]
+            end
+            if edge.next_node_name_hash ~= nil then
+              hash_target = by_hash[ref_key("hash:", edge.next_node_name_hash)]
+            end
+            local both_references = edge.next_node_id ~= nil
+              and edge.next_node_name_hash ~= nil
+            local identity_conflict = id_target == false or hash_target == false
+              or (both_references and (id_target == nil or hash_target == nil
+                or id_target ~= hash_target))
+            local target = not identity_conflict and (id_target or hash_target) or nil
+            if identity_conflict then
+              graph_reason = "talk_grant_node_identity_conflict"
+            elseif target == nil then
+              graph_reason = "talk_grant_graph_target_unresolved"
+            else
+              local next_state, next_reason = state, reach_reason[node]
+              if state == 2 and edge.condition_count > 0 then
+                next_state, next_reason = 1, "talk_grant_branch_condition_unmodeled"
+              elseif state == 2 and not transparent_kind[node.kind] then
+                next_state, next_reason = 1, "talk_grant_intermediate_node_unmodeled"
+              end
+              if reach[target] == nil or next_state > reach[target] then
+                reach[target], reach_reason[target] = next_state, next_reason
+                changed = true
+              end
+            end
+          end
+        end
+      end
+    end
+    local gate_eligibility, gate_reason = event_gate(event)
+    for _, node in ipairs(event.nodes) do
+      local outputs = {}
+      for _, grant in ipairs(node.grants or {}) do
+        if wanted_set[grant.item_id] then outputs[#outputs + 1] = copy(grant) end
+      end
+      if #outputs > 0 then
+        local eligibility, reason = gate_eligibility, gate_reason
+        local identity, identity_owner = node_identity(node), nil
+        if node.node_id ~= nil
+            and by_id[ref_key("id:", node.node_id)] == node then
+          identity_owner = node
+        elseif node.node_name_hash ~= nil
+            and by_hash[ref_key("hash:", node.node_name_hash)] == node then
+          identity, identity_owner = node.node_name_hash, node
+        end
+        if eligibility == "eligible" then
+          if identity_owner ~= node then
+            eligibility, reason = "unknown", "talk_grant_node_identity_conflict"
+          elseif reach[node] == 1 then
+            eligibility, reason = "unknown", reach_reason[node]
+              or "talk_grant_branch_condition_unmodeled"
+          elseif reach[node] ~= 2 then
+            eligibility, reason = "unknown",
+              graph_reason or "talk_grant_node_unreachable"
+          end
+        end
+        local diagnostic = { event_id = event.event_id, node_id = identity,
+          node_index = node.index, eligibility = eligibility, reason = reason,
+          outputs = copy(outputs), speaker_cid = event.speaker_cid,
+          history_present = event.history_present == true,
+          history_played = event.history_played,
+          history_result = event.history_result }
+        out.diagnostics[#out.diagnostics + 1] = diagnostic
+        if eligibility == "eligible" then
+          out.candidates[#out.candidates + 1] = {
+            source_id = { "source", "talk_grant", event.event_id, identity },
+            provider = "talk_grant",
+            target = { kind = "npc", cid = event.speaker_cid,
+              pos = copy(event.speaker_position) },
+            outputs = copy(outputs),
+            capacity_pool_id = { "capacity", "talk_grant", event.event_id, identity },
+            capacity_kind = "finite", available_acquisitions = 1,
+            certainty = "guaranteed", eligibility = "eligible",
+            generation = generation,
+            evidence = { event_id = event.event_id, node_index = node.index,
+              node_id = identity, history_present = event.history_present == true },
+          }
+        end
+      end
+    end
+  end
+  out.status, out.complete, out.reason = "ok", true, nil
+  return out
+end
+
+function A.objective_forgery_provider_snapshot(observation, generation)
+  local function finite_integer(value, minimum)
+    return type(value) == "number" and value == value and value > -math.huge
+      and value < math.huge and value == math.floor(value) and value >= minimum
+  end
+  local function dense(value)
+    if type(value) ~= "table" then return nil end
+    local n, count = #value, 0
+    for key in pairs(value) do
+      if not finite_integer(key, 1) or key > n then return nil end
+      count = count + 1
+    end
+    return count == n and value or nil
+  end
+  local function copy(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for key, child in pairs(value) do out[key] = copy(child) end
+    return out
+  end
+  local out = { provider = "forgery", generation = generation,
+    status = "unknown", complete = false, candidates = {},
+    diagnostics = { services = {}, mappings = {}, order = {} } }
+  if not finite_integer(generation, 1) then
+    out.reason = "forgery_generation_invalid"; return out
+  end
+  if type(observation) ~= "table" then
+    out.reason = "forgery_observation_unavailable"; return out
+  end
+  out.diagnostics.services = copy(type(observation.services) == "table"
+    and observation.services or {})
+  out.diagnostics.mappings = copy(type(observation.mappings) == "table"
+    and observation.mappings or {})
+  out.diagnostics.order = copy(type(observation.order) == "table"
+    and observation.order or {})
+  if observation.complete ~= true then
+    out.reason = type(observation.reason) == "string" and observation.reason
+      or "forgery_observation_incomplete"
+    return out
+  end
+  local wanted, services, mappings = dense(observation.wanted),
+    dense(observation.services), dense(observation.mappings)
+  if wanted == nil or services == nil or mappings == nil
+      or type(observation.order) ~= "table" then
+    out.reason = "forgery_observation_malformed"; return out
+  end
+  for _, item_id in ipairs(wanted) do
+    if not finite_integer(item_id, 1) then
+      out.reason = "forgery_observation_malformed"; return out
+    end
+  end
+  for _, service in ipairs(services) do
+    if type(service) ~= "table" or service.service_type ~= "app.NpcShopForgeryParam"
+        or not finite_integer(service.talk_event_id, 1)
+        or not finite_integer(service.service_index, 0)
+        or not finite_integer(service.chara_id, 1)
+        or not finite_integer(service.shop_id, 1) then
+      out.reason = "forgery_observation_malformed"; return out
+    end
+  end
+  for _, mapping in ipairs(mappings) do
+    if type(mapping) ~= "table" or not finite_integer(mapping.input_item_id, 1)
+        or not finite_integer(mapping.output_item_id, 1)
+        or not finite_integer(mapping.price, 1)
+        or type(mapping.enabled_readable) ~= "boolean"
+        or (mapping.enabled_readable and type(mapping.enabled) ~= "boolean") then
+      out.reason = "forgery_observation_malformed"; return out
+    end
+  end
+  if #wanted == 0 or #mappings == 0 or #services == 0 then
+    out.status, out.complete, out.reason = "ok", true, nil
+    return out
+  end
+  local any_enabled = false
+  for _, mapping in ipairs(mappings) do
+    if not mapping.enabled_readable then
+      out.reason = "forgery_mapping_enablement_unproven"
+      out.missing_evidence = { "mapping_enablement", "service_speaker_join",
+        "service_availability",
+        "positioned_interactable_service", "held_input_acceptance",
+        "price_affordability", "busy_kept_completion_semantics" }
+      return out
+    end
+    if mapping.enabled then any_enabled = true end
+  end
+  if not any_enabled then
+    out.status, out.complete, out.reason = "ok", true, nil
+    return out
+  end
+  local any_available = false
+  for _, service in ipairs(services) do
+    if service.speaker_matches_service ~= true then
+      out.reason = "forgery_service_speaker_join_unproven"
+      out.missing_evidence = { "service_speaker_join", "service_availability",
+        "positioned_interactable_service", "held_input_acceptance",
+        "price_affordability", "busy_kept_completion_semantics" }
+      return out
+    elseif service.availability_readable ~= true then
+      out.reason = "forgery_service_availability_unproven"
+      out.missing_evidence = { "service_availability",
+        "positioned_interactable_service", "held_input_acceptance",
+        "price_affordability", "busy_kept_completion_semantics" }
+      return out
+    end
+    if service.available then any_available = true end
+  end
+  if not any_available then
+    out.status, out.complete, out.reason = "ok", true, nil
+    return out
+  end
+  out.reason = "forgery_positioned_interaction_semantics_unproven"
+  out.missing_evidence = { "positioned_interactable_service",
+    "held_input_acceptance", "price_affordability",
+    "busy_kept_completion_semantics" }
+  return out
+end
+
 function A.make()
   local a = {}
   local objective_task_state = { owner = nil, focus = nil, journal = nil,
     needs = nil, focus_epoch = 0, journal_generation = 0, need_generation = 0,
-    source_generation = 1 }
+    source_generation = 1, source_catalog = nil, source_observation = nil,
+    source_at = -math.huge, talk_generation = 1, talk_observation = nil,
+    talk_at = -math.huge, forgery_generation = 1, forgery_observation = nil,
+    forgery_at = -math.huge, reward_observation = nil }
   local LOC_KINDS = { "placed", "box", "drop" }   -- item_locations order
   a.overhead_block_reason = A.overhead_block_reason
   function a.acceptable_ids()
@@ -3624,6 +5327,111 @@ function A.make()
   a.refresh_items = items.refresh
   function a.invalidate_items() items.invalidate() end
   function a.item_needs() return ITEM_NEEDS end
+  -- Pure expression grouper used by the objective adapter scan. Kept beside
+  -- the legacy item API so callers can migrate without changing item_needs().
+  local function objective_copy(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for key, nested in pairs(value) do out[key] = objective_copy(nested) end
+    return out
+  end
+  local function objective_owner_matches(owner, record, task_index)
+    if type(owner) ~= "table" or owner.task_index ~= task_index
+        or owner.eligibility ~= "eligible" or owner.proof_kind ~= "condition" then
+      return false
+    end
+    local options = type(record.options) == "table" and record.options or {}
+    if #options ~= 1 then return false end
+    local option, required = options[1], options[1].required
+    if option.op == "morethan" and type(required) == "number" then
+      required = required + 1
+    elseif option.op ~= "more" then
+      return false
+    end
+    return type(option.item_id) == "number" and type(required) == "number"
+      and owner.item_id == option.item_id and owner.count == required
+  end
+  local function objective_owned_records(task_snapshot, state)
+    local qrows, owned, matches, owner_uses = {}, {}, {}, {}
+    for _, row in ipairs(task_snapshot.quests) do
+      if type(row) == "table" and type(row.qid) == "number" then qrows[row.qid] = row end
+    end
+    for record_index, record in ipairs(state.records) do
+      local row = qrows[record.qid]
+      if type(row) == "table" and row.read_status == "ok"
+          and row.task_index == state.task_index[record.qid] then
+        for owner_index, owner in ipairs(type(row.item_ownership) == "table"
+            and row.item_ownership or {}) do
+          if objective_owner_matches(owner, record, row.task_index) then
+            local owner_key = tostring(record.qid) .. ":" .. tostring(owner_index)
+            local list = matches[record_index]
+            if list == nil then list = {}; matches[record_index] = list end
+            list[#list + 1] = owner_key
+            owner_uses[owner_key] = (owner_uses[owner_key] or 0) + 1
+          end
+        end
+      end
+    end
+    for record_index, record in ipairs(state.records) do
+      for _, owner_key in ipairs(matches[record_index] or {}) do
+        if owner_uses[owner_key] == 1 then
+          local proven = objective_copy(record)
+          proven.current_work = true
+          owned[#owned + 1] = proven
+          break
+        end
+      end
+    end
+    return owned
+  end
+  function a.objective_need_groups(task_snapshot)
+    local state = items.objective_group_state
+    local qrows, qseen = {}, {}
+    if type(task_snapshot) ~= "table" or type(task_snapshot.need_generation) ~= "number"
+        or type(task_snapshot.quests) ~= "table" or not ITEM_STATS.needs_fresh
+        or state.complete ~= true or state.status ~= "ok" then
+      return { status = "unknown", complete = false, groups = {},
+        generation = type(task_snapshot) == "table" and task_snapshot.need_generation or nil,
+        source_generation = state.generation, reason = "need_or_task_observation_unknown" }
+    end
+    for _, row in ipairs(task_snapshot.quests) do
+      if type(row) == "table" and type(row.qid) == "number" then
+        qrows[row.qid] = row
+        qseen[row.qid] = true
+      end
+    end
+    if state.task_generation ~= items.task_observation_generation then
+      return { status = "unknown", complete = false, groups = {},
+        generation = task_snapshot.need_generation,
+        source_generation = state.generation, reason = "task_observation_changed" }
+    end
+    for qid in pairs(qseen) do
+      local row = qrows[qid]
+      if state.task_index[qid] ~= nil and (row.read_status ~= "ok"
+          or row.task_index ~= state.task_index[qid]) then
+        return { status = "unknown", complete = false, groups = {},
+          generation = task_snapshot.need_generation,
+          source_generation = state.generation, reason = "current_task_changed" }
+      end
+    end
+    local records = objective_owned_records(task_snapshot, state)
+    if #state.records > 0 and #records == 0 then
+      return { status = "unknown", complete = false, groups = {},
+        generation = task_snapshot.need_generation,
+        source_generation = state.generation, reason = "current_task_ownership_unproven" }
+    end
+    local groups, complete = A.objective_need_builder.build(records, state.held,
+      { generation = state.generation, task_generation = state.generation,
+        task_index = state.task_index })
+    if not complete then
+      return { status = "unknown", complete = false, groups = {},
+        generation = task_snapshot.need_generation,
+        source_generation = state.generation, reason = "owned_need_invalid" }
+    end
+    return { status = "ok", complete = true, groups = groups,
+      generation = task_snapshot.need_generation, source_generation = state.generation,
+      task_generation = state.task_generation }
+  end
   -- v14 (SPEC 22.10.1): { [item_id] = { quest title, ... } }, cached until
   -- the next commit
   function a.item_related(reveal)
@@ -4100,6 +5908,8 @@ function A.make()
                       if condition.kind == "item" and condition.enabled and not condition.is_not then
                         result.item_ownership[#result.item_ownership + 1] = {
                           item_id = type(condition.item_id) == "number" and condition.item_id or nil,
+                          count = condition.set_num == true and type(condition.num) == "number"
+                            and condition.num or nil,
                           proof_kind = "condition", eligibility = "unknown",
                           reason = "native_item_condition_leaf_unread", task_index = ti,
                           concierge_index = g.index, destination_index = parsed.index }
@@ -4149,10 +5959,24 @@ function A.make()
     end
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")
     if qlm ~= objective_task_state.owner then
+      A.invalidate_objective_provider_catalogs()
+      items.reset_task_observations()
       objective_task_state.owner = qlm
       objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
         objective_task_state.need_generation = 0, 0, 0
+      objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
+      objective_task_state.source_at = -math.huge
+      objective_task_state.source_generation = objective_task_state.source_generation + 1
+      objective_task_state.talk_observation, objective_task_state.forgery_observation = nil, nil
+      objective_task_state.talk_at, objective_task_state.forgery_at = -math.huge, -math.huge
+      objective_task_state.talk_generation = objective_task_state.talk_generation + 1
+      objective_task_state.forgery_generation = objective_task_state.forgery_generation + 1
+      if objective_task_state.reward_observation ~= nil then
+        objective_task_state.reward_observation.owner = nil
+        objective_task_state.reward_observation.signature = nil
+        objective_task_state.reward_observation.data = nil
+      end
     end
     local focus, focus_seen = {}, {}
     for _, qid in ipairs(type(focus_qids) == "table" and focus_qids or {}) do
@@ -4187,12 +6011,27 @@ function A.make()
           task_destinations = {}, guidance = {}, item_ownership = {},
           live_destination = live.live_destination }
       end
+      items.observe_task_index(qid,
+        row.read_status == "ok" and type(row.task_index) == "number" and row.task_index or nil)
       quests[#quests + 1] = row
       local journal_row = clone(row)
       journal_row.item_ownership = {}
       journal_rows[#journal_rows + 1] = journal_row
+      local objective_groups, objective_status = {}, "unknown"
+      if ITEM_STATS.needs_fresh and items.objective_group_state.complete
+          and items.objective_group_state.task_generation == items.task_observation_generation
+          and row.read_status == "ok"
+          and row.task_index == items.objective_group_state.task_index[qid] then
+        objective_status = "ok"
+        for _, group in ipairs(items.objective_group_state.groups) do
+          if group.qid == qid and group.task_index == row.task_index then
+            objective_groups[#objective_groups + 1] = clone(group)
+          end
+        end
+      end
       need_rows[qid] = { status = (ITEM_NEEDS == nil or not ITEM_STATS.needs_fresh) and "unknown" or "ok",
         current = clone(ITEM_STATS.needs_fresh and ITEM_NEEDS and ITEM_NEEDS[qid] or {}),
+        objective = { status = objective_status, groups = objective_groups },
         ownership = clone(row.item_ownership) }
     end
     if not same(journal_rows, objective_task_state.journal) then
@@ -4208,7 +6047,8 @@ function A.make()
       journal_generation = objective_task_state.journal_generation,
       need_generation = objective_task_state.need_generation, quests = quests }
   end
-  function a.objective_item_source_snapshots(objective_catalog, task_snapshot)
+  function a.objective_item_source_snapshots(objective_catalog, task_snapshot,
+      source_catalog, supplied_source_observation, supplied_provider_observations)
     local function copy(value)
       if type(value) ~= "table" then return value end
       local out = {}
@@ -4253,24 +6093,418 @@ function A.make()
         end
       end
     end
-    local providers = {}
-    for _, name in ipairs({ "placed", "chest", "loot" }) do
-      providers[#providers + 1] = { provider = name, generation = generation,
-        status = "unknown", reason = "objective_source_scan_not_performed", candidates = {},
-        catalog_version = version, source_descriptors = copy(descriptors),
-        signal_evidence = copy(signals), guidance_delivery_refs = copy(deliveries) }
+    local function same(x, y)
+      if type(x) ~= type(y) then return false end
+      if type(x) ~= "table" then return x == y end
+      for k, v in pairs(x) do if not same(v, y[k]) then return false end end
+      for k in pairs(y) do if x[k] == nil then return false end end
+      return true
+    end
+    local now = os.clock()
+    local observation = supplied_source_observation
+    local source_scanned = false
+    if observation == nil and type(source_catalog) == "table" then
+      if objective_task_state.source_catalog == source_catalog
+          and objective_task_state.source_observation ~= nil
+          and now - objective_task_state.source_at < 0.5 then
+        observation = objective_task_state.source_observation
+      else
+        observation = A.read_objective_source_observation(source_catalog)
+        source_scanned = true
+      end
+    end
+    if objective_task_state.source_catalog ~= source_catalog
+        or not same(objective_task_state.source_observation, observation) then
+      if objective_task_state.source_catalog ~= nil
+          or objective_task_state.source_observation ~= nil then
+        objective_task_state.source_generation = math.min(2147483647,
+          objective_task_state.source_generation + 1)
+      end
+      objective_task_state.source_catalog = source_catalog
+      objective_task_state.source_observation = copy(observation)
+    end
+    if source_scanned then objective_task_state.source_at = now end
+    local providers = A.objective_source_provider_snapshots(source_catalog, observation,
+      objective_task_state.source_generation)
+    for _, provider in ipairs(providers) do
+      provider.catalog_version = version
+      provider.source_catalog_version = type(source_catalog) == "table" and source_catalog.version or nil
+      provider.source_descriptors = copy(descriptors)
+      provider.signal_evidence = copy(signals)
+      provider.guidance_delivery_refs = copy(deliveries)
+    end
+    local need_snapshot = a.objective_need_groups(task_snapshot)
+    local wanted = nil
+    if need_snapshot.complete then
+      wanted = {}
+      for _, group in ipairs(need_snapshot.groups) do
+        for _, option in ipairs(group.options) do wanted[option.item_id] = true end
+      end
+    end
+    local loot = copy(items.objective_loot_observations(wanted, generation))
+    loot.catalog_version = version
+    loot.source_descriptors = copy(descriptors)
+    loot.signal_evidence = copy(signals)
+    loot.guidance_delivery_refs = copy(deliveries)
+    providers[#providers + 1] = loot
+    local wanted_list = {}
+    if wanted ~= nil then
+      for item_id in pairs(wanted) do wanted_list[#wanted_list + 1] = item_id end
+      table.sort(wanted_list)
+    end
+    local function provider_observation(kind)
+      local state_key, generation_key, at_key, reader
+      if kind == "talk_grant" then
+        state_key, generation_key, at_key = "talk_observation", "talk_generation", "talk_at"
+        reader = A.read_objective_talk_grant_observation
+      else
+        state_key, generation_key, at_key = "forgery_observation", "forgery_generation", "forgery_at"
+        reader = A.read_objective_forgery_observation
+      end
+      local supplied = type(supplied_provider_observations) == "table"
+        and supplied_provider_observations[kind] or nil
+      local value = supplied
+      if value == nil then
+        local previous = objective_task_state[state_key]
+        if wanted == nil then
+          value = { complete = false, reason = "objective_need_snapshot_incomplete",
+            wanted = {}, events = kind == "talk_grant" and {} or nil,
+            services = kind == "forgery" and {} or nil,
+            mappings = kind == "forgery" and {} or nil,
+            order = kind == "forgery" and {} or nil }
+        elseif previous ~= nil and same(previous.wanted, wanted_list)
+            and now - objective_task_state[at_key] < 0.5 then
+          value = previous
+        elseif type(reader) == "function" then
+          value = reader(wanted)
+        else
+          value = { complete = false, reason = kind .. "_observation_unavailable",
+            wanted = copy(wanted_list) }
+        end
+      end
+      if not same(objective_task_state[state_key], value) then
+        if objective_task_state[state_key] ~= nil then
+          objective_task_state[generation_key] = math.min(2147483647,
+            objective_task_state[generation_key] + 1)
+        end
+        objective_task_state[state_key] = copy(value)
+      end
+      objective_task_state[at_key] = now
+      return value, objective_task_state[generation_key]
+    end
+    local talk_observation, talk_generation = provider_observation("talk_grant")
+    local forgery_observation, forgery_generation = provider_observation("forgery")
+    local talk = A.objective_talk_grant_provider_snapshot(talk_observation, talk_generation)
+    local forgery = A.objective_forgery_provider_snapshot(forgery_observation, forgery_generation)
+    -- Quest reward diagnostics are joined to the live RewardDict and processor
+    -- list only to explain possible outputs. The task endpoint, branch truth,
+    -- and claim state are not observable here, so this provider never emits a
+    -- candidate (SPEC 22.9.5). Cache this bounded join so the map path cannot
+    -- walk hundreds of managed rows every frame.
+    local signature_parts = { tostring(type(task_snapshot) == "table" and task_snapshot.focus_epoch or 0),
+      tostring(type(task_snapshot) == "table" and task_snapshot.need_generation or 0),
+      tostring(version), tostring(extension), wanted == nil and "needs:unknown" or "needs:complete" }
+    for _, quest in ipairs(type(task_snapshot) == "table" and task_snapshot.quests or {}) do
+      if type(quest) == "table" then
+        signature_parts[#signature_parts + 1] = tostring(quest.qid) .. ":"
+          .. tostring(quest.task_index) .. ":" .. tostring(quest.read_status)
+      end
+    end
+    local wanted_ids = {}
+    for item_id in pairs(wanted or {}) do wanted_ids[#wanted_ids + 1] = item_id end
+    table.sort(wanted_ids)
+    for _, item_id in ipairs(wanted_ids) do signature_parts[#signature_parts + 1] = tostring(item_id) end
+    local reward_signature = table.concat(signature_parts, "|")
+    local function same_plain(left, right)
+      if type(left) ~= type(right) then return false end
+      if type(left) ~= "table" then return left == right end
+      for key, value in pairs(left) do if not same_plain(value, right[key]) then return false end end
+      for key in pairs(right) do if left[key] == nil then return false end end
+      return true
+    end
+    local reward_observation = objective_task_state.reward_observation
+    local reward_now = os.clock()
+    local reward_key_changed = reward_observation ~= nil
+      and (reward_observation.owner ~= objective_task_state.owner
+        or reward_observation.signature ~= reward_signature)
+    local reward_refresh_due = reward_observation == nil or reward_now - reward_observation.at >= 0.5
+    local reward_refresh_pending = reward_key_changed and not reward_refresh_due
+    if reward_refresh_due then
+      local function scan_reward_sources()
+        local reward_outputs, reward_runtime, reward_rows = {}, {}, {}
+        local reward_complete = true
+        local function bounded_elements(array, cap)
+          local ok, values = pcall(function() return array:get_elements() end)
+          if not ok or values == nil then return nil end
+          local count_ok, count = pcall(function() return #values end)
+          if not count_ok or type(count) ~= "number" or count < 0 or count > cap then return nil end
+          local out = {}
+          for i = 1, count do
+            local row_ok, row = pcall(function() return values[i] end)
+            if not row_ok or row == nil then return nil end
+            out[i] = row
+          end
+          return out
+        end
+        local qm = nil
+        pcall(function() qm = sdk.get_managed_singleton("app.QuestManager") end)
+        local reward_dict = safe_field(qm, "RewardDict")
+        local dict_entries = bounded_elements(safe_field(reward_dict, "_entries"), 512)
+        local dict_count = A.count_of(int_value(safe_call(reward_dict, "get_Count")))
+        local dict_used = A.count_of(int_value(safe_field(reward_dict, "_count")))
+        local dict_free = A.count_of(int_value(safe_field(reward_dict, "_freeCount")))
+        if dict_entries == nil or dict_count == nil or dict_used == nil or dict_free == nil
+            or dict_used > #dict_entries or dict_used > 512
+            or dict_count + dict_free ~= dict_used then
+          reward_complete = false
+        else
+          local active, free = 0, 0
+          for i = 1, dict_used do
+            local entry = dict_entries[i]
+            local next_slot = int_value(safe_field(entry, "next") or safe_field(entry, "Next"))
+            if next_slot == nil or math.tointeger(next_slot) ~= next_slot then
+              reward_complete = false
+            elseif next_slot < -1 then
+              free = free + 1
+            else
+              active = active + 1
+              local hash = int_value(safe_field(entry, "key") or safe_field(entry, "Key"))
+              local reward = safe_field(entry, "value") or safe_field(entry, "Value")
+              local rows = bounded_elements(safe_field(reward, "_ItemList"), 32)
+            if type(hash) ~= "number" or math.tointeger(hash) ~= hash
+                or hash < 0 or hash > 4294967295 or rows == nil
+                or reward_outputs[hash] ~= nil then
+                reward_complete = false
+              else
+                local outputs = {}
+                for _, row in ipairs(rows) do
+                  local item_id, count = int_value(safe_field(row, "_ItemId")),
+                    int_value(safe_field(row, "_Num"))
+                  if type(item_id) ~= "number" or math.tointeger(item_id) ~= item_id or item_id <= 0
+                      or type(count) ~= "number" or math.tointeger(count) ~= count or count <= 0 then
+                    reward_complete = false
+                  else
+                    outputs[#outputs + 1] = { item_id = item_id, count = count }
+                  end
+                end
+                reward_outputs[hash] = outputs
+              end
+            end
+          end
+          if active ~= dict_count or free ~= dict_free then reward_complete = false end
+        end
+        local processors = bounded_elements(safe_field(qm, "DistributedQuestProcessors"), 512)
+        if processors == nil then reward_complete = false else
+          for _, processor in ipairs(processors) do
+            local proc_id = int_value(safe_field(processor, "ProcID"))
+            if proc_id ~= nil and math.tointeger(proc_id) == proc_id
+                and proc_id >= 0 and proc_id <= 4294967295 and reward_runtime[proc_id] == nil then
+              local process = safe_field(processor, "Process")
+              local action = safe_field(process, "QuestAction")
+              local action_type = nil
+              pcall(function()
+                local definition = action and action:get_type_definition() or nil
+                action_type = definition and definition:get_full_name() or nil
+              end)
+              reward_runtime[proc_id] = { qid = int_value(safe_call(process, "get_QuestID")),
+                action_type = action_type, executed = safe_call(process, "get_Executed"),
+                canceled = safe_call(process, "get_Canceled") }
+            else
+              reward_complete = false
+            end
+          end
+        end
+        local focus_qids = {}
+        for _, quest in ipairs(type(task_snapshot) == "table" and task_snapshot.quests or {}) do
+          if type(quest) == "table" and type(quest.qid) == "number" then focus_qids[quest.qid] = true end
+        end
+        local reward_catalog = type(extension) == "table" and extension.quests or nil
+        if type(reward_catalog) == "table" then
+          for qid, quest in pairs(reward_catalog) do
+            for _, diagnostic in ipairs(type(quest) == "table" and quest.reward_diagnostics or {}) do
+              if type(diagnostic) == "table" then
+                local identity = diagnostic.source_identity
+                local proc_id = type(identity) == "table" and identity.processor_id or nil
+                local runtime = type(proc_id) == "number" and reward_runtime[proc_id] or nil
+                local relevant, mapped = false, {}
+                for _, reward_row in ipairs(type(diagnostic.reward_rows) == "table"
+                    and diagnostic.reward_rows or {}) do
+                  local outputs = type(reward_row) == "table"
+                    and reward_outputs[reward_row.name_hash] or nil
+                  for _, output in ipairs(outputs or {}) do
+                    if wanted and wanted[output.item_id] then
+                      relevant = true
+                      mapped[#mapped + 1] = { item_id = output.item_id, count = output.count }
+                    end
+                  end
+                end
+                if focus_qids[qid] or relevant then
+                  local detail = { qid = qid, action_ordinal = identity
+                    and identity.action_ordinal or nil, processor_id = proc_id,
+                    processor_present = runtime ~= nil,
+                    runtime_qid = runtime and runtime.qid or nil,
+                    runtime_action_type = runtime and runtime.action_type or nil,
+                    focused_quest = focus_qids[qid] == true,
+                    outputs = mapped, branch_status = diagnostic.branch_status,
+                    task_endpoint_join = copy(diagnostic.task_endpoint_join),
+                    unresolved_joins = copy(diagnostic.unresolved_joins), eligibility = "unknown" }
+                  if runtime ~= nil then
+                    detail.runtime_executed, detail.runtime_canceled = runtime.executed, runtime.canceled
+                  end
+                  reward_rows[#reward_rows + 1] = detail
+                end
+              end
+            end
+          end
+        end
+        return { complete = reward_complete, rows = reward_rows }
+      end
+      local observed = scan_reward_sources()
+      local observed_at = os.clock()
+      local changed = reward_observation == nil or reward_observation.owner ~= objective_task_state.owner
+        or reward_observation.signature ~= reward_signature
+        or not same_plain(reward_observation.data, observed)
+      reward_observation = { owner = objective_task_state.owner, signature = reward_signature,
+        at = observed_at, generation = changed and ((reward_observation and reward_observation.generation or 0) + 1)
+          or reward_observation.generation, data = observed }
+      objective_task_state.reward_observation = reward_observation
+    end
+    local reward_data = reward_refresh_pending and { complete = false, rows = {} }
+      or (reward_observation and reward_observation.data or { complete = false, rows = {} })
+    providers[#providers + 1] = { provider = "reward", generation = reward_observation.generation,
+      status = "unknown", complete = false,
+      reason = reward_refresh_pending and "reward_snapshot_refresh_pending"
+        or (not reward_data.complete and "reward_runtime_scan_incomplete")
+        or (wanted == nil and "reward_current_need_set_unproven"
+          or "reward_task_branch_and_claim_gates_unproven"),
+      missing_evidence = { "journal_task_to_reward_endpoint", "current_branch_truth",
+        "claim_state", "reward_action_to_drawable_target" },
+      candidates = {}, diagnostic_rows = copy(reward_data.rows),
+      reward_runtime_complete = reward_data.complete,
+      focused_item_count = wanted and (function()
+        local count = 0; for _ in pairs(wanted) do count = count + 1 end; return count
+      end)() or 0, catalog_version = version }
+    for _, provider in ipairs({ talk, forgery }) do
+      provider.catalog_version = version
+      provider.source_descriptors = copy(descriptors)
+      provider.signal_evidence = copy(signals)
+      provider.guidance_delivery_refs = copy(deliveries)
+      providers[#providers + 1] = provider
     end
     return providers
+  end
+  -- Pure classification for synthetic/research evidence only. The live service,
+  -- mapping, target and order-state join is not proved, so this deliberately
+  -- cannot satisfy core's normalized provider/candidate contract.
+  function a.objective_forgery_evidence(evidence, generation)
+    local used_generation = generation == nil and objective_task_state.source_generation or generation
+    local out = { evidence_only = true, publication_ready = false,
+      evidence_generation = used_generation, eligibility = "unknown",
+      reason = "forgery_evidence_malformed" }
+    local function finite(v)
+      return type(v) == "number" and v == v and v > -math.huge and v < math.huge
+    end
+    local function integer(v, minimum)
+      return finite(v) and v == math.floor(v) and v >= minimum
+    end
+    local function result(eligibility, reason)
+      out.eligibility, out.reason = eligibility, reason
+      return out
+    end
+    if not integer(used_generation, 1) then
+      return result("unknown", "forgery_generation_invalid")
+    end
+    if type(evidence) ~= "table" then return out end
+    local id, pos = evidence.identity, evidence.service_position
+    local service, output = evidence.service_id, evidence.output_item_id
+    if type(id) ~= "table" or id[1] ~= "source" or id[2] ~= "forgery"
+      or not integer(service, 1) or not integer(output, 1)
+      or not integer(evidence.mapping_input_item_id, 1)
+      or not integer(evidence.mapping_output_item_id, 1)
+      or evidence.mapping_output_item_id ~= output
+      or id[3] ~= service or id[4] ~= output or id[5] ~= nil
+      or evidence.service_type ~= "NpcShopForgeryParam"
+      or type(pos) ~= "table" or not finite(pos.x) or not finite(pos.y) or not finite(pos.z)
+      or not integer(evidence.kept_item_id, 0) or not integer(evidence.kept_item_count, 0)
+      or not integer(evidence.mapping_price, 1)
+      or (evidence.price ~= nil and not integer(evidence.price, 1)) then return out end
+    if type(evidence.row_enabled) ~= "boolean" then
+      return result("unknown", "forgery_mapping_state_unreadable")
+    elseif evidence.row_enabled == false then
+      return result("ineligible", "forgery_mapping_disabled")
+    end
+    if type(evidence.interactable) ~= "boolean" then
+      return result("unknown", "forgery_interaction_state_unreadable")
+    elseif evidence.interactable == false then
+      return result("ineligible", "forgery_service_not_interactable")
+    end
+    if evidence.busy_readable ~= true then
+      return result("unknown", "forgery_busy_state_unreadable")
+    elseif evidence.kept_readable ~= true then
+      return result("unknown", "forgery_kept_item_unreadable")
+    elseif evidence.completion_time_readable ~= true then
+      return result("unknown", "forgery_completion_time_unreadable")
+    elseif evidence.completion_readable ~= true then
+      return result("unknown", "forgery_completion_state_unreadable")
+    elseif not finite(evidence.completion_time) or evidence.completion_time < 0
+      or type(evidence.completed) ~= "boolean" or type(evidence.busy) ~= "boolean" then
+      return out
+    end
+    if evidence.completed then
+      if evidence.kept_item_count <= 0 then
+        return result("ineligible", "forgery_order_not_ready")
+      elseif evidence.kept_item_id == output then
+        return result("eligible", "matching_forgery_output_ready")
+      end
+      return result("ineligible", "forgery_order_unrelated")
+    elseif evidence.busy then
+      if evidence.kept_item_count <= 0 or evidence.kept_item_id == 0 then
+        return result("unknown", "forgery_pending_order_identity_unproven")
+      elseif evidence.kept_item_id ~= evidence.mapping_input_item_id then
+        return result("ineligible", "forgery_order_unrelated")
+      end
+      return result("ineligible", "forgery_order_pending")
+    elseif evidence.idle ~= true or evidence.kept_item_id ~= 0
+        or evidence.kept_item_count ~= 0 then
+      if type(evidence.idle) ~= "boolean" then
+        return result("unknown", "forgery_idle_state_unreadable")
+      end
+      return result("ineligible", "forgery_order_not_ready")
+    end
+    if evidence.price == nil or evidence.price ~= evidence.mapping_price
+      or type(evidence.input_held) ~= "boolean"
+      or type(evidence.price_held) ~= "boolean" then
+      return result("unknown", "forgery_preorder_evidence_unreadable")
+    elseif evidence.input_held == false then
+      return result("ineligible", "forgery_input_not_held")
+    elseif evidence.price_held == false then
+      return result("ineligible", "forgery_price_unaffordable")
+    end
+    return result("eligible", "forgery_order_can_start")
   end
   function a.reset_session_caches()
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")
     if qlm ~= QUEST_SESSION_OWNER then
       QUEST_SESSION_OWNER = qlm
+      A.invalidate_objective_provider_catalogs()
       reset_runtime_caches()
+      items.reset_task_observations()
       objective_task_state.owner = qlm
       objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
         objective_task_state.need_generation = 0, 0, 0
+      objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
+      objective_task_state.source_at = -math.huge
+      objective_task_state.source_generation = objective_task_state.source_generation + 1
+      objective_task_state.talk_observation, objective_task_state.forgery_observation = nil, nil
+      objective_task_state.talk_at, objective_task_state.forgery_at = -math.huge, -math.huge
+      objective_task_state.talk_generation = objective_task_state.talk_generation + 1
+      objective_task_state.forgery_generation = objective_task_state.forgery_generation + 1
+      if objective_task_state.reward_observation ~= nil then
+        objective_task_state.reward_observation.owner = nil
+        objective_task_state.reward_observation.signature = nil
+        objective_task_state.reward_observation.data = nil
+      end
       return true
     end
     return false

@@ -133,6 +133,69 @@ return reviewed_call(o, "get_Count")
 check("reviewed managed call capability allows its fixed read set",
   reviewed_call_ok:find("cmd ok=true get_Count", 1, true) ~= nil)
 
+local talk_methods_ok = run_case('', [[
+local tem = { call = function(_, name, arg) return name .. ":" .. tostring(arg) end }
+local id = "talk-event-id"
+local character = "engine-character"
+local initial = reviewed_call(tem, "getTalkEventInitialSpeaker", id)
+local playable = reviewed_try_call(tem, "isEventPlayable", id)
+local interact = reviewed_call(tem, "canTalkEventInteract", character)
+local history = reviewed_call(tem, "getHistory", id)
+return initial .. "|" .. tostring(playable) .. "|" .. interact .. "|" .. history
+]], 150)
+check("talk-event read calls accept only their literal allowlist entries",
+  talk_methods_ok:find("cmd ok=true getTalkEventInitialSpeaker:talk-event-id|true|canTalkEventInteract:engine-character|getHistory:talk-event-id", 1, true) ~= nil)
+
+local forgery_methods_ok = run_case('', [[
+local im = { call = function(_, name) return name end }
+local kept = reviewed_call(im, "isFakeShopKeeped")
+local remaining = reviewed_call(im, "isFakeShopRemainingMinute")
+return kept .. "|" .. remaining
+]], 150)
+check("forgery probe state reads accept only literal allowlist entries",
+  forgery_methods_ok:find("cmd ok=true isFakeShopKeeped|isFakeShopRemainingMinute", 1, true) ~= nil)
+
+local forgery_method_near_miss = run_case('', [[
+return reviewed_call({}, "isFakeShopKeepedExtra")
+]], 150)
+check("forgery probe state near-miss stays rejected",
+  forgery_method_near_miss:find("cmd ok=false unsafe probe call: unreviewed managed method", 1, true) ~= nil)
+
+local monster_getters_ok = run_case('', [[
+local character = { call = function(_, name) return name end }
+local transform = reviewed_call(character, "get_Transform")
+local position = reviewed_call(character, "get_UniversalPosition")
+local dead = reviewed_call(character, "get_IsDead")
+return transform .. "|" .. position .. "|" .. dead
+]], 150)
+check("monster probe read getters accept only literal allowlist entries",
+  monster_getters_ok:find("cmd ok=true get_Transform|get_UniversalPosition|get_IsDead", 1, true) ~= nil)
+
+local monster_getter_near_miss = run_case('', [[
+return reviewed_call({}, "get_IsDeadExtra")
+]], 150)
+check("monster probe getter near-miss stays rejected",
+  monster_getter_near_miss:find("cmd ok=false unsafe probe call: unreviewed managed method", 1, true) ~= nil)
+
+local unproven_is_dead_alias = run_case('', [[
+return reviewed_call({}, "isDead")
+]], 150)
+check("unverified isDead alias stays rejected",
+  unproven_is_dead_alias:find("cmd ok=false unsafe probe call: unreviewed managed method", 1, true) ~= nil)
+
+local talk_method_near_miss = run_case('', [[
+return reviewed_call({}, "getTalkEventInitialSpeakerExtra", "id")
+]], 150)
+check("talk-event near-miss method remains rejected",
+  talk_method_near_miss:find("cmd ok=false unsafe probe call: unreviewed managed method", 1, true) ~= nil)
+
+local talk_method_dynamic = run_case('', [[
+local method = "getHistory"
+return reviewed_call({}, method, "id")
+]], 150)
+check("talk-event dynamic method remains rejected",
+  talk_method_dynamic:find("cmd ok=false unsafe probe call: unreviewed managed method", 1, true) ~= nil)
+
 local reviewed_try_ok = run_case('', [[
 local o = { call = function(_, name) return name end }
 local ok, value = reviewed_try_call(o, "get_Count")
@@ -168,6 +231,19 @@ return tostring(ok) .. ":" .. tostring(value)
 ]], 150)
 check("reviewed managed try-call reports managed exception failure",
   reviewed_try_error:find("cmd ok=true false:nil", 1, true) ~= nil)
+
+local reviewed_forgery_reads = run_case('', [[
+local o = { call = function(_, name)
+  if name == "get_IsEnableFake" then return true end
+  if name == "isFakeShopKeeped" then return false end
+  if name == "isFakeShopRemainingMinute" then return 0 end
+end }
+return tostring(reviewed_call(o, "get_IsEnableFake")) .. ":"
+  .. tostring(reviewed_call(o, "isFakeShopKeeped")) .. ":"
+  .. tostring(reviewed_call(o, "isFakeShopRemainingMinute"))
+]], 150)
+check("reviewed forgery getters are exact read-only capabilities",
+  reviewed_forgery_reads:find("cmd ok=true true:false:0", 1, true) ~= nil)
 
 local reviewed_call_bad = run_case('', [[
 local o = { call = function() return "mutated" end }

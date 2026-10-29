@@ -113,8 +113,19 @@ return D, qlm, td, world
             os.path.dirname(__file__), "probe", "qnml_check.lua")
         with open(harness_path, encoding="utf-8") as stream:
             harness = stream.read()
-        allowed = set(re.findall(r'\["([^"]+)"\]\s*=\s*true', harness))
-        self.assertEqual(needed, probe_run.REVIEWED_METHODS)
+        reviewed_block = harness.split("reviewed_methods = {", 1)[1].split("\n}", 1)[0]
+        allowed = set(re.findall(r'\["([^"]+)"\]\s*=\s*true', reviewed_block))
+        talk_methods = {
+            "getTalkEventInitialSpeaker", "isEventPlayable",
+            "canTalkEventInteract", "getHistory"}
+        forgery_methods = {
+            "get_IsEnableFake", "isFakeShopKeeped",
+            "isFakeShopRemainingMinute"}
+        monster_methods = {
+            "get_Transform", "get_UniversalPosition", "get_IsDead"}
+        self.assertEqual(needed | talk_methods | forgery_methods | monster_methods,
+                         probe_run.REVIEWED_METHODS)
+        self.assertEqual(allowed, probe_run.REVIEWED_METHODS)
         self.assertEqual(needed - allowed, set())
 
     def test_reviewed_capabilities_require_direct_allowlisted_literals(self):
@@ -139,6 +150,58 @@ return D, qlm, td, world
                 'return reviewed_invoke(method, o, "getContext")'):
             with self.subTest(source=source):
                 self.assertIsNone(probe_run.unsafe_probe_call(source))
+
+    def test_talk_event_methods_are_reviewed_literals(self):
+        methods = (
+            "getTalkEventInitialSpeaker", "isEventPlayable",
+            "canTalkEventInteract", "getHistory")
+        for method in methods:
+            source = 'return reviewed_call(tem, "%s", value)' % method
+            with self.subTest(method=method):
+                self.assertEqual(
+                    probe_run.unsafe_probe_call(source),
+                    None)
+        near_misses = (
+            "getTalkEventInitialSpeakerExtra", "isEventPlayableNow",
+            "canTalkEventInteractById", "getHistoryList")
+        for method in near_misses:
+            source = 'return reviewed_call(tem, "%s", value)' % method
+            with self.subTest(near_miss=method):
+                self.assertEqual(
+                    probe_run.unsafe_probe_call(source),
+                    "unreviewed managed method")
+        self.assertEqual(
+            probe_run.unsafe_probe_call(
+                'return reviewed_call(tem, method, value)'),
+            "unreviewed managed method")
+
+    def test_monster_probe_getters_are_reviewed_literals(self):
+        methods = ("get_Transform", "get_UniversalPosition", "get_IsDead")
+        for method in methods:
+            source = 'return reviewed_call(character, "%s")' % method
+            with self.subTest(method=method):
+                self.assertIsNone(probe_run.unsafe_probe_call(source))
+        near_misses = ("get_TransformExtra", "get_UniversalPositionExtra",
+                       "get_IsDeadExtra", "isDead")
+        for method in near_misses:
+            source = 'return reviewed_call(character, "%s")' % method
+            with self.subTest(near_miss=method):
+                self.assertEqual(
+                    probe_run.unsafe_probe_call(source),
+                    "unreviewed managed method")
+
+    def test_forgery_state_methods_are_reviewed_literals(self):
+        methods = ("isFakeShopKeeped", "isFakeShopRemainingMinute")
+        for method in methods:
+            source = 'return reviewed_call(item_manager, "%s")' % method
+            with self.subTest(method=method):
+                self.assertIsNone(probe_run.unsafe_probe_call(source))
+        for method in ("isFakeShopKeepedExtra", "isFakeShopRemainingMinutes"):
+            source = 'return reviewed_call(item_manager, "%s")' % method
+            with self.subTest(near_miss=method):
+                self.assertEqual(
+                    probe_run.unsafe_probe_call(source),
+                    "unreviewed managed method")
 
     def test_comments_preserve_token_boundaries(self):
         source = 'return--[[ gap ]]sdk.create_resource("x")'

@@ -131,7 +131,198 @@ class RszTests(unittest.TestCase):
         self.assertEqual(qnml_rsz.guid_str(b), "03020100-0504-0706-0809-0a0b0c0d0e0f")
 
 
+def add_source_metadata(insts, table_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer=0):
+    """Attach the native GenerateTableData relation used by source rows."""
+    insts[0].fields["_LayerType"] = layer
+    node = qnml_rsz.Inst(len(insts) + 1, "app.GenerateTableData", "source.user")
+    node.fields = {"_Table": qnml_rsz.Ref(1), "_TableID": table_id}
+    insts.append(node)
+    return insts
+
+
 class RowTests(unittest.TestCase):
+    def test_non_chest_item_placement_relation(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        table = [
+            inst(1, "app.GenerateTable", _GimmickSetInfo=R(2)),
+            inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3)]),
+            inst(3, "app.GenerateRowData", _ManualSetGuid="00000000-0000-0000-0000-000000000123",
+                 _GimmickID=163, _ManualPos=(1.25, 2.5, 3.75), _Container=R(4)),
+            inst(4, "app.Container", _GimmickSetting=R(5), _SetFlagSetting=R(6)),
+            inst(5, "app.GimmickSetting", _ParamId=7),
+            inst(6, "app.GenerateSetting.SetFlagSettingData", _QuestFlagInfos=R(7)),
+            inst(7, "app.GenerateManager.QuestFlagInfos", _CheckType=0, _Infos=[R(8)]),
+            inst(8, ew.QUEST_FLAG, _QuestID=11040, _IsFinishCheck=False),
+        ]
+        add_source_metadata(table)
+        listing = [inst(1, "app.GenerateTableData", path="normal.user"),
+                   inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)],
+                        _SubQuestTableList=[], _MainQuestTableList=[], _RandomNormalTableList=[])]
+        params = {7: {"items": [(999, 9)], "trap": False, "pawn": False}}
+        pickup_params = ew.pickup_params_of([
+            inst(1, "app.Gm82_000Param", ParamId=7, ItemId=500, ItemNum=2)])
+        rows, *_ = ew.collect_rows({"normal.user": table, "list.user": listing}, params, set(), {},
+                                   pickup_params=pickup_params)
+        item = next(row for row in rows if row["k"] == "item")
+        self.assertEqual(item, {"k": "item", "uid": "00000000-0000-0000-0000-000000000123",
+                                "index": 0,
+                                "table_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                                "layer": 0, "id": 500, "n": 2,
+                                "x": 1.2, "y": 2.5, "z": 3.8,
+                                "src": "normal", "gate": {"check": 0, "conditions": [
+                                    {"kind": "quest", "qid": 11040, "finish": False}]}})
+
+    def test_pickup_and_chest_access_metadata_comes_from_structured_relations(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        table = [
+            inst(1, "app.GenerateTable", _LayerType=2, _GimmickSetInfo=R(2)),
+            inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3), R(6)]),
+            inst(3, "app.GenerateRowData", _ManualSetGuid="00000000-0000-0000-0000-000000000123",
+                 _GimmickID=163, _ManualPos=(1.0, 2.0, 3.0), _Container=R(4)),
+            inst(4, "app.Container", _GimmickSetting=R(5)),
+            inst(5, "app.GimmickSetting", _ParamId=7),
+            inst(6, "app.GenerateRowData", _ManualSetGuid="00000000-0000-0000-0000-000000000456",
+                 _GimmickID=10, _ManualPos=(4.0, 5.0, 6.0), _Container=R(7)),
+            inst(7, "app.Container", _GimmickSetting=R(8)),
+            inst(8, "app.GimmickSetting", _ParamId=8),
+            inst(9, "app.GenerateTableData", path="t.user", _Table=R(1), _TableID=table_id),
+        ]
+        listing = [inst(1, "app.GenerateTableData", path="t.user"),
+                   inst(2, "app.GenerateTableListData", _NormalTableList=[],
+                        _SubQuestTableList=[R(1)], _MainQuestTableList=[],
+                        _RandomNormalTableList=[])]
+        params = {8: {"items": [(600, 3)], "trap": False, "pawn": False,
+                      "unlock_item": 0, "is_seal": False}}
+        rows, *_ = ew.collect_rows(
+            {"t.user": table, "list.user": listing}, params, set(), {},
+            pickup_params={7: {"item": 500, "count": 2}},
+            quest_override_paths={"t.user"})
+        by_kind = {row["k"]: row for row in rows}
+        self.assertEqual(
+            {key: by_kind["item"][key] for key in ("index", "table_id", "layer")},
+            {"index": 0, "table_id": table_id, "layer": 2})
+        self.assertEqual(
+            {key: by_kind["chest"][key] for key in (
+                "index", "table_id", "layer", "unlock_item", "is_seal",
+                "fake_unlock_item", "quest_override")},
+            {"index": 0, "table_id": table_id, "layer": 2, "unlock_item": 0,
+             "is_seal": False, "fake_unlock_item": 0, "quest_override": True})
+
+    def test_chest_param_overlap_cannot_fabricate_pickup_output(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        table = [inst(1, "app.GenerateTable", _GimmickSetInfo=R(2)),
+                 inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3)]),
+                 inst(3, "app.GenerateRowData", _ManualSetGuid="00000000-0000-0000-0000-000000000123",
+                      _GimmickID=163, _ManualPos=(1.0, 2.0, 3.0), _Container=R(4)),
+                 inst(4, "app.Container", _GimmickSetting=R(5)),
+                 inst(5, "app.GimmickSetting", _ParamId=7)]
+        add_source_metadata(table)
+        listing = [inst(1, "app.GenerateTableData", path="normal.user"),
+                   inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)],
+                        _SubQuestTableList=[], _MainQuestTableList=[], _RandomNormalTableList=[])]
+        rows, *_ = ew.collect_rows({"normal.user": table, "list.user": listing},
+                                   {7: {"items": [(500, 2)], "trap": False, "pawn": False}}, set(), {})
+        self.assertEqual(rows, [])
+
+    def test_unknown_gimmick_is_skipped(self):
+        rows, *_ = self._one_unrecognized_gimmick()
+        self.assertFalse(any(row["k"] == "gimmick" for row in rows))
+
+    @staticmethod
+    def _one_unrecognized_gimmick():
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+        table = [inst(1, "app.GenerateTable", _GimmickSetInfo=R(2)),
+                 inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=[R(3)]),
+                 inst(3, "app.GenerateRowData", _ManualSetGuid="unknown", _GimmickID=42,
+                      _ManualPos=(1.0, 2.0, 3.0), _Container=R(0))]
+        listing = [inst(1, "app.GenerateTableData", path="normal.user"),
+                   inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)],
+                        _SubQuestTableList=[], _MainQuestTableList=[], _RandomNormalTableList=[])]
+        return ew.collect_rows({"normal.user": table, "list.user": listing}, {}, set(), {})
+
+    def test_pickup_param_conflicts_are_rejected(self):
+        def inst(i, t, **fields):
+            n = qnml_rsz.Inst(i, t)
+            n.fields = fields
+            return n
+        data = [inst(1, "app.Gm82_000Param", ParamId=7, ItemId=500, ItemNum=2),
+                inst(2, "app.Gm82_000Param", ParamId=7, ItemId=501, ItemNum=1)]
+        with self.assertRaises(ew.ExtractError):
+            ew.pickup_params_of(data)
+
+    def test_pickup_params_ignore_nonpositive_outputs(self):
+        def inst(i, **fields):
+            n = qnml_rsz.Inst(i, "app.Gm82_000Param")
+            n.fields = fields
+            return n
+        data = [inst(1, ParamId=7, ItemId=500, ItemNum=2)]
+        for i, (item_id, count) in enumerate(((0, 1), (-1, 1), (500, 0), (500, -1)), 2):
+            data.append(inst(i, ParamId=7, ItemId=item_id, ItemNum=count))
+        self.assertEqual(ew.pickup_params_of(data), {7: {"item": 500, "count": 2}})
+
+    def test_pickup_params_reject_malformed_types(self):
+        for field in ("ParamId", "ItemId", "ItemNum"):
+            for value in (None, True, 1.5, "1"):
+                with self.subTest(field=field, value=value):
+                    n = qnml_rsz.Inst(1, "app.Gm82_000Param")
+                    n.fields = {"ParamId": 7, "ItemId": 500, "ItemNum": 2}
+                    n.fields[field] = value
+                    with self.assertRaises(ew.ExtractError):
+                        ew.pickup_params_of([n])
+
+    def test_non_chest_item_placement_rejects_bad_identity_output_or_position(self):
+        def inst(i, t, path=None, **fields):
+            n = qnml_rsz.Inst(i, t, path)
+            n.fields = fields
+            return n
+        R = qnml_rsz.Ref
+
+        def collect(uid, count, position, duplicate=False):
+            row_refs = [R(3), R(6)] if duplicate else [R(3)]
+            table = [inst(1, "app.GenerateTable", _GimmickSetInfo=R(2)),
+                     inst(2, "app.GenerateTable.SetInfo", _BasicRowDatas=row_refs),
+                     inst(3, "app.GenerateRowData", _ManualSetGuid=uid, _GimmickID=163,
+                          _ManualPos=position, _Container=R(4)),
+                     inst(4, "app.Container", _GimmickSetting=R(5)),
+                     inst(5, "app.GimmickSetting", _ParamId=7)]
+            if duplicate:
+                table.extend([inst(6, "app.GenerateRowData", _ManualSetGuid=uid, _GimmickID=163,
+                                   _ManualPos=position, _Container=R(7)),
+                              inst(7, "app.Container", _GimmickSetting=R(8)),
+                              inst(8, "app.GimmickSetting", _ParamId=7)])
+            add_source_metadata(table)
+            listing = [inst(1, "app.GenerateTableData", path="normal.user"),
+                       inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)],
+                            _SubQuestTableList=[], _MainQuestTableList=[], _RandomNormalTableList=[])]
+            return ew.collect_rows({"normal.user": table, "list.user": listing}, {}, set(), {},
+                                   pickup_params={7: {"item": 500, "count": count}})
+
+        cases = (("bad-guid", 1, (1.0, 2.0, 3.0)),
+                 ("00000000-0000-0000-0000-000000000123", 0, (1.0, 2.0, 3.0)),
+                 ("00000000-0000-0000-0000-000000000123", 1, (1.0, float("nan"), 3.0)))
+        for args in cases:
+            with self.subTest(args=args), self.assertRaises(ew.ExtractError):
+                collect(*args)
+        with self.assertRaises(ew.ExtractError):
+            collect("00000000-0000-0000-0000-000000000123", 1, (1.0, 2.0, 3.0), duplicate=True)
+
     def test_gate_schema_and_rejection_boundaries(self):
         def inst(i, t, **fields):
             n = qnml_rsz.Inst(i, t)
@@ -325,6 +516,7 @@ class RowTests(unittest.TestCase):
                  inst(6, "app.GenerateSetting.SetFlagSettingData", _QuestFlagInfos=R(7)),
                  inst(7, "app.GenerateManager.QuestFlagInfos", _CheckType=1, _Infos=[R(8)]),
                  inst(8, qflag, _QuestID=11040, _IsFinishCheck=False)]
+        add_source_metadata(chest)
         listing = [inst(1, "app.GenerateTableData", path="a-normal.user"),
                    inst(2, "app.GenerateTableData", path="manual/beforeseason4/qu020082/c-quest.user"),
                    inst(3, "app.GenerateTableData", path="b-chest.user"),
@@ -333,7 +525,8 @@ class RowTests(unittest.TestCase):
         rows, *_ = ew.collect_rows({"a-normal.user": normal, "b-chest.user": chest,
                                     "manual/beforeseason4/qu020082/c-quest.user": quest,
                                     "list.user": listing},
-                                   {1: {"items": [], "trap": False, "pawn": False}}, set(),
+                                   {1: {"items": [], "trap": False, "pawn": False,
+                                        "unlock_item": 0, "is_seal": False}}, set(),
                                    {"5": "ch5", "6": "ch6"})
         order = {"chest": 0, "token": 1, "beetle": 2, "chara": 3}
         rows.sort(key=lambda r: (order[r["k"]], r["uid"]))
@@ -372,6 +565,18 @@ class RowTests(unittest.TestCase):
                                   for c in row["gate"]["conditions"])]
         self.assertEqual(len(all_normal_quest_gates), 829)
         self.assertEqual(len(variable_gates), 15)
+        pickups = [row for row in data["rows"] if row["k"] == "item"]
+        chests = [row for row in data["rows"] if row["k"] == "chest"]
+        # 690 native pickup rows exist; one has no exact positive Gm82 output join,
+        # so the generated item-source catalog correctly retains 689.
+        self.assertEqual((len(pickups), len(chests)), (689, 922))
+        self.assertTrue(all(row["index"] == 0 and isinstance(row["table_id"], str)
+                            and row["layer"] in (0, 2) for row in pickups + chests))
+        self.assertEqual(collections.Counter(row["layer"] for row in pickups), {0: 681, 2: 8})
+        self.assertEqual(collections.Counter(row["layer"] for row in chests), {0: 919, 2: 3})
+        self.assertTrue(all(row["unlock_item"] == 0 and row["is_seal"] is False
+                            and row["fake_unlock_item"] == 0
+                            and row["quest_override"] is False for row in chests))
 
     def test_third_chest_types(self):
         def inst(i, t, path=None, **fields):
@@ -389,15 +594,17 @@ class RowTests(unittest.TestCase):
                     inst(4, "app.Container", _GimmickSetting=R(5)),
                     inst(5, "app.GimmickSetting", _ParamId=1),
                 ]
+                add_source_metadata(table)
                 lst = [inst(1, "app.GenerateTableData", path="t.user"),
                        inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)], _SubQuestTableList=[],
                             _MainQuestTableList=[], _RandomNormalTableList=[])]
                 rows, unjoined, _ids, _kinds = ew.collect_rows(
                     {"t.user": table, "l.user": lst},
-                    {1: {"items": [(500, 2)], "trap": False, "pawn": False}}, set(), {})
+                    {1: {"items": [(500, 2), (600, 3)], "trap": False, "pawn": False,
+                         "unlock_item": 0, "is_seal": False}}, set(), {})
                 self.assertEqual(len(rows), 1)
                 self.assertEqual((rows[0]["k"], rows[0]["id"], rows[0]["items"]),
-                                 ("chest", gid, [{"id": 500, "n": 2}]))
+                                 ("chest", gid, [{"id": 500, "n": 2}, {"id": 600, "n": 3}]))
                 self.assertEqual(unjoined, 0)
 
     def test_params_of_flags(self):
@@ -408,15 +615,17 @@ class RowTests(unittest.TestCase):
         R = qnml_rsz.Ref
         insts = [
             inst(1, "app.Gm80_001Param", ParamId=1, ItemList=[R(3)], TrapGenerateData=R(4),
-                 IsPawnRestrict=True),
+                 IsPawnRestrict=True, UnlockItem=0, IsSeal=False),
             inst(2, "app.Gm80_001Param", ParamId=2, ItemList=[R(3)], TrapGenerateData=R(0),
-                 IsPawnRestrict=False),
+                 IsPawnRestrict=False, UnlockItem=77, IsSeal=True),
             inst(3, "app.Gm80_001Param.ItemParam", ItemId=7, ItemNum=1),
             inst(4, "app.TrapGenerateData"),
         ]
         params, conflicts = ew.params_of(insts)
-        self.assertEqual(params[1], {"items": [(7, 1)], "trap": True, "pawn": True})
-        self.assertEqual(params[2], {"items": [(7, 1)], "trap": False, "pawn": False})
+        self.assertEqual(params[1], {"items": [(7, 1)], "trap": True, "pawn": True,
+                                     "unlock_item": 0, "is_seal": False})
+        self.assertEqual(params[2], {"items": [(7, 1)], "trap": False, "pawn": False,
+                                     "unlock_item": 77, "is_seal": True})
         self.assertEqual(conflicts, set())
 
     def test_params_of_flag_conflict(self):
@@ -426,8 +635,10 @@ class RowTests(unittest.TestCase):
             return n
         R = qnml_rsz.Ref
         insts = [
-            inst(1, "app.Gm80_001Param", ParamId=1, ItemList=[], TrapGenerateData=R(0), IsPawnRestrict=True),
-            inst(2, "app.Gm80_001Param", ParamId=1, ItemList=[], TrapGenerateData=R(0), IsPawnRestrict=False),
+            inst(1, "app.Gm80_001Param", ParamId=1, ItemList=[], TrapGenerateData=R(0),
+                 IsPawnRestrict=True, UnlockItem=0, IsSeal=False),
+            inst(2, "app.Gm80_001Param", ParamId=1, ItemList=[], TrapGenerateData=R(0),
+                 IsPawnRestrict=False, UnlockItem=0, IsSeal=False),
         ]
         params, conflicts = ew.params_of(insts)
         self.assertEqual(conflicts, {1})
@@ -481,12 +692,16 @@ class RowTests(unittest.TestCase):
         by = {i.idx: i for i in insts}
         top = max(by)
         full = [by.get(k) or inst(k, "app.Filler") for k in range(1, top + 1)]
+        add_source_metadata(full)
         lst = [inst(1, "app.GenerateTableData", path="t.user"),
                inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)], _SubQuestTableList=[],
                     _MainQuestTableList=[], _RandomNormalTableList=[])]
-        params = {1: {"items": [], "trap": False, "pawn": False},
-                  2: {"items": [], "trap": True, "pawn": False},
-                  3: {"items": [], "trap": False, "pawn": True}}
+        params = {1: {"items": [], "trap": False, "pawn": False,
+                      "unlock_item": 0, "is_seal": False},
+                  2: {"items": [], "trap": True, "pawn": False,
+                      "unlock_item": 0, "is_seal": False},
+                  3: {"items": [], "trap": False, "pawn": True,
+                      "unlock_item": 0, "is_seal": False}}
         rows, _unj, _ids, kinds = ew.collect_rows({"t.user": full, "l.user": lst}, params, set(), {})
         r = {x["uid"]: x for x in rows}
         for k in ("quest", "trap", "pawn"):
@@ -530,10 +745,12 @@ class RowTests(unittest.TestCase):
                  inst(12, "app.GenerateManager.QuestFlagInfos", _CheckType=0, _Infos=[R(13)]),
                  inst(13, "app.GenerateManager.QuestFlagInfos.SomethingNew")]
         full = list(table)
+        add_source_metadata(full)
         lst = [inst(1, "app.GenerateTableData", path="t.user"),
                inst(2, "app.GenerateTableListData", _NormalTableList=[R(1)], _SubQuestTableList=[],
                     _MainQuestTableList=[], _RandomNormalTableList=[])]
-        params = {1: {"items": [], "trap": False, "pawn": False}}
+        params = {1: {"items": [], "trap": False, "pawn": False,
+                      "unlock_item": 0, "is_seal": False}}
         rows, _unj, _ids, kinds = ew.collect_rows({"t.user": full, "l.user": lst}, params, set(), {})
         r = {x["uid"]: x for x in rows}
         self.assertEqual(kinds["key locations"], 1)

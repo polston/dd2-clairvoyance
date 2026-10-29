@@ -174,24 +174,926 @@ local contract = {
   "seen_quest_name", "quest_region",
   "refresh_tree_gates", "invalidate_tree_gates", "tree_gate_qids",
   "tree_gate_table", "tree_gate_stats",
-  "invalidate_items", "item_needs", "item_locations", "item_name", "item_stats",
+  "invalidate_items", "item_needs", "objective_need_groups", "item_locations", "item_name", "item_stats",
   "refresh_items", "item_related", "reset_item_throttle", "quest_steps_text",
   "tracked_qid", "journal_now", "journal_all", "npc_name", "journal_stats",
   "map_open", "map_jump_apply", "journal_note_jump", "map_cursor",
   "quest_step", "masquerade_door_closed",
   "overhead_block_reason",
 }
-assert(#contract == 53)
+assert(#contract == 54)
 for _, name in ipairs(contract) do
   assert(type(a[name]) == "function", "contract function missing: " .. name)
 end
+local grouped, grouped_complete = A.objective_need_builder.build({
+  { qid = 700, processor_id = 800, list_index = 0, condition_index = 1,
+    complete = true, current_work = true, options = {
+      { item_id = 900, required = 2, op = "more" },
+      { item_id = 901, required = 2, op = "more" },
+    } },
+}, { [900] = 1 }, { generation = 3, task_generation = 3,
+  task_index = { [700] = 4 } })
+assert(grouped_complete and #grouped == 1 and grouped[1].remaining == 1
+  and #grouped[1].options == 2 and grouped[1].id[1] == "need"
+  and grouped[1].generation == 3, "adapter exports objective-only grouped need model")
+local empty_need_snapshot = a.objective_need_groups()
+assert(empty_need_snapshot.status == "unknown" and not empty_need_snapshot.complete
+  and #empty_need_snapshot.groups == 0, "unrefreshed objective group snapshot is unknown")
+local forgery_identity = { "source", "forgery", 17, 29 }
+local function forgery_evidence(overrides)
+  local e = { identity = forgery_identity, service_id = 17, output_item_id = 29,
+    mapping_input_item_id = 11, mapping_output_item_id = 29, price = 6, mapping_price = 6,
+    service_type = "NpcShopForgeryParam", service_position = { x = 1, y = 2, z = 3 },
+    interactable = true, row_enabled = true, input_held = true, price_held = true,
+    idle = true, busy = false, kept_item_id = 0, kept_item_count = 0,
+    completed = false, completion_readable = true, busy_readable = true,
+    kept_readable = true, completion_time_readable = true, completion_time = 0 }
+  for k, v in pairs(overrides or {}) do e[k] = v end
+  return e
+end
+local pre_order = a.objective_forgery_evidence(forgery_evidence(), 7)
+assert(pre_order.evidence_only == true and pre_order.publication_ready == false
+  and pre_order.eligibility == "eligible" and pre_order.reason == "forgery_order_can_start"
+  and pre_order.evidence_generation == 7 and pre_order.provider == nil
+  and pre_order.status == nil and pre_order.complete == nil and pre_order.candidates == nil,
+  "forgery classification is explicit evidence-only data, never an eligible provider publication")
+local pending = a.objective_forgery_evidence(forgery_evidence({ idle = false, busy = true,
+  input_held = false, price_held = false, kept_item_id = 11, kept_item_count = 1 }))
+assert(pending.eligibility == "ineligible" and pending.reason == "forgery_order_pending",
+  "forgery pending order is an ineligible evidence finding")
+local complete = a.objective_forgery_evidence(forgery_evidence({ completed = true,
+  input_held = false, price_held = false, kept_item_id = 29, kept_item_count = 1 }))
+assert(complete.eligibility == "eligible" and complete.reason == "matching_forgery_output_ready"
+  and complete.publication_ready == false,
+  "completed matching output remains eligible without input or price")
+local unrelated = a.objective_forgery_evidence(forgery_evidence({ completed = true,
+  input_held = false, price_held = false, kept_item_id = 30, kept_item_count = 1 }))
+assert(unrelated.eligibility == "ineligible" and unrelated.reason == "forgery_order_unrelated",
+  "unrelated completed order is ineligible")
+local unrelated_busy = a.objective_forgery_evidence(forgery_evidence({ idle = false, busy = true,
+  input_held = false, price_held = false, kept_item_id = 30, kept_item_count = 1 }))
+assert(unrelated_busy.eligibility == "ineligible"
+  and unrelated_busy.reason == "forgery_order_unrelated",
+  "unrelated active order is ineligible and distinct from a matching pending order")
+local unreadable = a.objective_forgery_evidence(forgery_evidence({ busy_readable = false }))
+assert(unreadable.eligibility == "unknown" and unreadable.reason == "forgery_busy_state_unreadable",
+  "unreadable forgery state invalidates provider without stale candidates")
+local completion_time_unreadable = a.objective_forgery_evidence(forgery_evidence({
+  completion_time_readable = false }))
+assert(completion_time_unreadable.eligibility == "unknown"
+  and completion_time_unreadable.reason == "forgery_completion_time_unreadable",
+  "forgery classification requires readable completion-time evidence")
+local disabled = a.objective_forgery_evidence(forgery_evidence({ row_enabled = false,
+  completion_time_readable = false }))
+assert(disabled.eligibility == "ineligible" and disabled.reason == "forgery_mapping_disabled",
+  "exact disabled forgery mapping is ineligible, not unknown")
+local blocked = a.objective_forgery_evidence(forgery_evidence({ interactable = false,
+  busy_readable = false }))
+assert(blocked.eligibility == "ineligible"
+  and blocked.reason == "forgery_service_not_interactable",
+  "exact non-interactable service is ineligible, not unknown")
+for _, bad in ipairs({
+    { "false service id", { service_id = false } },
+    { "false input id", { mapping_input_item_id = false } },
+    { "false output id", { output_item_id = false } },
+    { "false mapped output id", { mapping_output_item_id = false } },
+    { "false kept item id", { kept_item_id = false } },
+    { "fractional service id", { service_id = 17.5 } },
+    { "fractional output id", { output_item_id = 29.5 } },
+    { "fractional mapped output id", { mapping_output_item_id = 29.5 } },
+    { "fractional kept item id", { kept_item_id = 0.5 } },
+    { "fractional count", { kept_item_count = 0.5 } },
+    { "infinite count", { kept_item_count = math.huge } },
+    { "infinite position", { service_position = { x = math.huge, y = 2, z = 3 } } },
+    { "nan position", { service_position = { x = 1, y = 0 / 0, z = 3 } } },
+    { "infinite price", { price = math.huge, mapping_price = math.huge } },
+    { "infinite completion time", { completion_time = math.huge } },
+  }) do
+  local malformed = a.objective_forgery_evidence(forgery_evidence(bad[2]))
+  assert(malformed.eligibility == "unknown" and malformed.reason == "forgery_evidence_malformed",
+    "malformed forgery evidence rejected: " .. bad[1])
+end
+for _, generation in ipairs({ 1.5, math.huge }) do
+  local malformed = a.objective_forgery_evidence(forgery_evidence(), generation)
+  assert(malformed.eligibility == "unknown" and malformed.reason == "forgery_generation_invalid",
+    "fractional or infinite forgery evidence generation is rejected")
+end
+
+-- Talk-grant and forgery production providers are pure over atomic native
+-- observations. Complete talk evidence publishes only reachable, currently
+-- playable grants; incomplete source gates remain diagnostic and fail closed.
+do
+  assert(type(A.objective_talk_grant_provider_snapshot) == "function",
+    "talk-grant provider classifier is exported")
+  assert(type(A.objective_forgery_provider_snapshot) == "function",
+    "forgery provider classifier is exported")
+  local talk_observation = { complete = true, wanted = { 29 }, events = {
+    { event_id = 1900, playable = true, playing = false,
+      speaker_cid = 101, speaker_position = { x = 1, y = 2, z = 3 },
+      interaction_readable = true, interaction_enabled = true,
+      history_readable = true, history_present = false, nodes = {
+        { index = 0, kind = "app.RootSegmentNode", node_id = "start",
+          node_name_hash = 10, edges = {
+          { index = 0, next_node_id = "grant", next_node_name_hash = 11,
+            condition_count = 0 }, } },
+        { index = 1, kind = "app.ItemControlSegmentNode", node_id = "grant",
+          node_name_hash = 11, edges = {},
+          grants = { { item_index = 0, item_id = 29, count = 1 } } },
+      } }, } }
+  local talk = A.objective_talk_grant_provider_snapshot(talk_observation, 7)
+  assert(talk.provider == "talk_grant" and talk.generation == 7
+    and talk.status == "ok" and talk.complete == true
+    and #talk.candidates == 1 and #talk.diagnostics == 1
+    and talk.candidates[1].source_id[2] == "talk_grant"
+    and talk.candidates[1].source_id[3] == 1900
+    and talk.candidates[1].source_id[4] == "grant"
+    and talk.candidates[1].target.cid == 101
+    and talk.candidates[1].outputs[1].item_id == 29
+    and talk.candidates[1].eligibility == "eligible"
+    and talk.diagnostics[1].eligibility == "eligible",
+    "complete reachable direct grant publishes one stable positioned source")
+  local function talk_variant(fields, edge_conditions, middle_kind, mismatched_hash)
+    local event = {
+      event_id = 1900, playable = true, playing = false, speaker_cid = 101,
+      speaker_position = { x = 1, y = 2, z = 3 }, interaction_readable = true,
+      interaction_enabled = true, history_readable = true, history_present = false,
+      nodes = {
+        { index = 0, kind = "app.RootSegmentNode", node_id = "start",
+          node_name_hash = 10, edges = { { index = 0, next_node_id = "talk",
+            next_node_name_hash = mismatched_hash or 12,
+            condition_count = edge_conditions or 0 } } },
+        { index = 1, kind = middle_kind or "app.TalkSegmentNode", node_id = "talk",
+          node_name_hash = 12, edges = { { index = 0, next_node_id = "grant",
+            next_node_name_hash = 11, condition_count = 0 } } },
+        { index = 2, kind = "app.ItemControlSegmentNode", node_id = "grant",
+          node_name_hash = 11, edges = {},
+          grants = { { item_index = 0, item_id = 29, count = 1 } } },
+      },
+    }
+    for key, value in pairs(fields or {}) do event[key] = value end
+    return A.objective_talk_grant_provider_snapshot(
+      { complete = true, wanted = { 29 }, events = { event } }, 8)
+  end
+  local modeled_talk = talk_variant()
+  assert(#modeled_talk.candidates == 1
+    and modeled_talk.diagnostics[1].eligibility == "eligible",
+    "root and talk segments form a modeled unconditional grant path")
+  local conditional_talk = talk_variant(nil, 1)
+  assert(conditional_talk.status == "ok" and conditional_talk.complete
+    and #conditional_talk.candidates == 0
+    and conditional_talk.diagnostics[1].eligibility == "unknown"
+    and conditional_talk.diagnostics[1].reason == "talk_grant_branch_condition_unmodeled",
+    "unsupported branch conditions remain unknown without hiding supported events")
+  local gated_talk = talk_variant(nil, 0, "app.ItemDeliverySegmentNode")
+  assert(#gated_talk.candidates == 0
+    and gated_talk.diagnostics[1].eligibility == "unknown"
+    and gated_talk.diagnostics[1].reason == "talk_grant_intermediate_node_unmodeled",
+    "an unmodeled intermediate segment cannot become an unconditional grant path")
+  local conflicting_edge = talk_variant(nil, 0, nil, 11)
+  assert(#conflicting_edge.candidates == 0
+    and conflicting_edge.diagnostics[1].eligibility == "unknown"
+    and conflicting_edge.diagnostics[1].reason == "talk_grant_node_identity_conflict",
+    "edge node id and name hash must resolve to the same stable node")
+  local unavailable_talk = talk_variant({ playable = false })
+  assert(#unavailable_talk.candidates == 0
+    and unavailable_talk.diagnostics[1].eligibility == "ineligible"
+    and unavailable_talk.diagnostics[1].reason == "talk_grant_event_unavailable",
+    "a complete negative playability read rejects the grant")
+  local claimed_talk = talk_variant({ history_present = true,
+    history_played = false, history_result = 60 })
+  assert(#claimed_talk.candidates == 1
+    and claimed_talk.diagnostics[1].eligibility == "eligible",
+    "a previously recorded but currently playable direct event remains obtainable")
+  for _, observed_result in ipairs({ -1, 0, 60 }) do
+    local recorded = talk_variant({ history_present = true,
+      history_played = false, history_result = observed_result })
+    assert(#recorded.candidates == 1,
+      "observed playable history result is branch evidence, not claim state")
+  end
+  for _, blocked in ipairs({
+      { { playing = true }, "ineligible", "talk_grant_event_playing" },
+      { { interaction_enabled = false }, "ineligible", "talk_grant_interaction_disabled" },
+      { { history_readable = false }, "unknown", "talk_grant_history_unreadable" },
+      { { history_present = true, history_played = true }, "ineligible",
+        "talk_grant_history_played" },
+      { { history_present = true, history_played = nil }, "unknown",
+        "talk_grant_history_state_unreadable" },
+      { { history_present = true, history_played = false, history_result = false },
+        "unknown", "talk_grant_history_result_unreadable" },
+      { { speaker_position = false }, "unknown", "talk_grant_speaker_position_unreadable" },
+    }) do
+    local result = talk_variant(blocked[1])
+    assert(#result.candidates == 0
+      and result.diagnostics[1].eligibility == blocked[2]
+      and result.diagnostics[1].reason == blocked[3],
+      "talk-grant source gate: " .. blocked[3])
+  end
+  local no_talk = A.objective_talk_grant_provider_snapshot(
+    { complete = true, wanted = { 29 }, events = {} }, 9)
+  assert(no_talk.status == "ok" and no_talk.complete and #no_talk.candidates == 0,
+    "a complete catalog scan with no matching talk grant is authoritative empty")
+  local partial_talk = A.objective_talk_grant_provider_snapshot(
+    { complete = false, reason = "talk_grant_nodes_truncated", wanted = { 29 }, events = {} }, 10)
+  assert(partial_talk.status == "unknown" and not partial_talk.complete
+    and partial_talk.reason == "talk_grant_nodes_truncated" and #partial_talk.candidates == 0,
+    "a partial talk catalog scan clears all candidates")
+
+  local forgery_observation = { complete = true, wanted = { 29 },
+    services = { { job = 94, talk_event_id = 1919, service_index = 0,
+      chara_id = 3472286413, shop_id = 25, service_type = "app.NpcShopForgeryParam",
+      playable = true, speaker_present = true, interactable = true,
+      interaction_disabled = false, condition_truth_readable = false } },
+    mappings = { { input_item_id = 11, output_item_id = 29, price = 6,
+      enabled_readable = false } },
+    order = { kept_readable = true, kept_item_id = 0, kept_item_count = 0,
+      completion_time_readable = true, completion_time = 0,
+      completed_readable = true, completed = false } }
+  local forgery = A.objective_forgery_provider_snapshot(forgery_observation, 11)
+  assert(forgery.provider == "forgery" and forgery.generation == 11
+    and forgery.status == "unknown" and not forgery.complete
+    and forgery.reason == "forgery_mapping_enablement_unproven"
+    and #forgery.candidates == 0 and #forgery.diagnostics.services == 1
+    and #forgery.diagnostics.mappings == 1
+    and forgery.missing_evidence[1] == "mapping_enablement"
+    and forgery.missing_evidence[7] == "busy_kept_completion_semantics",
+    "forgery provider preserves typed service/order diagnostics but fails closed")
+  local enabled_observation = {
+    complete = true, wanted = { 29 }, services = forgery_observation.services,
+    mappings = { { input_item_id = 11, output_item_id = 29, price = 6,
+      enabled_readable = true, enabled = true, held_readable = false,
+      price_readable = false } }, order = forgery_observation.order }
+  local enabled_forgery = A.objective_forgery_provider_snapshot(enabled_observation, 12)
+  assert(enabled_forgery.status == "unknown"
+    and enabled_forgery.reason == "forgery_service_speaker_join_unproven"
+    and enabled_forgery.missing_evidence[1] == "service_speaker_join",
+    "a readable enabled mapping exposes the exact structured-speaker join gate")
+  local availability_service = {}
+  for key, value in pairs(forgery_observation.services[1]) do
+    availability_service[key] = value
+  end
+  availability_service.speaker_matches_service = true
+  availability_service.availability_readable = false
+  local availability_observation = {
+    complete = true, wanted = { 29 }, services = { availability_service },
+    mappings = enabled_observation.mappings, order = forgery_observation.order }
+  local availability_forgery = A.objective_forgery_provider_snapshot(
+    availability_observation, 13)
+  assert(availability_forgery.reason == "forgery_service_availability_unproven"
+    and availability_forgery.missing_evidence[1] == "service_availability",
+    "a matched speaker exposes the exact structured service-availability gate")
+  local no_mapping = A.objective_forgery_provider_snapshot({ complete = true,
+    wanted = { 29 }, services = forgery_observation.services, mappings = {},
+    order = forgery_observation.order }, 14)
+  assert(no_mapping.status == "ok" and no_mapping.complete and #no_mapping.candidates == 0,
+    "a complete item catalog scan with no forgery mapping is authoritative empty")
+  local partial_forgery = A.objective_forgery_provider_snapshot({ complete = false,
+    reason = "forgery_service_catalog_truncated", wanted = { 29 }, services = {},
+    mappings = {}, order = {} }, 15)
+  assert(partial_forgery.status == "unknown" and not partial_forgery.complete
+    and partial_forgery.reason == "forgery_service_catalog_truncated"
+    and #partial_forgery.candidates == 0,
+    "a partial forgery catalog scan clears all candidates")
+
+  local aux = { talk_grant = talk_observation, forgery = forgery_observation }
+  local first = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, aux)
+  local repeated = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, aux)
+  assert(first[5].status == "ok" and first[5].complete
+    and #first[5].candidates == 1
+    and first[6].reason == "forgery_mapping_enablement_unproven"
+    and repeated[5].generation == first[5].generation
+    and repeated[6].generation == first[6].generation,
+    "identical production observations keep independent provider generations stable")
+  local changed_aux = { talk_grant = {
+      complete = true, wanted = { 29 }, events = {} },
+    forgery = forgery_observation }
+  local changed = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, changed_aux)
+  assert(changed[5].generation == first[5].generation + 1
+    and changed[5].status == "ok" and #changed[5].candidates == 0
+    and changed[6].generation == first[6].generation,
+    "a changed talk observation advances only talk generation and leaves no stale candidate")
+end
+
+-- Native catalog readers reconcile bounded managed collections atomically and
+-- retain only plain diagnostic values (never managed-object references).
+do
+  assert(type(A.read_objective_talk_grant_observation) == "function",
+    "talk-grant native observation reader is exported")
+  assert(type(A.read_objective_forgery_observation) == "function",
+    "forgery native observation reader is exported")
+  local function managed(fields, calls, name)
+    local object = { fields = fields or {}, calls = calls or {} }
+    function object.get_field(_, key) return object.fields[key] end
+    function object.call(_, method, ...)
+      local value = object.calls[method]
+      if type(value) == "function" then return value(...) end
+      return value
+    end
+    function object.get_type_definition()
+      return { get_full_name = function() return name end }
+    end
+    return object
+  end
+  local function managed_list(values, count)
+    return managed({}, { get_Count = count or #values,
+      get_Item = function(index) return values[index + 1] end })
+  end
+  local function managed_array(values)
+    return { get_elements = function() return values end }
+  end
+  local function managed_dict(rows, expected, counter)
+    local entries = {}
+    for index, row in ipairs(rows) do
+      entries[index] = managed({ Next = -1, Key = row[1], Value = row[2] })
+    end
+    local array = { get_elements = function() return entries end }
+    return managed({ _count = #entries, _freeCount = 0, _entries = array },
+      { get_Count = function()
+        if counter ~= nil then counter.reads = counter.reads + 1 end
+        return expected or #entries
+      end })
+  end
+  local grant = managed({ _ItemId = 29, _Num = 2 })
+  local edge_conditions = managed({ _ConditionList = managed_array({}) })
+  local edge = managed({ _NextNodeId = "grant", _NextNodeNameHash = 11,
+    _Conditions = edge_conditions })
+  local start = managed({ _NodeId = "start", _NodeNameHash = 10,
+    _NextNodesCandidates = managed_array({ edge }) }, nil, "app.RootSegmentNode")
+  local grant_node = managed({ _NodeId = "grant", _NodeNameHash = 11,
+    _NextNodesCandidates = managed_array({}), _ChangeType = 0,
+    _Items = managed_array({ grant }) }, nil, "app.ItemControlSegmentNode")
+  local event_data = managed({ _SegmentNodes = managed_array({ start, grant_node }) })
+  local event_ref = managed({ _Item = event_data })
+  local talk_reads, shop_reads, mapping_reads = { reads = 0 }, { reads = 0 }, { reads = 0 }
+  local talk_dict = managed_dict({ { 1900, event_ref } }, nil, talk_reads)
+  local character_data = managed({}, {}, "app.CharacterData")
+  local blackboard = managed({}, {}, "app.AIBlackBoardController")
+  local speaker = managed({}, {
+    get_AIBlackBoardController = function() return blackboard end,
+    get_UniversalPosition = function() return { x = 10, y = 20, z = 30 } end,
+  }, "app.Character")
+  local speaker_holder = managed({ CharaID = 3472286413, _chara = speaker }, {
+    get_chara = function() return speaker end,
+    get_UniversalPosition = function() return { x = 10, y = 20, z = 30 } end,
+  }, "app.NPCHolder")
+  local holder_dict = managed({}, { get_Item = function(chara_id)
+    return chara_id == 3472286413 and speaker_holder or nil
+  end })
+  local npc_manager = managed({ NPCHolderDic = holder_dict }, {
+    getNPCCharacterData = function(chara_id)
+      return chara_id == 3472286413 and character_data or nil
+    end,
+  })
+  local talk_manager = managed({ _ResourceCatalog = managed({
+      ["<MergedCatalog>k__BackingField"] = talk_dict }),
+      _PlayingEventIDList = managed_list({}) }, {
+    getTalkEventInitialSpeaker = function(event_id)
+      return event_id == 1900 and 3472286413 or nil
+    end,
+    isEventPlayable = function(event_id) return event_id == 1900 end,
+    getHistory = function() return nil end,
+  })
+  local service = managed({ _CharaID = 3472286413, _ShopID = 25 }, nil,
+    "app.NpcShopForgeryParam")
+  local shop_data = managed({ _TalkEventID = 1919,
+    _CharacterShopData = managed_list({ service }) })
+  local shop_dict = managed_dict({ { 94, shop_data } }, nil, shop_reads)
+  talk_manager.fields._ShopTalkEventDataCatalog = shop_dict
+  local mapping = managed({ _Id = 11, _FakeItemId = 29, _FakePrice = 6 }, {
+      get_IsEnableFake = function() return true end },
+    "app.ItemDataParam")
+  local item_manager = managed({ _ItemDataDict = managed_dict({ { 11, mapping } }, nil,
+      mapping_reads) }, {
+    get_FakeShopKeepedItem = function() return managed({ _ItemId = 0, _Num = 0 }) end,
+    get_FakeShopCompleteTime = function() return 0 end,
+    isFakeShopKeeped = function() return false end,
+    isFakeShopCompleted = function() return false end,
+    isFakeShopRemainingMinute = function() return 0 end,
+  })
+  talk_manager.calls.getTalkEventInitialSpeaker = function(event_id)
+    return (event_id == 1900 or event_id == 1919) and 3472286413 or nil
+  end
+  talk_manager.calls.isEventPlayable = function(event_id)
+    return event_id == 1900 or event_id == 1919
+  end
+  talk_manager.calls.isTalkEventInteractDisabled = function(chara_id)
+    return chara_id ~= 3472286413
+  end
+  talk_manager.calls.isShopTalkEventAvailableForChara = function(data, board)
+    return data == character_data and board == blackboard
+  end
+  local original_singleton = sdk.get_managed_singleton
+  sdk.get_managed_singleton = function(name)
+    if name == "app.TalkEventManager" then return talk_manager end
+    if name == "app.ItemManager" then return item_manager end
+    if name == "app.NPCManager" then return npc_manager end
+    return nil
+  end
+  local no_talk_need = A.read_objective_talk_grant_observation({})
+  local no_forgery_need = A.read_objective_forgery_observation({})
+  assert(no_talk_need.complete and no_forgery_need.complete
+    and talk_reads.reads == 0 and shop_reads.reads == 0 and mapping_reads.reads == 0,
+    "no focused item need performs no provider catalog or live scan")
+  local talk_read = A.read_objective_talk_grant_observation({ [29] = true })
+  assert(talk_read.complete and #talk_read.wanted == 1 and talk_read.wanted[1] == 29
+    and #talk_read.events == 1 and talk_read.events[1].event_id == 1900
+    and #talk_read.events[1].nodes == 2
+    and talk_read.events[1].nodes[1].edges[1].next_node_id == "grant"
+    and talk_read.events[1].nodes[1].edges[1].condition_count == 0
+    and talk_read.events[1].nodes[2].grants[1].item_id == 29
+    and talk_read.events[1].nodes[2].grants[1].count == 2
+    and talk_read.events[1].speaker_cid == 3472286413
+    and talk_read.events[1].speaker_position.x == 10
+    and talk_read.events[1].playing == false
+    and talk_read.events[1].interaction_readable
+    and talk_read.events[1].interaction_enabled,
+    "talk reader scans the typed graph and current numeric-speaker gates")
+  local saved_interaction_disabled = talk_manager.calls.isTalkEventInteractDisabled
+  talk_manager.calls.isTalkEventInteractDisabled = function() return true end
+  local disabled_talk = A.read_objective_talk_grant_observation({ [29] = true })
+  assert(disabled_talk.events[1].interaction_readable
+    and disabled_talk.events[1].interaction_enabled == false,
+    "a readable disabled interaction remains a negative Boolean gate")
+  talk_manager.calls.isTalkEventInteractDisabled = saved_interaction_disabled
+  local forgery_read = A.read_objective_forgery_observation({ [29] = true })
+  assert(forgery_read.complete and #forgery_read.wanted == 1
+    and #forgery_read.services == 1
+    and forgery_read.services[1].service_type == "app.NpcShopForgeryParam"
+    and forgery_read.services[1].talk_event_id == 1919
+    and forgery_read.services[1].chara_id == 3472286413
+    and forgery_read.services[1].speaker_cid == 3472286413
+    and forgery_read.services[1].speaker_matches_service
+    and forgery_read.services[1].availability_readable
+    and forgery_read.services[1].available
+    and forgery_read.services[1].interaction_disabled == false
+    and #forgery_read.mappings == 1
+    and forgery_read.mappings[1].input_item_id == 11
+    and forgery_read.mappings[1].output_item_id == 29
+    and forgery_read.mappings[1].enabled_readable
+    and forgery_read.mappings[1].enabled == true
+    and forgery_read.mappings[1].held_readable == false
+    and forgery_read.mappings[1].price_readable == false
+    and forgery_read.order.kept_readable and forgery_read.order.kept_item_id == 0
+    and forgery_read.order.kept_state_readable
+    and forgery_read.order.kept_active == false
+    and forgery_read.order.completion_time_readable
+    and forgery_read.order.completed_readable
+    and forgery_read.order.remaining_minutes_readable
+    and forgery_read.order.remaining_minutes == 0,
+    "forgery reader joins typed service, mapping and exact raw order getters")
+  local saved_kept = item_manager.calls.get_FakeShopKeepedItem
+  local saved_time = item_manager.calls.get_FakeShopCompleteTime
+  local saved_kept_state = item_manager.calls.isFakeShopKeeped
+  local saved_completed = item_manager.calls.isFakeShopCompleted
+  local saved_remaining = item_manager.calls.isFakeShopRemainingMinute
+  item_manager.calls.get_FakeShopKeepedItem = function() return nil end
+  item_manager.calls.get_FakeShopCompleteTime = function() return nil end
+  item_manager.calls.isFakeShopKeeped = function() return nil end
+  item_manager.calls.isFakeShopCompleted = function() return nil end
+  item_manager.calls.isFakeShopRemainingMinute = function() return nil end
+  local unreadable_order = A.read_objective_forgery_observation({ [29] = true })
+  assert(not unreadable_order.order.kept_readable
+    and not unreadable_order.order.completion_time_readable
+    and not unreadable_order.order.kept_state_readable
+    and not unreadable_order.order.completed_readable
+    and not unreadable_order.order.remaining_minutes_readable,
+    "every raw forgery order seam keeps an independent unreadable flag")
+  item_manager.calls.get_FakeShopKeepedItem = saved_kept
+  item_manager.calls.get_FakeShopCompleteTime = saved_time
+  item_manager.calls.isFakeShopKeeped = saved_kept_state
+  item_manager.calls.isFakeShopCompleted = saved_completed
+  item_manager.calls.isFakeShopRemainingMinute = saved_remaining
+  local saved_initial_speaker = talk_manager.calls.getTalkEventInitialSpeaker
+  talk_manager.calls.getTalkEventInitialSpeaker = function(event_id)
+    return event_id == 1900 and 3472286413 or 1
+  end
+  local wrong_speaker = A.read_objective_forgery_observation({ [29] = true })
+  assert(wrong_speaker.services[1].speaker_cid == 1
+    and not wrong_speaker.services[1].speaker_matches_service
+    and wrong_speaker.services[1].join_reason == "forgery_service_speaker_join_unproven"
+    and not wrong_speaker.services[1].availability_readable,
+    "forgery service target rejects a structured speaker CID mismatch")
+  talk_manager.calls.getTalkEventInitialSpeaker = saved_initial_speaker
+  local cached_talk_reads, cached_shop_reads, cached_mapping_reads =
+    talk_reads.reads, shop_reads.reads, mapping_reads.reads
+  A.read_objective_talk_grant_observation({ [29] = true })
+  A.read_objective_forgery_observation({ [29] = true })
+  assert(talk_reads.reads == cached_talk_reads
+    and shop_reads.reads == cached_shop_reads
+    and mapping_reads.reads == cached_mapping_reads,
+    "static provider catalogs are built once while focused live gates refresh")
+  assert(type(A.invalidate_objective_provider_catalogs) == "function",
+    "provider catalog invalidation is exported")
+  A.invalidate_objective_provider_catalogs()
+  event_data.fields._SegmentNodes = managed_array({ [1] = start, [3] = grant_node })
+  local sparse = A.read_objective_talk_grant_observation({ [29] = true })
+  assert(not sparse.complete and sparse.reason == "talk_grant_nodes_unreadable"
+    and #sparse.events == 0,
+    "a sparse managed array fails atomically instead of compacting holes")
+  A.invalidate_objective_provider_catalogs()
+  event_data.fields._SegmentNodes = managed_list({ start, grant_node }, 1025)
+  local truncated = A.read_objective_talk_grant_observation({ [29] = true })
+  assert(not truncated.complete and truncated.reason == "talk_grant_nodes_truncated"
+    and #truncated.events == 0,
+    "an over-limit talk graph fails atomically without partial rows")
+  sdk.get_managed_singleton = original_singleton
+end
 local empty_source_snapshots = a.objective_item_source_snapshots()
-assert(#empty_source_snapshots == 3 and empty_source_snapshots[1].provider == "placed"
+assert(type(a.objective_forgery_evidence) == "function"
+  and a.objective_forgery_candidate == nil, "forgery helper must be evidence-only")
+assert(#empty_source_snapshots == 6 and empty_source_snapshots[1].provider == "placed"
   and empty_source_snapshots[2].provider == "chest" and empty_source_snapshots[3].provider == "loot"
   and empty_source_snapshots[1].status == "unknown"
+  and empty_source_snapshots[1].complete == false
+  and empty_source_snapshots[1].reason == "source_catalog_unavailable"
+  and empty_source_snapshots[2].complete == false
+  and empty_source_snapshots[2].reason == "source_catalog_unavailable"
+  and empty_source_snapshots[4].provider == "reward"
+  and empty_source_snapshots[4].status == "unknown"
+  and empty_source_snapshots[4].complete == false
+  and type(empty_source_snapshots[4].reason) == "string"
+  and #empty_source_snapshots[4].candidates == 0
+  and empty_source_snapshots[5].provider == "talk_grant"
+  and empty_source_snapshots[5].status == "unknown"
+  and empty_source_snapshots[5].complete == false
+  and empty_source_snapshots[5].reason == "objective_need_snapshot_incomplete"
+  and #empty_source_snapshots[5].candidates == 0
+  and empty_source_snapshots[5].generation > 0
+  and empty_source_snapshots[6].provider == "forgery"
+  and empty_source_snapshots[6].status == "unknown"
+  and empty_source_snapshots[6].complete == false
+  and empty_source_snapshots[6].reason == "objective_need_snapshot_incomplete"
+  and #empty_source_snapshots[6].candidates == 0
+  and empty_source_snapshots[6].generation > 0
   and empty_source_snapshots[1].generation > 0
   and empty_source_snapshots[2].generation > 0 and empty_source_snapshots[3].generation > 0,
-  "source envelopes initialize with separate positive generations")
+  "source envelopes initialize with separate positive generations: "
+    .. tostring(#empty_source_snapshots) .. "/"
+    .. tostring(empty_source_snapshots[2] and empty_source_snapshots[2].reason) .. "/"
+    .. tostring(empty_source_snapshots[4] and empty_source_snapshots[4].reason) .. "/"
+    .. tostring(empty_source_snapshots[5] and empty_source_snapshots[5].reason) .. "/"
+    .. tostring(empty_source_snapshots[6] and empty_source_snapshots[6].reason))
+
+-- Pickup/chest classification is pure over one complete static catalog and
+-- one atomic adapter observation.  The live reader feeds this same contract.
+do
+  assert(type(A.objective_source_provider_snapshots) == "function",
+    "pickup/chest provider classifier is exported")
+  local function base_catalog()
+    return { version = 2, status = "ok", complete = true, generation = 3,
+      placements = {
+        { uid = "11111111-1111-1111-1111-111111111111", index = 0,
+          table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
+          source_id = { "source", "placed", "11111111-1111-1111-1111-111111111111", 0 },
+          capacity_pool_id = { "capacity", "placed", "11111111-1111-1111-1111-111111111111", 0 },
+          outputs = { { item_id = 501, count = 2 } }, pos = { x = 1, y = 2, z = 3 } },
+      }, chests = {
+        { uid = "22222222-2222-2222-2222-222222222222", index = 0,
+          table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", layer = 0,
+          source_id = { "source", "chest", "22222222-2222-2222-2222-222222222222", 0 },
+          capacity_pool_id = { "capacity", "chest", "22222222-2222-2222-2222-222222222222", 0 },
+          outputs = { { item_id = 601, count = 1 }, { item_id = 602, count = 3 } },
+          pos = { x = 4, y = 5, z = 6 }, unlock_item = 0, is_seal = false,
+          fake_unlock_item = 0, quest_override = false },
+      } }
+  end
+  local function base_observation()
+    return { complete = true, persisted_complete = true, generation_complete = true,
+      requested_complete = true, loaded_complete = true,
+      persisted = {}, never = {}, dead = {}, disabled_tables = {}, blacklist = {},
+      requested_tables = {}, loaded = {}, gate_results = {} }
+  end
+  local function classify(catalog, observation, generation)
+    local rows = A.objective_source_provider_snapshots(catalog, observation, generation or 7)
+    return rows[1], rows[2]
+  end
+  local placed, chest = classify(base_catalog(), base_observation())
+  assert(placed.status == "unknown" and placed.complete == false
+    and placed.reason == "placed_current_state_unproven" and #placed.candidates == 0,
+    "placed provider fails closed when persisted and loaded state are both absent")
+  assert(chest.status == "unknown" and chest.complete == false
+    and chest.reason == "chest_current_state_unproven" and #chest.candidates == 0,
+    "chest provider fails closed when persisted and loaded state are both absent")
+
+  local available = base_observation()
+  available.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 0 }
+  available.persisted["22222222-2222-2222-2222-222222222222:0"] =
+    { family = "chest", pick = false, keep = false, unlock = false, seal = false }
+  placed, chest = classify(base_catalog(), available)
+  assert(placed.status == "ok" and placed.complete == true and #placed.candidates == 1
+    and placed.candidates[1].generation == 7 and placed.candidates[1].provider == "placed"
+    and placed.candidates[1].target.uid == "11111111-1111-1111-1111-111111111111"
+    and placed.candidates[1].outputs[1].item_id == 501
+    and placed.candidates[1].outputs[1].count == 2,
+    "placed provider accepts exact persisted evidence of an uncollected source")
+  assert(chest.status == "ok" and chest.complete == true and #chest.candidates == 1
+    and #chest.candidates[1].outputs == 2
+    and chest.candidates[1].outputs[2].item_id == 602
+    and chest.candidates[1].outputs[2].count == 3,
+    "chest provider preserves exact multi-item outputs")
+
+  local collected = base_observation()
+  collected.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 3 }
+  placed = classify(base_catalog(), collected)
+  assert(placed.status == "ok" and #placed.candidates == 0,
+    "pickup free bits 0/1 remove a collected source")
+  local opened = base_observation()
+  opened.persisted["22222222-2222-2222-2222-222222222222:0"] =
+    { family = "chest", pick = true, keep = false, unlock = false, seal = false }
+  _, chest = classify(base_catalog(), opened)
+  assert(chest.status == "ok" and #chest.candidates == 0,
+    "chest Pick/opened removes an emptied source")
+  local unopened_keep = base_observation()
+  unopened_keep.persisted["22222222-2222-2222-2222-222222222222:0"] =
+    { family = "chest", pick = false, keep = true, unlock = false, seal = false }
+  _, chest = classify(base_catalog(), unopened_keep)
+  assert(chest.status == "ok" and #chest.candidates == 1,
+    "chest Keep and Unlock false do not remove an unopened zero-key source")
+
+  local live = base_observation()
+  live.loaded["11111111-1111-1111-1111-111111111111:0"] = {
+    family = "placed", table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    generated = true, disabled = false, freebit = 0, broken = false, used = false }
+  live.loaded["22222222-2222-2222-2222-222222222222:0"] = {
+    family = "chest", table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    generated = true, disabled = false, pick = false, keep = false, unlock = false,
+    opened = false, unlock_api = false, seal = false, unlock_item = 0,
+    fake_unlock_item = 0, pawn_restrict = true }
+  placed, chest = classify(base_catalog(), live, 9)
+  assert(#placed.candidates == 1 and #chest.candidates == 1
+    and placed.candidates[1].generation == 9 and chest.candidates[1].generation == 9,
+    "exact loaded/catalog joins publish one stable generation")
+  live.loaded["22222222-2222-2222-2222-222222222222:0"].opened = true
+  placed, chest = classify(base_catalog(), live, 10)
+  assert(placed.status == "ok" and #placed.candidates == 1
+    and chest.status == "unknown" and chest.complete == false and #chest.candidates == 0
+    and chest.reason == "chest_loaded_state_inconsistent",
+    "one family inconsistency fails closed without stale candidates")
+
+  local wrong_join = base_observation()
+  wrong_join.loaded["11111111-1111-1111-1111-111111111111:0"] = {
+    family = "placed", table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    generated = true, disabled = false, freebit = 0, broken = false, used = false }
+  placed = classify(base_catalog(), wrong_join)
+  assert(placed.status == "unknown" and #placed.candidates == 0
+    and placed.reason == "placed_loaded_identity_unreadable",
+    "a negative loaded UID/table join invalidates the placed observation")
+  local wrong_persisted = base_observation()
+  wrong_persisted.persisted["11111111-1111-1111-1111-111111111111:0"] = {
+    family = "chest", pick = false, keep = false, unlock = false }
+  placed = classify(base_catalog(), wrong_persisted)
+  assert(placed.status == "unknown" and #placed.candidates == 0,
+    "a negative persisted UID/family join fails closed")
+  for _, exclusion in ipairs({ "never", "dead" }) do
+    local excluded = base_observation()
+    excluded[exclusion]["11111111-1111-1111-1111-111111111111:0"] = true
+    placed = classify(base_catalog(), excluded)
+    assert(placed.status == "ok" and #placed.candidates == 0,
+      "full-UID " .. exclusion .. " exclusion removes a pickup")
+  end
+  local excluded = base_observation()
+  excluded.blacklist["22222222-2222-2222-2222-222222222222"] = true
+  _, chest = classify(base_catalog(), excluded)
+  assert(chest.status == "ok" and #chest.candidates == 0,
+    "bare-GUID blacklist removes a chest")
+  excluded = base_observation()
+  excluded.disabled_tables["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"] = true
+  placed = classify(base_catalog(), excluded)
+  assert(placed.status == "ok" and #placed.candidates == 0,
+    "disabled table removes its pickup")
+  local removed_live = base_observation()
+  removed_live.loaded["11111111-1111-1111-1111-111111111111:0"] = {
+    family = "placed", table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    generated = true, disabled = false, freebit = 0, broken = true, used = false }
+  removed_live.loaded["22222222-2222-2222-2222-222222222222:0"] = {
+    family = "chest", table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    generated = true, disabled = false, pick = true, keep = false, unlock = false,
+    opened = true, unlock_api = false, unlock_item = 0, fake_unlock_item = 0,
+    pawn_restrict = false }
+  placed, chest = classify(base_catalog(), removed_live)
+  assert(placed.status == "ok" and chest.status == "ok"
+    and #placed.candidates == 0 and #chest.candidates == 0,
+    "loaded broken pickup and opened chest are removed without stale candidates")
+
+  local duplicate_catalog = base_catalog()
+  duplicate_catalog.chests[1].uid = duplicate_catalog.placements[1].uid
+  placed, chest = classify(duplicate_catalog, base_observation())
+  assert(placed.status == "unknown" and chest.status == "unknown"
+    and placed.reason == "source_catalog_identity_duplicate",
+    "cross-family duplicate native identity invalidates both providers")
+
+  local gated_catalog = base_catalog()
+  gated_catalog.placements[1].gate = { check = 0, conditions = {
+    { kind = "quest", qid = 20040, finish = true } } }
+  local gated = base_observation()
+  gated.gate_results["placed:11111111-1111-1111-1111-111111111111:0"] = false
+  placed = classify(gated_catalog, gated)
+  assert(placed.status == "ok" and #placed.candidates == 0,
+    "a proven false structured row gate removes the source")
+  gated.gate_results = {}
+  placed = classify(gated_catalog, gated)
+  assert(placed.status == "unknown" and #placed.candidates == 0
+    and placed.reason == "placed_gate_state_unreadable",
+    "an unreadable structured gate makes the provider unknown")
+
+  local subquest_catalog = base_catalog()
+  subquest_catalog.placements[1].layer = 2
+  local requested = base_observation()
+  requested.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 0 }
+  requested.requested_tables["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"] = {
+    active = true, failed = false, finished = true,
+    uids = { ["11111111-1111-1111-1111-111111111111:0"] = true } }
+  placed = classify(subquest_catalog, requested)
+  assert(placed.status == "ok" and #placed.candidates == 1,
+    "active complete requested subquest table admits its exact UID")
+  requested.requested_tables["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"].uids = {}
+  placed = classify(subquest_catalog, requested)
+  assert(placed.status == "ok" and #placed.candidates == 0,
+    "subquest table without exact UID is ineligible")
+  requested.requested_tables["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"].finished = nil
+  placed = classify(subquest_catalog, requested)
+  assert(placed.status == "unknown" and #placed.candidates == 0,
+    "partial subquest request fails closed")
+
+  local partial = base_observation()
+  partial.persisted_complete = false
+  placed, chest = classify(base_catalog(), partial)
+  assert(placed.status == "unknown" and chest.status == "unknown"
+    and #placed.candidates == 0 and #chest.candidates == 0,
+    "an incomplete shared sparse scan invalidates both providers atomically")
+  local future_access = base_catalog()
+  future_access.chests[1].unlock_item = 77
+  _, chest = classify(future_access, base_observation())
+  assert(chest.status == "unknown" and #chest.candidates == 0
+    and chest.reason == "chest_access_domain_unmodeled",
+    "future keyed chest access stays unknown")
+
+  local world_mod = require("Clairvoyance.world")
+  local integrated_rows = {
+    { k = "item", uid = "11111111-1111-1111-1111-111111111111", index = 0,
+      table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
+      id = 501, n = 2, x = 1, y = 2, z = 3, src = "normal" },
+    { k = "chest", uid = "22222222-2222-2222-2222-222222222222", index = 0,
+      table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", layer = 0,
+      id = 10, x = 4, y = 5, z = 6, src = "normal",
+      unlock_item = 0, is_seal = false, fake_unlock_item = 0, quest_override = false,
+      items = { { id = 601, n = 1 }, { id = 602, n = 3 } } },
+  }
+  local integrated_world = world_mod.new(a, {}, {
+    load = function(path)
+      if path == world_mod.K.PLACES then
+        return { version = 2, pak = "1:1", rows = integrated_rows }
+      end
+    end,
+    dump = function() return true end,
+    clock = function() return 0 end,
+  })
+  local integrated_catalog = integrated_world:objective_static_source_catalog()
+  local integrated_observation = base_observation()
+  integrated_observation.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 0 }
+  integrated_observation.persisted["22222222-2222-2222-2222-222222222222:0"] =
+    { family = "chest", pick = false, keep = false, unlock = false, seal = false }
+  local integrated_placed, integrated_chest = classify(integrated_catalog,
+    integrated_observation, 12)
+  assert(integrated_catalog.status == "ok" and integrated_placed.status == "ok"
+    and integrated_chest.status == "ok" and #integrated_placed.candidates == 1
+    and #integrated_chest.candidates == 1
+    and integrated_placed.candidates[1].source_id[4] == 0
+    and integrated_chest.candidates[1].outputs[2].item_id == 602,
+    "generated world metadata reaches the real pickup/chest classifier")
+
+  local wired_catalog, wired_observation = base_catalog(), base_observation()
+  wired_observation.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 0 }
+  wired_observation.persisted["22222222-2222-2222-2222-222222222222:0"] =
+    { family = "chest", pick = false, keep = false, unlock = false, seal = false }
+  local wired = a.objective_item_source_snapshots(nil, { need_generation = 11 },
+    wired_catalog, wired_observation)
+  local wired_repeat = a.objective_item_source_snapshots(nil, { need_generation = 11 },
+    wired_catalog, wired_observation)
+  assert(wired[1].status == "ok" and wired[2].status == "ok"
+    and #wired[1].candidates == 1 and #wired[2].candidates == 1
+    and wired_repeat[1].generation == wired[1].generation,
+    "adapter provider API publishes and keeps an identical observation generation stable")
+  wired_observation.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 3 }
+  local wired_changed = a.objective_item_source_snapshots(nil, { need_generation = 11 },
+    wired_catalog, wired_observation)
+  assert(wired_changed[1].generation == wired[1].generation + 1
+    and #wired_changed[1].candidates == 0 and #wired_changed[2].candidates == 1,
+    "a changed atomic source observation advances generation and removes stale pickup")
+
+  local saved_source_reader, saved_source_clock = A.read_objective_source_observation, os.clock
+  local scan_count, fake_now = 0, 100
+  A.read_objective_source_observation = function()
+    scan_count = scan_count + 1
+    return base_observation()
+  end
+  os.clock = function() return fake_now end
+  local cache_adapter, cache_catalog = A.make(), base_catalog()
+  cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
+  fake_now = 100.4
+  cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
+  fake_now = 100.8
+  cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
+  A.read_objective_source_observation, os.clock = saved_source_reader, saved_source_clock
+  assert(scan_count == 2,
+    "cached frame calls cannot move the fresh-scan timestamp and suppress a required rescan")
+
+  -- The native reader reconciles sparse persisted records and exact loaded
+  -- identities before the pure classifier sees them.
+  local function robj(fields, calls, name)
+    local o = { fields = fields or {}, calls = calls or {} }
+    function o.get_field(_, key) return o.fields[key] end
+    function o.call(_, method, ...)
+      local value = o.calls[method]
+      if type(value) == "function" then return value(...) end
+      return value
+    end
+    function o.get_type_definition()
+      return { get_full_name = function() return name end }
+    end
+    return o
+  end
+  local function rlist(values, count)
+    return robj({}, { get_Count = count or #values,
+      get_Item = function(index) return values[index + 1] end })
+  end
+  local function rdict(rows)
+    local entries = {}
+    for i, row in ipairs(rows or {}) do
+      entries[i] = robj({ Next = -1, Key = row[1], Value = row[2] })
+    end
+    local array = { get_elements = function() return entries end }
+    return robj({ _count = #entries, _freeCount = 0, _entries = array },
+      { get_Count = #entries })
+  end
+  local function rguid(text) return robj({}, { ["ToString()"] = text }) end
+  local function ruid(text)
+    return robj({ _RowID = rguid(text), _Index = 0 })
+  end
+  local function holder(contexts)
+    local rows = {}
+    for i, context in ipairs(contexts) do
+      rows[i] = { i, robj({ ["<CurrentContext>k__BackingField"] = context }) }
+    end
+    return robj({ Contexts = rdict(rows), RestoredContexts = rdict({}) })
+  end
+  local scanner_catalog = base_catalog()
+  local chest_uid = scanner_catalog.chests[1].uid
+  local chest_item = robj({ _IsPick = false, _IsKeep = true, _IsUnlock = false }, nil,
+    "app.GmItemContext")
+  local chest_record = robj({ Contexts = rlist({
+    robj({ UniqueID = ruid(chest_uid) }, nil, "app.UniqueIDContext"), chest_item,
+  }) })
+  local chest_record_info = robj({ ["<Record>k__BackingField"] = chest_record })
+  local gen_context = robj({ _IsGenerated = true, _IsDisableGenerate = false }, nil,
+    "app.GenerateInfoContext")
+  local live_holder = holder({ gen_context, chest_item })
+  local table_guid = rguid(scanner_catalog.chests[1].table_id)
+  local generator_id = robj({ _TableID = table_guid })
+  local common = robj({ _CustomGeneratorID = generator_id })
+  local comp_generate = robj({ _Container = robj({ _CommonInfo = common }) })
+  local live_chest = robj({ ["<UniqId>k__BackingField"] = ruid(chest_uid),
+      ["<CompContext>k__BackingField"] = live_holder,
+      ["<CompGenerateInfo>k__BackingField"] = comp_generate,
+      ItemContext = chest_item, UnlockItem = 0, FakeUnlockItem = 0,
+      _IsPawnRestrict = false },
+    { get_IsOpenedFreeBit = false, get_IsUnlockFreeBit = false }, "app.gm80_001")
+  local empty_set = function() return rdict({}) end
+  local generation_manager = robj({ _NeverGenetateID = empty_set(),
+    _NeverGenerateIDByDeadRequests = empty_set(), _DisableGenerateRequests = empty_set(),
+    _GenerateBlacklistUniqueIDHashSet = empty_set(), _RequestedTableInfos = empty_set() })
+  local game_managers = {
+    ["app.ContextDBMS"] = robj({ OfflineDB = robj({
+      Records = rlist({ nil, chest_record_info }, 2) }) }),
+    ["app.GenerateManager"] = generation_manager,
+    ["app.GimmickManager"] = robj({
+      ["<ManagedGimmicksByIDs>k__BackingField"] = rdict({ { 80,
+        rdict({ { chest_uid, live_chest } }) } }) }),
+    ["app.QuestManager"] = robj(), ["app.QuestLogManager"] = robj(),
+  }
+  local saved_singleton = sdk.get_managed_singleton
+  sdk.get_managed_singleton = function(name) return game_managers[name] end
+  local scanned = A.read_objective_source_observation(scanner_catalog)
+  sdk.get_managed_singleton = saved_singleton
+  assert(scanned.complete == true and scanned.persisted_complete == true
+    and scanned.persisted[chest_uid .. ":0"].keep == true
+    and scanned.loaded[chest_uid .. ":0"].table_id == scanner_catalog.chests[1].table_id
+    and scanned.persisted[scanner_catalog.placements[1].uid .. ":0"] == nil,
+    "native reader treats sparse nil slots and complete pickup absence exactly")
+  placed, chest = classify(scanner_catalog, scanned)
+  assert(placed.status == "unknown" and #placed.candidates == 0
+    and placed.reason == "placed_current_state_unproven"
+    and chest.status == "ok" and #chest.candidates == 1,
+    "complete scanner absence is unknown while exact live/persisted chest joins publish: "
+      .. tostring(placed.status) .. "/" .. tostring(#placed.candidates) .. "/"
+      .. tostring(placed.reason) .. " chest " .. tostring(chest.status) .. "/"
+      .. tostring(#chest.candidates) .. "/" .. tostring(chest.reason))
+end
 assert(type(a.reset_session_caches) == "function", "reset_session_caches missing")
 assert(a.objective_cids(1) == nil, "no walk committed yet")
 assert(a.objective_issued_cids(1) == nil, "no issued target before a walk")
@@ -2288,7 +3190,7 @@ do
   local HAS = "app.quest.condition.CheckHasItem"
   local IS = { procs = {}, prog = {}, prog_nil = false, qm = nil, qm_on = true,
     im_on = true, dict = nil, icons = {}, icon_fail = {}, gm = nil, gets = {},
-    data_calls = 0, dict_reads = 0, cls_reads = 0, started_reads = 0,
+    data_calls = 0, dict_reads = 0, cls_reads = 0, loot_reads = 0, started_reads = 0,
     count_reads = 0, drift = 0 }
   local function typed(tn, fields)
     local o = mobj(fields)
@@ -2339,7 +3241,7 @@ do
     local p = mobj({
       ["<RefQuestController>k__BackingField"] = mobj({ _QuestID = qid }),
       ProcID = o.procid or (900 + iproc_n),
-      ConditionLists = ilist({ ilist(conds) },
+      ConditionLists = ilist(o.condition_lists or { ilist(conds) },
         function() IS.cls_reads = IS.cls_reads + 1 end),
     })
     p.get_field = function(self, n)
@@ -2349,6 +3251,7 @@ do
       end
       if n == "<IsStarted>k__BackingField" then
         IS.started_reads = IS.started_reads + 1
+        if o.unread_started then return nil end
         if o.started == nil then return true end
         return o.started
       end
@@ -2382,8 +3285,26 @@ do
     if m == "getProgressingQuestIds" then
       if IS.prog_nil then return nil end
       return mcoll(IS.prog)
+    elseif m == "getCurrentTask" then
+      return { call = function(_, method)
+        if method == "getActiveDestinations" then return mcoll({}) end
+      end }
     end
-  end }
+  end,
+    get_field = function(_, name)
+      if name == "_QuestLogInfoDict" then
+        return { call = function(_, method, qid)
+          if method == "get_Item" then
+            return { call = function(_, method_name)
+              if method_name == "get_CurrentTaskIndex" then
+                if IS.task_index_unreadable then return nil end
+                return IS.task_index or 0
+              end
+            end }
+          end
+        end }
+      end
+    end }
   local function sd(id, num) return mobj({ _ItemId = id, _Num = num }) end
   local function storage(entries)   -- {key=, value=}; value absent = free slot
     local elems = {}
@@ -2421,10 +3342,23 @@ do
   local function placed(id, upos, lpos, tn)
     return gim(tn or "app.Gm82_000", { ItemId = id, ItemNum = 1 }, upos, lpos)
   end
-  local function drop(id, upos, lpos, deleted)
-    return gim("app.Gm82_000_01", { ItemId = id,
-      MyContext = mobj({ _ItemId = id, _Num = 1 }),
-      ["<IsDeleted>k__BackingField"] = deleted == true }, upos, lpos)
+  local drop_id = 0
+  local function drop(id, upos, lpos, deleted, uid, amount)
+    drop_id = drop_id + 1
+    if uid == nil then uid = string.format("00000000-0000-4000-8000-%012x", drop_id) end
+    if amount == nil then amount = 1 end
+    local fields = { ItemId = id, MyContext = mobj({ _ItemId = id, _Num = amount }) }
+    if deleted ~= "unreadable" then fields["<IsDeleted>k__BackingField"] = deleted == true end
+    local out = gim("app.Gm82_000_01", fields, upos, lpos)
+    local original_call = out.call
+    out.call = function(self, method, ...)
+      if method == "get_UniqId" then
+        if uid == false then return nil end
+        return { call = function(_, name) if name == "ToString()" then return uid end end }
+      end
+      return original_call(self, method, ...)
+    end
+    return out
   end
   local function box(ids, upos, lpos)
     local items = {}
@@ -2449,7 +3383,8 @@ do
   local function gmgr(o)
     return mobj({
       ["<ManagedGimmicksByIDs>k__BackingField"] = o.managed,
-      ["<DropItemGimmicks>k__BackingField"] = o.drops and ilist(o.drops) or nil,
+      ["<DropItemGimmicks>k__BackingField"] = o.drops and ilist(o.drops,
+        function() IS.loot_reads = IS.loot_reads + 1 end) or nil,
       ["<TreasureBoxGimmicks>k__BackingField"] = o.boxes and ilist(o.boxes) or nil,
     })
   end
@@ -2480,12 +3415,14 @@ do
     IS.qm_on, IS.im_on, IS.prog_nil, IS.drift = true, true, false, 0
     IS.prog = { 20090 }
     IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+    IS.task_index = 0
     IS.dict = storage({ { key = PL, value = ilist({}) } })
     IS.icons = { [300] = 2017 }
     IS.icon_fail = {}
     IS.gm = gmgr({ managed = managed({ hset({ placed(300, V, L) }) }),
       drops = {}, boxes = {} })
     IS.gets = {}
+    IS.loot_reads = 0
     IS.data_calls, IS.dict_reads, IS.cls_reads = 0, 0, 0
     IS.started_reads, IS.count_reads = 0, 0
   end
@@ -2567,7 +3504,7 @@ do
   ai.reset_session_caches()                 -- primes the session owner
   ai.item_name(300)
   dc = IS.data_calls
-  iqlm = { call = iqlm.call }
+  iqlm = { call = iqlm.call, get_field = iqlm.get_field }
   assert(ai.reset_session_caches() == true, "NM6 session reset ran")
   ai.item_name(300)
   assert(IS.data_calls == dc + 1, "NM6 reset_runtime_caches clears the name cache")
@@ -2675,10 +3612,257 @@ do
   local nd = needs_of(ai, 20090)
   assert(nd ~= nil and #nd == 1 and nd[1].id == 300 and nd[1].num == 1,
     "IW1 need committed")
+  local task_snapshot = ai.objective_task_snapshot({ 20090 })
+  local need_snapshot = ai.objective_need_groups(task_snapshot)
+  assert(need_snapshot.status == "unknown" and not need_snapshot.complete
+    and #need_snapshot.groups == 0 and nd ~= nil and #nd == 1,
+    "IW1 processor need without exact current-task ownership stays unrouted")
+  task_snapshot.quests[1].item_ownership = { {
+    proof_kind = "condition", eligibility = "unknown",
+    reason = "native_item_condition_leaf_unread", item_id = 300, count = 1,
+    task_index = 0, concierge_index = 0, destination_index = 0,
+  } }
+  need_snapshot = ai.objective_need_groups(task_snapshot)
+  assert(need_snapshot.status == "unknown"
+    and not need_snapshot.complete and #need_snapshot.groups == 0,
+    "IW1 unread native item ownership remains unrouted")
+  task_snapshot.quests[1].item_ownership[1].eligibility = "eligible"
+  task_snapshot.quests[1].item_ownership[1].reason = nil
+  local owned_need_snapshot = ai.objective_need_groups(task_snapshot)
+  assert(owned_need_snapshot.status == "ok" and owned_need_snapshot.complete
+    and #owned_need_snapshot.groups == 1
+    and owned_need_snapshot.groups[1].qid == 20090
+    and owned_need_snapshot.groups[1].task_index == 0
+    and owned_need_snapshot.groups[1].remaining == 1
+    and owned_need_snapshot.groups[1].options[1].item_id == 300,
+    "IW1 exact current concierge item ownership unlocks the matching processor need")
+  task_snapshot.quests[1].item_ownership = {}
+  -- The loot reader tests below exercise provider behavior independently of
+  -- processor-to-task ownership. Supply the proven need snapshot they require.
+  ai._test_real_objective_need_groups = ai.objective_need_groups
+  ai._test_owned_need_generation = task_snapshot.need_generation
+  ai.objective_need_groups = function(snapshot)
+    local row = type(snapshot) == "table" and type(snapshot.quests) == "table"
+      and snapshot.quests[1] or nil
+    if type(row) ~= "table" or row.qid ~= 20090 or row.task_index ~= 0
+        or snapshot.need_generation ~= ai._test_owned_need_generation then
+      return { status = "unknown", complete = false, groups = {},
+        generation = type(snapshot) == "table" and snapshot.need_generation or nil }
+    end
+    return { status = "ok", complete = true, generation = snapshot.need_generation,
+      groups = { { qid = 20090, task_index = 0, remaining = 1,
+        options = { { item_id = 300, accepted_count = 1 } } } } }
+  end
+  local live_drop = drop(300, V, L, false,
+    "00000000-0000-4000-8000-000000000101", 2)
+  IS.gm = gmgr({ managed = managed({}), drops = { live_drop }, boxes = {} })
+  local source_views = ai.objective_item_source_snapshots(nil, task_snapshot)
+  local loot_view = source_views[3]
+  assert(loot_view.provider == "loot" and loot_view.status == "ok"
+    and loot_view.complete and #loot_view.candidates == 1,
+    "IW1 current focused loot publishes one complete source")
+  local loot_candidate = loot_view.candidates[1]
+  assert(loot_candidate.source_id[1] == "source"
+    and loot_candidate.source_id[2] == "loot"
+    and loot_candidate.source_id[3] == "00000000-0000-4000-8000-000000000101"
+    and loot_candidate.outputs[1].item_id == 300 and loot_candidate.outputs[1].count == 2
+    and loot_candidate.target.kind == "loot"
+    and loot_candidate.target.uid == "00000000-0000-4000-8000-000000000101"
+    and loot_candidate.target.pos.x == V.x
+    and loot_candidate.capacity_kind == "finite"
+    and loot_candidate.available_acquisitions == 1
+    and loot_candidate.capacity_pool_id[1] == "capacity"
+    and loot_candidate.capacity_pool_id[2] == "loot"
+    and loot_candidate.certainty == "guaranteed"
+    and loot_candidate.eligibility == "eligible"
+    and loot_candidate.evidence.deleted == false
+    and loot_candidate.generation == task_snapshot.need_generation,
+    "IW1 loot observation carries UID, exact output, position and capacity")
+  local native_uid = "00000000-0000-4000-8000-000000000105_0"
+  IS.gm = gmgr({ managed = managed({}),
+    drops = { drop(300, V, L, false, native_uid, 2) }, boxes = {} })
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "ok" and #loot_view.candidates == 1
+    and loot_view.candidates[1].target.uid == native_uid
+    and loot_view.candidates[1].source_id[3] == native_uid,
+    "IW1 native indexed GUID UID is accepted and preserved")
+  local duplicate_uid = "00000000-0000-4000-8000-000000000106_0"
+  IS.gm = gmgr({ managed = managed({}), drops = {
+    drop(999, V, L, true, duplicate_uid, 1),
+    drop(300, V, L, false, duplicate_uid, 2) }, boxes = {} })
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "unknown" and not loot_view.complete
+    and #loot_view.candidates == 0,
+    "IW1 duplicate UID across unwanted and deleted rows invalidates loot atomically")
+  local loot_count_reads = IS.loot_reads
+  ai.objective_item_source_snapshots(nil, task_snapshot)
+  assert(IS.loot_reads == loot_count_reads,
+    "IW1 repeated snapshot reuses the bounded loot observation")
+  IS.gm = gmgr({ managed = managed({}), drops = { live_drop }, boxes = {} })
+  live_drop["<IsDeleted>k__BackingField"] = true
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "ok" and loot_view.complete
+    and #loot_view.candidates == 0, "IW1 collected loot disappears on refresh")
+  local function loot_unknown(next_drop, label)
+    IS.gm = gmgr({ managed = managed({}), drops = { next_drop }, boxes = {} })
+    iclk = iclk + 0.6
+    local view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+    assert(view.status == "unknown" and not view.complete and #view.candidates == 0,
+      "IW1 " .. label .. " fails closed without retained loot")
+  end
+  loot_unknown(drop(300, V, L, false, false, 1), "UID unreadable")
+  loot_unknown(drop(300, nil, nil, false, "00000000-0000-4000-8000-000000000102", 1),
+    "position unreadable")
+  loot_unknown(drop(300, V, L, "unreadable",
+    "00000000-0000-4000-8000-000000000103", 1), "deletion state unreadable")
+  loot_unknown(drop(300, V, L, false,
+    "00000000-0000-4000-8000-000000000104", 0), "nonpositive count")
+  local too_many_drops = {}
+  for i = 1, 65 do too_many_drops[i] = drop(999, V, L, false) end
+  IS.gm = gmgr({ managed = managed({}), drops = too_many_drops, boxes = {} })
+  iclk = iclk + 0.6
+  loot_view = ai.objective_item_source_snapshots(nil, task_snapshot)[3]
+  assert(loot_view.status == "unknown" and loot_view.reason == "loot_rows_truncated"
+    and #loot_view.candidates == 0, "IW1 over-limit loot list is unknown")
   local s = ai.item_stats()
   assert(s.needs == 1 and s.ids == 1 and s.located == 1 and s.rounds == 1
     and s.skipped == 0 and s.ignored == 0 and s.failed_total == 0,
     "IW1 stats (rounds re-counted after the owner reset)")
+  IS.gm = gmgr({ managed = managed({}), drops = { drop(300, V, L, false) }, boxes = {} })
+  iclk = iclk + 0.6
+  source_views = ai.objective_item_source_snapshots(nil, task_snapshot)
+  assert(#source_views[3].candidates == 1, "IW1 loot is present before task change")
+  IS.task_index = 1
+  local changed_task = ai.objective_task_snapshot({ 20090 })
+  loot_view = ai.objective_item_source_snapshots(nil, changed_task)[3]
+  assert(loot_view.status == "unknown" and #loot_view.candidates == 0,
+    "IW1 task change invalidates cached loot candidates")
+  IS.task_index = 0
+  ai.invalidate_items()
+  local changed_needs = ai.objective_task_snapshot({ 20090 })
+  loot_view = ai.objective_item_source_snapshots(nil, changed_needs)[3]
+  assert(loot_view.status == "unknown" and #loot_view.candidates == 0,
+    "IW1 need invalidation removes cached loot candidates")
+  ai.objective_need_groups = ai._test_real_objective_need_groups
+  ai._test_real_objective_need_groups, ai._test_owned_need_generation = nil, nil
+  IS.task_index = 1
+  changed_task = ai.objective_task_snapshot({ 20090 })
+  local invalidated = ai.objective_need_groups(changed_task)
+  assert(invalidated.status == "unknown" and not invalidated.complete
+    and #invalidated.groups == 0, "IW1 task change immediately invalidates old groups")
+  -- A skipped processor row makes the current-objective walk incomplete even
+  -- when other rows produced usable groups.
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }),
+    iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }, { unread_started = true }) }
+  ai.refresh_items()
+  local skipped_group_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(skipped_group_snapshot.status == "unknown" and not skipped_group_snapshot.complete
+    and #skipped_group_snapshot.groups == 0,
+    "IW1 skipped processor row empties objective groups")
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+  local exact_held = {}
+  for i = 1, 512 do exact_held[i] = sd(900 + i, 1) end
+  IS.dict = storage({ { key = PL, value = ilist(exact_held) } })
+  ai.refresh_items()
+  need_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(need_snapshot.status == "unknown" and #need_snapshot.groups == 0
+      and #needs_of(ai, 20090) == 1,
+    "IW1 exact held-owner cap preserves legacy need without ownership proof")
+  local over_held = {}
+  for i = 1, 513 do over_held[i] = sd(900 + i, 1) end
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+  IS.dict = storage({ { key = PL, value = ilist(over_held) } })
+  ai.refresh_items()
+  local over_held_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(over_held_snapshot.status == "unknown" and #over_held_snapshot.groups == 0
+    and #needs_of(ai, 20090) == 1, "IW1 over-cap held list only invalidates objective groups")
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) }) }
+  IS.dict = storage({ { key = PL, value = ilist({ sd(300, 1), sd(false, 1) }) } })
+  ai.refresh_items()
+  local unreadable_held_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(unreadable_held_snapshot.status == "unknown" and #unreadable_held_snapshot.groups == 0,
+    "IW1 unreadable held entry invalidates objective groups")
+  ifresh()
+  ai.refresh_items()
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  IS.task_index = 1
+  ai.objective_task_snapshot({ 20090 })
+  IS.task_index = 0
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  local returned_task_groups = ai.objective_need_groups(task_snapshot)
+  assert(returned_task_groups.status == "unknown" and #returned_task_groups.groups == 0,
+    "IW1 task change away and back invalidates groups until a fresh item scan")
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  assert(ai.objective_need_groups(task_snapshot).status == "unknown",
+    "IW1 fresh item scan does not invent current-task ownership")
+  IS.task_index_unreadable = true
+  ai.objective_task_snapshot({ 20090 })
+  IS.task_index_unreadable = false
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  local recovered_task_groups = ai.objective_need_groups(task_snapshot)
+  assert(recovered_task_groups.status == "unknown" and #recovered_task_groups.groups == 0,
+    "IW1 unreadable task observation invalidates groups until a fresh item scan")
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  assert(ai.objective_need_groups(task_snapshot).status == "unknown",
+    "IW1 fresh item scan still requires exact current-task ownership")
+  IS.task_index = 0
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }),
+    deliver(nil, 1, 4) }) }
+  ai.refresh_items()
+  task_snapshot = ai.objective_task_snapshot({ 20090 })
+  need_snapshot = ai.objective_need_groups(task_snapshot)
+  assert(need_snapshot.status == "unknown" and not need_snapshot.complete
+    and #need_snapshot.groups == 0 and #needs_of(ai, 20090) == 1,
+    "IW1 incomplete sibling expression empties objective groups and preserves legacy need")
+  ifresh()
+  ai.refresh_items()
+  IS.prog_nil = true
+  iclk = iclk + 10
+  ai.refresh_items("needs")
+  need_snapshot = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(need_snapshot.status == "unknown" and #need_snapshot.groups == 0,
+    "IW1 failed refresh immediately clears objective groups")
+  local function other_conditions(n)
+    local out = {}
+    for _ = 1, n do out[#out + 1] = typed("app.quest.condition.Other", {}) end
+    return out
+  end
+  local function objective_after_lists(outer_count, inner_count)
+    ifresh()
+    local lists = {}
+    if outer_count == 1 then
+      lists[1] = ilist(other_conditions(inner_count))
+    else
+      for i = 1, outer_count do lists[i] = ilist({}) end
+    end
+    IS.procs = { iproc(20090, {}, { condition_lists = lists }) }
+    ai.refresh_items()
+    return ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  end
+  local exact_inner = objective_after_lists(1, 16)
+  assert(exact_inner.status == "ok" and exact_inner.complete
+    and #exact_inner.groups == 0, "IW1 exact inner condition limit remains complete")
+  local over_inner = objective_after_lists(1, 17)
+  assert(over_inner.status == "unknown" and not over_inner.complete
+    and #over_inner.groups == 0, "IW1 over-limit inner list empties objective groups")
+  local exact_outer = objective_after_lists(16, 0)
+  assert(exact_outer.status == "ok" and exact_outer.complete,
+    "IW1 exact outer condition limit remains complete")
+  local over_outer = objective_after_lists(17, 0)
+  assert(over_outer.status == "unknown" and not over_outer.complete
+    and #over_outer.groups == 0, "IW1 over-limit outer list empties objective groups")
   ifresh()
   IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } },
     "app.quest.condition.CheckHasItemParam") }) }
@@ -2760,6 +3944,26 @@ do
     { fin = true }) }
   ai.refresh_items()
   assert(next(ai.item_needs()) == nil, "IW1 finished processor contributes nothing")
+  local excluded = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(excluded.status == "ok" and excluded.complete and #excluded.groups == 0,
+    "IW1 finished processor contributes no current objective group")
+  ifresh()
+  IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 4 } }) },
+    { started = false }) }
+  ai.refresh_items()
+  excluded = ai.objective_need_groups(ai.objective_task_snapshot({ 20090 }))
+  assert(excluded.status == "ok" and excluded.complete and #excluded.groups == 0,
+    "IW1 unstarted processor contributes no current objective group")
+  ifresh()
+  IS.procs = {}
+  ai.refresh_items()
+  local no_need_task = ai.objective_task_snapshot({ 20090 })
+  IS.gm = gmgr({ managed = managed({}), drops = { drop(300, V, L, false) }, boxes = {} })
+  local no_need_reads = IS.loot_reads
+  loot_view = ai.objective_item_source_snapshots(nil, no_need_task)[3]
+  assert(loot_view.status == "ok" and loot_view.complete
+    and #loot_view.candidates == 0 and IS.loot_reads == no_need_reads,
+    "IW1 no focused item need skips the live loot scan")
   -- IW2 enum by name: Morethan 1 -> 2, Morethan 0 -> 1, Equal ignored
   ifresh()
   IS.procs = { iproc(20090, { has_item({ { id = 300, num = 1, lv = 5 },
@@ -3304,13 +4508,59 @@ do
     incomplete_possible = true, operator = 0, groups = { { index = 0,
       item_ids = { 9002 }, count = 1, is_all_item = true, is_infinite = false,
       ignore_restriction_items = {} } } } } }
+  local reward_fixture = {}
+  reward_fixture.diagnostic = function(qid, proc_id, hash)
+    return { family = "quest_reward", quest_id = qid,
+      source_identity = { quest_id = qid, processor_id = proc_id, action_ordinal = 0 },
+      reward_rows = { { ordinal = 0, name_hash = hash } }, branch_status = "unverified",
+      task_endpoint_join = { status = "unproven",
+        reason = "journal_task_to_drawable_reward_endpoint_unverified" },
+      unresolved_joins = { "journal_task_to_reward_endpoint", "reward_action_to_drawable_target",
+        "current_branch_truth", "claim_state", "runtime_reward_hash_to_item_count" } }
+  end
+  own_catalog.quests[888] = { reward_diagnostics = { reward_fixture.diagnostic(888, 40, 77) } }
+  own_catalog.quests[889] = { reward_diagnostics = { reward_fixture.diagnostic(889, 41, 78) } }
+  reward_fixture.scans = { entries = 0, processors = 0 }
+  reward_fixture.sequence = function(rows, scan_name)
+    return { get_elements = function()
+      if scan_name then reward_fixture.scans[scan_name] = reward_fixture.scans[scan_name] + 1 end
+      return rows
+    end }
+  end
+  reward_fixture.managed = function(fields, calls)
+    return { get_field = function(_, name) return fields[name] end,
+      call = function(_, name) return calls and calls[name] end }
+  end
+  reward_fixture.entries = reward_fixture.sequence({
+    reward_fixture.managed({ key = 77, value = reward_fixture.managed({ _ItemList = reward_fixture.sequence({
+      reward_fixture.managed({ _ItemId = 9001, _Num = 2 }) }) }), next = -1 }),
+    reward_fixture.managed({ next = -2 }),
+    reward_fixture.managed({ key = 78, value = reward_fixture.managed({ _ItemList = reward_fixture.sequence({
+      reward_fixture.managed({ _ItemId = 9999, _Num = 1 }) }) }), next = -1 }),
+  }, "entries")
+  reward_fixture.previous_singleton = sdk.get_managed_singleton
+  reward_fixture.calls = { get_Count = 2 }
+  sdk.get_managed_singleton = function(name)
+    if name == "app.QuestManager" then return reward_fixture.managed({
+      RewardDict = reward_fixture.managed({ _entries = reward_fixture.entries,
+        _count = 3, _freeCount = 1 }, reward_fixture.calls),
+      DistributedQuestProcessors = reward_fixture.sequence({
+        reward_fixture.managed({ ProcID = 40 }), reward_fixture.managed({ ProcID = 41 }) }, "processors") }) end
+    return reward_fixture.previous_singleton(name)
+  end
+  reward_fixture.previous_need_groups = ai.objective_need_groups
+  ai.objective_need_groups = function()
+    return { status = "ok", complete = true, groups = { { options = { { item_id = 9001 } } } } }
+  end
+  own_catalog.quests[890] = { reward_diagnostics = { false } }
   local owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  reward_fixture.original_need_generation = owned_snapshot.need_generation
   local owned = owned_snapshot.quests[1].item_ownership
-  assert(#owned == 2 and owned[1].item_id == 9001 and owned[1].count == nil
+  assert(#owned == 2 and owned[1].item_id == 9001 and owned[1].count == 2
     and owned[1].proof_kind == "condition" and owned[1].eligibility == "unknown"
     and owned[1].task_index == 0
     and owned[1].concierge_index == 0 and owned[1].destination_index == 0,
-    "objective task owner reports item evidence unknown until a native leaf is proven")
+    "objective task owner preserves exact catalog count while native leaf truth remains unknown")
   assert(owned[2].proof_kind == "delivery" and owned[2].eligibility == "unknown"
     and owned[2].delivery.group_id == 3 and owned[2].delivery.check_storage == true
     and #owned[2].delivery.refs == 1 and #owned[2].delivery.groups == 1
@@ -3318,10 +4568,104 @@ do
     and owned[1].item_id ~= 9002,
     "objective task owner preserves delivery groups and does not flatten alternatives")
   local source_snapshots = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
-  assert(#source_snapshots == 3 and source_snapshots[1].provider == "placed"
+  assert(source_snapshots[4].provider == "reward" and source_snapshots[4].status == "unknown"
+    and source_snapshots[4].reward_runtime_complete == true
+    and #source_snapshots[4].candidates == 0 and #source_snapshots[4].diagnostic_rows == 1
+    and source_snapshots[4].diagnostic_rows[1].qid == 888
+    and source_snapshots[4].diagnostic_rows[1].processor_present == true
+    and source_snapshots[4].diagnostic_rows[1].outputs[1].item_id == 9001
+    and source_snapshots[4].diagnostic_rows[1].outputs[1].count == 2,
+    "reward diagnostics join matching nonfocused reward output and runtime processor without eligibility")
+  reward_fixture.first_generation = source_snapshots[4].generation
+  reward_fixture.reads_after_first = reward_fixture.scans.entries + reward_fixture.scans.processors
+  assert(#ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].diagnostic_rows == 1
+    and reward_fixture.scans.entries + reward_fixture.scans.processors == reward_fixture.reads_after_first
+    and ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].generation
+      == reward_fixture.first_generation,
+    "same-task reward snapshot reuses cached diagnostics inside the half-second window")
+  owned_snapshot.quests[1].task_index = owned_snapshot.quests[1].task_index + 1
+  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
+      == "reward_snapshot_refresh_pending"
+    and #ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].diagnostic_rows == 0
+    and reward_fixture.scans.entries == 1 and reward_fixture.scans.processors == 1,
+    "task change invalidates old reward diagnostics and respects scan cadence")
+  iclk = iclk + 0.6
+  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].generation
+      > source_snapshots[4].generation
+    and reward_fixture.scans.entries == 2 and reward_fixture.scans.processors == 2,
+    "task change refreshes reward diagnostics after the cadence window")
+  owned_snapshot.quests[1].task_index = owned_snapshot.quests[1].task_index - 1
+  owned_snapshot.need_generation = owned_snapshot.need_generation + 1
+  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
+      == "reward_snapshot_refresh_pending"
+    and #ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].diagnostic_rows == 0,
+    "need change does not reuse stale reward diagnostics")
+  iclk = iclk + 0.6
+  ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
+  assert(reward_fixture.scans.entries == 3 and reward_fixture.scans.processors == 3,
+    "need change refreshes reward diagnostics after the cadence window")
+  reward_fixture.calls.get_Count = 1
+  owned_snapshot.need_generation = owned_snapshot.need_generation + 1
+  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
+      == "reward_snapshot_refresh_pending",
+    "changed need set waits for the bounded runtime scan")
+  iclk = iclk + 0.6
+  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
+      == "reward_runtime_scan_incomplete"
+    and #ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].candidates == 0,
+    "inconsistent RewardDict count fails closed")
+  assert(reward_fixture.scans.entries == 4 and reward_fixture.scans.processors == 4,
+    "incomplete runtime observation is cached inside the half-second window")
+  reward_fixture.calls.get_Count = 2
+  own_catalog.quests[20040].reward_diagnostics = {
+    reward_fixture.diagnostic(20040, 40, 77) }
+  ai.objective_need_groups = function()
+    return { status = "ok", complete = true, groups = {} }
+  end
+  owned_snapshot.need_generation = owned_snapshot.need_generation + 1
+  iclk = iclk + 0.6
+  local proven_empty_reward = ai.objective_item_source_snapshots(
+    own_catalog, owned_snapshot)[4]
+  assert(proven_empty_reward.reason == "reward_task_branch_and_claim_gates_unproven"
+    and #proven_empty_reward.diagnostic_rows == 1,
+    "a proven empty need set may retain focused reward diagnostics")
+  ai.objective_need_groups = function()
+    return { status = "unknown", complete = false, groups = {} }
+  end
+  local unknown_need_reward = ai.objective_item_source_snapshots(
+    own_catalog, owned_snapshot)[4]
+  assert(unknown_need_reward.reason == "reward_snapshot_refresh_pending"
+    and #unknown_need_reward.diagnostic_rows == 0,
+    "loss of need-set completeness invalidates cached reward diagnostics")
+  own_catalog.quests[20040].reward_diagnostics = nil
+  owned_snapshot.need_generation = reward_fixture.original_need_generation
+  ai.objective_need_groups = reward_fixture.previous_need_groups
+  sdk.get_managed_singleton = reward_fixture.previous_singleton
+  assert(#source_snapshots == 6 and source_snapshots[1].provider == "placed"
     and source_snapshots[2].provider == "chest" and source_snapshots[3].provider == "loot"
     and source_snapshots[1].status == "unknown"
-    and source_snapshots[1].generation == owned_snapshot.need_generation
+    and source_snapshots[1].complete == false
+    and source_snapshots[1].reason == "source_catalog_unavailable"
+    and source_snapshots[2].complete == false
+    and source_snapshots[2].reason == "source_catalog_unavailable"
+    and source_snapshots[4].provider == "reward"
+    and source_snapshots[4].status == "unknown"
+    and source_snapshots[4].complete == false
+    and source_snapshots[4].reason == "reward_task_branch_and_claim_gates_unproven"
+    and #source_snapshots[4].candidates == 0
+    and source_snapshots[4].generation > 0
+    and source_snapshots[5].provider == "talk_grant"
+    and source_snapshots[5].status == "unknown"
+    and source_snapshots[5].complete == false
+    and source_snapshots[5].reason == "talk_grant_catalog_unreadable"
+    and #source_snapshots[5].candidates == 0
+    and source_snapshots[5].generation > 0
+    and source_snapshots[6].provider == "forgery"
+    and source_snapshots[6].status == "unknown"
+    and source_snapshots[6].reason == "forgery_service_catalog_unreadable"
+    and #source_snapshots[6].candidates == 0
+    and source_snapshots[6].generation > 0
+    and source_snapshots[1].generation > 0
     and source_snapshots[1].catalog_version == 2
     and #source_snapshots[1].source_descriptors == 2
     and source_snapshots[1].source_descriptors[1].qid == nil

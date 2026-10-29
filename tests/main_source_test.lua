@@ -138,6 +138,8 @@ ordered("objective inputs flow through one snapshot before compute", tick_body, 
   "pcall(adapter.refresh_objectives)",
   "pcall(adapter.refresh_items, mode)",
   "adapter.objective_task_snapshot,",
+  "pcall(adapter.objective_need_groups, task_snapshot)",
+  "task_snapshot.objective_needs = need_snapshot",
   'wt.q("objective_place_snapshot",',
   'wt.q("objective_source_snapshots",',
   "core.objective_snapshot(",
@@ -145,6 +147,9 @@ ordered("objective inputs flow through one snapshot before compute", tick_body, 
   "category_visibility =",
   "local result = core.compute(adapter, show)",
 })
+check("objective need grouping fails closed before provider and core processing",
+  tick_body:find('local need_snapshot = { status = "unknown", complete = false,', 1, true) ~= nil
+    and tick_body:find('reason = "need_snapshot_failed"', 1, true) ~= nil)
 local compute_at = tick_body:find("local result = core.compute(adapter, show)", 1, true)
 local route_at = tick_body:find('wt.q("set_routes", nil, result.objective_routes)', 1, true)
 local success_at = tick_body:find("if result == nil then", 1, true)
@@ -233,6 +238,21 @@ check("focus debug copies provider generations and registry diagnostics",
     and debug_focus:find("need_generation = objective_snapshot.stamp", 1, true) ~= nil
     and debug_focus:find("registry_diagnostics", 1, true) ~= nil
     and debug_focus:find("key_type = diagnostic.key_type", 1, true) ~= nil)
+check("focus debug exposes grouped need and source capacity evidence",
+  debug_focus:find("need_groups", 1, true) ~= nil
+    and debug_focus:find("capacity_pool_id =", 1, true) ~= nil
+    and debug_focus:find("capacity_kind = target.capacity_kind", 1, true) ~= nil
+    and debug_focus:find("available_acquisitions = target.available_acquisitions", 1, true) ~= nil
+    and debug_focus:find("certainty = target.certainty", 1, true) ~= nil
+    and debug_focus:find("probability = target.probability", 1, true) ~= nil
+    and debug_focus:find("groups = {}", 1, true) ~= nil)
+check("focus debug exposes provider status and cap omissions",
+  debug_focus:find("status = provider.status", 1, true) ~= nil
+    and debug_focus:find("complete = provider.complete", 1, true) ~= nil
+    and debug_focus:find("reason = provider.reason", 1, true) ~= nil
+    and debug_focus:find("candidate_count = provider.candidate_count", 1, true) ~= nil
+    and debug_focus:find("marker_omitted", 1, true) ~= nil
+    and debug_focus:find("route_omitted", 1, true) ~= nil)
 check("focus debug makes no managed NPC reads",
   debug_focus:find("adapter.npc_pos", 1, true) == nil
     and debug_focus:find("adapter.npc_alive", 1, true) == nil)

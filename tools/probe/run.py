@@ -20,6 +20,8 @@ UNSAFE_METHODS = {"create_instance", "set_field", "add_ref", "release"}
 SAFE_SDK_METHODS = {"find_type_definition", "get_managed_singleton"}
 SECONDARY_LOADERS = {"load", "loadfile", "dofile"}
 ALLOWED_REQUIRE = {"Clairvoyance.world"}
+# Exact TalkEventManager reads; canTalkEventInteract takes Character, while
+# the other three take TalkEventDefine.ID (verified in the local dump).
 REVIEWED_METHODS = {
     "IsRelease", "ToString()", "evaluate", "evaluateHide",
     "evaluateRegisterCondition", "evaluateShow", "evaluateUpdateShow",
@@ -27,6 +29,7 @@ REVIEWED_METHODS = {
     "getItemNumber", "getItemShopTotalPay", "getItemStockNum",
     "getNPCCharacterData", "getProgressingQuestIds",
     "getRegisterableDestinations", "getStorageDict",
+    "getHistory", "getTalkEventInitialSpeaker",
     "get_AIBlackBoardController", "get_Area", "get_Canceled",
     "get_CanceledAction", "get_CharaID", "get_CompContext", "get_Count",
     "get_CurrentTaskIndex", "get_Data", "get_DataList", "get_DeliverData",
@@ -34,12 +37,15 @@ REVIEWED_METHODS = {
     "get_Destinations", "get_DestType", "get_DoneAction", "get_ErrorStatus",
     "get_Executed", "get_FakeShopCompleteTime", "get_FakeShopKeepedItem",
     "get_GimmickID", "get_GmContext", "get_IsAllItem", "get_IsFinish",
-    "get_IsOpenedFreeBit", "get_IsRemove", "get_IsStock",
+    "get_IsDead", "get_IsEnableFake", "get_IsOpenedFreeBit", "get_IsRemove", "get_IsStock",
     "get_IsUnlockFreeBit", "get_Item", "get_ItemList", "get_Key",
     "get_KeyLocation", "get_LocalArea", "get_Operator", "get_Process",
-    "get_QuestID", "get_SetNpc", "get_Stock", "get_TaskIndex", "get_UniqId",
-    "get_Value", "getContext", "hasDeliver", "isFakeShopCompleted",
-    "isFinish", "isShopTalkEventAvailableForChara",
+    "get_QuestID", "get_SetNpc", "get_Stock", "get_TaskIndex",
+    "get_Transform", "get_UniqId", "get_UniversalPosition",
+    "get_Value", "getContext", "hasDeliver", "isEventPlayable",
+    "isFakeShopCompleted", "isFakeShopKeeped", "isFakeShopRemainingMinute",
+    "isFinish", "canTalkEventInteract",
+    "isShopTalkEventAvailableForChara",
     "isTalkEventInteractDisabled",
 }
 REVIEWED_CAPABILITIES = {

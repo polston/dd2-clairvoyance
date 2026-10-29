@@ -646,6 +646,40 @@ do
       and #catalog.diagnostics > 0)
 end
 do
+  local nested = { operator = "or", operator_value = 1, parameters = {
+    { kind = "processor_result", proc_id = 21, result_no = 0,
+      action_type = "app.quest.action.Trigger", result_status = "observed" },
+  }, children = {} }
+  local row = { family = "quest_reward", quest_id = 12,
+    source_identity = { quest_id = 12, action_ordinal = 0, processor_id = 34 },
+    action_type = "app.quest.action.QuestReward", ownership_status = "exact",
+    branch_status = "unverified", branch_diagnostics = {
+      "predecessor_action_semantics_unverified",
+    }, precondition = { nested }, reward_rows = { { ordinal = 0, name_hash = 56 } },
+    reward_payload_status = "complete", task_endpoint_join = {
+      status = "unproven", reason = "journal_task_to_drawable_reward_endpoint_unverified",
+    }, unresolved_joins = { "journal_task_to_reward_endpoint",
+      "reward_action_to_drawable_target", "current_branch_truth", "claim_state",
+      "runtime_reward_hash_to_item_count" }, eligibility = "unknown" }
+  local _, catalog = N.parse_quests({ version = 2, quests = {
+    ["12"] = { tasks = {}, guidance = {}, deliveries = {},
+      reward_diagnostics = { row, { family = "quest_reward", quest_id = 12 } } },
+  } })
+  local rewards = catalog and catalog.quests[12] and catalog.quests[12].reward_diagnostics
+  check("quests v2 rewards: exact nested archive diagnostics survive validation",
+    rewards and rewards[1] and rewards[1].source_identity.processor_id == 34
+      and rewards[1].precondition[1].parameters[1].action_type == "app.quest.action.Trigger"
+      and rewards[1].reward_rows[1].name_hash == 56
+      and rewards[1].task_endpoint_join.status == "unproven")
+  check("quests v2 rewards: malformed diagnostic is isolated at its stable ordinal",
+    rewards and rewards[2] == false and #catalog.diagnostics > 0)
+  nested.parameters[1].action_type = "mutated"
+  row.reward_rows[1].name_hash = 99
+  check("quests v2 rewards: parsed diagnostic is a detached structural copy",
+    rewards and rewards[1].precondition[1].parameters[1].action_type == "app.quest.action.Trigger"
+      and rewards[1].reward_rows[1].name_hash == 56)
+end
+do
   local _, catalog = N.parse_quests({ version = 2, quests = {
     ["20"] = { tasks = {}, guidance = {}, deliveries = {}, sources = {
       { id = "same", kind = "placed_pickup", item_ids = { 5 },
