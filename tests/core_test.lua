@@ -6320,7 +6320,8 @@ do
     check("objective markers: every covering target owner is unioned",
       source_marker[1] ~= nil and type(source_marker[1].objective_qids) == "table"
         and table.concat(source_marker[1].objective_qids, ",") == "50")
-    local multi_cover_input = { { key = "n:70", cat = "quest", cid = 70, qids = {} } }
+    local multi_cover_input = { { key = "n:70", cat = "quest", cid = 70, qids = {},
+      objective_labels = { "Existing label" } } }
     local multi_cover = core.objective_markers(multi_cover_input, nil,
       { generation = 3, targets = {
         { key = tk({ 40, "issued_npc", 70 }), ordinal = 1, kind = "npc", target = { cid = 70 },
@@ -6334,6 +6335,11 @@ do
         and multi_cover[1].label:find("Quest 40", 1, true) ~= nil
         and multi_cover[1].label:find("Quest 41", 1, true) ~= nil
         and #multi_cover_input[1].qids == 0)
+    check("objective markers: cloned label arrays do not mutate the source projection",
+      #multi_cover_input[1].objective_labels == 1
+        and multi_cover_input[1].objective_labels[1] == "Existing label"
+        and multi_cover[1].objective_labels ~= multi_cover_input[1].objective_labels
+        and #multi_cover[1].objective_labels == 3)
     check("objective labels: multi-item sources name every matched output",
       core.objective_label({ names = {
         items = { { item_id = 900, name = "First" },

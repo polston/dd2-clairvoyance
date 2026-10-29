@@ -5280,7 +5280,8 @@ function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
       local copy = {}
       for k, v in pairs(original) do
         if k == "qids" or k == "objective_qids" or k == "objective_group_keys"
-            or k == "objective_group_qids" or k == "objective_item_ids" then
+            or k == "objective_group_qids" or k == "objective_item_ids"
+            or k == "objective_labels" then
           copy[k] = {}
           for i, qid in ipairs(objective_array(v) or {}) do copy[k][i] = qid end
         else copy[k] = v end
