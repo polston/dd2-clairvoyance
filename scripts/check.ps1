@@ -73,33 +73,43 @@ $localsBaseline = @{
     "reframework/autorun/Clairvoyance/adapter.lua" = 32
     "reframework/autorun/Clairvoyance.lua" = 81
 }
-function Test-Fits([string[]]$lines, [int]$n, [string]$tmp) {
+function Test-Fits([string[]]$lines, [int]$n, [string]$tmpRoot) {
     $idx = -1
     for ($i = $lines.Count - 1; $i -ge 0; $i--) { if ($lines[$i] -match '^return(\s|$)') { $idx = $i; break } }
     $pad = @(1..$n | ForEach-Object { "local _qnml_pad$_ = nil" })
     if ($n -eq 0) { $pad = @() }
     if ($idx -ge 0) { $out = @($lines[0..($idx - 1)]) + $pad + @($lines[$idx..($lines.Count - 1)]) }
     else { $out = @($lines) + $pad }
-    [System.IO.File]::WriteAllLines($tmp, $out)
-    $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & $Luac -p $tmp 2>&1 | Out-Null
-    $ErrorActionPreference = $old
-    return ($LASTEXITCODE -eq 0)
+    $tmp = New-QnmlTempFilePath $tmpRoot "probe_" ".lua"
+    try {
+        [System.IO.File]::WriteAllLines($tmp, $out)
+        $old = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        & $Luac -p $tmp 2>&1 | Out-Null
+        $ok = $LASTEXITCODE -eq 0
+        $ErrorActionPreference = $old
+        return $ok
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
 }
 if (Get-Command $Luac -ErrorAction SilentlyContinue) {
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "qnml_locals_probe_$PID.lua"
-    foreach ($rel in $localsBaseline.Keys) {
-        $lines = [System.IO.File]::ReadAllLines((Join-Path $root $rel))
-        $lo = 0; $hi = 200
-        while ($lo -lt $hi) {
-            $mid = [int][math]::Ceiling(($lo + $hi) / 2)
-            if (Test-Fits $lines $mid $tmp) { $lo = $mid } else { $hi = $mid - 1 }
+    $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) "qnml_locals_probe_$PID"
+    try {
+        New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
+        foreach ($rel in $localsBaseline.Keys) {
+            $lines = [System.IO.File]::ReadAllLines((Join-Path $root $rel))
+            $lo = 0; $hi = 200
+            while ($lo -lt $hi) {
+                $mid = [int][math]::Ceiling(($lo + $hi) / 2)
+                if (Test-Fits $lines $mid $tmpRoot) { $lo = $mid } else { $hi = $mid - 1 }
+            }
+            $base = $localsBaseline[$rel]
+            Write-Host "locals: $(Split-Path $rel -Leaf) fits $lo more (baseline $base)"
+            if ($lo -lt $base) { Write-Host "LOCALS FAIL: $rel fits $lo, baseline $base"; $fail = $true }
         }
-        $base = $localsBaseline[$rel]
-        Write-Host "locals: $(Split-Path $rel -Leaf) fits $lo more (baseline $base)"
-        if ($lo -lt $base) { Write-Host "LOCALS FAIL: $rel fits $lo, baseline $base"; $fail = $true }
+    } finally {
+        Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item $tmp -ErrorAction SilentlyContinue
 }
 if (-not $NoTests) {
 Get-ChildItem -Filter *_test.lua -Path (Join-Path $root "tests") -ErrorAction SilentlyContinue | ForEach-Object {
