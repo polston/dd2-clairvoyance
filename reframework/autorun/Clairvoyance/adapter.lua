@@ -5691,9 +5691,25 @@ function A.make()
       return ok and type(name) == "string" and name or nil
     end
     local function native_item_condition_owner(parsed_conditions, destination, qid)
-      if type(parsed_conditions) ~= "table" or #parsed_conditions ~= 1 then return nil end
-      local parsed = parsed_conditions[1]
-      if type(parsed) ~= "table" or parsed.kind ~= "item" then return nil end
+      if type(parsed_conditions) ~= "table" then return nil end
+      local parsed, parsed_index
+      local function has_nested_item(value)
+        if type(value) ~= "table" then return false end
+        if value.kind == "item" then return true end
+        for _, child in ipairs(value.children or {}) do
+          if has_nested_item(child) then return true end
+        end
+        return false
+      end
+      for index, condition in ipairs(parsed_conditions) do
+        if type(condition) == "table" and condition.kind == "item" then
+          if parsed ~= nil then return nil end
+          parsed, parsed_index = condition, index
+        elseif has_nested_item(condition) then
+          return nil
+        end
+      end
+      if parsed == nil then return nil end
       local owner = {
         item_id = type(parsed.item_id) == "number" and parsed.item_id or nil,
         count = parsed.set_num == true and type(parsed.num) == "number" and parsed.num or 1,
@@ -5708,8 +5724,10 @@ function A.make()
           or "native_item_condition_list_unreadable"
         return owner
       end
-      if #native_rows ~= 1 then owner.reason = "native_item_condition_not_singleton"; return owner end
-      local selector = native_rows[1]
+      if #native_rows ~= #parsed_conditions then
+        owner.reason = "native_item_condition_list_mismatch"; return owner
+      end
+      local selector = native_rows[parsed_index]
       if managed_type_name(selector) ~= "app.ClassSelector`1<app.ConciergeConditionBase>" then
         owner.reason = "native_item_condition_selector_mismatch"; return owner
       end
