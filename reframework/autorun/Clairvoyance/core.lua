@@ -2984,7 +2984,7 @@ function M.compute(adapter, show)
 
   -- v10 (SPEC 17.4): world markers, appended AFTER every item marker. The
   -- seller merge runs here, once the quest markers exist.
-  local world_panel, fullmap_world
+  local world_panel, fullmap_world, fullmap_calibration
   local npc_rows, npc_match_cids = {}, {}
   if show.world then
     local boxes, quest_by_cid = {}, {}
@@ -3025,9 +3025,19 @@ function M.compute(adapter, show)
   local undisc = show.world_undiscovered == true
   for _, route in ipairs(type(show.routes) == "table" and show.routes or {}) do
     if type(route) == "table" and type(route.stops) == "table"
-      and type(route.cid) == "number" and route.place == nil then
+      and type(route.cid) == "number" and (route.place == nil or route.direct == true) then
       for n, s in ipairs(route.stops) do
-        if type(s) == "table" and s.lead ~= true and valid_pos(s.pos)
+        if type(s) == "table" and s.lead == true and valid_pos(s.pos) then
+          -- The player lead is not a visible stop, but the full-map route
+          -- transform needs its layout position when no other marker is on
+          -- screen. The renderer consumes this private calibration record.
+          fullmap_calibration = fullmap_calibration or {}
+          fullmap_calibration[#fullmap_calibration + 1] = {
+            key = string.format("r:%d:0", math.floor(route.cid)),
+            cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
+            label = "", cid = route.cid, stop = n, num = 0,
+            slot = route.slot, calibration = true }
+        elseif route.direct ~= true and type(s) == "table" and valid_pos(s.pos)
           and (s.discovered ~= false or undisc) then
           -- SPEC 32.14.11.4: num is the number shown; a lead entry's first
           -- stop is the player, so its stops count from 1 after it.
@@ -3431,6 +3441,7 @@ function M.compute(adapter, show)
     item_capped = item_capped,
     world = world_panel,
     fullmap_world = fullmap_world,
+    fullmap_calibration = fullmap_calibration,
     tracked_qid = tracked_qid,
     nearest_qid = nearest_qid,
     journal = journal,
@@ -5153,6 +5164,31 @@ function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
     end
   end
   return out, want_full and full or nil, projection
+end
+
+function M.objective_route_member_equal(route, member)
+  if type(route) ~= "table" or type(member) ~= "table"
+      or route.cid ~= member.route_id or route.qid ~= member.qid
+      or route.kind ~= (member.kind == "source" and "item" or member.kind)
+      or (route.direct == true) ~= (member.direct == true)
+      or route.target_key ~= member.target_key or route.ordinal ~= member.ordinal
+      or route.name ~= member.name or route.objective ~= member.objective
+      or route.certainty ~= member.certainty or route.probability ~= member.probability
+      or route.capacity_key ~= member.capacity_key
+      or route.capacity_kind ~= member.capacity_kind then return false end
+  local function same_values(a, b)
+    if type(a) ~= type(b) then return false end
+    if a == nil then return true end
+    if #a ~= #b then return false end
+    for i, value in ipairs(a) do if value ~= b[i] then return false end end
+    return true
+  end
+  if not same_values(route.item_ids, member.item_ids)
+      or not same_values(route.group_keys, member.group_keys) then return false end
+  if member.direct ~= true then return true end
+  return route.place == member.place and type(route.pos) == "table"
+    and type(member.pos) == "table" and route.pos.x == member.pos.x
+    and route.pos.y == member.pos.y and route.pos.z == member.pos.z
 end
 
 local function objective_grouped_routes(snapshot, player_origin, policy)

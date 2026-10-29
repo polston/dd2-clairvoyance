@@ -133,6 +133,29 @@ local guid_ok, guid_error = pcall(A.guid_parse, malformed_guid)
 assert(not guid_ok and tostring(guid_error):find("malformed GUID '" .. malformed_guid .. "'", 1, true),
   "guid_parse preserves malformed input in its error")
 
+do
+  local old_pools = A.icon_pools
+  local panel, sprite = { label = "panel", array = "Panels", ref = "Panel" },
+    { label = "sprite", array = "Sprites", ref = "Sprite" }
+  A.icon_pools = { panel, sprite }
+  local panel_ref, sprite_ref = {}, {}
+  local pos = { x = 10, y = 2, z = 30 }
+  local info = { Panel = panel_ref, Sprite = sprite_ref, Pos = pos }
+  local this = {
+    MapIconInfoList = { get_Count = function() return 1 end,
+      get_Item = function(_, i) return i == 0 and info or nil end },
+    Panels = { get_Length = function() return 2 end },
+    Sprites = { get_Length = function() return 4 end },
+  }
+  local selected, used, capacity, native = A.get_icon_pool(this)
+  assert(selected == sprite and used == 1 and capacity == 4
+    and #native == 2 and native[1].ref == panel_ref and native[1].pos == pos
+    and native[1].pool == panel and native[2].ref == sprite_ref
+    and native[2].pool == sprite,
+    "get_icon_pool returns each native ref with its map position and owning pool")
+  A.icon_pools = old_pools
+end
+
 -- giver_audit_step (SPEC 18.5.1.4)
 do
   assert(A.giver_audit_step(nil, {}, nil, nil, nil, nil) == false, "nil ids")
@@ -986,22 +1009,59 @@ do
     and #wired_changed[1].candidates == 0 and #wired_changed[2].candidates == 1,
     "a changed atomic source observation advances generation and removes stale pickup")
 
+  local focused_catalog, focused_observation = base_catalog(), base_observation()
+  focused_catalog.placements[#focused_catalog.placements + 1] = {
+    uid = "33333333-3333-3333-3333-333333333333", index = 0,
+    table_id = "cccccccc-cccc-cccc-cccc-cccccccccccc", layer = 0,
+    source_id = { "source", "placed", "33333333-3333-3333-3333-333333333333", 0 },
+    capacity_pool_id = { "capacity", "placed", "33333333-3333-3333-3333-333333333333", 0 },
+    outputs = { { item_id = 999, count = 1 } }, pos = { x = 7, y = 8, z = 9 },
+  }
+  focused_observation.persisted["11111111-1111-1111-1111-111111111111:0"] =
+    { family = "placed", freebit = 0 }
+  local saved_need_groups = a.objective_need_groups
+  a.objective_need_groups = function()
+    return { status = "ok", complete = true, generation = 12, groups = {
+      { qid = 20090, task_index = 0, remaining = 1,
+        options = { { item_id = 501, accepted_count = 1 } } },
+    } }
+  end
+  local focused = a.objective_item_source_snapshots(nil,
+    { need_generation = 12, quests = {} }, focused_catalog, focused_observation)
+  a.objective_need_groups = saved_need_groups
+  assert(focused[1].status == "ok" and focused[1].complete
+    and #focused[1].candidates == 1
+    and focused[1].candidates[1].outputs[1].item_id == 501,
+    "an unrelated unproved pickup cannot suppress a proven current-needed pickup")
+
   local saved_source_reader, saved_source_clock = A.read_objective_source_observation, os.clock
-  local scan_count, fake_now = 0, 100
-  A.read_objective_source_observation = function()
+  local scan_count, scanned_catalogs, fake_now = 0, {}, 100
+  A.read_objective_source_observation = function(catalog)
     scan_count = scan_count + 1
+    scanned_catalogs[#scanned_catalogs + 1] = catalog
     return base_observation()
   end
   os.clock = function() return fake_now end
   local cache_adapter, cache_catalog = A.make(), base_catalog()
+  cache_adapter.objective_need_groups = function()
+    return { status = "ok", complete = true, generation = 1, groups = {
+      { qid = 20090, task_index = 0, remaining = 1,
+        options = { { item_id = 501, accepted_count = 1 } } },
+    } }
+  end
   cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
   fake_now = 100.4
   cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
   fake_now = 100.8
   cache_adapter.objective_item_source_snapshots(nil, { need_generation = 1 }, cache_catalog)
+  assert(scan_count == 1,
+    "stable current needs reuse the complete source observation across tick cadence")
+  cache_adapter.objective_item_source_snapshots(nil, { need_generation = 2 }, cache_catalog)
   A.read_objective_source_observation, os.clock = saved_source_reader, saved_source_clock
   assert(scan_count == 2,
-    "cached frame calls cannot move the fresh-scan timestamp and suppress a required rescan")
+    "a current-need generation change forces a complete source rescan")
+  assert(scanned_catalogs[1] == scanned_catalogs[2],
+    "need-driven rescans reuse the exact filtered static-catalog table")
 
   -- The native reader reconciles sparse persisted records and exact loaded
   -- identities before the pure classifier sees them.
@@ -1032,8 +1092,8 @@ do
       { get_Count = #entries })
   end
   local function rguid(text) return robj({}, { ["ToString()"] = text }) end
-  local function ruid(text)
-    return robj({ _RowID = rguid(text), _Index = 0 })
+  local function ruid(text, index)
+    return robj({ _RowID = rguid(text), _Index = index or 0 })
   end
   local function holder(contexts)
     local rows = {}
@@ -1050,6 +1110,12 @@ do
     robj({ UniqueID = ruid(chest_uid) }, nil, "app.UniqueIDContext"), chest_item,
   }) })
   local chest_record_info = robj({ ["<Record>k__BackingField"] = chest_record })
+  local unrelated_uid = "33333333-3333-3333-3333-333333333333"
+  local unrelated_record = robj({ Contexts = rlist({
+    robj({ UniqueID = ruid(unrelated_uid, -7) }, nil, "app.UniqueIDContext"),
+    robj({}, nil, "app.CharacterIDContext"),
+  }) })
+  local unrelated_record_info = robj({ ["<Record>k__BackingField"] = unrelated_record })
   local gen_context = robj({ _IsGenerated = true, _IsDisableGenerate = false }, nil,
     "app.GenerateInfoContext")
   local live_holder = holder({ gen_context, chest_item })
@@ -1064,12 +1130,17 @@ do
       _IsPawnRestrict = false },
     { get_IsOpenedFreeBit = false, get_IsUnlockFreeBit = false }, "app.gm80_001")
   local empty_set = function() return rdict({}) end
+  local unrelated_table = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+  local unrelated_request = robj({ _IsFailedAllRequest = false,
+    _IsFinishAllRequestForGenerateTable = true,
+    _Requests = rdict({ { "character", ruid(unrelated_uid, -7) } }) })
   local generation_manager = robj({ _NeverGenetateID = empty_set(),
     _NeverGenerateIDByDeadRequests = empty_set(), _DisableGenerateRequests = empty_set(),
-    _GenerateBlacklistUniqueIDHashSet = empty_set(), _RequestedTableInfos = empty_set() })
+    _GenerateBlacklistUniqueIDHashSet = empty_set(), _RequestedTableInfos = rdict({ {
+      robj({ _TableID = rguid(unrelated_table), _ExtraID = 0 }), unrelated_request } }) })
   local game_managers = {
     ["app.ContextDBMS"] = robj({ OfflineDB = robj({
-      Records = rlist({ nil, chest_record_info }, 2) }) }),
+      Records = rlist({ nil, unrelated_record_info, chest_record_info }, 3) }) }),
     ["app.GenerateManager"] = generation_manager,
     ["app.GimmickManager"] = robj({
       ["<ManagedGimmicksByIDs>k__BackingField"] = rdict({ { 80,
@@ -4466,7 +4537,9 @@ do
   local od = nobj({}, { get_DestType = 3, get_CharaID = 101,
     get_KeyLocation = 2308, get_LocalArea = 0, getDestination = { x = 1, y = 2, z = 3 } })
   local ot = nobj({ _Destinations = mcoll({ od }) }, { getActiveDestinations = mcoll({ od }) })
-  local og = nobj({ _Conditions = mcoll({
+  local og = nobj({ _GuidancePos = nobj({ _Process = nobj({ _KeyLocation = 2308 }, nil,
+      "app.GuidanceKeyLocation") }, nil, "app.ClassSelector`1<app.GuidanceData>"),
+    _Conditions = mcoll({
     nobj({ _Process = nobj({ _ItemID = 9001, _SetNum = false, _Num = 1,
       _IsEnabled = true, _IsNot = true }, { evaluate = true },
       "app.ConciergeConditionItem") }, nil,
@@ -4475,7 +4548,7 @@ do
       "app.ConciergeConditionQuestVariable") }, nil,
       "app.ClassSelector`1<app.ConciergeConditionBase>") }) },
     { evaluate = 0, evaluateRegisterCondition = true,
-    get_CharaID = 101, get_KeyLocation = 2308 })
+    get_CharaID = 1857826560 })
   og.test_selector = og.fields._Conditions:call("get_element", 0)
   og.test_process = og.test_selector:get_field("_Process")
   local oc = nobj({ _TaskIndex = 0 }, { get_TaskIndex = 0,
@@ -4512,7 +4585,7 @@ do
         local_area = 0, has_show_conditions = false, show_conditions = {},
         is_update_condition = false, has_display_conditions = false, display_conditions = {} },
     } } }, guidance = { { index = 0, task_index = 0, destination_index = 0,
-      destinations = { { index = 0, cid = 101, target = { kind = "key_location", key = 2308 },
+      destinations = { { index = 0, cid = nil, target = { kind = "key_location", key = 2308 },
         conditions = {
           { kind = "item", enabled = true, is_not = true, item_id = 9001, set_num = false, num = 1 },
           { kind = "quest_variable", enabled = true, is_not = false, qid = 20040,
@@ -5409,12 +5482,33 @@ do
     "OT3c native CID zero is normalized and place-only evidence remains usable")
   original_guidance[1].cid = saved_guidance_cid
   concierge_dest._calls.get_CharaID = saved_concierge_cid
+  local saved_key, saved_area = concierge_dest._calls.get_KeyLocation,
+    concierge_dest._calls.get_LocalArea
+  original_guidance[1].target = nil
+  concierge_dest._calls.get_KeyLocation, concierge_dest._calls.get_LocalArea = nil, nil
+  local npc_only = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(npc_only.eligibility == "eligible" and #npc_only.signals == 1
+    and npc_only.signals[1].kind == "npc" and npc_only.signals[1].target.cid == cid,
+    "OT3c NPC-only guidance matches when both catalog and live place identities are absent")
+  concierge_dest._calls.get_KeyLocation, concierge_dest._calls.get_LocalArea = saved_key, saved_area
   original_guidance[1].target = { kind = "key_location", key = key + 1 }
   local wrong_key = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
   assert(wrong_key.eligibility == "unknown"
     and wrong_key.reason == "concierge_destination_mismatch",
     "OT3c a matching CID with the wrong place key is not joined")
   original_guidance[1].target = saved_guidance_target
+  concierge_dest._calls.get_CharaID = "RAISE"
+  local unreadable_cid = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(unreadable_cid.eligibility == "unknown"
+    and unreadable_cid.reason == "concierge_destination_identity_unreadable",
+    "OT3g a raised native CID read fails closed instead of becoming absent")
+  concierge_dest._calls.get_CharaID = saved_concierge_cid
+  concierge_dest._calls.get_KeyLocation = "RAISE"
+  local unreadable_place = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
+  assert(unreadable_place.eligibility == "unknown"
+    and unreadable_place.reason == "concierge_destination_identity_unreadable",
+    "OT3g a raised native place read fails closed instead of becoming absent")
+  concierge_dest._calls.get_KeyLocation = saved_key
   local saved_delivery = original_guidance[1].delivery
   original_guidance[1].delivery = false
   local false_delivery = oa.objective_task_snapshot({ qid }, catalog).quests[1]

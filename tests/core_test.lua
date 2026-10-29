@@ -3568,8 +3568,19 @@ do
     end
     local leadr = { cid = 5, name = "N", slot = 1, lead = true, stops = {
       { pos = pl(0, 0), discovered = true, lead = true }, { pos = pl(10, 10), discovered = true } } }
-    local lm = stops_of(run({}, nil, { routes = { leadr } }))
+    local lead_result = run({}, nil, { routes = { leadr } })
+    local lm = stops_of(lead_result)
     check("rcc lead markers", #lm == 1 and lm[1].stop == 2 and lm[1].num == 1 and lm[1].key == "r:5:1")
+    local calibration = has(lead_result.fullmap_calibration, "r:5:0")
+    check("rcc lead keeps calibration separate from replacement world markers",
+      calibration ~= nil and calibration.calibration == true and calibration.stop == 1
+        and calibration.num == 0 and calibration.pos.x == 0 and calibration.pos.z == 0
+        and has(lead_result.fullmap_world, "r:5:0") == nil)
+    local lead_no_origin = run({ chests = { { uid = "keep", pos = pl(3, 3),
+      state = "unopened" } } }, nil, { routes = { leadr }, map_origin = false })
+    check("rcc calibration never replaces ordinary world markers without a map origin",
+      has(core.fullmap_order(lead_no_origin.markers, nil, lead_no_origin.fullmap_world),
+        "w:chest:keep") ~= nil and has(lead_no_origin.fullmap_calibration, "r:5:0") ~= nil)
     local plain = stops_of(run({}, nil, { routes = { { cid = 5, name = "N", slot = 1, stops = {
       { pos = pl(0, 0), discovered = true }, { pos = pl(10, 10), discovered = true } } } } }))
     check("rcc plain markers", #plain == 2 and plain[1].num == 1 and plain[2].num == 2
@@ -3586,6 +3597,14 @@ do
     local lb = stops_of(run({}, nil, { routes = { leadb } }))
     check("rcc non-number idx falls back", #lb == 1 and lb[1].num == 1)
     check("rcc lead signature", core.signature(lm, {}) ~= core.signature(one, {}))
+    local direct_lead = { cid = -4398046511104, name = "Objective: Item", slot = 1,
+      place = 0, direct = true, lead = true, stops = {
+        { pos = pl(0, 0), discovered = true, lead = true },
+        { pos = pl(10, 10), discovered = true } } }
+    local direct_result = run({}, nil, { routes = { direct_lead } })
+    check("rcc direct objective keeps only a private player calibration anchor",
+      has(direct_result.fullmap_calibration, "r:-4398046511104:0") ~= nil
+        and #stops_of(direct_result) == 0)
   end
 
   -- hint pins, with a query active, outside the cap
@@ -5120,6 +5139,34 @@ do
       and route_id_fn(math.huge, "place") == nil and route_id_fn(0 / 0, "item") == nil
       and route_id_fn(0x80000000, "place") == nil
       and route_id_fn(1, "npc") == nil)
+  local route_member_equal = core.objective_route_member_equal
+  check("objective route member comparator exists", type(route_member_equal) == "function")
+  if type(route_member_equal) == "function" then
+    local member = { route_id = core.objective_direct_route_id(4), place = 0, qid = 30150,
+      kind = "source", direct = true, target_key = core.target_key(
+        { "source", "placed", "fixture", 0 }), ordinal = 4,
+      name = "Objective: Item", objective = true, objective_generation = 8,
+      pos = pos(1, 2, 3), item_ids = { 377, 378 }, certainty = "guaranteed",
+      capacity_key = core.target_key({ "capacity", "placed", "fixture", 0 }),
+      capacity_kind = "finite", group_keys = {
+        core.target_key({ "need", 30150, 0, "item", 377, "exact" }) } }
+    local route = { cid = member.route_id, place = 0, qid = member.qid,
+      kind = "item", direct = true, target_key = member.target_key,
+      ordinal = member.ordinal, name = member.name, objective = true,
+      objective_generation = 7, pos = pos(1, 2, 3), item_ids = { 377, 378 },
+      certainty = member.certainty, capacity_key = member.capacity_key,
+      capacity_kind = member.capacity_kind, group_keys = { member.group_keys[1] } }
+    check("objective route member comparator ignores generation only",
+      route_member_equal(route, member))
+    route.qid = route.qid + 1
+    check("objective route member comparator checks qid", not route_member_equal(route, member))
+    route.qid = member.qid
+    route.capacity_key = core.target_key({ "capacity", "placed", "other", 0 })
+    check("objective route member comparator checks capacity", not route_member_equal(route, member))
+    route.capacity_key = member.capacity_key
+    route.group_keys = { core.target_key({ "need", 30150, 0, "item", 378, "exact" }) }
+    check("objective route member comparator checks groups", not route_member_equal(route, member))
+  end
   if type(route_id_fn) == "function" then
     local route_ids = {}
     for _, qid in ipairs({ 1, 2, 3, 999, 0x7FFFFFFF }) do

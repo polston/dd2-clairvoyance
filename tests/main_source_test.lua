@@ -193,6 +193,31 @@ check("stale route publication removes route-stop markers before point and signa
     and tick_body:find("without_stale_route_stops(result.fullmap_world)", 1, true) ~= nil
     and tick_body:find("if type(list) ~= \"table\" then return list end", 1, true) ~= nil
     and tick_body:find("local route_on, has_pts, route_pts = core.route_point_state(result,", 1, true) ~= nil)
+check("generation-only objective refresh does not disable stable route rendering",
+  tick_body:find("local route_parts = {}", 1, true) ~= nil
+    and tick_body:find("local route_changed = route_sig ~= wt.objective_route_sig", 1, true) ~= nil)
+local route_current_block = tick_body:match("local expected_routes.-if not routes_current then") or ""
+check("current-route validation tolerates one-tick generation lag",
+  route_current_block:find(
+    "route.objective_generation ~= route_publication.objective_generation", 1, true) == nil
+    and route_current_block:find(
+      "route.objective_generation == route_publication.objective_generation", 1, true) == nil
+    and route_current_block:find(
+      "core.objective_route_member_equal(route, member)", 1, true) ~= nil)
+check("lead calibration records are isolated, last, zero-size and uncounted",
+  src:find("if m.calibration == true then", 1, true) ~= nil
+    and src:find("and not m.calibration", 1, true) ~= nil
+    and src:find("snapshot.fullmap_calibration", 1, true) ~= nil
+    and src:find("if m.calibration ~= true then added_count = added_count + 1 end", 1, true) ~= nil
+    and src:find("if m.calibration == true then ref:set_Scale(0) end", 1, true) ~= nil
+    and src:find("rec.calibration and 0 or scale", 1, true) ~= nil
+    and src:find("if m.calibration ~= true then note_dropped() end", 1, true) ~= nil)
+check("native map icons provide zero-cost route transform anchors",
+  src:find("native.pool == pool", 1, true) ~= nil
+    and src:find("marker = { pos = { x = x, y = y, z = z }, calibration = true }", 1, true) ~= nil)
+check("current-route validation delegates the complete endpoint comparison",
+  route_current_block:find("core.objective_route_member_equal(route, member)", 1, true) ~= nil
+    and route_current_block:find("route.pos.x == member.pos.x", 1, true) == nil)
 local set_routes_n = 0
 for _ in src:gmatch('wt%.q%("set_routes"') do set_routes_n = set_routes_n + 1 end
 check("main has exactly one set_routes handoff", set_routes_n == 1)

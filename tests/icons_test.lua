@@ -364,12 +364,15 @@ do
   r:preload({ 1 }); r:draw()
   now = 42
   local recs = { { id = 1, size = 20, argb = 0xFFFFFFFF, cat = "route_stop" },
-                 { id = 1, size = 20, argb = 0xFFFFFFFF, cat = "chest" } }
+                 { id = 1, size = 20, argb = 0xFFFFFFFF, cat = "chest" },
+                 { calibration = true } }
   r:fill(recs, function() return 100, 200 end)
   check("fill: route stop 1.5x with style", r.map.pool[1].size == 30 and r.map.pool[1].style == sty)
   check("fill: other category 1x no style", r.map.pool[2].size == 20 and r.map.pool[2].style == nil)
   check("fill: lx ly read_at on records", recs[1].lx == 100 and recs[1].ly == 200 and recs[2].lx == 100
     and recs[1].read_at == 42 and recs[2].ly == 200)
+  check("fill: calibration record is measured without drawing an icon",
+    recs[3].lx == 100 and recs[3].ly == 200 and recs[3].read_at == 42 and r.map.n == 2)
   check("fill_at set", r.fill_at == 42)
   now = 0
 end

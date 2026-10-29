@@ -1645,7 +1645,7 @@ get_icon_pool = function(this)
         local widget = info[pool.ref]
         if widget ~= nil then
           used[pi] = used[pi] + 1
-          native_refs[#native_refs + 1] = widget
+          native_refs[#native_refs + 1] = { ref = widget, pos = info.Pos, pool = pool }
         end
       end
     end
@@ -3832,13 +3832,14 @@ function A.read_objective_source_observation(catalog)
     generation_complete = false, requested_complete = false, loaded_complete = false,
     persisted = {}, never = {}, dead = {}, disabled_tables = {}, blacklist = {},
     requested_tables = {}, loaded = {}, gate_results = {} }
-  local by_identity = {}
+  local by_identity, catalog_tables = {}, {}
   local function catalog_rows(rows, family)
     if type(rows) ~= "table" then return false end
     for _, row in ipairs(rows) do
       if type(row) ~= "table" or type(row.uid) ~= "string"
-          or type(row.index) ~= "number" then return false end
+          or type(row.index) ~= "number" or type(row.table_id) ~= "string" then return false end
       by_identity[row.uid:lower() .. ":" .. tostring(row.index)] = family
+      catalog_tables[row.table_id:lower()] = true
     end
     return true
   end
@@ -3866,9 +3867,8 @@ function A.read_objective_source_observation(catalog)
   local function identity(value)
     local uid = guid_text(safe_field(value, "_RowID"))
     local index = int_value(safe_field(value, "_Index"))
-    if uid == nil or type(index) ~= "number" or index < 0 or index ~= math.floor(index) then
-      return nil
-    end
+    if uid == nil or type(index) ~= "number" or index ~= math.floor(index) then return nil end
+    if index < 0 then return nil, uid, index end
     return uid .. ":" .. tostring(index), uid, index
   end
   local function list(value, cap, visit)
@@ -3938,8 +3938,8 @@ function A.read_objective_source_observation(catalog)
       local map = context_map(safe_field(info, "<Record>k__BackingField"),
         safe_field(info, "SaveData"))
       if map == nil then return false end
-      local key = identity(safe_field(map["app.UniqueIDContext"], "UniqueID"))
-      if key == nil then return false end
+      local key, uid, index = identity(safe_field(map["app.UniqueIDContext"], "UniqueID"))
+      if key == nil then return uid ~= nil and type(index) == "number" and index < 0 end
       local family = by_identity[key]
       if family == "placed" then
         local freebit = int_value(safe_field(map["app.GimmickContext"], "_FreeBit"))
@@ -3988,6 +3988,7 @@ function A.read_objective_source_observation(catalog)
         local finished = safe_field(info, "_IsFinishAllRequestForGenerateTable")
         if table_id == nil or type(extra) ~= "number" or type(failed) ~= "boolean"
             or type(finished) ~= "boolean" then return false end
+        if not catalog_tables[table_id] then return true end
         local state = out.requested_tables[table_id]
         if state == nil then
           state = { active = true, failed = false, finished = true, uids = {} }
@@ -3996,8 +3997,8 @@ function A.read_objective_source_observation(catalog)
         state.failed = state.failed or failed
         state.finished = state.finished and finished
         return entries(safe_field(info, "_Requests"), 32768, function(uid_value)
-          local key = identity(uid_value)
-          if key == nil then return false end
+          local key, uid, index = identity(uid_value)
+          if key == nil then return uid ~= nil and type(index) == "number" and index < 0 end
           state.uids[key] = true
           return true
         end)
@@ -5266,7 +5267,10 @@ function A.make()
   local objective_task_state = { owner = nil, focus = nil, journal = nil,
     needs = nil, focus_epoch = 0, journal_generation = 0, need_generation = 0,
     source_generation = 1, source_catalog = nil, source_observation = nil,
-    source_at = -math.huge, talk_generation = 1, talk_observation = nil,
+    source_need_generation = nil,
+    filtered_source_owner = nil, filtered_source_signature = nil,
+    filtered_source_catalog = nil,
+    talk_generation = 1, talk_observation = nil,
     talk_at = -math.huge, forgery_generation = 1, forgery_observation = nil,
     forgery_at = -math.huge, reward_observation = nil }
   local LOC_KINDS = { "placed", "box", "drop" }   -- item_locations order
@@ -5688,7 +5692,58 @@ function A.make()
       local ok, name = pcall(function()
         return object:get_type_definition():get_full_name()
       end)
-      return ok and type(name) == "string" and name or nil
+      if not ok then return nil, false end
+      return type(name) == "string" and name or nil, true
+    end
+    local function native_guidance_cid(destination)
+      local ok, value = pcall(function() return destination:call("get_CharaID") end)
+      if not ok then return nil, false end
+      local cid = int_value(value)
+      -- The extractor normalizes the CharacterID enum's Invalid and player
+      -- sentinels to no character; the live join must use the same identity.
+      if cid == 0 or cid == 1857826560 or cid == 2891076981 then return nil, true end
+      return cid, true
+    end
+    local function native_guidance_place(destination)
+      local guidance_ok, guidance = pcall(function() return destination:get_field("_GuidancePos") end)
+      if not guidance_ok then return nil, false end
+      local guidance_kind, kind_readable
+      if guidance ~= nil then guidance_kind, kind_readable = managed_type_name(guidance) end
+      if guidance ~= nil and not kind_readable then return nil, false end
+      if guidance_kind == "app.ClassSelector`1<app.GuidanceData>" then
+        local process_ok
+        process_ok, guidance = pcall(function() return guidance:get_field("_Process") end)
+        if not process_ok then return nil, false end
+      end
+      local kind, readable = nil, true
+      if guidance ~= nil then kind, readable = managed_type_name(guidance) end
+      if not readable then return nil, false end
+      if kind == "app.GuidanceKeyLocation" then
+        local ok, value = pcall(function() return guidance:get_field("_KeyLocation") end)
+        if not ok then return nil, false end
+        local key = int_value(value)
+        return type(key) == "number" and key > 0
+          and { kind = "key_location", key = key } or nil, true
+      elseif kind == "app.GuidanceLocalArea" then
+        local ok, value = pcall(function() return guidance:get_field("LocalArea") end)
+        if not ok then return nil, false end
+        local local_area = int_value(value)
+        return type(local_area) == "number" and local_area >= 0
+          and { kind = "local_area", local_area = local_area } or nil, true
+      end
+      local key_ok, key_value = pcall(function() return destination:call("get_KeyLocation") end)
+      if not key_ok then return nil, false end
+      local key = int_value(key_value)
+      if type(key) == "number" and key > 0 then
+        return { kind = "key_location", key = key }, true
+      end
+      local area_ok, area_value = pcall(function() return destination:call("get_LocalArea") end)
+      if not area_ok then return nil, false end
+      local local_area = int_value(area_value)
+      if type(local_area) == "number" and local_area >= 0 then
+        return { kind = "local_area", local_area = local_area }, true
+      end
+      return nil, true
     end
     local function native_item_condition_owner(parsed_conditions, destination, qid)
       if type(parsed_conditions) ~= "table" then return nil end
@@ -5927,22 +5982,26 @@ function A.make()
                   local status_ok, status = pcall(function() return native:call("evaluate", qid) end)
                   local register_call_ok, register = pcall(function() return native:call("evaluateRegisterCondition", qid) end)
                   local status_num = status_ok and int_value(status) or nil
-                  local native_cid = int_value(safe_call(native, "get_CharaID"))
-                  if native_cid == 0 then native_cid = nil end
+                  local native_cid, cid_readable = native_guidance_cid(native)
                   local target
-                  local native_key = int_value(safe_call(native, "get_KeyLocation"))
-                  local native_area = int_value(safe_call(native, "get_LocalArea"))
+                  local native_place, place_readable = native_guidance_place(native)
                   local parsed_cid, parsed_place = concierge_identity(parsed)
-                  local place_ok = parsed_place == nil or (parsed_place.kind == "key_location"
-                    and native_key == parsed_place.key) or (parsed_place.kind == "local_area"
-                    and native_area == parsed_place.local_area)
+                  local place_ok = parsed_place == nil and native_place == nil
+                    or (type(parsed_place) == "table" and type(native_place) == "table"
+                      and parsed_place.kind == native_place.kind
+                      and ((parsed_place.kind == "key_location"
+                          and parsed_place.key == native_place.key)
+                        or (parsed_place.kind == "local_area"
+                          and parsed_place.local_area == native_place.local_area)))
                   target = { cid = parsed_cid,
                     place = parsed_place, pos = position(safe_call(native, "getDestination")) }
                   if target.pos == nil and target.cid ~= nil then
                     local x, y, z = objective_pos(target.cid)
                     if x ~= nil then target.pos = { x = x, y = y, z = z } end
                   end
-                  if parsed_cid ~= native_cid or not place_ok then
+                  if not cid_readable or not place_readable then
+                    destination_reason = "concierge_destination_identity_unreadable"
+                  elseif parsed_cid ~= native_cid or not place_ok then
                     destination_reason = "concierge_destination_mismatch"
                   elseif not status_ok then
                     destination_reason = "concierge_status_exception"
@@ -6041,7 +6100,10 @@ function A.make()
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
         objective_task_state.need_generation = 0, 0, 0
       objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
-      objective_task_state.source_at = -math.huge
+      objective_task_state.source_need_generation = nil
+      objective_task_state.filtered_source_owner = nil
+      objective_task_state.filtered_source_signature = nil
+      objective_task_state.filtered_source_catalog = nil
       objective_task_state.source_generation = objective_task_state.source_generation + 1
       objective_task_state.talk_observation, objective_task_state.forgery_observation = nil, nil
       objective_task_state.talk_at, objective_task_state.forgery_at = -math.huge, -math.huge
@@ -6175,39 +6237,6 @@ function A.make()
       for k in pairs(y) do if x[k] == nil then return false end end
       return true
     end
-    local now = os.clock()
-    local observation = supplied_source_observation
-    local source_scanned = false
-    if observation == nil and type(source_catalog) == "table" then
-      if objective_task_state.source_catalog == source_catalog
-          and objective_task_state.source_observation ~= nil
-          and now - objective_task_state.source_at < 0.5 then
-        observation = objective_task_state.source_observation
-      else
-        observation = A.read_objective_source_observation(source_catalog)
-        source_scanned = true
-      end
-    end
-    if objective_task_state.source_catalog ~= source_catalog
-        or not same(objective_task_state.source_observation, observation) then
-      if objective_task_state.source_catalog ~= nil
-          or objective_task_state.source_observation ~= nil then
-        objective_task_state.source_generation = math.min(2147483647,
-          objective_task_state.source_generation + 1)
-      end
-      objective_task_state.source_catalog = source_catalog
-      objective_task_state.source_observation = copy(observation)
-    end
-    if source_scanned then objective_task_state.source_at = now end
-    local providers = A.objective_source_provider_snapshots(source_catalog, observation,
-      objective_task_state.source_generation)
-    for _, provider in ipairs(providers) do
-      provider.catalog_version = version
-      provider.source_catalog_version = type(source_catalog) == "table" and source_catalog.version or nil
-      provider.source_descriptors = copy(descriptors)
-      provider.signal_evidence = copy(signals)
-      provider.guidance_delivery_refs = copy(deliveries)
-    end
     local need_snapshot = a.objective_need_groups(task_snapshot)
     local wanted = nil
     if need_snapshot.complete then
@@ -6216,17 +6245,82 @@ function A.make()
         for _, option in ipairs(group.options) do wanted[option.item_id] = true end
       end
     end
+    local wanted_list = {}
+    if wanted ~= nil then
+      for item_id in pairs(wanted) do wanted_list[#wanted_list + 1] = item_id end
+      table.sort(wanted_list)
+    end
+    local wanted_signature = wanted ~= nil and table.concat(wanted_list, ",") or nil
+    local scan_catalog = source_catalog
+    local source_catalog_is_filtered = wanted ~= nil and type(source_catalog) == "table"
+    if source_catalog_is_filtered then
+      if objective_task_state.filtered_source_owner == source_catalog
+          and objective_task_state.filtered_source_signature == wanted_signature then
+        scan_catalog = objective_task_state.filtered_source_catalog
+      else
+        scan_catalog = {}
+        for key, value in pairs(source_catalog) do
+          if key ~= "placements" and key ~= "chests" then scan_catalog[key] = copy(value) end
+        end
+        local function matching_rows(rows)
+          local out = {}
+          for _, row in ipairs(type(rows) == "table" and rows or {}) do
+            local matches = false
+            for _, output in ipairs(type(row) == "table" and row.outputs or {}) do
+              if wanted[output.item_id] then matches = true; break end
+            end
+            if matches then out[#out + 1] = copy(row) end
+          end
+          return out
+        end
+        scan_catalog.placements = matching_rows(source_catalog.placements)
+        scan_catalog.chests = matching_rows(source_catalog.chests)
+        objective_task_state.filtered_source_owner = source_catalog
+        objective_task_state.filtered_source_signature = wanted_signature
+        objective_task_state.filtered_source_catalog = scan_catalog
+      end
+    end
+    local function source_catalog_matches()
+      return objective_task_state.source_catalog == scan_catalog
+    end
+    local now = os.clock()
+    local observation = supplied_source_observation
+    if observation == nil and type(scan_catalog) == "table" then
+      if source_catalog_matches()
+          and objective_task_state.source_need_generation == generation
+          and objective_task_state.source_observation ~= nil
+      then
+        observation = objective_task_state.source_observation
+      else
+        observation = A.read_objective_source_observation(scan_catalog)
+      end
+    end
+    if not source_catalog_matches()
+        or not same(objective_task_state.source_observation, observation) then
+      if objective_task_state.source_catalog ~= nil
+          or objective_task_state.source_observation ~= nil then
+        objective_task_state.source_generation = math.min(2147483647,
+          objective_task_state.source_generation + 1)
+      end
+      objective_task_state.source_catalog = scan_catalog
+      objective_task_state.source_observation = copy(observation)
+    end
+    objective_task_state.source_need_generation = generation
+    local providers = A.objective_source_provider_snapshots(scan_catalog, observation,
+      objective_task_state.source_generation)
+    for _, provider in ipairs(providers) do
+      provider.catalog_version = version
+      provider.source_catalog_version = type(source_catalog) == "table" and source_catalog.version or nil
+      provider.source_descriptors = copy(descriptors)
+      provider.signal_evidence = copy(signals)
+      provider.guidance_delivery_refs = copy(deliveries)
+    end
     local loot = copy(items.objective_loot_observations(wanted, generation))
     loot.catalog_version = version
     loot.source_descriptors = copy(descriptors)
     loot.signal_evidence = copy(signals)
     loot.guidance_delivery_refs = copy(deliveries)
     providers[#providers + 1] = loot
-    local wanted_list = {}
-    if wanted ~= nil then
-      for item_id in pairs(wanted) do wanted_list[#wanted_list + 1] = item_id end
-      table.sort(wanted_list)
-    end
     local function provider_observation(kind)
       local state_key, generation_key, at_key, reader
       if kind == "talk_grant" then
@@ -6569,7 +6663,10 @@ function A.make()
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
         objective_task_state.need_generation = 0, 0, 0
       objective_task_state.source_catalog, objective_task_state.source_observation = nil, nil
-      objective_task_state.source_at = -math.huge
+      objective_task_state.source_need_generation = nil
+      objective_task_state.filtered_source_owner = nil
+      objective_task_state.filtered_source_signature = nil
+      objective_task_state.filtered_source_catalog = nil
       objective_task_state.source_generation = objective_task_state.source_generation + 1
       objective_task_state.talk_observation, objective_task_state.forgery_observation = nil, nil
       objective_task_state.talk_at, objective_task_state.forgery_at = -math.huge, -math.huge
