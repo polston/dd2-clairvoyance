@@ -5340,16 +5340,16 @@ function A.make()
         or owner.eligibility ~= "eligible" or owner.proof_kind ~= "condition" then
       return false
     end
-    local option_ids, option_count, required = {}, 0, nil
-    for _, option in ipairs(type(record.options) == "table" and record.options or {}) do
-      local count = option.required
-      if option.op == "morethan" and type(count) == "number" then count = count + 1 end
-      if type(option.item_id) ~= "number" or type(count) ~= "number"
-          or (required ~= nil and required ~= count) then return false end
-      option_ids[option.item_id], option_count, required = true, option_count + 1, count
+    local options = type(record.options) == "table" and record.options or {}
+    if #options ~= 1 then return false end
+    local option, required = options[1], options[1].required
+    if option.op == "morethan" and type(required) == "number" then
+      required = required + 1
+    elseif option.op ~= "more" then
+      return false
     end
-    return option_count == 1 and option_ids[owner.item_id] == true
-      and owner.count == required
+    return type(option.item_id) == "number" and type(required) == "number"
+      and owner.item_id == option.item_id and owner.count == required
   end
   local function objective_owned_records(task_snapshot, state)
     local qrows, owned, matches, owner_uses = {}, {}, {}, {}
