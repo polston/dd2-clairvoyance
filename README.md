@@ -193,7 +193,23 @@ kept.
 
 ## Development
 
-Offline tests run with Lua 5.4:
+Install [`just`](https://just.systems/) and use the repository recipes for the
+normal Windows development loop:
+
+    just doctor
+    just check
+    just deploy
+    just probe tools/probe/objective_phase0.lua 30
+    just shot .tmp-tests/shot.png
+    just verify-install
+
+`just doctor` locates Lua 5.4 and Python, while the other recipes isolate
+temporary files inside the checkout so parallel Windows runs do not collide.
+`deploy` runs the full check before installing, `probe` runs one guarded live
+probe, and `verify-install` compares the installed files with the checkout.
+
+The underlying check remains directly callable when explicit tool paths are
+needed:
 
     powershell -NoProfile -File scripts/check.ps1 -Lua <path to lua.exe> -Luac <path to luac.exe>
 
