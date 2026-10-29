@@ -793,10 +793,13 @@ class KeyPathTests(unittest.TestCase):
             git(main, "commit", "-q", "-m", "x")
             wt = os.path.join(d, "wt")
             git(main, "worktree", "add", "-q", wt, "-b", "lane")
-            want = os.path.realpath(os.path.join(main, "tools", "pak_key.local.txt"))
-            for root in (main, wt):
-                got = _key_path_from(os.path.join(root, "tools", "key_check.py"))
-                self.assertEqual(os.path.realpath(got), want, root)
+            try:
+                want = os.path.realpath(os.path.join(main, "tools", "pak_key.local.txt"))
+                for root in (main, wt):
+                    got = _key_path_from(os.path.join(root, "tools", "key_check.py"))
+                    self.assertEqual(os.path.realpath(got), want, root)
+            finally:
+                git(main, "worktree", "remove", "--force", wt)
 
 
 class KeyCheckVerbTests(unittest.TestCase):
