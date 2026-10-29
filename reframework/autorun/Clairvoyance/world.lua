@@ -3152,15 +3152,26 @@ function M.new(a, reads, io)
     for i, id in ipairs(ids or {}) do out[i] = id end
     return out
   end
+  local function route_count_metadata_valid(publication, member_count)
+    local total, omitted = rawget(publication, "total"), rawget(publication, "omitted")
+    if total == nil and omitted == nil then return true end
+    return type(total) == "number" and math.type(total) == "integer"
+      and type(omitted) == "number" and math.type(omitted) == "integer"
+      and total >= 0 and total <= 2147483647
+      and omitted >= 0 and omitted <= 2147483647
+      and total == member_count + omitted
+  end
   local function normalize_objective_publication(publication)
     local only_expected = true
     for k in pairs(publication) do
-      if k ~= "objective_generation" and k ~= "members" then only_expected = false; break end
+      if k ~= "objective_generation" and k ~= "members"
+          and k ~= "total" and k ~= "omitted" then only_expected = false; break end
     end
     local generation = publication.objective_generation
     local raw_members = route_dense_array(publication.members)
     local normalized = {}
     local valid = only_expected and route_positive(generation, 2147483647) and raw_members ~= nil
+      and route_count_metadata_valid(publication, raw_members and #raw_members or 0)
     if not valid then return nil, generation, false end
     for _, e in ipairs(raw_members) do
       if type(e) ~= "table" or e.objective_generation ~= generation
@@ -3236,10 +3247,12 @@ function M.new(a, reads, io)
       return false
     end
     for k in pairs(publication) do
-      if k ~= "objective_generation" and k ~= "members" then return false end
+      if k ~= "objective_generation" and k ~= "members"
+          and k ~= "total" and k ~= "omitted" then return false end
     end
     local members, previous = route_dense_array(publication.members), S.objective_publication.members
-    if members == nil or #members ~= #previous then return false end
+    if members == nil or not route_count_metadata_valid(publication, #members)
+        or #members ~= #previous then return false end
     for i, member in ipairs(members) do
       local old = previous[i]
       if type(member) ~= "table" or type(old) ~= "table" then return false end
