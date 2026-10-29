@@ -4447,15 +4447,9 @@ do
 
   -- Seed a real adapter-produced current need for the objective task snapshot
   -- tests; the snapshot must join this committed table, not invent ownership.
-  ifresh()
-  IS.prog = { 20040 }
-  IS.procs = { iproc(20040, { has_item({ { id = 9001, num = 2, lv = 4 } }) }) }
-  ai.refresh_items("needs")
-  assert(ai.item_needs()[20040] ~= nil and ai.item_needs()[20040][1].id == 9001,
-    "objective task fixture has one live unsatisfied item need")
   local saved_task_gms = sdk.get_managed_singleton
-  local function nobj(fields, calls)
-    local o = { fields = fields or {}, calls = calls or {} }
+  local function nobj(fields, calls, type_name)
+    local o = { fields = fields or {}, calls = calls or {}, type_name = type_name }
     function o.get_field(_, k) return o.fields[k] end
     function o.get_address() return o.address end
     function o.call(_, m, ...)
@@ -4464,13 +4458,23 @@ do
       if type(v) == "function" then return v(...) end
       return v
     end
+    function o.get_type_definition()
+      return { get_full_name = function() return o.type_name end }
+    end
     return o
   end
   local od = nobj({}, { get_DestType = 3, get_CharaID = 101,
     get_KeyLocation = 2308, get_LocalArea = 0, getDestination = { x = 1, y = 2, z = 3 } })
   local ot = nobj({ _Destinations = mcoll({ od }) }, { getActiveDestinations = mcoll({ od }) })
-  local og = nobj({}, { evaluate = 0, evaluateRegisterCondition = true,
+  local og = nobj({ _Conditions = mcoll({
+    nobj({ _Process = nobj({ _ItemID = 9001, _SetNum = false, _Num = 1,
+      _IsEnabled = true, _IsNot = true }, { evaluate = true },
+      "app.ConciergeConditionItem") }, nil,
+      "app.ClassSelector`1<app.ConciergeConditionBase>") }) },
+    { evaluate = 0, evaluateRegisterCondition = true,
     get_CharaID = 101, get_KeyLocation = 2308 })
+  og.test_selector = og.fields._Conditions:call("get_element", 0)
+  og.test_process = og.test_selector:get_field("_Process")
   local oc = nobj({ _TaskIndex = 0 }, { get_TaskIndex = 0,
     get_Destinations = mcoll({ og }) })
   local oi = nobj({}, { get_CurrentTaskIndex = 0, getCurrentTaskConciergeData = oc })
@@ -4480,11 +4484,22 @@ do
   local oq = nobj({ _QuestLogInfoDict = nobj({}, { get_Item = function(q)
     if q == 20040 then return oi end
   end }), _Catalog = own_native_catalog }, {
+    getProgressingQuestIds = function() return mcoll(IS.prog) end,
     getCurrentTask = function(q) if q == 20040 then return ot end end })
   oq.address = 0x202
   sdk.get_managed_singleton = function(n)
     if n == "app.QuestLogManager" then return oq end
+    return saved_task_gms(n)
   end
+  ai.objective_task_snapshot({ 20040 }, nil)
+  ifresh()
+  IS.prog = { 20040 }
+  IS.procs = { iproc(20040, { has_item({ { id = 9001, num = 1, lv = 4 } }) }) }
+  ai.refresh_items("needs")
+  IS._fixture_needs = ai.item_needs()
+  assert(IS._fixture_needs ~= nil and IS._fixture_needs[20040] ~= nil
+    and IS._fixture_needs[20040][1].id == 9001,
+    "objective task fixture has one live unsatisfied item need")
   local own_catalog = { version = 2, sources = {
     { id = "global-source", kind = "placed" },
   }, quests = {} }
@@ -4496,10 +4511,7 @@ do
     } } }, guidance = { { index = 0, task_index = 0, destination_index = 0,
       destinations = { { index = 0, cid = 101, target = { kind = "key_location", key = 2308 },
         conditions = {
-          { kind = "item", enabled = true, is_not = false, item_id = 9001, set_num = true, num = 2 },
-          { kind = "quest_variable_or", enabled = true, is_not = false, children = {
-            { kind = "item", enabled = true, is_not = false, item_id = 9002, set_num = true, num = 1 },
-          } },
+          { kind = "item", enabled = true, is_not = true, item_id = 9001, set_num = false, num = 1 },
         }, delivery = { is_not = false, check_storage = true, group_id = 3,
           refs = { { qid = 777, key = 2, serial = 2 } } } } } } },
     deliveries = {}, sources = { { id = "fixture-source", kind = "placed" } },
@@ -4549,24 +4561,92 @@ do
     return reward_fixture.previous_singleton(name)
   end
   reward_fixture.previous_need_groups = ai.objective_need_groups
-  ai.objective_need_groups = function()
-    return { status = "ok", complete = true, groups = { { options = { { item_id = 9001 } } } } }
-  end
   own_catalog.quests[890] = { reward_diagnostics = { false } }
   local owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   reward_fixture.original_need_generation = owned_snapshot.need_generation
   local owned = owned_snapshot.quests[1].item_ownership
-  assert(#owned == 2 and owned[1].item_id == 9001 and owned[1].count == 2
-    and owned[1].proof_kind == "condition" and owned[1].eligibility == "unknown"
+  assert(#owned == 2 and owned[1].item_id == 9001 and owned[1].count == 1
+    and owned[1].proof_kind == "condition" and owned[1].eligibility == "eligible"
     and owned[1].task_index == 0
     and owned[1].concierge_index == 0 and owned[1].destination_index == 0,
-    "objective task owner preserves exact catalog count while native leaf truth remains unknown")
+    "objective task owner uses an exact true native item leaf and defaults unset quantity to one")
   assert(owned[2].proof_kind == "delivery" and owned[2].eligibility == "unknown"
     and owned[2].delivery.group_id == 3 and owned[2].delivery.check_storage == true
     and #owned[2].delivery.refs == 1 and #owned[2].delivery.groups == 1
-    and owned[2].delivery.groups[1].delivery.groups[1].item_ids[1] == 9002
-    and owned[1].item_id ~= 9002,
-    "objective task owner preserves delivery groups and does not flatten alternatives")
+    and owned[2].delivery.groups[1].delivery.groups[1].item_ids[1] == 9002,
+    "objective task owner preserves delivery groups without promoting their alternatives")
+  owned_snapshot._natural_groups = ai.objective_need_groups(owned_snapshot)
+  assert(owned_snapshot._natural_groups.status == "ok" and owned_snapshot._natural_groups.complete
+    and #owned_snapshot._natural_groups.groups == 1
+    and owned_snapshot._natural_groups.groups[1].options[1].item_id == 9001,
+    "native item-condition ownership unlocks the matching current need without test injection")
+  og.test_process.calls.evaluate = false
+  owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
+  assert(owned_snapshot._condition_case.item_ownership[1].eligibility == "ineligible"
+    and owned_snapshot._condition_case.item_ownership[1].reason == "native_item_condition_false",
+    "a readable false native item leaf remains ineligible")
+  og.test_process.calls.evaluate = true
+  og.test_process.fields._IsEnabled = false
+  own_catalog.quests[20040].guidance[1].destinations[1].conditions[1].enabled = false
+  owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
+  assert(owned_snapshot._condition_case.item_ownership[1].eligibility == "ineligible"
+    and owned_snapshot._condition_case.item_ownership[1].reason
+      == "native_item_condition_disabled",
+    "a disabled native item leaf remains ineligible even if its evaluator returns true")
+  og.test_process.fields._IsEnabled = true
+  own_catalog.quests[20040].guidance[1].destinations[1].conditions[1].enabled = true
+  og.test_process.fields._IsNot = false
+  own_catalog.quests[20040].guidance[1].destinations[1].conditions[1].is_not = false
+  owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
+  assert(owned_snapshot._condition_case.item_ownership[1].eligibility == "ineligible"
+    and owned_snapshot._condition_case.item_ownership[1].reason
+      == "native_item_condition_not_missing",
+    "a true possession-oriented item leaf does not prove an outstanding acquisition need")
+  og.test_process.fields._IsNot = true
+  own_catalog.quests[20040].guidance[1].destinations[1].conditions[1].is_not = true
+  og.test_process.calls.evaluate = nil
+  owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
+  assert(owned_snapshot._condition_case.item_ownership[1].eligibility == "unknown"
+    and owned_snapshot._condition_case.item_ownership[1].reason
+      == "native_item_condition_result_unreadable",
+    "an unreadable native item result remains unknown")
+  og.test_process.calls.evaluate = true
+  og.test_process.fields._ItemID = 9002
+  owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
+  assert(owned_snapshot._condition_case.item_ownership[1].eligibility == "unknown"
+    and owned_snapshot._condition_case.item_ownership[1].reason
+      == "native_item_condition_catalog_mismatch",
+    "a native item field mismatch remains unknown")
+  og.test_process.fields._ItemID = 9001
+  og.test_selector.type_name = "app.OtherSelector"
+  owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
+  assert(owned_snapshot._condition_case.item_ownership[1].eligibility == "unknown"
+    and owned_snapshot._condition_case.item_ownership[1].reason
+      == "native_item_condition_selector_mismatch",
+    "a non-exact native selector type remains unknown")
+  og.test_selector.type_name = "app.ClassSelector`1<app.ConciergeConditionBase>"
+  own_catalog.quests[20040].guidance[1].destinations[1].conditions[2] = {
+    kind = "item", enabled = true, is_not = true, item_id = 9002, set_num = false, num = 1 }
+  owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
+  assert(#owned_snapshot._condition_case.item_ownership == 1
+    and owned_snapshot._condition_case.item_ownership[1].proof_kind == "delivery",
+    "multiple item leaves never promote one catalog option")
+  own_catalog.quests[20040].guidance[1].destinations[1].conditions = { {
+    kind = "quest_variable_or", enabled = true, is_not = false, children = { {
+      kind = "item", enabled = true, is_not = true, item_id = 9001,
+      set_num = false, num = 1 } } } }
+  owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
+  assert(#owned_snapshot._condition_case.item_ownership == 1
+    and owned_snapshot._condition_case.item_ownership[1].proof_kind == "delivery",
+    "an alternative item expression remains unknown and unrouted")
+  own_catalog.quests[20040].guidance[1].destinations[1].conditions = { {
+    kind = "item", enabled = true, is_not = true, item_id = 9001,
+    set_num = false, num = 1 } }
+  owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  reward_fixture.original_need_generation = owned_snapshot.need_generation
+  ai.objective_need_groups = function()
+    return { status = "ok", complete = true, groups = { { options = { { item_id = 9001 } } } } }
+  end
   local source_snapshots = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
   assert(source_snapshots[4].provider == "reward" and source_snapshots[4].status == "unknown"
     and source_snapshots[4].reward_runtime_complete == true
@@ -4686,7 +4766,7 @@ do
   assert(need_changed.journal_generation == owned_repeat.journal_generation
     and need_changed.need_generation == owned_repeat.need_generation + 1,
     "need input advances only need_generation, not journal_generation")
-  ai.item_needs()[20040][1].num = 2
+  ai.item_needs()[20040][1].num = 1
   local fresh_before_failure = ai.objective_task_snapshot({ 20040 }, own_catalog)
   IS.dict = nil
   iclk = iclk + 10
