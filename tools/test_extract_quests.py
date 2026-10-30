@@ -32,6 +32,31 @@ def inst(i, t, **fields):
     return n
 
 
+def reward_endpoint_fixture():
+    return [
+        inst(1, eq.REWARD_TYPE, _Param=[R(2)], _Data=R(3)),
+        inst(2, eq.REWARD_PARAM_TYPE, _DataList=[R(4)]),
+        inst(3, eq.REWARD_PARAM_TYPE, _DataList=[]),
+        inst(4, eq.REWARD_DATA_TYPE, _NameHash=7),
+        inst(5, eq.PROCESSOR_ENTITY_TYPE, QuestAction=R(1)),
+        inst(6, eq.PROCESSOR_TYPE, ProcID=9, PrevProcCondition=R(7), Process=R(5)),
+        inst(7, eq.PROC_CONDITION_TYPE, _ElementArray=[R(8)]),
+        inst(8, eq.PROC_ELEMENT_TYPE, _Operator=1, _ParamArray=[R(9)], _ElementArray=[]),
+        inst(9, eq.PROC_ELEMENT_PARAM_TYPE, _ProcID=10, _ResultNo=0),
+        inst(10, eq.PROCESSOR_TYPE, ProcID=10, PrevProcCondition=R(18), Process=R(11)),
+        inst(11, eq.PROCESSOR_ENTITY_TYPE, QuestAction=R(12)),
+        inst(12, "app.quest.action.Trigger", _Param=[R(13)]),
+        inst(13, "app.quest.action.TriggerParam", _ConditionParam=R(14)),
+        inst(14, "app.QuestConditionParam", _Operator=0, ConditionParamArray=[R(15)]),
+        inst(15, "app.quest.condition.CheckTalkEventEndNoParam",
+             _TalkEventID=24, _EndNo=1, _AcceptMinusOne=False),
+        inst(16, "app.Unused"),
+        inst(17, "app.Unused"),
+        inst(18, eq.PROC_CONDITION_TYPE, _ElementArray=[R(19)]),
+        inst(19, eq.PROC_ELEMENT_TYPE, _Operator=1, _ParamArray=[], _ElementArray=[]),
+    ]
+
+
 class RelationTests(unittest.TestCase):
     def test_paths(self):
         self.assertEqual(eq.scene_path(20090), "natives/STM/AppData/Quest/qu02/qu020090/Resident.scn.21")
@@ -94,7 +119,7 @@ class RelationTests(unittest.TestCase):
                  _ParamArray=[R(11)], _ElementArray=[]),
             inst(11, "app.QuestProcessor.ProcCondition.ElementParam",
                  _ProcID=3952043610, _ResultNo=0),
-            inst(12, "app.quest.action.Trigger"),
+            inst(12, "app.quest.action.Trigger", _Param=[]),
             inst(13, "app.QuestProcessor.ProcessEntity", QuestAction=R(12)),
             inst(14, "app.QuestProcessor", ProcID=3952043607,
                  PrevProcCondition=R(7), Process=R(13)),
@@ -129,12 +154,63 @@ class RelationTests(unittest.TestCase):
             "task_endpoint_join": {"status": "unproven",
                                    "reason": "journal_task_to_drawable_reward_endpoint_unverified"},
             "reward_payload_status": "complete",
+            "endpoint_evidence": None,
             "unresolved_joins": ["journal_task_to_reward_endpoint",
                                  "reward_action_to_drawable_target",
                                  "current_branch_truth", "claim_state",
                                  "runtime_reward_hash_to_item_count"],
             "eligibility": "unknown",
         }])
+
+    def test_reward_endpoint_evidence_requires_closed_single_talk_trigger(self):
+        expected = {
+            "kind": "single_talk_trigger", "reward_root_count": 1,
+            "reward_operator": "or", "reward_operator_value": 1,
+            "reward_relation_count": 1, "reward_child_count": 0,
+            "relation_result_no": 0, "predecessor_processor_id": 10,
+            "predecessor_action_type": "app.quest.action.Trigger",
+            "trigger_parameter_count": 1, "condition_operator": "and",
+            "condition_operator_value": 0, "condition_count": 1,
+            "condition_type": "app.quest.condition.CheckTalkEventEndNoParam",
+            "talk_event_id": 24, "end_no": 1, "accept_minus_one": False,
+        }
+        self.assertEqual(eq.decode_reward_diagnostics(reward_endpoint_fixture(), 10030)[0]
+                         ["endpoint_evidence"], expected)
+
+        unsupported = [
+            ("multiple reward roots", lambda rows: rows[6].fields["_ElementArray"].append(R(19))),
+            ("wrong root operator", lambda rows: rows[7].fields.update(_Operator=0)),
+            ("multiple reward relations", lambda rows: (rows.append(inst(
+                20, eq.PROC_ELEMENT_PARAM_TYPE, _ProcID=10, _ResultNo=0)),
+                rows[7].fields["_ParamArray"].append(R(20)))),
+            ("nonzero relation result", lambda rows: rows[8].fields.update(_ResultNo=1)),
+            ("reward children", lambda rows: rows[7].fields["_ElementArray"].append(R(19))),
+            ("non-Trigger predecessor", lambda rows: rows[11].__setattr__("type", "app.quest.action.PlayEvent")),
+            ("multiple Trigger parameters", lambda rows: rows[11].fields["_Param"].append(R(13))),
+            ("wrong condition operator", lambda rows: rows[13].fields.update(_Operator=1)),
+            ("multiple conditions", lambda rows: rows[13].fields["ConditionParamArray"].append(R(15))),
+            ("wrong condition type", lambda rows: rows[14].__setattr__("type", "app.quest.condition.Other")),
+            ("nonpositive talk id", lambda rows: rows[14].fields.update(_TalkEventID=0)),
+        ]
+        for label, mutate in unsupported:
+            with self.subTest(label=label):
+                rows = reward_endpoint_fixture()
+                mutate(rows)
+                self.assertIsNone(eq.decode_reward_diagnostics(rows, 10030)[0]["endpoint_evidence"])
+
+        for field, value in (("_TalkEventID", "24"), ("_EndNo", "1"),
+                             ("_AcceptMinusOne", 0)):
+            with self.subTest(field=field, invalid=value):
+                rows = reward_endpoint_fixture()
+                rows[14].fields[field] = value
+                with self.assertRaises(ew.ExtractError):
+                    eq.decode_reward_diagnostics(rows, 10030)
+        for field in ("_TalkEventID", "_EndNo", "_AcceptMinusOne"):
+            with self.subTest(field=field, missing=True):
+                rows = reward_endpoint_fixture()
+                del rows[14].fields[field]
+                with self.assertRaises(ew.ExtractError):
+                    eq.decode_reward_diagnostics(rows, 10030)
 
     def test_reward_diagnostics_preserve_hash_rows_and_unknown_endpoint(self):
         insts = [
@@ -149,7 +225,7 @@ class RelationTests(unittest.TestCase):
             inst(9, "app.QuestProcessor.ProcCondition.Element", _Operator=1,
                  _ParamArray=[R(10)], _ElementArray=[]),
             inst(10, "app.QuestProcessor.ProcCondition.ElementParam", _ProcID=10, _ResultNo=0),
-            inst(11, "app.quest.action.Trigger"),
+            inst(11, "app.quest.action.Trigger", _Param=[]),
             inst(12, "app.QuestProcessor.ProcessEntity", QuestAction=R(11)),
             inst(13, "app.QuestProcessor", ProcID=10, PrevProcCondition=R(8), Process=R(12)),
         ]
@@ -219,7 +295,7 @@ class RelationTests(unittest.TestCase):
         self.assertNotIn("processor_id", row["source_identity"])
 
         duplicate_processor = base + [
-            inst(10, "app.quest.action.Trigger"),
+            inst(10, "app.quest.action.Trigger", _Param=[]),
             inst(11, "app.QuestProcessor.ProcessEntity", QuestAction=R(10)),
             inst(12, "app.QuestProcessor", ProcID=9,
                  PrevProcCondition=R(7), Process=R(11)),
@@ -645,8 +721,9 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(lines[1], "entries: cast 2, npcs 1, items 1, dest 2")
         self.assertEqual(lines[2], "objectives: tasks 0, task destinations 0, concierge records 0, guidance destinations 0, deliveries 0, delivery refs 0")
         self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 0, records without quest id 0, records without item data 1, reward records 0, gift records 0, transformation records 0, reward diagnostics 0, eligible archive source descriptors 0")
-        self.assertTrue(lines[4].startswith("undecoded 10040: "))
-        self.assertEqual(len(lines), 5)
+        self.assertEqual(lines[4], "reward endpoints: closed single-talk Trigger members 0")
+        self.assertTrue(lines[5].startswith("undecoded 10040: "))
+        self.assertEqual(len(lines), 6)
         self.assertEqual(FakePak.closed, 1)
         for p in (eq.scene_path(10000), eq.scene_path(39999), eq.journal_path(39999)):
             self.assertIn(p, FakePak.reads)
@@ -741,6 +818,7 @@ class ExtractTests(unittest.TestCase):
         self.assertEqual(lines[0], "quests 122, scenes 114, decoded 105, journals 86")
         self.assertEqual(lines[2], "objectives: tasks 298, task destinations 341, concierge records 246, guidance destinations 240, deliveries 184, delivery refs 77")
         self.assertEqual(lines[3], "diagnostics: delivery item-id zero sentinels 15, records without quest id 1, records without item data 0, reward records 496, gift records 0, transformation records 0, reward diagnostics 124, eligible archive source descriptors 0")
+        self.assertEqual(lines[4], "reward endpoints: closed single-talk Trigger members 17")
         quests = out["quests"]
         legacy_fields = ("cast", "npcs", "items", "dest", "decoded")
         fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
