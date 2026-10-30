@@ -222,7 +222,7 @@ assert(grouped_complete and #grouped == 1 and grouped[1].remaining == 1
 local empty_need_snapshot = a.objective_need_groups()
 assert(empty_need_snapshot.status == "unknown" and not empty_need_snapshot.complete
   and #empty_need_snapshot.groups == 0, "unrefreshed objective group snapshot is unknown")
-local forgery_identity = { "source", "forgery", 17, 29 }
+local forgery_identity = { "source", "forgery", 17, 11, 29 }
 local function forgery_evidence(overrides)
   local e = { identity = forgery_identity, service_id = 17, output_item_id = 29,
     mapping_input_item_id = 11, mapping_output_item_id = 29, price = 6, mapping_price = 6,
@@ -433,22 +433,21 @@ do
       completed_readable = true, completed = false } }
   local forgery = A.objective_forgery_provider_snapshot(forgery_observation, 11)
   assert(forgery.provider == "forgery" and forgery.generation == 11
-    and forgery.status == "unknown" and not forgery.complete
-    and forgery.reason == "forgery_mapping_enablement_unproven"
+    and forgery.status == "ok" and forgery.complete and forgery.reason == nil
     and #forgery.candidates == 0 and #forgery.diagnostics.services == 1
     and #forgery.diagnostics.mappings == 1
-    and forgery.missing_evidence[1] == "mapping_enablement"
-    and forgery.missing_evidence[7] == "busy_kept_completion_semantics",
-    "forgery provider preserves typed service/order diagnostics but fails closed")
+    and forgery.source_status.rows[1].state == "unknown"
+    and forgery.source_status.rows[1].reason_code == "forgery_mapping_enablement_unproven",
+    "forgery provider preserves typed diagnostics and publishes unknown status")
   local enabled_observation = {
     complete = true, wanted = { 29 }, services = forgery_observation.services,
     mappings = { { input_item_id = 11, output_item_id = 29, price = 6,
       enabled_readable = true, enabled = true, held_readable = false,
       price_readable = false } }, order = forgery_observation.order }
   local enabled_forgery = A.objective_forgery_provider_snapshot(enabled_observation, 12)
-  assert(enabled_forgery.status == "unknown"
-    and enabled_forgery.reason == "forgery_service_speaker_join_unproven"
-    and enabled_forgery.missing_evidence[1] == "service_speaker_join",
+  assert(enabled_forgery.status == "ok" and enabled_forgery.complete
+    and enabled_forgery.source_status.rows[1].state == "unknown"
+    and enabled_forgery.source_status.rows[1].reason_code == "forgery_service_speaker_join_unproven",
     "a readable enabled mapping exposes the exact structured-speaker join gate")
   local availability_service = {}
   for key, value in pairs(forgery_observation.services[1]) do
@@ -461,8 +460,9 @@ do
     mappings = enabled_observation.mappings, order = forgery_observation.order }
   local availability_forgery = A.objective_forgery_provider_snapshot(
     availability_observation, 13)
-  assert(availability_forgery.reason == "forgery_service_availability_unproven"
-    and availability_forgery.missing_evidence[1] == "service_availability",
+  assert(availability_forgery.status == "ok" and availability_forgery.complete
+    and availability_forgery.source_status.rows[1].state == "unknown"
+    and availability_forgery.source_status.rows[1].reason_code == "forgery_service_availability_unproven",
     "a matched speaker exposes the exact structured service-availability gate")
   local no_mapping = A.objective_forgery_provider_snapshot({ complete = true,
     wanted = { 29 }, services = forgery_observation.services, mappings = {},
@@ -477,12 +477,113 @@ do
     and #partial_forgery.candidates == 0,
     "a partial forgery catalog scan clears all candidates")
 
+  local function production_forgery(fields)
+    local observation = { complete = true, wanted = { 29 },
+      services = { { job = 94, talk_event_id = 1919, service_index = 0,
+        chara_id = 3472286413, shop_id = 25,
+        service_type = "app.NpcShopForgeryParam", playable = true,
+        speaker_present = true, speaker_matches_service = true,
+        availability_readable = true, available = true,
+        speaker_position = { x = 10, y = 20, z = 30 },
+        interactable = true, interaction_disabled = false } },
+      mappings = { { input_item_id = 11, output_item_id = 29, price = 6,
+        enabled_readable = true, enabled = true, held_readable = true,
+        held_count = 1, price_readable = true, affordable = true } },
+      order = { kept_readable = true, kept_item_id = 0, kept_item_count = 0,
+        completion_time_readable = true, completion_time = 0,
+        kept_state_readable = true, kept_active = false,
+        completed_readable = true, completed = false,
+        remaining_minutes_readable = true, remaining_minutes = 0 } }
+    for key, value in pairs(fields or {}) do observation[key] = value end
+    return observation
+  end
+  local preorder = A.objective_forgery_provider_snapshot(production_forgery(), 21)
+  assert(preorder.status == "ok" and preorder.complete and preorder.reason == nil
+    and #preorder.candidates == 1 and preorder.candidates[1].provider == "forgery"
+    and preorder.candidates[1].generation == 21
+    and preorder.candidates[1].source_id[1] == "source"
+    and preorder.candidates[1].source_id[2] == "forgery"
+    and preorder.candidates[1].source_id[3] == 25
+    and preorder.candidates[1].source_id[4] == 11
+    and preorder.candidates[1].source_id[5] == 29
+    and preorder.candidates[1].target.cid == 3472286413
+    and preorder.candidates[1].outputs[1].item_id == 29
+    and preorder.source_status.complete == true
+    and preorder.source_status.generation == 21
+    and #preorder.source_status.rows == 1
+    and preorder.source_status.rows[1].state == "available"
+    and preorder.source_status.rows[1].reason_code == "forgery_order_can_start",
+    "idle affordable forgery publishes one stable service/transformation source")
+  local pending_observation = production_forgery()
+  pending_observation.order.kept_item_id = 11
+  pending_observation.order.kept_item_count = 1
+  pending_observation.order.kept_active = true
+  pending_observation.order.remaining_minutes = 3
+  local pending_forgery = A.objective_forgery_provider_snapshot(pending_observation, 22)
+  assert(pending_forgery.status == "ok" and pending_forgery.complete
+    and #pending_forgery.candidates == 0
+    and pending_forgery.source_status.rows[1].state == "unavailable"
+    and pending_forgery.source_status.rows[1].reason_code == "forgery_order_pending",
+    "matching pending forgery is visible as unavailable and never routed")
+  local ready_observation = production_forgery()
+  ready_observation.mappings[1].held_count = 0
+  ready_observation.mappings[1].affordable = false
+  ready_observation.order.kept_item_id = 29
+  ready_observation.order.kept_item_count = 1
+  ready_observation.order.completed = true
+  local ready_forgery = A.objective_forgery_provider_snapshot(ready_observation, 23)
+  assert(ready_forgery.status == "ok" and ready_forgery.complete
+    and #ready_forgery.candidates == 1
+    and ready_forgery.candidates[1].source_id[3] == 25
+    and ready_forgery.source_status.rows[1].state == "available"
+    and ready_forgery.source_status.rows[1].reason_code == "matching_forgery_output_ready",
+    "matching completed forgery routes to collection without input or payment")
+  local unrelated_observation = production_forgery()
+  unrelated_observation.order.kept_item_id = 30
+  unrelated_observation.order.kept_item_count = 1
+  unrelated_observation.order.completed = true
+  local unrelated_forgery = A.objective_forgery_provider_snapshot(unrelated_observation, 24)
+  assert(unrelated_forgery.status == "ok" and unrelated_forgery.complete
+    and #unrelated_forgery.candidates == 0
+    and unrelated_forgery.source_status.rows[1].state == "unavailable"
+    and unrelated_forgery.source_status.rows[1].reason_code == "forgery_order_unrelated",
+    "an unrelated completed forgery cannot produce a stale candidate")
+  local unknown_observation = production_forgery()
+  unknown_observation.mappings[1].price_readable = false
+  local unknown_forgery = A.objective_forgery_provider_snapshot(unknown_observation, 25)
+  assert(unknown_forgery.status == "ok" and unknown_forgery.complete
+    and #unknown_forgery.candidates == 0
+    and unknown_forgery.source_status.generation == 25
+    and unknown_forgery.source_status.rows[1].state == "unknown"
+    and unknown_forgery.source_status.rows[1].reason_code == "forgery_preorder_evidence_unreadable",
+    "unreadable affordability clears candidates in the same generation")
+  local integrated = a.objective_item_source_snapshots(nil,
+    { need_generation = 8 }, nil, nil, { talk_grant = {
+      complete = true, wanted = { 29 }, events = {} }, forgery = production_forgery() })
+  assert(#integrated == 6 and integrated[6].provider == "forgery"
+    and integrated[6].status == "ok" and integrated[6].complete
+    and #integrated[6].candidates == 1
+    and integrated[6].candidates[1].generation == integrated[6].generation
+    and integrated[6].source_status.generation == integrated[6].generation,
+    "objective source integration retains one generation-atomic forgery publication")
+  local integrated_unknown = production_forgery()
+  integrated_unknown.mappings[1].price_readable = false
+  local invalidated = a.objective_item_source_snapshots(nil,
+    { need_generation = 8 }, nil, nil, { talk_grant = {
+      complete = true, wanted = { 29 }, events = {} }, forgery = integrated_unknown })
+  assert(invalidated[6].generation == integrated[6].generation + 1
+    and #invalidated[6].candidates == 0
+    and invalidated[6].source_status.generation == invalidated[6].generation
+    and invalidated[6].source_status.rows[1].state == "unknown",
+    "a changed unreadable forgery observation advances generation and drops the old route")
+
   local aux = { talk_grant = talk_observation, forgery = forgery_observation }
   local first = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, aux)
   local repeated = a.objective_item_source_snapshots(nil, { need_generation = 3 }, nil, nil, aux)
   assert(first[5].status == "ok" and first[5].complete
     and #first[5].candidates == 1
-    and first[6].reason == "forgery_mapping_enablement_unproven"
+    and first[6].status == "ok" and first[6].complete
+    and first[6].source_status.rows[1].reason_code == "forgery_mapping_enablement_unproven"
     and repeated[5].generation == first[5].generation
     and repeated[6].generation == first[6].generation,
     "identical production observations keep independent provider generations stable")

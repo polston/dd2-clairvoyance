@@ -5333,10 +5333,10 @@ function A.read_objective_forgery_observation(wanted)
   if #mappings > 0 then
     local input_ids = {}
     for _, mapping in ipairs(mappings) do input_ids[mapping.input_item_id] = true end
-    local held, _, held_complete = items.read_held(input_ids)
+    local _, _, held_complete, carried = items.read_held(input_ids)
     for _, mapping in ipairs(mappings) do
-      mapping.held_readable = held ~= nil and held_complete == true
-      mapping.held_count = mapping.held_readable and (held[mapping.input_item_id] or 0) or nil
+      mapping.held_readable = carried ~= nil and held_complete == true
+      mapping.held_count = mapping.held_readable and (carried[mapping.input_item_id] or 0) or nil
       mapping.held_reason = mapping.held_readable and nil
         or "forgery_input_inventory_read_incomplete"
       mapping.price_readable = false
@@ -5371,6 +5371,93 @@ function A.read_objective_forgery_observation(wanted)
   end
   out.services, out.mappings, out.order, out.complete = services, mappings, order, true
   return out
+end
+
+function A.objective_forgery_evidence(evidence, generation)
+  local out = { evidence_only = true, publication_ready = false,
+    evidence_generation = generation, eligibility = "unknown",
+    reason = "forgery_evidence_malformed" }
+  local function finite(v)
+    return type(v) == "number" and v == v and v > -math.huge and v < math.huge
+  end
+  local function integer(v, minimum)
+    return finite(v) and v == math.floor(v) and v >= minimum
+  end
+  local function result(eligibility, reason)
+    out.eligibility, out.reason = eligibility, reason
+    return out
+  end
+  if not integer(generation, 1) then
+    return result("unknown", "forgery_generation_invalid")
+  end
+  if type(evidence) ~= "table" then return out end
+  local id, pos = evidence.identity, evidence.service_position
+  local service, output = evidence.service_id, evidence.output_item_id
+  if type(id) ~= "table" or id[1] ~= "source" or id[2] ~= "forgery"
+    or not integer(service, 1) or not integer(output, 1)
+    or not integer(evidence.mapping_input_item_id, 1)
+    or not integer(evidence.mapping_output_item_id, 1)
+    or evidence.mapping_output_item_id ~= output
+    or id[3] ~= service or id[4] ~= evidence.mapping_input_item_id
+    or id[5] ~= output or id[6] ~= nil
+    or evidence.service_type ~= "NpcShopForgeryParam"
+    or type(pos) ~= "table" or not finite(pos.x) or not finite(pos.y) or not finite(pos.z)
+    or not integer(evidence.kept_item_id, 0) or not integer(evidence.kept_item_count, 0)
+    or not integer(evidence.mapping_price, 1)
+    or (evidence.price ~= nil and not integer(evidence.price, 1)) then return out end
+  if type(evidence.row_enabled) ~= "boolean" then
+    return result("unknown", "forgery_mapping_state_unreadable")
+  elseif evidence.row_enabled == false then
+    return result("ineligible", "forgery_mapping_disabled")
+  end
+  if type(evidence.interactable) ~= "boolean" then
+    return result("unknown", "forgery_interaction_state_unreadable")
+  elseif evidence.interactable == false then
+    return result("ineligible", "forgery_service_not_interactable")
+  end
+  if evidence.busy_readable ~= true then
+    return result("unknown", "forgery_busy_state_unreadable")
+  elseif evidence.kept_readable ~= true then
+    return result("unknown", "forgery_kept_item_unreadable")
+  elseif evidence.completion_time_readable ~= true then
+    return result("unknown", "forgery_completion_time_unreadable")
+  elseif evidence.completion_readable ~= true then
+    return result("unknown", "forgery_completion_state_unreadable")
+  elseif not finite(evidence.completion_time) or evidence.completion_time < 0
+    or type(evidence.completed) ~= "boolean" or type(evidence.busy) ~= "boolean" then
+    return out
+  end
+  if evidence.completed then
+    if evidence.kept_item_count <= 0 then
+      return result("ineligible", "forgery_order_not_ready")
+    elseif evidence.kept_item_id == output then
+      return result("eligible", "matching_forgery_output_ready")
+    end
+    return result("ineligible", "forgery_order_unrelated")
+  elseif evidence.busy then
+    if evidence.kept_item_count <= 0 or evidence.kept_item_id == 0 then
+      return result("unknown", "forgery_pending_order_identity_unproven")
+    elseif evidence.kept_item_id ~= evidence.mapping_input_item_id then
+      return result("ineligible", "forgery_order_unrelated")
+    end
+    return result("ineligible", "forgery_order_pending")
+  elseif evidence.idle ~= true or evidence.kept_item_id ~= 0
+      or evidence.kept_item_count ~= 0 then
+    if type(evidence.idle) ~= "boolean" then
+      return result("unknown", "forgery_idle_state_unreadable")
+    end
+    return result("ineligible", "forgery_order_not_ready")
+  end
+  if evidence.price == nil or evidence.price ~= evidence.mapping_price
+    or type(evidence.input_held) ~= "boolean"
+    or type(evidence.price_held) ~= "boolean" then
+    return result("unknown", "forgery_preorder_evidence_unreadable")
+  elseif evidence.input_held == false then
+    return result("ineligible", "forgery_input_not_held")
+  elseif evidence.price_held == false then
+    return result("ineligible", "forgery_price_unaffordable")
+  end
+  return result("eligible", "forgery_order_can_start")
 end
 
 -- Production provider envelopes over atomic native observations.  The
@@ -5649,14 +5736,41 @@ function A.objective_forgery_provider_snapshot(observation, generation)
     for key, child in pairs(value) do out[key] = copy(child) end
     return out
   end
-  local out = { provider = "forgery", generation = generation,
+  local used_generation = finite_integer(generation, 1) and generation or 1
+  local out = { provider = "forgery", generation = used_generation,
     status = "unknown", complete = false, candidates = {},
     diagnostics = { services = {}, mappings = {}, order = {} } }
+  local function tuple_key(tuple)
+    local parts = { "t", tostring(#tuple), ":" }
+    for _, value in ipairs(tuple) do
+      if type(value) == "number" and finite_integer(value, 0) then
+        parts[#parts + 1] = "i" .. string.format("%.0f", value) .. ";"
+      elseif type(value) == "string" then
+        parts[#parts + 1] = "s" .. tostring(#value) .. ":" .. value
+      else return nil end
+    end
+    return table.concat(parts)
+  end
+  local function fallback(reason)
+    out.status, out.complete, out.reason, out.candidates = "unknown", false, reason, {}
+    out.source_status = { generation = out.generation, complete = false,
+      reason_code = reason, rows = { { scope = "provider", generation = out.generation,
+        identity = "provider:forgery", provider = "forgery", qid = nil,
+        task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
+    return out
+  end
+  local function finish(rows)
+    table.sort(rows, function(left, right) return left.identity < right.identity end)
+    out.status, out.complete, out.reason = "ok", true, nil
+    out.source_status = { generation = out.generation, complete = true,
+      reason_code = nil, rows = rows }
+    return out
+  end
   if not finite_integer(generation, 1) then
-    out.reason = "forgery_generation_invalid"; return out
+    return fallback("forgery_generation_invalid")
   end
   if type(observation) ~= "table" then
-    out.reason = "forgery_observation_unavailable"; return out
+    return fallback("forgery_observation_unavailable")
   end
   out.diagnostics.services = copy(type(observation.services) == "table"
     and observation.services or {})
@@ -5665,19 +5779,18 @@ function A.objective_forgery_provider_snapshot(observation, generation)
   out.diagnostics.order = copy(type(observation.order) == "table"
     and observation.order or {})
   if observation.complete ~= true then
-    out.reason = type(observation.reason) == "string" and observation.reason
-      or "forgery_observation_incomplete"
-    return out
+    return fallback(type(observation.reason) == "string" and observation.reason
+      or "forgery_observation_incomplete")
   end
   local wanted, services, mappings = dense(observation.wanted),
     dense(observation.services), dense(observation.mappings)
   if wanted == nil or services == nil or mappings == nil
       or type(observation.order) ~= "table" then
-    out.reason = "forgery_observation_malformed"; return out
+    return fallback("forgery_observation_malformed")
   end
   for _, item_id in ipairs(wanted) do
     if not finite_integer(item_id, 1) then
-      out.reason = "forgery_observation_malformed"; return out
+      return fallback("forgery_observation_malformed")
     end
   end
   for _, service in ipairs(services) do
@@ -5686,7 +5799,7 @@ function A.objective_forgery_provider_snapshot(observation, generation)
         or not finite_integer(service.service_index, 0)
         or not finite_integer(service.chara_id, 1)
         or not finite_integer(service.shop_id, 1) then
-      out.reason = "forgery_observation_malformed"; return out
+      return fallback("forgery_observation_malformed")
     end
   end
   for _, mapping in ipairs(mappings) do
@@ -5695,55 +5808,101 @@ function A.objective_forgery_provider_snapshot(observation, generation)
         or not finite_integer(mapping.price, 1)
         or type(mapping.enabled_readable) ~= "boolean"
         or (mapping.enabled_readable and type(mapping.enabled) ~= "boolean") then
-      out.reason = "forgery_observation_malformed"; return out
+      return fallback("forgery_observation_malformed")
     end
   end
   if #wanted == 0 or #mappings == 0 or #services == 0 then
-    out.status, out.complete, out.reason = "ok", true, nil
-    return out
+    return finish({})
   end
-  local any_enabled = false
-  for _, mapping in ipairs(mappings) do
-    if not mapping.enabled_readable then
-      out.reason = "forgery_mapping_enablement_unproven"
-      out.missing_evidence = { "mapping_enablement", "service_speaker_join",
-        "service_availability",
-        "positioned_interactable_service", "held_input_acceptance",
-        "price_affordability", "busy_kept_completion_semantics" }
-      return out
-    end
-    if mapping.enabled then any_enabled = true end
-  end
-  if not any_enabled then
-    out.status, out.complete, out.reason = "ok", true, nil
-    return out
-  end
-  local any_available = false
+  local wanted_set = {}
+  for _, item_id in ipairs(wanted) do wanted_set[item_id] = true end
+  local rows = {}
   for _, service in ipairs(services) do
-    if service.speaker_matches_service ~= true then
-      out.reason = "forgery_service_speaker_join_unproven"
-      out.missing_evidence = { "service_speaker_join", "service_availability",
-        "positioned_interactable_service", "held_input_acceptance",
-        "price_affordability", "busy_kept_completion_semantics" }
-      return out
-    elseif service.availability_readable ~= true then
-      out.reason = "forgery_service_availability_unproven"
-      out.missing_evidence = { "service_availability",
-        "positioned_interactable_service", "held_input_acceptance",
-        "price_affordability", "busy_kept_completion_semantics" }
-      return out
+    for _, mapping in ipairs(mappings) do
+      if wanted_set[mapping.output_item_id] then
+        if #rows >= 512 then return fallback("forgery_status_row_overflow") end
+        local source_id = { "source", "forgery", service.shop_id,
+          mapping.input_item_id, mapping.output_item_id }
+        local identity = tuple_key(source_id)
+        if identity == nil then return fallback("forgery_observation_malformed") end
+        local state, reason = "unknown", "forgery_evidence_malformed"
+        local position = service.speaker_position
+        local position_ok = type(position) == "table"
+          and type(position.x) == "number" and position.x == position.x
+          and type(position.y) == "number" and position.y == position.y
+          and type(position.z) == "number" and position.z == position.z
+          and position.x > -math.huge and position.x < math.huge
+          and position.y > -math.huge and position.y < math.huge
+          and position.z > -math.huge and position.z < math.huge
+        if mapping.enabled_readable ~= true then
+          reason = "forgery_mapping_enablement_unproven"
+        elseif mapping.enabled == false then
+          state, reason = "unavailable", "forgery_mapping_disabled"
+        elseif service.speaker_matches_service ~= true then
+          reason = "forgery_service_speaker_join_unproven"
+        elseif service.availability_readable ~= true then
+          reason = "forgery_service_availability_unproven"
+        elseif service.available ~= true then
+          state, reason = "unavailable", "forgery_service_not_interactable"
+        elseif not position_ok then
+          reason = "forgery_service_position_unreadable"
+        elseif type(service.interactable) ~= "boolean"
+            or type(service.interaction_disabled) ~= "boolean" then
+          reason = "forgery_interaction_state_unreadable"
+        else
+          local input_held, price_held, idle
+          if mapping.held_readable == true and finite_integer(mapping.held_count, 0) then
+            input_held = mapping.held_count > 0
+          end
+          if mapping.price_readable == true and type(mapping.affordable) == "boolean" then
+            price_held = mapping.affordable
+          end
+          if observation.order.kept_state_readable == true
+              and observation.order.completed_readable == true
+              and type(observation.order.kept_active) == "boolean"
+              and type(observation.order.completed) == "boolean" then
+            idle = not observation.order.kept_active and not observation.order.completed
+          end
+          local classified = A.objective_forgery_evidence({ identity = source_id,
+            service_id = service.shop_id, output_item_id = mapping.output_item_id,
+            mapping_input_item_id = mapping.input_item_id,
+            mapping_output_item_id = mapping.output_item_id,
+            mapping_price = mapping.price,
+            price = mapping.price_readable == true and mapping.price or nil,
+            service_type = "NpcShopForgeryParam", service_position = position,
+            interactable = service.interactable and not service.interaction_disabled,
+            row_enabled = mapping.enabled,
+            input_held = input_held, price_held = price_held, idle = idle,
+            busy = observation.order.kept_active,
+            busy_readable = observation.order.kept_state_readable,
+            kept_readable = observation.order.kept_readable,
+            kept_item_id = observation.order.kept_item_id,
+            kept_item_count = observation.order.kept_item_count,
+            completion_time_readable = observation.order.completion_time_readable,
+            completion_time = observation.order.completion_time,
+            completion_readable = observation.order.completed_readable,
+            completed = observation.order.completed }, out.generation)
+          state = classified.eligibility == "eligible" and "available"
+            or classified.eligibility == "ineligible" and "unavailable" or "unknown"
+          reason = classified.reason
+          if classified.eligibility == "eligible" then
+            out.candidates[#out.candidates + 1] = { provider = "forgery",
+              generation = out.generation, source_id = source_id,
+              capacity_pool_id = { "capacity", "forgery", service.shop_id },
+              target = { kind = "npc", cid = service.chara_id,
+                pos = { x = position.x, y = position.y, z = position.z } },
+              outputs = { { item_id = mapping.output_item_id, count = 1 } },
+              capacity_kind = "finite", available_acquisitions = 1,
+              certainty = "guaranteed", eligibility = "eligible", reason = reason }
+          end
+        end
+        rows[#rows + 1] = { scope = "source", generation = out.generation,
+          identity = identity, provider = "forgery", qid = nil, task_index = nil,
+          item_ids = { mapping.output_item_id }, state = state, reason_code = reason }
+      end
     end
-    if service.available then any_available = true end
   end
-  if not any_available then
-    out.status, out.complete, out.reason = "ok", true, nil
-    return out
-  end
-  out.reason = "forgery_positioned_interaction_semantics_unproven"
-  out.missing_evidence = { "positioned_interactable_service",
-    "held_input_acceptance", "price_affordability",
-    "busy_kept_completion_semantics" }
-  return out
+  return finish(rows)
 end
 
 function A.make()
@@ -7546,89 +7705,7 @@ function A.make()
   -- cannot satisfy core's normalized provider/candidate contract.
   function a.objective_forgery_evidence(evidence, generation)
     local used_generation = generation == nil and objective_task_state.source_generation or generation
-    local out = { evidence_only = true, publication_ready = false,
-      evidence_generation = used_generation, eligibility = "unknown",
-      reason = "forgery_evidence_malformed" }
-    local function finite(v)
-      return type(v) == "number" and v == v and v > -math.huge and v < math.huge
-    end
-    local function integer(v, minimum)
-      return finite(v) and v == math.floor(v) and v >= minimum
-    end
-    local function result(eligibility, reason)
-      out.eligibility, out.reason = eligibility, reason
-      return out
-    end
-    if not integer(used_generation, 1) then
-      return result("unknown", "forgery_generation_invalid")
-    end
-    if type(evidence) ~= "table" then return out end
-    local id, pos = evidence.identity, evidence.service_position
-    local service, output = evidence.service_id, evidence.output_item_id
-    if type(id) ~= "table" or id[1] ~= "source" or id[2] ~= "forgery"
-      or not integer(service, 1) or not integer(output, 1)
-      or not integer(evidence.mapping_input_item_id, 1)
-      or not integer(evidence.mapping_output_item_id, 1)
-      or evidence.mapping_output_item_id ~= output
-      or id[3] ~= service or id[4] ~= output or id[5] ~= nil
-      or evidence.service_type ~= "NpcShopForgeryParam"
-      or type(pos) ~= "table" or not finite(pos.x) or not finite(pos.y) or not finite(pos.z)
-      or not integer(evidence.kept_item_id, 0) or not integer(evidence.kept_item_count, 0)
-      or not integer(evidence.mapping_price, 1)
-      or (evidence.price ~= nil and not integer(evidence.price, 1)) then return out end
-    if type(evidence.row_enabled) ~= "boolean" then
-      return result("unknown", "forgery_mapping_state_unreadable")
-    elseif evidence.row_enabled == false then
-      return result("ineligible", "forgery_mapping_disabled")
-    end
-    if type(evidence.interactable) ~= "boolean" then
-      return result("unknown", "forgery_interaction_state_unreadable")
-    elseif evidence.interactable == false then
-      return result("ineligible", "forgery_service_not_interactable")
-    end
-    if evidence.busy_readable ~= true then
-      return result("unknown", "forgery_busy_state_unreadable")
-    elseif evidence.kept_readable ~= true then
-      return result("unknown", "forgery_kept_item_unreadable")
-    elseif evidence.completion_time_readable ~= true then
-      return result("unknown", "forgery_completion_time_unreadable")
-    elseif evidence.completion_readable ~= true then
-      return result("unknown", "forgery_completion_state_unreadable")
-    elseif not finite(evidence.completion_time) or evidence.completion_time < 0
-      or type(evidence.completed) ~= "boolean" or type(evidence.busy) ~= "boolean" then
-      return out
-    end
-    if evidence.completed then
-      if evidence.kept_item_count <= 0 then
-        return result("ineligible", "forgery_order_not_ready")
-      elseif evidence.kept_item_id == output then
-        return result("eligible", "matching_forgery_output_ready")
-      end
-      return result("ineligible", "forgery_order_unrelated")
-    elseif evidence.busy then
-      if evidence.kept_item_count <= 0 or evidence.kept_item_id == 0 then
-        return result("unknown", "forgery_pending_order_identity_unproven")
-      elseif evidence.kept_item_id ~= evidence.mapping_input_item_id then
-        return result("ineligible", "forgery_order_unrelated")
-      end
-      return result("ineligible", "forgery_order_pending")
-    elseif evidence.idle ~= true or evidence.kept_item_id ~= 0
-        or evidence.kept_item_count ~= 0 then
-      if type(evidence.idle) ~= "boolean" then
-        return result("unknown", "forgery_idle_state_unreadable")
-      end
-      return result("ineligible", "forgery_order_not_ready")
-    end
-    if evidence.price == nil or evidence.price ~= evidence.mapping_price
-      or type(evidence.input_held) ~= "boolean"
-      or type(evidence.price_held) ~= "boolean" then
-      return result("unknown", "forgery_preorder_evidence_unreadable")
-    elseif evidence.input_held == false then
-      return result("ineligible", "forgery_input_not_held")
-    elseif evidence.price_held == false then
-      return result("ineligible", "forgery_price_unaffordable")
-    end
-    return result("eligible", "forgery_order_can_start")
+    return A.objective_forgery_evidence(evidence, used_generation)
   end
   function a.reset_session_caches()
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")
