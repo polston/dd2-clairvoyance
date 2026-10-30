@@ -36,7 +36,7 @@ local function observation(overrides)
       { processor_id = 90, quest_action_type = "app.quest.action.Trigger", processor_phase = "Waiting",
         process_type = "ExecuteAction", process_phase = "ExecuteAction", process_completed = false,
         process_canceled = false, nested_action_type = "CheckTrigger", nested_action_phase = "CheckTrigger",
-        nested_action_completed = false, nested_action_canceled = false, nested_action_result = 7 }
+        nested_action_completed = false, nested_action_canceled = false, nested_action_result = 0 }
     } } },
     events = { { event_id = 20, owner_token = "c3", playable_readable = true, playable = true,
       initial_speaker_readable = true, initial_speaker_cid = 40,
@@ -124,17 +124,17 @@ do
     processor_id = 91, quest_action_type = "app.quest.action.Trigger", processor_phase = "Waiting",
     process_type = "ExecuteAction", process_phase = "ExecuteAction", process_completed = false,
     process_canceled = false, nested_action_type = "CheckTrigger", nested_action_phase = "CheckTrigger",
-    nested_action_completed = false, nested_action_canceled = false, nested_action_result = 7 }
+    nested_action_completed = false, nested_action_canceled = false, nested_action_result = 0 }
   local second_event = clone(obs.events[1]); second_event.event_id = 21
   obs.events[2] = second_event
   local mixed = classify({ row(), good, bad }, obs)
-  eq(mixed.complete, true, mixed.reason); eq(#mixed.candidates, 3)
+  eq(mixed.complete, true, mixed.reason); eq(#mixed.candidates, 2)
   local unknown_count, eligible_count = 0, 0
   for _, c in ipairs(mixed.candidates) do
     if c.eligibility == "unknown" then unknown_count = unknown_count + 1 end
     if c.eligibility == "eligible" then eligible_count = eligible_count + 1 end
   end
-  eq(unknown_count, 1); eq(eligible_count, 2)
+  eq(unknown_count, 0); eq(eligible_count, 2)
   local legacy=row({action_ordinal=5,processor_id=105,predecessor_processor_id=95,endpoint=false})
   local legacy_mix=classify({row(),legacy},observation())
   eq(legacy_mix.complete,true); eq(#legacy_mix.candidates,1)
@@ -204,15 +204,16 @@ do
     { "non-End leaf", function(e) e.nodes[1].ordinary_edges={}; e.nodes[1].choices={} end },
     { "wrong End", function(e) e.nodes[2].end_result=8 end },
     { "kept End", function(e) e.nodes[2].keep_previous_result=true end },
-    { "wrong edge index", function(e) e.nodes[1].ordinary_edges[1].edge_index=1 end },
-    { "node id hash conflict", function(e) e.nodes[1].node_hash=1; e.root_node_hash=2 end },
+    { "wrong edge index", function(e) e.nodes[1].ordinary_edges[1].edge_index=1 end, true },
+    { "node id hash conflict", function(e) e.nodes[1].node_hash=1; e.root_node_hash=2 end, true },
   }
   for _, t in ipairs(graph) do local o=observation(); t[2](o.events[1]); local s=classify({row()},o)
-    eq(s.candidates[1].eligibility,"unknown",t[1]); eq(s.source_status.rows[1].reason_code,"unsupported_reward_graph",t[1]) end
+    if t[3] then eq(s.complete,false,t[1]); eq(#s.candidates,0,t[1])
+    else eq(s.candidates[1].eligibility,"unknown",t[1]); eq(s.source_status.rows[1].reason_code,"unsupported_reward_graph",t[1]) end end
   local o=observation(); local s=classify({row({accept_minus_one=true})},o)
   eq(s.candidates[1].eligibility,"unknown"); eq(s.source_status.rows[1].reason_code,"unsupported_reward_graph")
   o=observation(); o.events[1].nodes[1].ordinary_edges[1].to_node_id="missing"
-  s=classify({row()},o); eq(s.candidates[1].eligibility,"unknown")
+  s=classify({row()},o); eq(s.complete,false,"unresolved graph edge invalidates provider"); eq(#s.candidates,0)
   o=observation(); local e=o.events[1]
   e.root_node_hash=1; e.nodes[1].node_hash=1; e.nodes[2].node_hash=2
   e.nodes[1].ordinary_edges[1].to_node_id=nil; e.nodes[1].ordinary_edges[1].to_node_hash=2
@@ -224,10 +225,10 @@ do
   s=classify({row()},o); eq(s.candidates[1].eligibility,"eligible","typed node identity")
   o=observation(); e=o.events[1]; e.nodes[3]={node_index=2,node_id="orphan",node_type="Talk",
     ordinary_edges={{edge_index=0,to_node_id="unresolved",condition_count=0}},choices={}}
-  s=classify({row()},o); eq(s.candidates[1].eligibility,"unknown","unreachable unresolved edge")
+  s=classify({row()},o); eq(s.complete,false,"unreachable unresolved edge invalidates provider"); eq(#s.candidates,0)
   o=observation(); e=o.events[1]; e.nodes[1].node_id={}
   local safe, malformed_graph=pcall(classify,{row()},o)
-  eq(safe,true,"malformed node identity must not throw"); eq(malformed_graph.candidates[1].eligibility,"unknown")
+  eq(safe,true,"malformed node identity must not throw"); eq(malformed_graph.complete,false)
 end
 
 do
@@ -250,6 +251,100 @@ do
 end
 
 do
+  -- Adversarial review regressions.
+  local o=observation(); o.controllers[1].processors[2].nested_action_result=0
+  local s=classify({row()},o)
+  eq(s.candidates[1].eligibility,"eligible","relation result is distinct from End result")
+
+  o=observation(); o.events[1].speaker.interaction_disabled_readable=false
+  o.events[1].speaker.interaction_disabled=nil
+  s=classify({row()},o)
+  eq(s.candidates[1].eligibility,"unknown","unreadable interaction state")
+
+  o=observation(); o.events[1].history.result_readable=true; o.events[1].history.result_no=7
+  s=classify({row()},o)
+  eq(s.candidates[1].eligibility,"unknown","result without history row")
+
+  o=observation(); local sibling=clone(o.events[1]); sibling.event_id=21; sibling.nodes=nil; o.events[2]=sibling
+  s=classify({row()},o)
+  eq(s.complete,false,"incomplete sibling event invalidates provider"); eq(#s.candidates,0)
+
+  local unsupported=row({action_ordinal=1,processor_id=101,predecessor_processor_id=91,accept_minus_one=true})
+  o=observation(); o.controllers[1].processors[#o.controllers[1].processors+1]={
+    processor_id=101,quest_action_type="app.quest.action.QuestReward",processor_phase="Standby"}
+  o.controllers[1].processors[#o.controllers[1].processors+1]={
+    processor_id=91,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",
+    process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,
+    nested_action_type="CheckTrigger",nested_action_phase="CheckTrigger",nested_action_completed=false,
+    nested_action_canceled=false,nested_action_result=0}
+  s=classify({row(),unsupported},o)
+  eq(s.complete,true); eq(#s.candidates,1,"unsupported sibling does not claim eligible capacity")
+  eq(s.candidates[1].eligibility,"eligible")
+  local core=require("Clairvoyance.core")
+  local need={id={"need",10,700,3,1},qid=10,task_index=3,remaining=1,
+    options={{item_id=500,accepted_count=1}},status="eligible",complete=true,generation=4}
+  local task={focus_epoch=1,journal_generation=2,need_generation=1,
+    objective_needs={status="ok",complete=true,generation=1,source_generation=4,groups={need}},
+    quests={{qid=10,task_index=3,read_status="ok",issued_npcs={},task_destinations={},guidance={},item_ownership={}}}}
+  local objective=core.objective_snapshot(task,nil,{s},core.target_registry_new())
+  local published=0
+  for _,target in ipairs(objective and objective.targets or {}) do if target.kind=="source" then published=published+1 end end
+  eq(published,1,"real core snapshot preserves valid sibling source")
+
+  local completed=row({action_ordinal=1,processor_id=101,predecessor_processor_id=91,reward_hashes={31}})
+  o=observation({reward_outputs={
+    {name_hash=30,outputs={{item_id=500,count=1}}},
+    {name_hash=31,outputs={{item_id=501,count=1}}}}})
+  o.wanted={500,501}
+  o.controllers[1].processors[#o.controllers[1].processors+1]={
+    processor_id=101,quest_action_type="app.quest.action.QuestReward",processor_phase="Completed"}
+  o.controllers[1].processors[#o.controllers[1].processors+1]={
+    processor_id=91,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",
+    process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,
+    nested_action_type="CheckTrigger",nested_action_phase="CheckTrigger",nested_action_completed=false,
+    nested_action_canceled=false,nested_action_result=0}
+  s=classify({row(),completed},o)
+  eq(s.complete,true); eq(#s.candidates,1,"completed sibling excluded from eligible aggregate")
+  eq(s.candidates[1].eligibility,"eligible"); eq(s.candidates[1].source_id[7],1)
+  eq(s.candidates[1].outputs[1].item_id,500)
+  local excluded=false
+  for _,d in ipairs(s.diagnostic_rows) do if d.member_id and d.status=="unavailable" then excluded=true end end
+  eq(excluded,true,"excluded sibling retains diagnostics")
+
+  o=observation({reward_outputs={{name_hash=30,outputs={{item_id=500,count=1},{item_id=501,count=4}}}}})
+  s=classify({row()},o)
+  eq(#s.candidates[1].outputs,2,"candidate keeps every reward output")
+  eq(#s.source_status.rows[1].item_ids,1,"status lists matched output ids only")
+  eq(s.source_status.rows[1].item_ids[1],500)
+
+  local one=classify({row()},observation())
+  o=observation(); o.tasks[1].task_index=4; o.tasks[1].targets[1].task_index=4
+  local two=classify({row()},o)
+  eq(one.candidates[1].source_id[4],3); eq(two.candidates[1].source_id[4],4)
+  eq(canonical_key(one.candidates[1].source_id)~=canonical_key(two.candidates[1].source_id),true)
+  eq(one.diagnostic_rows[1].member_id~=two.diagnostic_rows[1].member_id,true,
+    "diagnostic identity includes task index")
+  eq(core.target_key(one.candidates[1].source_id)~=nil,true,"published source tuple accepted by core")
+  eq(core.target_key(two.candidates[1].source_id)~=nil,true,"changed task tuple accepted by core")
+  local canonical_need={id={"need",10,700,4,1},qid=10,task_index=4,remaining=1,
+    options={{item_id=500,accepted_count=1}},status="eligible",complete=true,generation=4}
+  local canonical_task={focus_epoch=1,journal_generation=2,need_generation=1,
+    objective_needs={status="ok",complete=true,generation=1,source_generation=4,groups={canonical_need}},
+    quests={{qid=10,task_index=4,read_status="ok",issued_npcs={},task_destinations={},guidance={},item_ownership={}}}}
+  local canonical_snapshot=core.objective_snapshot(canonical_task,nil,{two},core.target_registry_new())
+  local canonical_sources=0
+  for _,target in ipairs(canonical_snapshot and canonical_snapshot.targets or {}) do
+    if target.kind=="source" then canonical_sources=canonical_sources+1 end
+  end
+  eq(canonical_sources,1,"real core accepts canonical task/member tuple")
+  for _,d in ipairs(two.diagnostic_rows) do
+    eq(type(d.member_id),"string"); eq(type(d.gate),"string"); eq(type(d.status),"string")
+    local fields=0;for _ in pairs(d) do fields=fields+1 end
+    eq(fields,3,"diagnostic row has exact member_id/gate/status shape")
+  end
+end
+
+do
   local r1=row(); local r2=row({ action_ordinal=1, processor_id=101, predecessor_processor_id=91,
     reward_hashes={31} })
   local o=observation({ reward_outputs={
@@ -258,7 +353,7 @@ do
   o.wanted={500,501,502}
   for _, id in ipairs({101,91}) do
     local p = id==101 and {processor_id=101,quest_action_type="app.quest.action.QuestReward",processor_phase="Standby"}
-      or {processor_id=91,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,nested_action_type="CheckTrigger",nested_action_phase="CheckTrigger",nested_action_completed=false,nested_action_canceled=false,nested_action_result=7}
+      or {processor_id=91,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,nested_action_type="CheckTrigger",nested_action_phase="CheckTrigger",nested_action_completed=false,nested_action_canceled=false,nested_action_result=0}
     o.controllers[1].processors[#o.controllers[1].processors+1]=p
   end
   local s=classify({r1,r2},o); eq(#s.candidates,1); eq(s.candidates[1].source_id[8],1)
@@ -284,7 +379,7 @@ do
     processors[#processors+1]={processor_id=200+i,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",
       process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,
       nested_action_type="CheckTrigger",nested_action_phase="CheckTrigger",nested_action_completed=false,
-      nested_action_canceled=false,nested_action_result=7}
+      nested_action_canceled=false,nested_action_result=0}
   end
   obs.wanted=wanted; obs.reward_outputs=outputs; obs.controllers[1].processors=processors
   local s=classify(rows,obs); eq(s.complete,true); eq(#s.candidates,1)
@@ -307,7 +402,7 @@ do
         ps[#ps+1]={processor_id=200+i,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",
           process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,
           nested_action_type="CheckTrigger",nested_action_phase="CheckTrigger",nested_action_completed=false,
-          nested_action_canceled=false,nested_action_result=7}
+          nested_action_canceled=false,nested_action_result=0}
       end
       o.reward_outputs=outs;o.controllers[1].processors=ps;return a,o
     end},
