@@ -6851,7 +6851,7 @@ function A.make()
       out.reward_outputs[#out.reward_outputs + 1] = { name_hash = hash, outputs = copied }
       output_by_hash[hash] = copied
     end
-    local relevant, event_ids, member_parts = {}, {}, {}
+    local relevant, members_by_qid = {}, {}
     for _, member in ipairs(type(catalog_rows) == "table" and catalog_rows or {}) do
       local identity, matched = type(member) == "table" and member.source_identity or nil, false
       for _, reward in ipairs(type(member) == "table" and member.reward_rows or {}) do
@@ -6860,7 +6860,29 @@ function A.make()
       end
       if matched and type(member.quest_id) == "number" and type(identity) == "table" then
         relevant[member.quest_id] = true
-        local evidence = member.endpoint_evidence
+        members_by_qid[member.quest_id] = members_by_qid[member.quest_id] or {}
+        members_by_qid[member.quest_id][#members_by_qid[member.quest_id] + 1] = member
+      end
+    end
+    local progressing = read_quest_id_list("getProgressingQuestIds", "progressing")
+    if type(progressing) ~= "table" then return fail("progressing_set_invalid") end
+    table.sort(progressing)
+    if #progressing > 64 then return fail("progressing_set_truncated") end
+    for i, qid in ipairs(progressing) do
+      if type(qid) ~= "number" or qid <= 0 or qid ~= math.floor(qid)
+          or i > 1 and qid <= progressing[i - 1] then return fail("progressing_set_invalid") end
+      out.progressing_qids[#out.progressing_qids + 1] = qid
+    end
+    local progressing_set, qids, event_ids, member_parts = {}, {}, {}, {}
+    for _, qid in ipairs(out.progressing_qids) do progressing_set[qid] = true end
+    for qid in pairs(relevant) do
+      if progressing_set[qid] then qids[#qids + 1] = qid end
+    end
+    table.sort(qids)
+    if #qids > 64 then return fail("reward_source_qids_truncated") end
+    for _, qid in ipairs(qids) do
+      for _, member in ipairs(members_by_qid[qid] or {}) do
+        local identity, evidence = member.source_identity, member.endpoint_evidence
         if type(evidence) == "table" and type(evidence.talk_event_id) == "number" then
           event_ids[evidence.talk_event_id] = true
         end
@@ -6874,36 +6896,38 @@ function A.make()
           for key in pairs(evidence) do evidence_keys[#evidence_keys + 1] = key end
           table.sort(evidence_keys, function(a, b) return tostring(a) < tostring(b) end)
           for _, key in ipairs(evidence_keys) do
-            local value = evidence[key]
-            member_parts[#member_parts + 1] = "e:" .. tostring(key) .. "=" .. tostring(value)
+            member_parts[#member_parts + 1] = "e:" .. tostring(key) .. "=" .. tostring(evidence[key])
           end
         end
-        for _, reward in ipairs(type(member) == "table" and member.reward_rows or {}) do
-          member_parts[#member_parts + 1] = "h:" .. tostring(type(reward) == "table" and reward.ordinal)
-            .. ":" .. tostring(type(reward) == "table" and reward.name_hash)
+        for _, reward in ipairs(member.reward_rows or {}) do
+          member_parts[#member_parts + 1] = "h:" .. tostring(reward.ordinal)
+            .. ":" .. tostring(reward.name_hash)
         end
       end
     end
     table.sort(member_parts)
-    local qids = {}
-    for qid in pairs(relevant) do qids[#qids + 1] = qid end
-    table.sort(qids)
-    if #qids > 64 then return fail("reward_source_qids_truncated") end
-    local progressing = read_quest_id_list("getProgressingQuestIds", "progressing")
-    if type(progressing) ~= "table" then return fail("progressing_set_invalid") end
-    table.sort(progressing)
-    if #progressing > 64 then return fail("progressing_set_truncated") end
-    for i, qid in ipairs(progressing) do
-      if type(qid) ~= "number" or qid <= 0 or qid ~= math.floor(qid)
-          or i > 1 and qid <= progressing[i - 1] then return fail("progressing_set_invalid") end
-      out.progressing_qids[#out.progressing_qids + 1] = qid
-    end
-    local entity_dict = safe_field(qm, "EntityDict")
-    if entity_dict == nil then return fail("reward_entity_dict_unreadable") end
+    local entity_dict = #qids > 0 and safe_field(qm, "EntityDict") or nil
+    if #qids > 0 and entity_dict == nil then return fail("reward_entity_dict_unreadable") end
     local controller_cache, structural = {}, { manager_token, dict_token, tostring(dict_count),
       tostring(dict_free), tostring(type(task_snapshot) == "table" and task_snapshot.need_generation),
       table.concat(out.wanted, ","), table.concat(out.progressing_qids, ","),
       table.concat(member_parts, "|") }
+    local function destination_signature(rows)
+      if type(rows) ~= "table" then return nil end
+      local identities = {}
+      for _, destination in ipairs(rows) do
+        if type(destination) ~= "table" or type(destination.target) ~= "table" then return nil end
+        local place = destination.target.place
+        identities[#identities + 1] = table.concat({ tostring(destination.task_index),
+          tostring(destination.destination_index), tostring(destination.kind),
+          tostring(destination.target.cid), tostring(destination.target.key),
+          tostring(type(place) == "table" and place.kind),
+          tostring(type(place) == "table" and place.key),
+          tostring(type(place) == "table" and place.local_area) }, ":")
+      end
+      table.sort(identities)
+      return table.concat(identities, "|")
+    end
     for _, qid in ipairs(qids) do
       local entry = type(catalog_quests) == "table" and catalog_quests[qid] or nil
       local task_reader = objective_task_state.reward_task_reader
@@ -6918,6 +6942,13 @@ function A.make()
         if type(task_quest) == "table" and task_quest.qid == qid
             and (task_quest.read_status ~= "ok" or task_quest.task_index ~= task_row.task_index) then
           return fail("current_task_changed")
+        elseif type(task_quest) == "table" and task_quest.qid == qid then
+          local snapshot_destinations = destination_signature(task_quest.task_destinations)
+          local live_destinations = destination_signature(task_row.task_destinations)
+          if snapshot_destinations == nil or live_destinations == nil
+              or snapshot_destinations ~= live_destinations then
+            return fail("current_task_changed")
+          end
         end
       end
       local targets, target_ids = {}, {}
@@ -7241,6 +7272,22 @@ function A.make()
     local forgery_observation, forgery_generation = provider_observation("forgery")
     local talk = A.objective_talk_grant_provider_snapshot(talk_observation, talk_generation)
     local forgery = A.objective_forgery_provider_snapshot(forgery_observation, forgery_generation)
+    local function destination_signature(rows)
+      if type(rows) ~= "table" then return nil end
+      local identities = {}
+      for _, destination in ipairs(rows) do
+        if type(destination) ~= "table" or type(destination.target) ~= "table" then return nil end
+        local place = destination.target.place
+        identities[#identities + 1] = table.concat({ tostring(destination.task_index),
+          tostring(destination.destination_index), tostring(destination.kind),
+          tostring(destination.target.cid), tostring(destination.target.key),
+          tostring(type(place) == "table" and place.kind),
+          tostring(type(place) == "table" and place.key),
+          tostring(type(place) == "table" and place.local_area) }, ":")
+      end
+      table.sort(identities)
+      return table.concat(identities, "|")
+    end
     local signature_parts = { tostring(type(task_snapshot) == "table" and task_snapshot.focus_epoch or 0),
       tostring(type(task_snapshot) == "table" and task_snapshot.need_generation or 0),
       tostring(version), tostring(extension), wanted == nil and "needs:unknown" or "needs:complete" }
@@ -7248,6 +7295,8 @@ function A.make()
       if type(quest) == "table" then
         signature_parts[#signature_parts + 1] = tostring(quest.qid) .. ":"
           .. tostring(quest.task_index) .. ":" .. tostring(quest.read_status)
+        signature_parts[#signature_parts + 1] = "destinations:" .. tostring(
+          destination_signature(quest.task_destinations))
       end
     end
     local wanted_ids = {}
@@ -7272,7 +7321,6 @@ function A.make()
         generation = next_generation }
       objective_task_state.reward_observation = reward_observation
     end
-    local reward_rows = {}
     local reward_quests = type(extension) == "table" and extension.quests or nil
     local reward_qids = {}
     for qid in pairs(type(reward_quests) == "table" and reward_quests or {}) do reward_qids[#reward_qids + 1] = qid end
@@ -7323,31 +7371,7 @@ function A.make()
     end
     objective_task_state.reward_live_observation = copy(classify_observation)
     objective_task_state.reward_live_signature = reward_signature
-    local reward_hashes = {}
-    local mapped = type(classify_observation) == "table"
-      and type(classify_observation.reward_outputs) == "table" and classify_observation.reward_outputs or {}
-    for _, mapping in ipairs(mapped) do
-      for _, output in ipairs(type(mapping) == "table" and mapping.outputs or {}) do
-        if wanted and wanted[output.item_id] then reward_hashes[mapping.name_hash] = true end
-      end
-    end
-    for _, qid in ipairs(reward_qids) do
-      local quest = reward_quests[qid]
-      if type(quest) == "table" then
-        for _, row in ipairs(type(quest.reward_diagnostics) == "table" and quest.reward_diagnostics or {}) do
-          local relevant = false
-          if type(row) == "table" and type(row.reward_rows) == "table" then
-            for _, hash in ipairs(row.reward_rows) do
-              if type(hash) == "table" and reward_hashes[hash.name_hash] then relevant = true end
-            end
-          end
-          if relevant or type(task_snapshot) == "table" and (function()
-              for _, task_quest in ipairs(task_snapshot.quests or {}) do if task_quest.qid == qid then return true end end
-              return false
-            end)() then reward_rows[#reward_rows + 1] = row end
-        end
-      end
-    end
+    local reward_rows = all_reward_rows
     local observation = classify_observation
     if observation == nil then
       observation = { complete = false, owner_token = tostring(objective_task_state.owner or "unknown"),

@@ -220,6 +220,18 @@ local function find_one(rows, field, value)
   end
   return found
 end
+local function member_intersects_wanted(row, mappings, wanted)
+  if type(row) ~= "table" or not dense(row.reward_rows, 32) then return nil end
+  for _, reward in ipairs(row.reward_rows) do
+    if type(reward) ~= "table" or not integer(reward.name_hash, 0, U32) then return nil end
+    local outputs = mappings[reward.name_hash]
+    if outputs == nil then return nil end
+    for _, output in ipairs(outputs) do
+      if wanted[output.item_id] then return true end
+    end
+  end
+  return false
+end
 
 local function normalize_catalog_member(row)
   if type(row) ~= "table" then return nil, "reward_catalog_invalid" end
@@ -324,14 +336,9 @@ local function classify_member(member, obs, mappings, wanted)
   end
   if nr~=1 or np~=1 then return nil,"reward_runtime_scan_incomplete" end
   if reward.quest_action_type~=REWARD or predecessor.quest_action_type~=TRIGGER then return nil,"reward_runtime_scan_incomplete" end
-  if reward.processor_phase=="Completed" or predecessor.processor_phase=="Completed" or predecessor.process_completed==true
-      or predecessor.nested_action_completed==true then return {state="unavailable",reason="processor_completed",outputs=complete_outputs,matched=matched,task=task} end
-  if reward.processor_phase=="Canceled" or predecessor.processor_phase=="Canceled" or predecessor.process_canceled==true
-      or predecessor.nested_action_canceled==true then return {state="unavailable",reason="processor_canceled",outputs=complete_outputs,matched=matched,task=task} end
-  if reward.processor_phase=="Uninitialized" or reward.processor_phase=="Inactive" then return {state="unavailable",reason="processor_inactive",outputs=complete_outputs,matched=matched,task=task} end
+  if reward.processor_phase=="Completed" then return {state="unavailable",reason="processor_completed",outputs=complete_outputs,matched=matched,task=task} end
+  if reward.processor_phase=="Canceled" then return {state="unavailable",reason="processor_canceled",outputs=complete_outputs,matched=matched,task=task} end
   if reward.processor_phase~="Standby" then return {state="unknown",reason="processor_state_unreadable",outputs=complete_outputs,matched=matched,task=task} end
-  if predecessor.processor_phase=="Uninitialized" or predecessor.processor_phase=="Inactive"
-      or predecessor.processor_phase=="Standby" then return {state="unavailable",reason="processor_inactive",outputs=complete_outputs,matched=matched,task=task} end
   if predecessor.processor_phase~="Waiting" or predecessor.process_type~="ExecuteAction"
       or predecessor.process_phase~="ExecuteAction" or predecessor.process_completed~=false
       or predecessor.process_canceled~=false or predecessor.nested_action_type~="CheckTrigger"
@@ -364,7 +371,7 @@ local function classify_member(member, obs, mappings, wanted)
   if event.speaker_present_readable and type(event.speaker_present)~="boolean" then return unknown_event("speaker_presence_unreadable") end
   if event.speaker_present==false then
     if event.speaker~=nil then return unknown_event("observation_contradictory") end
-    return {state="unavailable",reason="speaker_absent",outputs=complete_outputs,matched=matched,task=task,event=event}
+    return unknown_event("speaker_unreadable")
   end
   local speaker=event.speaker
   if type(speaker)~="table" or speaker.cid~=event.initial_speaker_cid then return unknown_event("speaker_unreadable") end
@@ -426,12 +433,19 @@ function M.classify(catalog_rows, observation, generation)
   local mapping=output_map(obs)
   if obs.complete and not mapping then provider_fallback(snapshot,"status_malformed"); return snapshot end
   local wanted={}; for _, id in ipairs(obs.wanted) do if not integer(id,1,MAX) or wanted[id] then provider_fallback(snapshot,"status_malformed"); return snapshot end; wanted[id]=true end
+  if not sorted_unique_positive(obs.progressing_qids,64) then
+    snapshot.reason="progressing_set_invalid";provider_fallback(snapshot,snapshot.reason);return snapshot
+  end
+  local progressing={}; for _,qid in ipairs(obs.progressing_qids) do progressing[qid]=true end
   local member_seen, outcomes, statuses = {}, {}, {}
-  for _, member in ipairs(catalog_rows) do
+  if next(wanted) ~= nil then for _, member in ipairs(catalog_rows) do
     if type(member)~="table" then provider_fallback(snapshot,"status_malformed"); return snapshot end
+    local intersects=member_intersects_wanted(member,mapping,wanted)
+    if intersects==nil then intersects=true end
+    if intersects then
     local normalized, normalize_error=normalize_catalog_member(member)
     if not normalized then snapshot.reason=normalize_error; provider_fallback(snapshot,"status_malformed"); return snapshot end
-    if normalized.endpoint_supported then
+    if normalized.endpoint_supported and progressing[normalized.qid] then
       local event, event_dup=find_one(obs.events,"event_id",normalized.talk_event_id)
       if event_dup or not event then
         snapshot.reason="event_unreadable"; provider_fallback(snapshot,snapshot.reason); return snapshot
@@ -450,7 +464,8 @@ function M.classify(catalog_rows, observation, generation)
       normalized.processor_id,normalized.predecessor_processor_id or "unknown",
       normalized.talk_event_id or "unknown",normalized.end_no or "unknown"}) or mk
     outcomes[#outcomes+1]=outcome
-  end
+    end
+  end end
   if not obs.complete then snapshot.reason="reward_observation_incomplete"; provider_fallback(snapshot,snapshot.reason); return snapshot end
   snapshot.status="ok"; snapshot.complete=true; snapshot.reason=nil
   local groups, candidates={},{}
@@ -524,6 +539,9 @@ function M.classify(catalog_rows, observation, generation)
           pos=g.speaker and copy_pos(g.speaker.pos) or nil,capacity_kind="finite",available_acquisitions=1,certainty="guaranteed"}
         candidates[#candidates+1]=candidate
       end
+    elseif greason=="quest_not_progressing" then
+      local item_ids={}; for _,out in ipairs(members[1].matched or {}) do item_ids[#item_ids+1]=out.item_id end
+      statuses[#statuses+1]=status_row(snapshot,"source",members[1].key,first.qid,nil,item_ids,gstate,greason)
     end
     if #eligible_members>0 then
       for _,o in ipairs(excluded_members) do

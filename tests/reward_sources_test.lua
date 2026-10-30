@@ -144,6 +144,33 @@ do
 end
 
 do
+  -- Catalog rows outside the current wanted-output intersection are not inspected.
+  local irrelevant=row({qid=0,reward_hashes={31}})
+  local irrelevant_obs=observation({reward_outputs={
+    {name_hash=30,outputs={{item_id=500,count=1}}},
+    {name_hash=31,outputs={{item_id=600,count=1}}}}})
+  local s=classify({irrelevant},irrelevant_obs)
+  eq(s.complete,true,"nonmatching catalog member does not degrade provider")
+  eq(#s.candidates,0,"nonmatching catalog member is filtered")
+  local missing_map=observation({reward_outputs={}})
+  s=classify({row()},missing_map)
+  eq(s.complete,false,"missing runtime mapping is not treated as non-intersecting")
+  eq(#s.candidates,0,"missing runtime mapping publishes no candidate")
+  local empty=observation({wanted={}})
+  s=classify({row()},empty)
+  eq(s.complete,true,"empty wanted set is a complete empty reward snapshot")
+  eq(#s.candidates,0,"empty wanted set publishes no candidates")
+  eq(#s.source_status.rows,0,"empty wanted set publishes no source rows")
+  empty=observation({wanted={},reward_outputs={}})
+  s=classify({row()},empty)
+  eq(s.complete,true,"empty wanted set bypasses missing reward mappings")
+  s=classify({false},empty)
+  eq(s.complete,true,"empty wanted set bypasses uninspectable catalog rows")
+  eq(#s.candidates,0,"empty wanted set remains candidate-free with malformed catalog entries")
+  eq(#s.source_status.rows,0,"empty wanted set remains status-free with malformed catalog entries")
+end
+
+do
   local tests = {
     { "duplicate reward processor", function(o) o.controllers[1].processors[3] = clone(o.controllers[1].processors[1]) end },
     { "duplicate predecessor processor", function(o) o.controllers[1].processors[3] = clone(o.controllers[1].processors[2]) end },
@@ -185,13 +212,14 @@ do
   for _, phase in ipairs(phases) do local o=observation(); phase[2](o); local s=classify({row()},o)
     eq(s.candidates[1].eligibility,"eligible",phase[1]) end
   local negative = {
-    { "reward inactive", function(o) o.controllers[1].processors[1].processor_phase="Uninitialized" end, "unavailable", "processor_inactive" },
-    { "predecessor inactive", function(o) o.controllers[1].processors[2].processor_phase="Standby" end, "unavailable", "processor_inactive" },
+    { "reward uninitialized", function(o) o.controllers[1].processors[1].processor_phase="Uninitialized" end, "unknown", "processor_state_unreadable" },
+    { "predecessor standby", function(o) o.controllers[1].processors[2].processor_phase="Standby" end, "unknown", "processor_state_unreadable" },
+    { "reward unsupported phase", function(o) o.controllers[1].processors[1].processor_phase="Setup" end, "unknown", "processor_state_unreadable" },
     { "reward completed", function(o) o.controllers[1].processors[1].processor_phase="Completed" end, "unavailable", "processor_completed" },
-    { "predecessor completed", function(o) o.controllers[1].processors[2].process_completed=true end, "unavailable", "processor_completed" },
-    { "predecessor phase completed", function(o) o.controllers[1].processors[2].processor_phase="Completed" end, "unavailable", "processor_completed" },
+    { "predecessor completed flag", function(o) o.controllers[1].processors[2].process_completed=true end, "unknown", "processor_state_unreadable" },
+    { "predecessor completed phase", function(o) o.controllers[1].processors[2].processor_phase="Completed" end, "unknown", "processor_state_unreadable" },
     { "reward canceled", function(o) o.controllers[1].processors[1].processor_phase="Canceled" end, "unavailable", "processor_canceled" },
-    { "predecessor canceled", function(o) o.controllers[1].processors[2].nested_action_canceled=true end, "unavailable", "processor_canceled" },
+    { "predecessor canceled", function(o) o.controllers[1].processors[2].nested_action_canceled=true end, "unknown", "processor_state_unreadable" },
   }
   for _, t in ipairs(negative) do local o=observation(); t[2](o); local s=classify({row()},o)
     eq(s.candidates[1].eligibility,t[3]=="unavailable" and "ineligible" or t[3],t[1]); eq(s.source_status.rows[1].reason_code,t[4],t[1]) end
@@ -235,7 +263,7 @@ end
 do
   local cases = {
     { "not playable", function(o) o.events[1].playable=false end, "unavailable", "event_not_playable" },
-    { "speaker absent", function(o) o.events[1].speaker_present=false; o.events[1].speaker=nil end, "unavailable", "speaker_absent" },
+    { "speaker absent", function(o) o.events[1].speaker_present=false; o.events[1].speaker=nil end, "unknown", "speaker_unreadable" },
     { "interaction disabled", function(o) o.events[1].speaker.interaction_disabled=true end, "unavailable", "interaction_unavailable" },
     { "interaction denied", function(o) o.events[1].speaker.interaction_allowed=false end, "unavailable", "interaction_unavailable" },
     { "claimed", function(o) o.events[1].history.present=true; o.events[1].history.played_readable=true; o.events[1].history.played=true end, "unavailable", "already_claimed" },

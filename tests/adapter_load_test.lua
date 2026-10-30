@@ -5057,6 +5057,7 @@ do
     reward_fixture.diagnostic(20040, 40, 77),
     reward_fixture.diagnostic(20040, 42, 78, 1) }
   own_catalog.quests[888].reward_diagnostics = {}
+  own_catalog.quests[889].reward_diagnostics = {}
   og.test_process.calls.evaluate = false
   owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
   assert(owned_snapshot._condition_case.item_ownership[1].eligibility == "ineligible"
@@ -5357,17 +5358,64 @@ do
     and progressing_change.progressing_qids[2] == 20041,
     "progressing quest ID changes are observed in the structural snapshot")
   reward_fixture.progressing_qids = nil
+  do (function()
+    local many_rows, many_catalog = {}, {}
+    for i = 1, 65 do
+      local qid = 21000 + i
+      many_rows[i] = reward_fixture.diagnostic(qid, 40, 77)
+      many_catalog[qid] = own_catalog.quests[20040]
+    end
+    reward_fixture.progressing_qids = {}
+    local processor_reads = reward_fixture.scans.processors
+    local graph_reads = reward_fixture.scans.graph
+    local bounded = ai.read_objective_reward_observation(many_rows, { [9001] = true },
+      owned_snapshot, many_catalog)
+    assert(bounded.complete and #bounded.progressing_qids == 0 and #bounded.tasks == 0
+      and #bounded.controllers == 0 and #bounded.events == 0
+      and reward_fixture.scans.processors == processor_reads
+      and reward_fixture.scans.graph == graph_reads,
+      "nonprogressing relevant catalog rows exceed no live-read or 64-qid budget")
+    local classified = A.reward_sources.classify(many_rows, bounded, 4)
+    assert(classified.complete and #classified.candidates == 0
+      and #classified.source_status.rows == 65
+      and classified.source_status.rows[1].reason_code == "quest_not_progressing",
+      "nonprogressing reward members retain candidate-local status without live task reads")
+    reward_fixture.progressing_qids = nil
+  end)() end
+  do (function()
   local task_target_before = ai.read_objective_reward_observation(
     { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
     owned_snapshot, own_catalog.quests)
   own_catalog.quests[20040].tasks[1].destinations[1].cid = 102
   reward_fixture.destination.calls.get_CharaID = 102
+  local changed_task_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   local task_target_changed = ai.read_objective_reward_observation(
     { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
-    owned_snapshot, own_catalog.quests)
+    changed_task_snapshot, own_catalog.quests)
   assert(task_target_before.complete and task_target_changed.complete
     and task_target_changed.tasks[1].targets[1].cid == 102,
     "task target mutation is read into a fresh reward structure")
+  local stale_target_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  stale_target_snapshot.quests[1].task_destinations[1].target.cid = 101
+  local mixed_target = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    stale_target_snapshot, own_catalog.quests)
+  assert(not mixed_target.complete and mixed_target.reason == "current_task_changed",
+    "same-index task target mismatch cannot mix reward and objective snapshots")
+  stale_target_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  local place_identity_changed = false
+  for _, destination in ipairs(stale_target_snapshot.quests[1].task_destinations) do
+    if destination.kind == "place" and type(destination.target.place) == "table" then
+      destination.target.place.key = destination.target.place.key + 1
+      place_identity_changed = true
+    end
+  end
+  local mixed_place = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    stale_target_snapshot, own_catalog.quests)
+  assert(place_identity_changed and not mixed_place.complete
+    and mixed_place.reason == "current_task_changed",
+    "same-index place key mismatch cannot mix reward and objective snapshots")
   own_catalog.quests[20040].tasks[1].destinations[1].cid = 101
   reward_fixture.destination.calls.get_CharaID = 101
   local task_target_restored = ai.read_objective_reward_observation(
@@ -5375,6 +5423,7 @@ do
     owned_snapshot, own_catalog.quests)
   assert(task_target_restored.complete and task_target_restored.tasks[1].targets[1].cid == 101,
     "restoring task target returns the original reward structure")
+  end)() end
   local before_wanted_change = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
   reward_fixture.wanted_id = 9002
   local wanted_change = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
@@ -5396,6 +5445,13 @@ do
   local catalog_restored = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
   assert(catalog_restored.status == "ok" and #catalog_restored.candidates == 1,
     "restoring catalog evidence restores the verified reward candidate")
+  own_catalog.quests[20041] = { reward_diagnostics = {
+    reward_fixture.diagnostic(20041, 43, 99) } }
+  reward_fixture.missing_mapping = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(reward_fixture.missing_mapping.status == "unknown"
+    and #reward_fixture.missing_mapping.candidates == 0,
+    "nonfocused reward with a missing runtime mapping fails closed")
+  own_catalog.quests[20041] = nil
   reward_fixture.entries_after_first = reward_fixture.scans.entries
   reward_fixture.processors_after_first = reward_fixture.scans.processors
   reward_fixture.graph_after_first = reward_fixture.scans.graph
@@ -5428,8 +5484,8 @@ do
   reward_fixture.overlay.process_executed = true
   reward_fixture.overlay_changed = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
   assert(#reward_fixture.overlay_changed.candidates == 2
-    and reward_fixture.overlay_changed.candidates[1].eligibility == "ineligible"
-    and reward_fixture.overlay_changed.candidates[2].eligibility == "ineligible"
+    and reward_fixture.overlay_changed.candidates[1].eligibility == "unknown"
+    and reward_fixture.overlay_changed.candidates[2].eligibility == "unknown"
     and reward_fixture.scans.graph == graph_before_overlay
     and reward_fixture.scans.entries == reward_fixture.entries_after_first,
     "processor live-state change reclassifies without a structural rescan")
@@ -5454,8 +5510,9 @@ do
   iclk = iclk + 0.6
   reward_fixture.empty_reward = ai.objective_item_source_snapshots(
     own_catalog, owned_snapshot)[4]
-  assert(reward_fixture.empty_reward.status == "unknown"
-    and #reward_fixture.empty_reward.candidates == 0,
+  assert(reward_fixture.empty_reward.status == "ok" and reward_fixture.empty_reward.complete
+    and #reward_fixture.empty_reward.candidates == 0
+    and #reward_fixture.empty_reward.source_status.rows == 0,
     "a complete empty need set publishes no stale reward candidate")
   ai.objective_need_groups = function()
     return { status = "unknown", complete = false, groups = {} }
@@ -5504,6 +5561,7 @@ do
     and #source_snapshots[1].signal_evidence > 0
     and #source_snapshots[1].guidance_delivery_refs > 0,
     "objective item source snapshots are generation-tagged unknown envelopes with evidence")
+  owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   local owned_repeat = ai.objective_task_snapshot({ 20040 }, own_catalog)
   assert(owned_repeat.focus_epoch == owned_snapshot.focus_epoch
     and owned_repeat.journal_generation == owned_snapshot.journal_generation
