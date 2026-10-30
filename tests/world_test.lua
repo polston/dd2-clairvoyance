@@ -1593,6 +1593,15 @@ do
       and monster_snapshot.rows[1].accessible == true
       and monster_snapshot.rows[3].alive == false
       and monster_snapshot.rows[1].chance == nil)
+  local freshness_ok, monster_freshness = pcall(R.objective_monster_freshness)
+  check("reads: monster freshness exposes bounded identity and eligibility gates without positions",
+    freshness_ok and monster_freshness.complete == true
+      and #monster_freshness.rows == 3
+      and monster_snapshot.freshness.complete == true
+      and monster_freshness.rows[1].uid == monster_snapshot.freshness.rows[1].uid
+      and monster_freshness.rows[1].alive == true
+      and monster_freshness.rows[3].alive == false
+      and monster_freshness.rows[1].pos == nil)
   check("reads: live monster rows are bounded to focused current item ids",
     monster_ok and monster_snapshot.complete
       and monster_snapshot.rows[1].item_id == 501
@@ -7635,7 +7644,19 @@ do
       alive = true, enabled = true, started = true, valid = true, accessible = true,
       drop_table_readable = true, pos = P(37, 0, 40) },
   } }
-  mf.reads.objective_monster_rows = function() return monster_rows end
+  local function monster_freshness()
+    local rows = {}
+    for _, row in ipairs(monster_rows.rows) do
+      rows[#rows + 1] = { uid = row.uid, alive = row.alive, enabled = row.enabled,
+        started = row.started, valid = row.valid, accessible = row.accessible }
+    end
+    return { complete = true, rows = rows }
+  end
+  mf.reads.objective_monster_rows = function()
+    monster_rows.freshness = monster_freshness()
+    return monster_rows
+  end
+  mf.reads.objective_monster_freshness = monster_freshness
   local mw = mf.new()
   local monsters = mw:objective_monster_observations(source_task, need_proof)
   local monster_status_counts = { available = 0, unavailable = 0 }
@@ -7671,18 +7692,16 @@ do
       and cached_monsters.source_status.generation == monsters.generation
       and #cached_monsters.source_status.rows == #monsters.source_status.rows)
   monster_rows.rows[1].alive = false
-  mw:poke()
   local death = mw:objective_monster_observations(source_task, need_proof)
-  check("monster objectives: death atomically removes the candidate and updates status",
+  check("monster objectives: death invalidates the live cache and atomically removes the candidate",
     death.status == "ok" and #death.candidates == 1
       and death.source_status.complete == true
       and death.source_status.generation == death.generation
       and death.generation > monsters.generation)
   monster_rows.rows[1].alive = true
   monster_rows.rows[1].accessible = nil
-  mw:poke()
   local access_unknown = mw:objective_monster_observations(source_task, need_proof)
-  check("monster objectives: missing structured access proof makes the provider unknown",
+  check("monster objectives: access loss invalidates the live cache without a world poke",
     access_unknown.status == "unknown" and #access_unknown.candidates == 0
       and access_unknown.source_status.complete == false
       and access_unknown.source_status.generation == access_unknown.generation

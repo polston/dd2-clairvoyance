@@ -362,7 +362,8 @@ local monster_singletons = {
 }
 local saved_sdk = sdk
 sdk = { get_managed_singleton = function(name) return monster_singletons[name] end }
-local production_monster_rows = world.game_reads().objective_monster_rows
+local production_monster_reads = world.game_reads()
+local production_monster_rows = production_monster_reads.objective_monster_rows
 local monster_reads, monster_raw_reason = 0, nil
 f.reads.objective_monster_rows = function(task, catalog, need)
   monster_reads = monster_reads + 1
@@ -371,6 +372,7 @@ f.reads.objective_monster_rows = function(task, catalog, need)
   monster_raw_reason = snapshot.reason
   return snapshot
 end
+f.reads.objective_monster_freshness = production_monster_reads.objective_monster_freshness
 local function monster_bench(label, task)
   local samples, provider_samples, reads_before = {}, {}, monster_reads
   for i = 1, 20 do

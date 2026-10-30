@@ -2909,7 +2909,7 @@ function M.new(a, reads, io)
   -- World-owned live source readers are optional until their managed gates are
   -- proven. Missing or partial reads publish unknown and never retain rows.
   local function objective_live_sources(provider, read_name, normalize, task_snapshot, need_snapshot,
-      publish_status)
+      publish_status, freshness_read_name)
     local function unknown_status(generation, reason)
       return { generation = generation, complete = false, reason_code = reason,
         rows = { { scope = "provider", generation = generation,
@@ -2942,10 +2942,18 @@ function M.new(a, reads, io)
     local source_generation = need_snapshot.source_generation
     local need_signature = objective_need_signature(need_snapshot)
     local cached = S.objective_live_source_cache[provider]
-    if cached ~= nil and cached.round == last_round
+    local cache_matches = cached ~= nil and cached.round == last_round
       and cached.need_generation == need_generation
       and cached.source_generation == source_generation
-      and cached.need_signature == need_signature then return objective_clone(cached.value) end
+      and cached.need_signature == need_signature
+    if cache_matches and freshness_read_name ~= nil then
+      local fresh_ok, freshness = call(freshness_read_name)
+      cache_matches = fresh_ok and type(freshness) == "table"
+        and freshness.complete == true and type(cached.freshness) == "table"
+        and cached.freshness.complete == true
+        and objective_same(freshness, cached.freshness)
+    end
+    if cache_matches then return objective_clone(cached.value) end
     local ok, raw = call(read_name, task_snapshot, objective_catalog, need_snapshot)
     local rows = type(raw) == "table" and raw.rows or nil
     local dense, n = type(rows) == "table", type(rows) == "table" and #rows or 0
@@ -3040,6 +3048,7 @@ function M.new(a, reads, io)
     S.objective_live_source_cache[provider] = { round = last_round,
       need_generation = need_generation, source_generation = source_generation,
       need_signature = need_signature,
+      freshness = type(raw) == "table" and objective_clone(raw.freshness) or nil,
       value = objective_clone(result) }
     return result
   end
@@ -3139,7 +3148,7 @@ function M.new(a, reads, io)
         eligibility = "eligible", evidence = { raw_rate = raw_rate, alive = true,
           enabled = true, started = true, valid = true, accessible = true,
           drop_table_readable = true } }, nil, status_row
-    end, task_snapshot, need_snapshot, true)
+    end, task_snapshot, need_snapshot, true, "objective_monster_freshness")
   end
 
   -- the next refresh runs a round even inside the throttle window
@@ -5504,54 +5513,106 @@ function M.game_reads()
     return out
   end
 
+  local MONSTER_ENEMY_MAX, MONSTER_SOURCE_MAX = 512, 8192
+  local MONSTER_TABLE_MAX, MONSTER_ITEM_MAX = 64, 256
+  local function monster_integer(value, minimum)
+    return type(value) == "number" and math.type(value) == "integer" and value >= minimum
+  end
+  local function monster_bounded(value, cap)
+    local array = elems(value)
+    if array ~= nil then
+      if #array > cap then return nil end
+      return array
+    end
+    local count = int_value(C(value, "get_Count"))
+    if not monster_integer(count, 0) or count > cap then return nil end
+    local out = {}
+    for i = 0, count - 1 do
+      local row = C(value, "get_Item", i)
+      if row == nil then return nil end
+      out[#out + 1] = row
+    end
+    return out
+  end
+  local function objective_monster_live_state()
+    local enemies = monster_bounded(G(single("app.EnemyManager"), "_EnemyList"),
+      MONSTER_ENEMY_MAX)
+    if enemies == nil then return { complete = false, rows = {}, reason = "enemy_list_unreadable" } end
+    local rows, seen_uids = {}, {}
+    for _, enemy in ipairs(enemies) do
+      if enemy == nil then
+        return { complete = false, rows = {}, reason = "enemy_identity_unreadable" }
+      end
+      local chara = C(enemy, "get_Chara")
+      local game_object = C(enemy, "get_GameObject")
+      local uid = C(C(chara, "get_UniqId"), "ToString()")
+      local cid = u32(int_value(C(chara, "get_CharaID")))
+      local dead = C(chara, "get_IsDead")
+      local enabled, started = C(enemy, "get_Enabled"), C(enemy, "get_Started")
+      local component_valid = C(enemy, "get_Valid")
+      local game_valid, accessible = C(game_object, "get_Valid"),
+        C(game_object, "get_Update")
+      local transform = C(chara, "get_Transform")
+      local pos = xyz(C(transform, "get_UniversalPosition"))
+      if chara == nil or type(uid) ~= "string" or uid == "" or seen_uids[uid]
+          or not monster_integer(cid, 1)
+          or type(dead) ~= "boolean" or type(enabled) ~= "boolean"
+          or type(started) ~= "boolean" or type(component_valid) ~= "boolean"
+          or type(game_valid) ~= "boolean" or type(accessible) ~= "boolean"
+          or pos == nil or near_zero(pos) then
+        return { complete = false, rows = {}, reason = "enemy_state_unreadable" }
+      end
+      seen_uids[uid] = true
+      rows[#rows + 1] = { uid = uid, cid = cid, alive = not dead,
+        enabled = enabled, started = started, valid = component_valid and game_valid,
+        accessible = accessible, pos = { x = pos.x, y = pos.y, z = pos.z } }
+    end
+    table.sort(rows, function(a, b) return core.byte_less(a.uid, b.uid) end)
+    local freshness = { complete = true, rows = {} }
+    for i, row in ipairs(rows) do
+      freshness.rows[i] = { uid = row.uid, cid = row.cid, alive = row.alive,
+        enabled = row.enabled, started = row.started, valid = row.valid,
+        accessible = row.accessible }
+    end
+    return { complete = true, rows = rows, freshness = freshness }
+  end
+
+  function R.objective_monster_freshness()
+    local live = objective_monster_live_state()
+    if live.complete ~= true then
+      return { complete = false, rows = {}, reason = live.reason }
+    end
+    return live.freshness
+  end
+
   -- Live objective observations retain each spawned Character identity and
   -- one row per positive structured drop entry. The raw lottery weight is
   -- preserved without converting it into a percentage. Behavior and game-
   -- object state prove that the current instance is enabled, started, valid
   -- and participating in world updates.
   function R.objective_monster_rows(task_snapshot, _, need_snapshot)
-    local ENEMY_MAX, SOURCE_MAX, TABLE_MAX, ITEM_MAX = 512, 8192, 64, 256
-    local function integer(value, minimum)
-      return type(value) == "number" and math.type(value) == "integer" and value >= minimum
-    end
-    local function bounded(value, cap)
-      local array = elems(value)
-      if array ~= nil then
-        if #array > cap then return nil end
-        return array
-      end
-      local count = int_value(C(value, "get_Count"))
-      if not integer(count, 0) or count > cap then return nil end
-      local out = {}
-      for i = 0, count - 1 do
-        local row = C(value, "get_Item", i)
-        if row == nil then return nil end
-        out[#out + 1] = row
-      end
-      return out
-    end
     local function fail(reason)
       return { complete = false, rows = {}, reason = reason }
     end
-    if type(task_snapshot) ~= "table" or not integer(task_snapshot.need_generation, 1)
+    if type(task_snapshot) ~= "table" or not monster_integer(task_snapshot.need_generation, 1)
         or type(need_snapshot) ~= "table" or need_snapshot.status ~= "ok"
         or need_snapshot.complete ~= true
         or need_snapshot.generation ~= task_snapshot.need_generation
-        or not integer(need_snapshot.source_generation, 1) then
+        or not monster_integer(need_snapshot.source_generation, 1) then
       return fail("current_need_unavailable")
     end
     local wanted = {}
     for _, group in ipairs(need_snapshot.groups or {}) do
-      if type(group) ~= "table" or not integer(group.qid, 1)
-          or not integer(group.task_index, 0) or group.status ~= "eligible"
+      if type(group) ~= "table" or not monster_integer(group.qid, 1)
+          or not monster_integer(group.task_index, 0) or group.status ~= "eligible"
           or group.complete ~= true or group.generation ~= need_snapshot.source_generation
-          or not integer(group.remaining, 1) or type(group.options) ~= "table"
+          or not monster_integer(group.remaining, 1) or type(group.options) ~= "table"
           or #group.options == 0 then
         return fail("current_need_malformed")
       end
       for _, option in ipairs(group.options) do
-        if type(option) ~= "table" or not integer(option.item_id, 1)
-            or not integer(option.accepted_count, 1) then
+        if type(option) ~= "table" or not monster_integer(option.item_id, 1)
+            or not monster_integer(option.accepted_count, 1) then
           return fail("current_need_malformed")
         end
         wanted[option.item_id] = true
@@ -5560,17 +5621,16 @@ function M.game_reads()
     if next(wanted) == nil then
       return { complete = true, rows = {}, reason = "no_focused_items" }
     end
-    local enemy_list = G(single("app.EnemyManager"), "_EnemyList")
-    local enemies = bounded(enemy_list, ENEMY_MAX)
-    if enemies == nil then return fail("enemy_list_unreadable") end
+    local live = objective_monster_live_state()
+    if live.complete ~= true then return fail(live.reason) end
     local item_manager = single("app.ItemManager")
     local default_dict = G(item_manager, "EnemyDefaultItemDropDataDict")
     local param_dict = G(item_manager, "EnemyItemDropDataDict")
-    local defaults, params = bounded(G(default_dict, "_entries"), SOURCE_MAX),
-      bounded(G(param_dict, "_entries"), SOURCE_MAX)
+    local defaults = monster_bounded(G(default_dict, "_entries"), MONSTER_SOURCE_MAX)
+    local params = monster_bounded(G(param_dict, "_entries"), MONSTER_SOURCE_MAX)
     local function dict_complete(dict, slots)
       local count = int_value(C(dict, "get_Count"))
-      if slots == nil or not integer(count, 0) then return false end
+      if slots == nil or not monster_integer(count, 0) then return false end
       local filled = 0
       for _, entry in ipairs(slots) do
         if hs_value(entry) ~= nil then filled = filled + 1 end
@@ -5589,8 +5649,8 @@ function M.game_reads()
           local source_key = u32(int_value(G(entry, "key")))
           local cid = u32(int_value(G(value, "_CharaId")))
           if (cid == nil or cid == 0) and is_default then cid = source_key end
-          if not integer(source_key, 1) or source_keys[family][source_key]
-              or not integer(cid, 1) then return false end
+          if not monster_integer(source_key, 1) or source_keys[family][source_key]
+              or not monster_integer(cid, 1) then return false end
           source_keys[family][source_key] = true
           if is_default then default_cids[cid] = true end
           if is_default or not default_cids[cid] then
@@ -5607,18 +5667,19 @@ function M.game_reads()
     end
     local function drops_for(cid)
       local sources = by_cid[cid] or {}
-      if #sources > TABLE_MAX then return nil end
+      if #sources > MONSTER_TABLE_MAX then return nil end
       local rows = {}
       for _, source in ipairs(sources) do
-        local tables = bounded(G(source.value, "_TableList"), TABLE_MAX)
+        local tables = monster_bounded(G(source.value, "_TableList"), MONSTER_TABLE_MAX)
         if tables == nil then return nil end
         for table_index, table_row in ipairs(tables) do
-          local items = bounded(G(table_row, "_ItemList"), ITEM_MAX)
+          local items = monster_bounded(G(table_row, "_ItemList"), MONSTER_ITEM_MAX)
           if items == nil then return nil end
           for item_index, item in ipairs(items) do
             local item_id, count, rate = int_value(G(item, "_Id")),
               int_value(G(item, "_Num")), int_value(G(item, "_Rate"))
-            if not integer(item_id, 1) or not integer(count, 0) or not integer(rate, 0) then
+            if not monster_integer(item_id, 1) or not monster_integer(count, 0)
+                or not monster_integer(rate, 0) then
               return nil
             end
             if wanted[item_id] then
@@ -5631,41 +5692,19 @@ function M.game_reads()
       end
       return rows
     end
-    local out, seen_uids = {}, {}
-    for _, enemy in ipairs(enemies) do
-      if enemy == nil then return fail("enemy_identity_unreadable") end
-      local chara = C(enemy, "get_Chara")
-      local game_object = C(enemy, "get_GameObject")
-      local uid = C(C(chara, "get_UniqId"), "ToString()")
-      local cid = u32(int_value(C(chara, "get_CharaID")))
-      local dead = C(chara, "get_IsDead")
-      local enabled, started = C(enemy, "get_Enabled"), C(enemy, "get_Started")
-      local component_valid = C(enemy, "get_Valid")
-      local game_valid, accessible = C(game_object, "get_Valid"),
-        C(game_object, "get_Update")
-      local transform = C(chara, "get_Transform")
-      local pos = xyz(C(transform, "get_UniversalPosition"))
-      if chara == nil or type(uid) ~= "string" or uid == "" or seen_uids[uid]
-          or not integer(cid, 1)
-          or type(dead) ~= "boolean" or type(enabled) ~= "boolean"
-          or type(started) ~= "boolean" or type(component_valid) ~= "boolean"
-          or type(game_valid) ~= "boolean" or type(accessible) ~= "boolean"
-          or pos == nil or near_zero(pos) then
-        return fail("enemy_state_unreadable")
-      end
-      seen_uids[uid] = true
-      local valid = component_valid and game_valid
-      local drops = drops_for(cid)
+    local out = {}
+    for _, state in ipairs(live.rows) do
+      local drops = drops_for(state.cid)
       if drops == nil then return fail("drop_rows_unreadable") end
       for _, drop in ipairs(drops) do
-        out[#out + 1] = { uid = uid, drop_row_id = drop.drop_row_id,
+        out[#out + 1] = { uid = state.uid, drop_row_id = drop.drop_row_id,
           item_id = drop.item_id, count = drop.count, raw_rate = drop.raw_rate,
-          alive = not dead, enabled = enabled, started = started, valid = valid,
-          accessible = accessible, drop_table_readable = true,
-          pos = { x = pos.x, y = pos.y, z = pos.z } }
+          alive = state.alive, enabled = state.enabled, started = state.started,
+          valid = state.valid, accessible = state.accessible, drop_table_readable = true,
+          pos = { x = state.pos.x, y = state.pos.y, z = state.pos.z } }
       end
     end
-    return { complete = true, rows = out }
+    return { complete = true, rows = out, freshness = live.freshness }
   end
 
   -- _RegisteredTimeInfos is a List<RegisterInfo> with _UniqID (UniqueID) and
