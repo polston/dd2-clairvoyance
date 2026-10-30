@@ -5401,6 +5401,12 @@ do
     d.keypos[2309] = P(576.3, 19.3, -1011.1)
     d.area_nodes["-1:7"] = { P(100, 0, 100) }
     d.area_nodes["42:-1"] = { P(300, 0, 300) }
+    d.icons = {
+      { type = K.SETTLEMENT_TYPE, pos = P(422, 0, -904), disp_id = "a", icon_id = 1 },
+      { type = K.SETTLEMENT_TYPE, pos = P(1000, 0, 1000), disp_id = "b", icon_id = 2 } }
+    d.msgs = { a = "Town A", b = "Town B" }
+    d.icons_found = { [2] = true }
+    d.disc_n = 1
     local w = f.new()
     local tg = on("search")
     w:refresh(0, true, tg)
@@ -5411,14 +5417,20 @@ do
       r ~= nil and r.stops ~= nil and r.stops[3] ~= nil
       and r.stops[3].pos.x == 422.7 and r.stops[3].pos.y == 57.4
       and r.stops[3].pos.z == -903.8)
-    d.npcpos[2696] = P(430.5, 58.0, -900.0)
+    check("real route: active Albert stop starts in the undiscovered settlement cell",
+      r ~= nil and r.stops ~= nil and r.stops[3] ~= nil
+        and r.stops[3].discovered == false)
+    d.npcpos[2696] = P(990.5, 58.0, 990.0)
     w:poke()
     w:refresh(2, true, tg)
     r = route_in(w)
     check("real route: cached active stop follows a moving NPC without a schedule change",
       r ~= nil and r.stops ~= nil and r.stops[3] ~= nil
-        and r.stops[3].pos.x == 430.5 and r.stops[3].pos.y == 58.0
-        and r.stops[3].pos.z == -900.0)
+        and r.stops[3].pos.x == 990.5 and r.stops[3].pos.y == 58.0
+        and r.stops[3].pos.z == 990.0)
+    check("real route: moving active stop recomputes discovery in its new position cell",
+      r ~= nil and r.stops ~= nil and r.stops[3] ~= nil
+        and r.stops[3].discovered == true)
   end
 
   -- a key that does not resolve is unplaced and never asks for area nodes

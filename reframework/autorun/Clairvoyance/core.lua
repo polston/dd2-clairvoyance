@@ -5116,6 +5116,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
     end
   end
   return { generation = objective_gen, grouped_needs = grouped_needs,
+    grouped_needs_valid = grouped_needs_valid,
     need_groups = need_groups, checklist = checklist,
     stamp = { focus_epoch = task_snapshot.focus_epoch, journal_generation = task_snapshot.journal_generation,
       need_generation = task_snapshot.need_generation,
@@ -5135,7 +5136,8 @@ function M.objective_checklist(task_snapshot)
   end
   local projected = M.objective_snapshot(task_snapshot,
     { generation = 0, status = "unknown", places = {} }, {}, M.target_registry_new())
-  return type(projected) == "table" and projected.checklist or {}
+  if type(projected) ~= "table" or projected.grouped_needs_valid ~= true then return nil end
+  return projected.checklist or {}
 end
 
 function M.objective_snapshot_with_checklist(snapshot, checklist)

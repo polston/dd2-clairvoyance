@@ -6160,6 +6160,14 @@ do
       status = "unknown", complete = false, groups = {} } })
     check("objective checklist: incomplete need observations do not publish an empty overlay",
       incoherent_checklist == nil)
+    local malformed_group_checklist = core.objective_checklist({ need_generation = 1,
+      quests = {}, objective_needs = { status = "ok", complete = true,
+        generation = 1, source_generation = 1, groups = { "malformed" }, held = {} } })
+    local malformed_held_checklist = core.objective_checklist({ need_generation = 1,
+      quests = {}, objective_needs = { status = "ok", complete = true,
+        generation = 1, source_generation = 1, groups = {}, held = { [820] = -1 } } })
+    check("objective checklist: normalized snapshot validity rejects malformed groups and held counts",
+      malformed_group_checklist == nil and malformed_held_checklist == nil)
     local cached_overlay = { generation = 1, checklist = { { qid = 1 } }, targets = {} }
     local presented_overlay = type(core.objective_snapshot_with_checklist) == "function"
       and core.objective_snapshot_with_checklist(cached_overlay, { { qid = 2 } }) or nil

@@ -3775,6 +3775,42 @@ do
     and need_snapshot.groups[1].options[1].item_id == 300
     and need_snapshot.groups[1].options[1].accepted_count == 1,
     "IW1 fresh focused legacy need supplies a current-task fallback group")
+  ;(function()
+  local unrelated_only = ai.objective_need_groups({ need_generation = task_snapshot.need_generation,
+    quests = { { qid = 20100, task_index = 0, read_status = "ok", item_ownership = {} } } })
+  assert(unrelated_only.status == "ok" and unrelated_only.complete
+      and #unrelated_only.groups == 0,
+    "IW1 records outside the requested quest set do not invalidate an empty projection")
+  local condition_owner = { proof_kind = "condition", eligibility = "eligible",
+    item_id = 300, count = 1, task_index = 0, concierge_index = 0,
+    destination_index = 0 }
+  local function checklist_projection(item_id)
+    return { need_generation = task_snapshot.need_generation, quests = { {
+      qid = 20090, task_index = 0, read_status = "ok", item_ownership = {
+        condition_owner,
+        { proof_kind = "delivery", task_index = 0,
+          delivery = { is_not = false, check_storage = true, groups = {
+            { delivery = { groups = { { index = 0, item_ids = { item_id }, count = 1,
+              is_all_item = false, is_infinite = false } } } },
+          } } },
+      },
+    } } }
+  end
+  local saved_projection_dict = IS.dict
+  IS.dict = storage({ { key = PL, value = ilist({ sd(301, 1), sd(302, 1) }) } })
+  local dict_reads_before_checklists = IS.dict_reads
+  local projection_301 = ai.objective_need_groups(checklist_projection(301))
+  local projection_302 = ai.objective_need_groups(checklist_projection(302))
+  local projection_301_again = ai.objective_need_groups(checklist_projection(301))
+  assert(projection_301.status == "ok" and projection_301.held[301] == 1
+      and projection_302.status == "ok" and projection_302.held[302] == 1
+      and projection_301_again.status == "ok" and projection_301_again.held[301] == 1,
+    "IW1 alternating checklist projections remain readable")
+  assert(IS.dict_reads == dict_reads_before_checklists + 2,
+    "IW1 checklist held reads cache each generation/signature projection (delta "
+      .. tostring(IS.dict_reads - dict_reads_before_checklists) .. ")")
+  IS.dict = saved_projection_dict
+  end)()
   task_snapshot.quests[1].item_ownership = { {
     proof_kind = "condition", eligibility = "unknown",
     reason = "native_item_condition_leaf_unread", item_id = 300, count = 1,

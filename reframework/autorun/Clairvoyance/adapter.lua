@@ -3149,7 +3149,7 @@ function items.read_held(ids)
                     end
                     if ids[id] then
                         held[id] = (held[id] or 0) + num
-                        if key ~= 65535 then carried[id] = (carried[id] or 0) + num end
+                        if key ~= K.STORAGE_BOX_KEY then carried[id] = (carried[id] or 0) + num end
                     end
                 end)
                 if not okd then skipped = skipped + 1; complete = false end
@@ -5651,6 +5651,12 @@ function A.make()
       end
     end
     local records = objective_owned_records(task_snapshot, state)
+    local relevant_record_n = 0
+    for _, record in ipairs(state.records) do
+      if type(record) == "table" and qseen[record.qid] then
+        relevant_record_n = relevant_record_n + 1
+      end
+    end
     local groups, complete = A.objective_need_builder.build(records, state.held,
       { generation = state.generation, task_generation = state.generation,
         task_index = state.task_index })
@@ -5662,7 +5668,7 @@ function A.make()
     local structured_qids = {}
     for _, record in ipairs(records) do structured_qids[record.qid] = true end
     local fallback_valid = true
-    if #state.records > 0 then
+    if relevant_record_n > 0 then
       for _, row in ipairs(task_snapshot.quests) do
         local ownership = type(row) == "table" and row.item_ownership or nil
         local needs = type(row) == "table" and ITEM_NEEDS and ITEM_NEEDS[row.qid] or nil
@@ -5699,7 +5705,7 @@ function A.make()
         if not fallback_valid then break end
       end
     end
-    if not fallback_valid or (#state.records > 0 and #records == 0 and #groups == 0) then
+    if not fallback_valid or (relevant_record_n > 0 and #records == 0 and #groups == 0) then
       return { status = "unknown", complete = false, groups = {},
         generation = task_snapshot.need_generation,
         source_generation = state.generation, reason = "current_task_ownership_unproven" }
@@ -5746,15 +5752,19 @@ function A.make()
       local parts = {}
       for i, item_id in ipairs(checklist_list) do parts[i] = tostring(item_id) end
       local signature = table.concat(parts, ",")
-      local extra = items.objective_checklist_held_state
-      if type(extra) ~= "table" or extra.generation ~= state.generation
-          or extra.signature ~= signature then
+      local cache = items.objective_checklist_held_state
+      if type(cache) ~= "table" or cache.generation ~= state.generation
+          or type(cache.by_signature) ~= "table" then
+        cache = { generation = state.generation, by_signature = {} }
+        items.objective_checklist_held_state = cache
+      end
+      local extra = cache.by_signature[signature]
+      if type(extra) ~= "table" then
         local extra_held, skipped, complete, extra_carried = items.read_held(checklist_ids)
-        extra = { generation = state.generation, signature = signature,
-          held = type(extra_held) == "table" and extra_held or {},
+        extra = { held = type(extra_held) == "table" and extra_held or {},
           held_carried = type(extra_carried) == "table" and extra_carried or {},
           complete = type(extra_held) == "table" and complete == true and skipped == 0 }
-        items.objective_checklist_held_state = extra
+        cache.by_signature[signature] = extra
       end
       if not extra.complete then
         return { status = "unknown", complete = false, groups = {},

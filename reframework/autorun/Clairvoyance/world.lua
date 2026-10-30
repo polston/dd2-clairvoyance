@@ -1713,10 +1713,14 @@ function M.new(a, reads, io)
         stops[current].pos = pcopy(current_pos)
       end
     end
-    for _, st in ipairs(stops) do
+    for i, st in ipairs(stops) do
       if valid_pos(st.pos) then
         local dkey = "r:" .. tostring(st.area) .. ":" .. tostring(st.location)
-        if type(st.key) == "number" and st.key > 0 then dkey = "r:k:" .. st.key end
+        if i == current then
+          dkey = string.format("r:n:%d:%d:%d", cid, st.pos.x // 200, st.pos.z // 200)
+        elseif type(st.key) == "number" and st.key > 0 then
+          dkey = "r:k:" .. st.key
+        end
         st.discovered = discovered(dkey, st.pos)
       end
     end
