@@ -4626,7 +4626,9 @@ do
     rdef("area_nodes", function() return nil end)
     rdef("graph_state", function()
       if d.graph_state_fail then error("fake graph state transition") end
-      return d.graph_state or { index = 0, signature = "0:", disabled = {} }
+      return d.graph_state or { index = 0,
+        signature = "0:phase=" .. (d.brine_drained and "drained" or "normal") .. ":",
+        disabled = {}, brine_drained = d.brine_drained == true }
     end)
     rdef("graph_block_count", function() return #cur end)
     rdef("graph_block", function(i, out, first, count, state)
@@ -4647,6 +4649,8 @@ do
         local hash = i * 100000 + k - 1
         out.hash[fl] = hash
         out.ok[fl] = state == nil or state.disabled[hash] ~= true
+        out.sheltered = out.sheltered or {}
+        out.sheltered[fl] = nd[5] == true
         out.lc[fl] = #nd[4]
         for _, l in ipairs(nd[4]) do
           nl = nl + 1
@@ -4959,11 +4963,13 @@ do
   do
     local f, d = gfix()
     f.tick = 0.001
-    d.graph_state = { index = 0, signature = "0:", disabled = {} }
+    d.graph_state = { index = 0, signature = "0:phase=normal:", disabled = {},
+      brine_drained = false }
     d.reject_stale_state = true
     d.on_read = function()
       if d.graph_state.index == 0 then
-        d.graph_state = { index = 1, signature = "1:", disabled = {} }
+        d.graph_state = { index = 1, signature = "1:phase=normal:", disabled = {},
+          brine_drained = false }
       end
     end
     local w = with_route(f, { P(0, 0, 0), P(40, 0, 0) })
@@ -4978,11 +4984,13 @@ do
   -- state is already part of the live copy and must be available to recovery.
   do
     local f, d = gfix()
-    d.graph_state = { index = 0, signature = "0:", disabled = {} }
+    d.graph_state = { index = 0, signature = "0:phase=normal:", disabled = {},
+      brine_drained = false }
     d.reject_stale_state = true
     d.before_read = function()
       d.before_read = nil
-      d.graph_state = { index = 1, signature = "1:", disabled = {} }
+      d.graph_state = { index = 1, signature = "1:phase=normal:", disabled = {},
+        brine_drained = false }
     end
     local w = with_route(f, { P(0, 0, 0), P(40, 0, 0) })
     for _ = 1, 20 do w:path_step(1e6, 1, true) end
@@ -5008,6 +5016,47 @@ do
     check("route failure: summary is unavailable, not ready",
       status.ready == 0 and status.state == "unavailable")
     check("route failure: no walking geometry is published", pair.pts == nil)
+  end
+
+  -- Normal-world routing must not use exposed deep graph nodes that only
+  -- become traversable when the brine drains. Sheltered cave nodes at the
+  -- same elevation remain valid, and A* must try the safe alternative.
+  do
+    local two_paths = { {
+      { 0, 0, 0, { { 0, 1 }, { 0, 3 } } },
+      { 10, -60, 0, { { 0, 0 }, { 0, 2 } }, false },
+      { 20, 0, 0, { { 0, 1 }, { 0, 4 } } },
+      { 0, -60, 10, { { 0, 0 }, { 0, 4 } }, true },
+      { 20, -60, 10, { { 0, 3 }, { 0, 2 } }, true },
+    } }
+    local f, d = gfix(two_paths)
+    local w = with_route(f, { P(0, 0, 0), P(20, 0, 0) })
+    for _ = 1, 20 do w:path_step(1e6, 1, true) end
+    local pts = w:route_paths(true)[2001][1].pts
+    check("brine mask: normal world reroutes around exposed deep nodes",
+      w:path_status(1, 2001) == "path ready" and pts ~= nil
+        and pts[4] == 0 and pts[5] == -60 and pts[6] == 10)
+    d.brine_drained = true
+    f.clock_t = f.clock_t + 2
+    for _ = 1, 20 do w:path_step(1e6, 1, true) end
+    pts = w:route_paths(true)[2001][1].pts
+    check("brine mask: drained world restores the shorter exposed route without recopying",
+      w:path_status(1, 2001) == "path ready" and pts ~= nil
+        and pts[4] == 10 and pts[5] == -60 and pts[6] == 0
+        and f.reads_n.graph_block_count == 1)
+  end
+
+  do
+    local only_exposed = { {
+      { 0, 0, 0, { { 0, 1 } } },
+      { 10, -60, 0, { { 0, 0 }, { 0, 2 } }, false },
+      { 20, 0, 0, { { 0, 1 } } },
+    } }
+    local w = with_route(gfix(only_exposed), { P(0, 0, 0), P(20, 0, 0) })
+    for _ = 1, 20 do w:path_step(1e6, 1, true) end
+    check("brine mask: no safe alternative publishes unavailable without geometry",
+      w:path_status(1, 2001) == "path unavailable"
+        and w:route_paths(true)[2001][1].pts == nil)
   end
 
   -- Walking endpoints must be close enough to the graph to justify the
@@ -5037,13 +5086,15 @@ do
       { 10, 0, 0, { { 0, 1 } } },
     } }
     local f, d = gfix(line)
-    d.graph_state = { index = 0, signature = "0:1=1,", disabled = { [1] = true } }
+    d.graph_state = { index = 0, signature = "0:phase=normal:1=1,",
+      disabled = { [1] = true }, brine_drained = false }
     local w = with_route(f, { P(0, 0, 0), P(10, 0, 0) })
     for _ = 1, 10 do w:path_step(1e6, 1, true) end
     local graph = w.graph
     check("graph mask refresh: disabled middle node blocks the route",
       graph ~= nil and w:path_status(1, 2001) == "path unavailable")
-    d.graph_state = { index = 0, signature = "0:", disabled = {} }
+    d.graph_state = { index = 0, signature = "0:phase=normal:", disabled = {},
+      brine_drained = false }
     f.clock_t = f.clock_t + 2
     for _ = 1, 10 do w:path_step(1e6, 1, true) end
     check("graph mask refresh: enabling the node rebuilds cached paths without recopying",
@@ -5062,7 +5113,8 @@ do
     check("graph mask refresh: the next successful poll recovers without a route toggle",
       w.graph == graph and w:path_status(1, 2001) == "path ready"
         and w.copy_tries == copy_tries)
-    d.graph_state = { index = 0, signature = "0:1=1,", disabled = { [1] = true } }
+    d.graph_state = { index = 0, signature = "0:phase=normal:1=1,",
+      disabled = { [1] = true }, brine_drained = false }
     f.clock_t = f.clock_t + 2
     for _ = 1, 10 do w:path_step(1e6, 1, true) end
     check("graph mask refresh: disabling the node invalidates a cached ready path",
@@ -5346,10 +5398,14 @@ do
       get_Item = function(i) return items[i + 1] end })
   end
   local bad = {}
-  local function node(x, y, z, links)
+  local function node(x, y, z, links, sheltered)
     local ls = {}
     for i, l in ipairs(links) do ls[i] = obj({ blockId = l[1], indexId = l[2] }) end
-    return obj({ _Pos = P(x, y, z), Links = list(ls) })
+    local local_areas = sheltered and { obj({ value__ = 1 }) } or {}
+    local area_array = obj()
+    function area_array:get_elements() return local_areas end
+    return obj({ _Pos = P(x, y, z), Links = list(ls),
+      _AILocalAreaHierarchy = area_array })
   end
   local blk0 = obj({ Nodes = list({ node(1, 2, 3, { { 0, 1 } }), node(4, 5, 6, {}) }) })
   local blk1 = obj({ Nodes = list({ node(7, 8, 9, { { 0, 0 }, { 1, 0 } }) }) })
@@ -5371,7 +5427,12 @@ do
   local mgr = obj({ AIWorldGraphDatas = list({ data0, data1 }), NodeDisableInfoDict = disable_dict }, {
     isEnebleAIWorldGraphData = function(i) return i == 1 end,
   })
-  local singletons, fetches = { ["app.AIWorldGraphManager"] = mgr }, 0
+  local season4 = false
+  local gs = obj(nil, { get_GameSeason4 = function() return season4 end })
+  local singletons, fetches = {
+    ["app.AIWorldGraphManager"] = mgr,
+    ["app.GameSystem"] = gs,
+  }, 0
   local saved_sdk = sdk
   sdk = {
     get_managed_singleton = function(n) fetches = fetches + 1; return singletons[n] end,
@@ -5387,13 +5448,14 @@ do
   local R = world.game_reads()
   local state = R.graph_state()
   check("graph reads: selects the one enabled graph",
-    state.index == 1 and R.graph_block_count(state) == 2)
-  local out = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {}, ok = {}, hash = {} }
+    state.index == 1 and R.graph_block_count(state) == 2 and state.brine_drained == false)
+  local out = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {}, ok = {}, hash = {},
+    sheltered = {} }
   local n = R.graph_block(1, out, nil, nil, state)
   check("graph reads: block 1 as plain tables", n == 1 and out.x[1] == 7 and out.y[1] == 8
     and out.z[1] == 9 and out.lc[1] == 2 and out.lb[1] == 0 and out.ln[1] == 0
     and out.lb[2] == 1 and out.ln[2] == 0 and out.ok[1] == false
-    and out.hash[1] == 100 and type(out.x) == "table")
+    and out.hash[1] == 100 and out.sheltered[1] == false and type(out.x) == "table")
   local nc, nf = R.graph_block(1, out, 1, 16, state)
   check("graph reads: clamp reports node count and filled", nc == 1 and nf == 1)
   local nc2, nf2 = R.graph_block(0, out, 2, 5, state)
@@ -5409,8 +5471,14 @@ do
   disable_info = obj({ ["<NodeDisableCounterDict>k__BackingField"] = empty_counters })
   local empty_state = R.graph_state()
   check("graph reads: an empty disable dictionary is a valid enabled graph state",
-    empty_state.index == 1 and empty_state.signature == "1:"
+    empty_state.index == 1 and empty_state.signature == "1:phase=normal:"
       and empty_state.disabled_count == 0 and next(empty_state.disabled) == nil)
+  season4 = true
+  local drained_state = R.graph_state()
+  check("graph reads: GameSeason4 restores the drained-world graph phase",
+    drained_state.brine_drained == true
+      and drained_state.signature == "1:phase=drained:")
+  season4 = false
   disable_info = populated_info
   check("graph reads: chain re-acquired each call", fetches >= 6)
   bad[blk0] = true

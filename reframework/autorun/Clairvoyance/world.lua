@@ -3703,10 +3703,11 @@ function M.new(a, reads, io)
   w.paths, w.near, w.copy_tries, w.pver = {}, {}, 0, 0
   w.copy_ms_max, w.search_ms_max = 0, 0
   local PATH_CAP, GRAPH_CHECK_SECONDS, ENDPOINT_GRAPH_MAX = 64, 1, 10
+  local BRINE_EXPOSED_Y = -50
   local path_order = {}        -- w.paths keys, oldest first
   local fail_gen = nil         -- w.route_gen when the copy last failed
   local blockbuf = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {},
-    ok = {}, hash = {} }
+    ok = {}, hash = {}, sheltered = {} }
   local copy_failed = false
   local graph_poll_error = nil
   w.graph_check_at = nil
@@ -3718,6 +3719,20 @@ function M.new(a, reads, io)
     w.path_job, w.near, w.paths, w.rps = nil, {}, {}, {}
     path_order, rp_out, rp_out_key = {}, nil, nil
     w.pver = w.pver + 1
+  end
+
+  -- The NPC graph contains the exposed seabed used after the brine drains.
+  -- In the normal world, deep nodes with no local-area enclosure are not a
+  -- player walking surface. Compose that phase mask with the game's live
+  -- NodeDisableInfoDict mask; never replace either source.
+  local function apply_graph_mask(graph, state)
+    if type(state.brine_drained) ~= "boolean" then error("graph: brine phase") end
+    for i, hash in ipairs(graph.hash) do
+      local exposed = not state.brine_drained and graph.y[i] < BRINE_EXPOSED_Y
+        and graph.sheltered[i] ~= true
+      graph.ok[i] = state.disabled[hash] ~= true and not exposed
+    end
+    graph.brine_drained = state.brine_drained
   end
 
   -- the published entry for the cid when it has a route with stops, else nil
@@ -3752,8 +3767,8 @@ function M.new(a, reads, io)
       local n = reads.graph_block_count(c.state)
       if type(n) ~= "number" or n < 1 then error("no graph blocks") end
       c.nb, c.b, c.nn, c.nl = n, 0, 0, 0
-      c.off, c.x, c.y, c.z, c.lc, c.lb, c.ln, c.ok, c.hash =
-        {}, {}, {}, {}, {}, {}, {}, {}, {}
+      c.off, c.x, c.y, c.z, c.lc, c.lb, c.ln, c.ok, c.hash, c.sheltered =
+        {}, {}, {}, {}, {}, {}, {}, {}, {}, {}
     end
     local nb = c.nb
     local did = false
@@ -3781,7 +3796,7 @@ function M.new(a, reads, io)
       end
       local x, y, z, lc, lb, ln = c.x, c.y, c.z, c.lc, c.lb, c.ln
       local bx, by, bz, blc = blockbuf.x, blockbuf.y, blockbuf.z, blockbuf.lc
-      local bok, bhash = blockbuf.ok, blockbuf.hash
+      local bok, bhash, bsheltered = blockbuf.ok, blockbuf.hash, blockbuf.sheltered
       local nn, nl = c.nn, c.nl
       if first == 1 then c.off[c.b + 1] = nn end
       local tl = 0
@@ -3789,6 +3804,7 @@ function M.new(a, reads, io)
         nn = nn + 1
         x[nn], y[nn], z[nn] = bx[k], by[k], bz[k]
         c.ok[nn], c.hash[nn] = bok[k] ~= false, bhash[k]
+        c.sheltered[nn] = bsheltered[k] == true
         local m = blc[k]
         lc[nn] = m
         tl = tl + m
@@ -3848,7 +3864,9 @@ function M.new(a, reads, io)
       return
     end
     w.graph = { n = nn, x = c.x, y = c.y, z = c.z, ls = ls, lc = lc, lt = lt,
-      ok = c.ok, hash = c.hash, index = fresh.index, signature = fresh.signature }
+      ok = c.ok, hash = c.hash, sheltered = c.sheltered,
+      index = fresh.index, signature = fresh.signature }
+    apply_graph_mask(w.graph, fresh)
     w.graph_check_at = clock() + GRAPH_CHECK_SECONDS
     w.copy = nil
   end
@@ -4033,9 +4051,7 @@ function M.new(a, reads, io)
           clear_path_cache()
           w.graph, w.copy, copy_failed = nil, { state = state }, false
         elseif ok and state.signature ~= w.graph.signature then
-          for i, hash in ipairs(w.graph.hash) do
-            w.graph.ok[i] = state.disabled[hash] ~= true
-          end
+          apply_graph_mask(w.graph, state)
           w.graph.signature = state.signature
           clear_path_cache()
         end
@@ -5657,6 +5673,7 @@ function M.game_reads()
       end
     end
     if index == nil then error("graph: no enabled data") end
+    local brine_drained = R.game_season4()
     local _, data, graph = graph_parts(index)
     local dict = G(mgr, "NodeDisableInfoDict")
       or C(data, "get_NodeDisableInfoDictProp") or G(data, "NodeDisableInfoDict")
@@ -5687,7 +5704,8 @@ function M.game_reads()
       end
     end
     table.sort(rows, function(a, b) return a[1] < b[1] end)
-    local parts = { tostring(index), ":" }
+    local parts = { tostring(index), ":phase=",
+      brine_drained and "drained" or "normal", ":" }
     for _, row in ipairs(rows) do
       parts[#parts + 1] = tostring(row[1])
       parts[#parts + 1] = "="
@@ -5695,7 +5713,7 @@ function M.game_reads()
       parts[#parts + 1] = ","
     end
     return { index = index, signature = table.concat(parts), disabled = disabled,
-      disabled_count = #rows }
+      disabled_count = #rows, brine_drained = brine_drained }
   end
 
   function R.graph_block_count(state)
@@ -5721,9 +5739,10 @@ function M.game_reads()
     if lo < 1 then lo = 1 end
     local hi = count ~= nil and lo + count - 1 or n
     if hi > n then hi = n end
-    out.ok, out.hash = out.ok or {}, out.hash or {}
+    out.ok, out.hash, out.sheltered = out.ok or {}, out.hash or {}, out.sheltered or {}
     local x, y, z, lc, lb, ln, enabled, hashes = out.x, out.y, out.z,
       out.lc, out.lb, out.ln, out.ok, out.hash
+    local sheltered = out.sheltered
     local nl, f = 0, 0
     for k = lo, hi do
       f = f + 1
@@ -5733,6 +5752,9 @@ function M.game_reads()
       x[f], y[f], z[f] = p.x, p.y, p.z
       local hash = node_hash(i, k - 1)
       hashes[f], enabled[f] = hash, state.disabled[hash] ~= true
+      local local_areas = copy_elements(G(node, "_AILocalAreaHierarchy"))
+      if local_areas == nil then error("graph: local areas") end
+      sheltered[f] = #local_areas > 0
       local links = managed(G(node, "Links"), "no links")
       local m = C(links, "get_Count")
       if type(m) ~= "number" then error("graph: link count") end
