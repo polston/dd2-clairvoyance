@@ -547,13 +547,62 @@ function M.parse_quests(t)
   end
   local function reward_diagnostic_array(raw, qid)
     if raw == nil then return {} end
-    if not dense_array(raw) then fail("quest " .. qid .. " reward diagnostics malformed"); return {} end
+    if not dense_array(raw) then fail("quest " .. qid .. " reward diagnostics malformed"); return false end
     local ownership = { exact = true, missing_owner = true, ambiguous_owner = true,
       duplicate_processor_id = true }
     local branch_status = { unverified = true, unsupported = true }
     local result_status = { observed = true, unsupported = true }
     local unresolved = { "journal_task_to_reward_endpoint", "reward_action_to_drawable_target",
       "current_branch_truth", "claim_state", "runtime_reward_hash_to_item_count" }
+    local function endpoint_evidence(raw_evidence, source_identity, precondition)
+      if raw_evidence == nil then return nil, true end
+      if type(raw_evidence) ~= "table" then return nil, false end
+      local expected = {
+        kind = true, reward_root_count = true, reward_operator = true,
+        reward_operator_value = true, reward_relation_count = true,
+        reward_child_count = true, relation_result_no = true,
+        predecessor_processor_id = true, predecessor_action_type = true,
+        trigger_parameter_count = true, condition_operator = true,
+        condition_operator_value = true, condition_count = true,
+        condition_type = true, talk_event_id = true, end_no = true,
+        accept_minus_one = true,
+      }
+      local count = 0
+      for key in pairs(raw_evidence) do
+        if not expected[key] then return nil, false end
+        count = count + 1
+      end
+      if count ~= 17 then return nil, false end
+      local e = raw_evidence
+      if e.kind ~= "single_talk_trigger" or e.reward_root_count ~= 1
+          or e.reward_operator ~= "or" or e.reward_operator_value ~= 1
+          or e.reward_relation_count ~= 1 or e.reward_child_count ~= 0
+          or e.relation_result_no ~= 0
+          or not is_integer(e.predecessor_processor_id, 0, 4294967295)
+          or e.predecessor_action_type ~= "app.quest.action.Trigger"
+          or e.trigger_parameter_count ~= 1 or e.condition_operator ~= "and"
+          or e.condition_operator_value ~= 0 or e.condition_count ~= 1
+          or e.condition_type ~= "app.quest.condition.CheckTalkEventEndNoParam"
+          or not is_integer(e.talk_event_id, 1, 2147483647)
+          or not is_integer(e.end_no, -2147483648, 2147483647)
+          or not bool(e.accept_minus_one) or type(source_identity) ~= "table"
+          or source_identity.quest_id ~= qid or not dense_array(precondition)
+          or #precondition ~= 1 then return nil, false end
+      local root = precondition[1]
+      if type(root) ~= "table" or root.operator ~= e.reward_operator
+          or root.operator_value ~= e.reward_operator_value
+          or not dense_array(root.parameters) or #root.parameters ~= e.reward_relation_count
+          or not dense_array(root.children) or #root.children ~= e.reward_child_count
+          or #root.parameters ~= 1 then return nil, false end
+      local relation = root.parameters[1]
+      if type(relation) ~= "table" or relation.kind ~= "processor_result"
+          or relation.proc_id ~= e.predecessor_processor_id
+          or relation.action_type ~= e.predecessor_action_type
+          or relation.result_no ~= e.relation_result_no then return nil, false end
+      local out = {}
+      for key in pairs(expected) do out[key] = e[key] end
+      return out, true
+    end
     local function strings(values)
       return copy_array(values, function(value)
         if type(value) ~= "string" or value == "" then return nil end
@@ -584,7 +633,7 @@ function M.parse_quests(t)
       return { operator = element.operator, operator_value = element.operator_value,
         parameters = parameters, children = children }
     end
-    local out = {}
+    local out, endpoint_invalid = {}, false
     for i, row in ipairs(raw) do
       local valid = type(row) == "table" and row.family == "quest_reward"
         and row.quest_id == qid and row.action_type == "app.quest.action.QuestReward"
@@ -623,6 +672,14 @@ function M.parse_quests(t)
           end
         end
       end
+      local evidence = nil
+      if type(row) == "table" and row.endpoint_evidence ~= nil then
+        local evidence_ok
+        evidence, evidence_ok = endpoint_evidence(row.endpoint_evidence,
+          row.source_identity, precondition)
+        if not evidence_ok then endpoint_invalid = true end
+        valid = valid and evidence_ok
+      end
       if valid then
         out[i] = { family = row.family, quest_id = qid,
           source_identity = { quest_id = qid, action_ordinal = i - 1,
@@ -632,12 +689,13 @@ function M.parse_quests(t)
           reward_rows = reward_rows, reward_payload_status = row.reward_payload_status,
           task_endpoint_join = { status = row.task_endpoint_join.status,
             reason = row.task_endpoint_join.reason }, unresolved_joins = joins,
-          eligibility = row.eligibility }
+          eligibility = row.eligibility, endpoint_evidence = evidence }
       else
         out[i] = false
         fail("quest " .. qid .. " reward diagnostic " .. (i - 1) .. " malformed")
       end
     end
+    if endpoint_invalid then return false end
     return out
   end
   local function source_record(s)
@@ -790,7 +848,8 @@ function M.parse_quests(t)
         if not guidance then fail("quest " .. qid .. " guidance malformed") else entry.guidance = guidance end
       end
       if entry.tasks or #entry.guidance > 0 or #entry.deliveries > 0 or #entry.sources > 0
-          or #entry.reward_diagnostics > 0 then
+          or entry.reward_diagnostics == false
+          or (type(entry.reward_diagnostics) == "table" and #entry.reward_diagnostics > 0) then
         catalog_quests[qid] = entry
       end
     end

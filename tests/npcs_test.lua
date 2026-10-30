@@ -701,6 +701,124 @@ do
       and rewards[1].reward_rows[1].name_hash == 56)
 end
 do
+  local function fixture(endpoint)
+    local relation = { kind = "processor_result", proc_id = 21, result_no = 0,
+      action_type = "app.quest.action.Trigger", result_status = "observed" }
+    local root = { operator = "or", operator_value = 1, parameters = { relation }, children = {} }
+    local evidence = endpoint and {
+      kind = "single_talk_trigger", reward_root_count = 1, reward_operator = "or",
+      reward_operator_value = 1, reward_relation_count = 1, reward_child_count = 0,
+      relation_result_no = 0, predecessor_processor_id = 21,
+      predecessor_action_type = "app.quest.action.Trigger", trigger_parameter_count = 1,
+      condition_operator = "and", condition_operator_value = 0, condition_count = 1,
+      condition_type = "app.quest.condition.CheckTalkEventEndNoParam",
+      talk_event_id = 123, end_no = -1, accept_minus_one = false,
+    } or nil
+    local row = { family = "quest_reward", quest_id = 12,
+      source_identity = { quest_id = 12, action_ordinal = 0, processor_id = 34 },
+      action_type = "app.quest.action.QuestReward", ownership_status = "exact",
+      branch_status = "unverified", branch_diagnostics = {}, precondition = { root },
+      reward_rows = { { ordinal = 0, name_hash = 56 } }, endpoint_evidence = evidence,
+      reward_payload_status = "complete", task_endpoint_join = {
+        status = "unproven", reason = "journal_task_to_drawable_reward_endpoint_unverified",
+      }, unresolved_joins = { "journal_task_to_reward_endpoint",
+        "reward_action_to_drawable_target", "current_branch_truth", "claim_state",
+        "runtime_reward_hash_to_item_count" }, eligibility = "unknown" }
+    return row
+  end
+  local function parse(row)
+    local _, catalog = N.parse_quests({ version = 2, sources = {
+      { id = "other", kind = "placed_pickup", item_ids = { 5 },
+        target = { cid = 1 }, evidence = { provider = "pickup", ref = {} }, inputs = {} },
+    }, quests = {
+      ["12"] = { tasks = { { index = 0, has_destination = false, destinations = {} } },
+        guidance = {}, deliveries = {},
+        reward_diagnostics = { row } },
+      ["13"] = { tasks = {}, guidance = {}, deliveries = {} },
+    } })
+    return catalog
+  end
+  local valid = fixture(true)
+  local catalog = parse(valid)
+  local copied = catalog and catalog.quests[12] and catalog.quests[12].reward_diagnostics
+  check("quests v2 rewards: valid endpoint evidence is preserved and detached",
+    copied and copied[1] and copied[1].endpoint_evidence
+      and copied[1].endpoint_evidence.talk_event_id == 123
+      and copied[1].endpoint_evidence.predecessor_processor_id == 21)
+  valid.endpoint_evidence.talk_event_id = 456
+  check("quests v2 rewards: endpoint evidence copy is detached",
+    copied and copied[1] and copied[1].endpoint_evidence
+      and copied[1].endpoint_evidence.talk_event_id == 123)
+  local legacy = parse(fixture(false))
+  check("quests v2 rewards: null endpoint evidence remains diagnostic unknown",
+    legacy and legacy.quests[12] and legacy.quests[12].reward_diagnostics[1]
+      and legacy.quests[12].reward_diagnostics[1].endpoint_evidence == nil)
+
+  local function parse_diagnostics(diagnostics)
+    local _, result = N.parse_quests({ version = 2, quests = {
+      ["12"] = { tasks = { { index = 0, has_destination = false, destinations = {} } },
+        guidance = {}, deliveries = {}, reward_diagnostics = diagnostics },
+      ["13"] = { tasks = {}, guidance = {}, deliveries = {} },
+    } })
+    return result
+  end
+  local malformed_outer = {
+    { label = "wrong type", value = "not an array" },
+    { label = "sparse array", value = { [1] = fixture(false), [3] = fixture(false) } },
+  }
+  for _, case in ipairs(malformed_outer) do
+    local parsed = parse_diagnostics(case.value)
+    check("quests v2 rewards: " .. case.label .. " outer shape is quest-atomic",
+      parsed and parsed.quests[12] and parsed.quests[12].reward_diagnostics == false
+        and parsed.quests[12].tasks and #parsed.quests[12].tasks == 1
+        and parsed.quests[13] ~= nil and #parsed.diagnostics > 0)
+  end
+  local absent = parse_diagnostics(nil)
+  check("quests v2 rewards: absent outer diagnostics remain legacy empty",
+    absent and absent.quests[12] and type(absent.quests[12].reward_diagnostics) == "table"
+      and #absent.quests[12].reward_diagnostics == 0)
+
+  local cases = {}
+  local fields = {
+    kind = false, reward_root_count = 0, reward_operator = false,
+    reward_operator_value = 0, reward_relation_count = 0, reward_child_count = 1,
+    relation_result_no = 1, predecessor_processor_id = -1,
+    predecessor_action_type = false, trigger_parameter_count = 0,
+    condition_operator = false, condition_operator_value = 1, condition_count = 0,
+    condition_type = false, talk_event_id = 0, end_no = 1.5,
+    accept_minus_one = 0,
+  }
+  for field, bad in pairs(fields) do
+    cases[#cases + 1] = function(r) r.endpoint_evidence[field] = bad end
+    cases[#cases + 1] = function(r) r.endpoint_evidence[field] = nil end
+    cases[#cases + 1] = function(r) r.endpoint_evidence[field] = {} end
+  end
+  cases[#cases + 1] = function(r) r.endpoint_evidence.extra = true end
+  cases[#cases + 1] = function(r) r.endpoint_evidence.predecessor_processor_id = 4294967296 end
+  cases[#cases + 1] = function(r) r.endpoint_evidence.talk_event_id = 2147483648 end
+  cases[#cases + 1] = function(r) r.endpoint_evidence.end_no = 2147483648 end
+  cases[#cases + 1] = function(r) r.source_identity.quest_id = 13 end
+  cases[#cases + 1] = function(r) r.precondition[1].parameters[1].proc_id = 22 end
+  cases[#cases + 1] = function(r) r.precondition[1].parameters[1].action_type = "app.quest.action.Other" end
+  cases[#cases + 1] = function(r) r.precondition[1].parameters[1].result_no = 2 end
+  cases[#cases + 1] = function(r) r.precondition[1].operator = "and" end
+  cases[#cases + 1] = function(r) r.precondition[1].operator_value = 2 end
+  cases[#cases + 1] = function(r) r.precondition[1].parameters[2] = {} end
+  cases[#cases + 1] = function(r) r.precondition[1].parameters = { [1] = r.precondition[1].parameters[1], [3] = {} } end
+  cases[#cases + 1] = function(r) r.precondition[1].children[1] = {} end
+  for i, mutate in ipairs(cases) do
+    local bad = fixture(true)
+    mutate(bad)
+    local parsed = parse(bad)
+    check("quests v2 rewards: malformed endpoint evidence is quest-atomic " .. i,
+      parsed and parsed.quests[12] and parsed.quests[12].reward_diagnostics == false
+        and parsed.quests[12].tasks and #parsed.quests[12].tasks == 1
+        and parsed.quests[12].guidance and parsed.quests[12].deliveries
+        and parsed.sources and #parsed.sources == 1
+        and parsed.quests[13] ~= nil and #parsed.diagnostics > 0)
+  end
+end
+do
   local _, catalog = N.parse_quests({ version = 2, quests = {
     ["20"] = { tasks = {}, guidance = {}, deliveries = {}, sources = {
       { id = "same", kind = "placed_pickup", item_ids = { 5 },
