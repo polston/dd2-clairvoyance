@@ -4619,6 +4619,17 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
       if type(live) == "table" and (live.task_index == nil
           or (objective_index(live.task_index, 2147483647) and live.task_index == task_index)) then
         local target = type(live.target) == "table" and live.target or {}
+        local pos = nil
+        if target.place == nil then pos = objective_copy_pos(target.pos) end
+        if not pos and target.place then
+          local pkey = table.concat({ tostring(qid), tostring(task_index), "live",
+            tostring(task_index), "0" }, ":")
+          local resolved = places[pkey]
+          if resolved and objective_place_key(resolved.target) == objective_place_key(target.place) then
+            pos = objective_copy_pos(resolved.pos)
+          end
+        end
+        target = { cid = target.cid, place = target.place, pos = pos }
         if target.pos or target.cid then
           add(qid, task_index, { qid, "live_destination", 0 }, target.cid and "npc" or "place", target,
             "live_destination", nil, nil, live.eligibility, live.reason)

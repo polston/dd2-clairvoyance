@@ -2617,8 +2617,8 @@ function M.new(a, reads, io)
       if type(target) ~= "table" or type(target.place) ~= "table" then return true end
       wanted = true
       local place = target.place
-      local pos = copy_pos(target.pos)
-      if pos == nil and place.kind == "key_location" and integer(place.key, 1) then
+      local pos = nil
+      if place.kind == "key_location" and integer(place.key, 1) then
         local ok, value = call("key_pos", place.key)
         if ok then pos = copy_pos(value) end
       elseif pos == nil and place.kind == "local_area" and integer(place.local_area, 0) then
@@ -2660,6 +2660,17 @@ function M.new(a, reads, io)
               "task", quest.task_index, signal.destination_index, signal.target) then
             return unknown(signal.reason or "task_place_unresolved")
           end
+        end
+      end
+      local live = quest.live_destination
+      if type(live) == "table" and type(live.target) == "table"
+          and type(live.target.place) == "table" then
+        if live.eligibility == "unknown" then
+          return unknown(live.reason or "live_place_unknown")
+        end
+        if live.eligibility == "eligible" and not resolve(quest.qid, quest.task_index,
+            "live", quest.task_index, 0, live.target) then
+          return unknown(live.reason or "live_place_unresolved")
         end
       end
       for _, guidance in ipairs(guidance_rows) do
@@ -3626,6 +3637,7 @@ function M.new(a, reads, io)
     S = new_session()
     givers_cache, givers_rev = nil, -1
     w.path_job = nil
+    w.graph_check_at = nil
     if type(reads.reset) == "function" then pcall(reads.reset) end
     gate_round = { quests = {}, variables = {}, season_read = false, season = nil }
     gate_stats = { season4 = nil, normal = { eligible = 0, total = 0 },
@@ -3690,14 +3702,23 @@ function M.new(a, reads, io)
   -- are searched over the copy (never through a game path query).
   w.paths, w.near, w.copy_tries, w.pver = {}, {}, 0, 0
   w.copy_ms_max, w.search_ms_max = 0, 0
-  local PATH_CAP = 64
+  local PATH_CAP, GRAPH_CHECK_SECONDS, ENDPOINT_GRAPH_MAX = 64, 1, 10
   local path_order = {}        -- w.paths keys, oldest first
   local fail_gen = nil         -- w.route_gen when the copy last failed
-  local blockbuf = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {} }
+  local blockbuf = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {},
+    ok = {}, hash = {} }
   local copy_failed = false
+  local graph_poll_error = nil
+  w.graph_check_at = nil
   w.rps = {}                   -- cid -> cached route pairs, keys and drawn list
   local rp_empty = {}
   local rp_out, rp_out_key = nil, nil  -- the cached route_paths outer table
+
+  local function clear_path_cache()
+    w.path_job, w.near, w.paths, w.rps = nil, {}, {}, {}
+    path_order, rp_out, rp_out_key = {}, nil, nil
+    w.pver = w.pver + 1
+  end
 
   -- the published entry for the cid when it has a route with stops, else nil
   local function entry_of(cid)
@@ -3727,10 +3748,12 @@ function M.new(a, reads, io)
   local function copy_run(c, limit)
     local t0 = clock()
     if c.nb == nil then
-      local n = reads.graph_block_count()
+      c.state = c.state or reads.graph_state()
+      local n = reads.graph_block_count(c.state)
       if type(n) ~= "number" or n < 1 then error("no graph blocks") end
       c.nb, c.b, c.nn, c.nl = n, 0, 0, 0
-      c.off, c.x, c.y, c.z, c.lc, c.lb, c.ln = {}, {}, {}, {}, {}, {}, {}
+      c.off, c.x, c.y, c.z, c.lc, c.lb, c.ln, c.ok, c.hash =
+        {}, {}, {}, {}, {}, {}, {}, {}, {}
     end
     local nb = c.nb
     local did = false
@@ -3752,18 +3775,20 @@ function M.new(a, reads, io)
       end
       local first = c.k or 1
       local tb = clock()
-      local n, filled = reads.graph_block(c.b, blockbuf, first, count)
+      local n, filled = reads.graph_block(c.b, blockbuf, first, count, c.state)
       if type(n) ~= "number" or n < 0 or type(filled) ~= "number" or filled < 0 then
         error("bad graph block")
       end
       local x, y, z, lc, lb, ln = c.x, c.y, c.z, c.lc, c.lb, c.ln
       local bx, by, bz, blc = blockbuf.x, blockbuf.y, blockbuf.z, blockbuf.lc
+      local bok, bhash = blockbuf.ok, blockbuf.hash
       local nn, nl = c.nn, c.nl
       if first == 1 then c.off[c.b + 1] = nn end
       local tl = 0
       for k = 1, filled do
         nn = nn + 1
         x[nn], y[nn], z[nn] = bx[k], by[k], bz[k]
+        c.ok[nn], c.hash[nn] = bok[k] ~= false, bhash[k]
         local m = blc[k]
         lc[nn] = m
         tl = tl + m
@@ -3817,7 +3842,14 @@ function M.new(a, reads, io)
         return
       end
     end
-    w.graph = { n = nn, x = c.x, y = c.y, z = c.z, ls = ls, lc = lc, lt = lt }
+    local fresh = reads.graph_state()
+    if fresh.index ~= c.state.index or fresh.signature ~= c.state.signature then
+      w.copy = { state = fresh }
+      return
+    end
+    w.graph = { n = nn, x = c.x, y = c.y, z = c.z, ls = ls, lc = lc, lt = lt,
+      ok = c.ok, hash = c.hash, index = fresh.index, signature = fresh.signature }
+    w.graph_check_at = clock() + GRAPH_CHECK_SECONDS
     w.copy = nil
   end
 
@@ -3881,6 +3913,22 @@ function M.new(a, reads, io)
     return nil
   end
 
+  -- nil while a pair is unresolved, false when a nearest-node or path search
+  -- settled without geometry, true only when every pair has a usable path.
+  local function path_result(c)
+    local near, paths = w.near, w.paths
+    for k = 1, #c.pairs do
+      local pr = c.pairs[k]
+      local a, b = near[c.keys[pr[1]]], near[c.keys[pr[2]]]
+      if a == nil or b == nil then return nil end
+      if a == false or b == false then return false end
+      local path = paths[a * 1048576 + b]
+      if path == nil then return nil end
+      if path == false then return false end
+    end
+    return true
+  end
+
   -- never evicts a path of the shown route; evicts the oldest others
   local function store_path(pk, entry)
     w.paths[pk] = entry
@@ -3935,7 +3983,8 @@ function M.new(a, reads, io)
         w.path_job = j
       end
       if npcs.nearest_step(j.job, budget_ms, clock) == "done" then
-        w.near[k] = j.job.best or false
+        w.near[k] = j.job.best ~= nil and j.job.dist <= ENDPOINT_GRAPH_MAX
+          and j.job.best or false
         -- A new stop key can resolve to nodes whose pair path is already in
         -- w.paths.  No store_path call follows in that case, so invalidate
         -- route_list's earlier pending result here as well.
@@ -3963,14 +4012,55 @@ function M.new(a, reads, io)
     undisc = undisc and true or false
     local on = any_route()
     local want = on and route_path == 1
+    if want and w.graph ~= nil then
+      local now = clock()
+      if w.graph_check_at == nil or now >= w.graph_check_at then
+        local ok, state = pcall(reads.graph_state)
+        w.graph_check_at = now + GRAPH_CHECK_SECONDS
+        if not ok then
+          local msg = tostring(state)
+          if msg ~= graph_poll_error then
+            graph_poll_error = msg
+            pcall(io.log, "graph state poll failed: " .. msg)
+          end
+          for i = 1, w.graph.n do w.graph.ok[i] = false end
+          w.graph.signature = nil
+          clear_path_cache()
+        else
+          graph_poll_error = nil
+        end
+        if ok and state.index ~= w.graph.index then
+          clear_path_cache()
+          w.graph, w.copy, copy_failed = nil, { state = state }, false
+        elseif ok and state.signature ~= w.graph.signature then
+          for i, hash in ipairs(w.graph.hash) do
+            w.graph.ok[i] = state.disabled[hash] ~= true
+          end
+          w.graph.signature = state.signature
+          clear_path_cache()
+        end
+      end
+    end
     if want and w.copy == nil and w.graph == nil and w.copy_tries < 3
       and (not copy_failed or w.route_gen ~= fail_gen) then
       w.copy, copy_failed = {}, false
     end
     if w.copy ~= nil then
       local t0 = clock()
-      local ok, err = pcall(copy_run, w.copy, (budget_ms or 0) / 1000)
-      if not ok then copy_fail(err) end
+      local active_copy = w.copy
+      local prior_state = active_copy.state
+      local ok, err = pcall(copy_run, active_copy, (budget_ms or 0) / 1000)
+      if not ok then
+        prior_state = prior_state or active_copy.state
+        local state_ok, fresh = pcall(reads.graph_state)
+        if state_ok and prior_state ~= nil
+            and (fresh.index ~= prior_state.index
+              or fresh.signature ~= prior_state.signature) then
+          w.copy, copy_failed, fail_gen = { state = fresh }, false, nil
+        else
+          copy_fail(err)
+        end
+      end
       local ms = (clock() - t0) * 1000
       if ms > w.copy_ms_max then w.copy_ms_max = ms end
     elseif want and w.graph ~= nil then
@@ -3994,9 +4084,10 @@ function M.new(a, reads, io)
       return "path: copying 0%"
     end
     local rp = w.rps[cid]
-    if rp == nil or not same_route(rp, cid, e.stops, rp.undisc) or next_target(rp) ~= nil then
-      return "path: finding"
-    end
+    if rp == nil or not same_route(rp, cid, e.stops, rp.undisc) then return "path: finding" end
+    local result = path_result(rp)
+    if result == nil then return "path: finding" end
+    if result == false then return "path unavailable" end
     return "path ready"
   end
 
@@ -4004,7 +4095,7 @@ function M.new(a, reads, io)
     local routes, total = input_tbl and input_tbl.routes or {}, 0
     for _, route in ipairs(routes) do if has_stops(route) then total = total + 1 end end
     if total == 0 or route_path ~= 1 then return nil end
-    local status = { total = total, ready = 0, state = "waiting" }
+    local status = { total = total, ready = 0, unavailable = 0, state = "waiting" }
     if w.copy ~= nil then
       status.state = "copying"
       status.percent = w.copy.nb ~= nil and (100 * w.copy.b) // w.copy.nb or 0
@@ -4017,12 +4108,15 @@ function M.new(a, reads, io)
     for _, route in ipairs(routes) do
       if has_stops(route) then
         local rp = rp_get(route.cid, route.stops, undisc and true or false)
-        if next_target(rp) == nil then status.ready = status.ready + 1 end
+        local result = path_result(rp)
+        if result == true then status.ready = status.ready + 1
+        elseif result == false then status.unavailable = status.unavailable + 1 end
       end
     end
     if status.ready == total then status.state = "ready"
     elseif w.path_job ~= nil and w.path_job.kind == "near" then status.state = "locating"
     elseif w.path_job ~= nil and w.path_job.kind == "path" then status.state = "finding"
+    elseif status.unavailable > 0 then status.state = "unavailable"
     end
     return status
   end
@@ -5522,17 +5616,92 @@ function M.game_reads()
     return o
   end
 
-  local function graph_blocks()
-    local mgr = managed(single("app.AIWorldGraphManager"), "no manager")
-    local datas = managed(G(mgr, "AIWorldGraphDatas"), "no graph datas")
-    local data = managed(C(datas, "get_Item", 0), "no graph data")
-    local gd = managed(G(data, "<GraphData>k__BackingField"), "no graph data body")
-    local graph = managed(G(gd, "AIWorldGraph"), "no graph")
-    return managed(G(graph, "Nodes"), "no blocks")
+  local node_hash_method = nil
+
+  local function node_hash(block_id, index_id)
+    if node_hash_method == nil then
+      local td = sdk.find_type_definition("app.AIWorldGraph.NodeID")
+      node_hash_method = td ~= nil and td:get_method("getHash") or nil
+      if node_hash_method == nil then error("graph: no node hash") end
+    end
+    local ok, value = pcall(function()
+      return node_hash_method:call(nil, block_id, index_id)
+    end)
+    if not ok or type(value) ~= "number" then error("graph: node hash") end
+    return value
   end
 
-  function R.graph_block_count()
-    local n = C(graph_blocks(), "get_Count")
+  local function graph_parts(index)
+    local mgr = managed(single("app.AIWorldGraphManager"), "no manager")
+    local datas = managed(G(mgr, "AIWorldGraphDatas"), "no graph datas")
+    local enabled = C(mgr, "isEnebleAIWorldGraphData", index)
+    if enabled ~= true then error("graph: selected data disabled") end
+    local data = managed(C(datas, "get_Item", index), "no graph data")
+    local gd = managed(G(data, "<GraphData>k__BackingField"), "no graph data body")
+    local graph = managed(G(gd, "AIWorldGraph"), "no graph")
+    return mgr, data, graph, managed(G(graph, "Nodes"), "no blocks")
+  end
+
+  function R.graph_state()
+    local mgr = managed(single("app.AIWorldGraphManager"), "no manager")
+    local datas = managed(G(mgr, "AIWorldGraphDatas"), "no graph datas")
+    local n = C(datas, "get_Count")
+    if type(n) ~= "number" or n < 1 then error("graph: data count") end
+    local index = nil
+    for i = 0, n - 1 do
+      local enabled = C(mgr, "isEnebleAIWorldGraphData", i)
+      if type(enabled) ~= "boolean" then error("graph: enabled state") end
+      if enabled then
+        if index ~= nil then error("graph: multiple enabled data") end
+        index = i
+      end
+    end
+    if index == nil then error("graph: no enabled data") end
+    local _, data, graph = graph_parts(index)
+    local dict = G(mgr, "NodeDisableInfoDict")
+      or C(data, "get_NodeDisableInfoDictProp") or G(data, "NodeDisableInfoDict")
+    dict = managed(dict, "no disable dictionary")
+    local has = C(dict, "ContainsKey", graph)
+    if type(has) ~= "boolean" then error("graph: disable dictionary state") end
+    local disabled, rows = {}, {}
+    if has then
+      local info = managed(C(dict, "get_Item", graph), "no disable info")
+      local counters = G(info, "<NodeDisableCounterDict>k__BackingField")
+        or C(info, "get_NodeDisableCounterDict")
+      counters = managed(counters, "no disable counters")
+      local count = C(counters, "get_Count")
+      if type(count) ~= "number" or count < 0 then error("graph: disable count") end
+      if count > 0 then
+        local values = entries(counters)
+        if values == nil then error("graph: disable entries") end
+        for _, entry in ipairs(values) do
+          local key, value = int_value(G(entry, "key")), int_value(G(entry, "value"))
+          if type(key) ~= "number" or type(value) ~= "number" then
+            error("graph: disable entry")
+          end
+          if value > 0 then
+            disabled[key] = true
+            rows[#rows + 1] = { key, value }
+          end
+        end
+      end
+    end
+    table.sort(rows, function(a, b) return a[1] < b[1] end)
+    local parts = { tostring(index), ":" }
+    for _, row in ipairs(rows) do
+      parts[#parts + 1] = tostring(row[1])
+      parts[#parts + 1] = "="
+      parts[#parts + 1] = tostring(row[2])
+      parts[#parts + 1] = ","
+    end
+    return { index = index, signature = table.concat(parts), disabled = disabled,
+      disabled_count = #rows }
+  end
+
+  function R.graph_block_count(state)
+    state = state or R.graph_state()
+    local _, _, _, blocks = graph_parts(state.index)
+    local n = C(blocks, "get_Count")
     if type(n) ~= "number" then error("graph: block count") end
     return n
   end
@@ -5541,8 +5710,10 @@ function M.game_reads()
   -- first + count - 1 of block i (1-based, clamped to the block) and
   -- out.lb, out.ln for those nodes' links in node order; returns the
   -- block's node count and the number of nodes filled.
-  function R.graph_block(i, out, first, count)
-    local block = managed(C(graph_blocks(), "get_Item", i), "no block")
+  function R.graph_block(i, out, first, count, state)
+    state = state or R.graph_state()
+    local _, _, _, blocks = graph_parts(state.index)
+    local block = managed(C(blocks, "get_Item", i), "no block")
     local list = managed(G(block, "Nodes"), "no node list")
     local n = C(list, "get_Count")
     if type(n) ~= "number" then error("graph: node count") end
@@ -5550,7 +5721,9 @@ function M.game_reads()
     if lo < 1 then lo = 1 end
     local hi = count ~= nil and lo + count - 1 or n
     if hi > n then hi = n end
-    local x, y, z, lc, lb, ln = out.x, out.y, out.z, out.lc, out.lb, out.ln
+    out.ok, out.hash = out.ok or {}, out.hash or {}
+    local x, y, z, lc, lb, ln, enabled, hashes = out.x, out.y, out.z,
+      out.lc, out.lb, out.ln, out.ok, out.hash
     local nl, f = 0, 0
     for k = lo, hi do
       f = f + 1
@@ -5558,6 +5731,8 @@ function M.game_reads()
       local p = xyz(G(node, "_Pos"))
       if p == nil then error("graph: node position") end
       x[f], y[f], z[f] = p.x, p.y, p.z
+      local hash = node_hash(i, k - 1)
+      hashes[f], enabled[f] = hash, state.disabled[hash] ~= true
       local links = managed(G(node, "Links"), "no links")
       local m = C(links, "get_Count")
       if type(m) ~= "number" then error("graph: link count") end

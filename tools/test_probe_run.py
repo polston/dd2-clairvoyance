@@ -123,7 +123,9 @@ return D, qlm, td, world
             "isFakeShopRemainingMinute"}
         monster_methods = {
             "get_Transform", "get_UniversalPosition", "get_IsDead"}
-        self.assertEqual(needed | talk_methods | forgery_methods | monster_methods,
+        brine_methods = {"get_FilterInfo", "castRay"}
+        self.assertEqual(needed | talk_methods | forgery_methods | monster_methods |
+                         brine_methods,
                          probe_run.REVIEWED_METHODS)
         self.assertEqual(allowed, probe_run.REVIEWED_METHODS)
         self.assertEqual(needed - allowed, set())
@@ -186,6 +188,18 @@ return D, qlm, td, world
         for method in near_misses:
             source = 'return reviewed_call(character, "%s")' % method
             with self.subTest(near_miss=method):
+                self.assertEqual(
+                    probe_run.unsafe_probe_call(source),
+                    "unreviewed managed method")
+
+    def test_brine_probe_reads_are_exact_and_setters_stay_rejected(self):
+        for method in ("get_FilterInfo", "castRay"):
+            source = 'return reviewed_call(object, "%s")' % method
+            with self.subTest(method=method):
+                self.assertIsNone(probe_run.unsafe_probe_call(source))
+        for method in ("set_FilterInfo", "castSphere", "initCastRayQuery"):
+            source = 'return reviewed_call(object, "%s")' % method
+            with self.subTest(method=method):
                 self.assertEqual(
                     probe_run.unsafe_probe_call(source),
                     "unreviewed managed method")

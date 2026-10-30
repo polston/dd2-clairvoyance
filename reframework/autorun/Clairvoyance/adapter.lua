@@ -5977,7 +5977,8 @@ function A.make()
       local dest = rows[1]
       local cid = int_value(safe_call(dest, "get_CharaID"))
       if cid == 0 then cid = nil end
-      local target = { cid = cid, pos = position(safe_call(dest, "getDestination")) }
+      local target = { cid = cid,
+        pos = cid ~= nil and position(safe_call(dest, "getDestination")) or nil }
       if cid == nil then
         local key = int_value(safe_call(dest, "get_KeyLocation"))
         local area = int_value(safe_call(dest, "get_LocalArea"))
@@ -6245,7 +6246,8 @@ function A.make()
               evidence = { provider = "task", task_index = ti, destination_index = index }, eligibility = "eligible" }
           end
           if target.place ~= nil then
-            local place_target_value = clone(target); place_target_value.cid = nil
+            local place_target_value = clone(target)
+            place_target_value.cid, place_target_value.pos = nil, nil
             result.task_destinations[#result.task_destinations + 1] = { kind = "place", task_index = ti,
               destination_index = index, signal_index = index, target = place_target_value,
               evidence = { provider = "task", task_index = ti, destination_index = index }, eligibility = "eligible" }
@@ -6378,7 +6380,8 @@ function A.make()
                           destination_index = parsed.index }, eligibility = "eligible" }
                     end
                     if target.place ~= nil then
-                      local place_target_value = clone(target); place_target_value.cid = nil
+                      local place_target_value = clone(target)
+                      place_target_value.cid, place_target_value.pos = nil, nil
                       out.signals[#out.signals + 1] = { kind = "place",
                         task_index = ti, concierge_index = g.index, destination_index = parsed.index,
                         signal_index = parsed.index, target = place_target_value,

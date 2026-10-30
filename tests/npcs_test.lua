@@ -303,6 +303,16 @@ do
   j = N.path_new(long, 1, 30)
   check("cap default", j.cap == 20000 and j.weight == 1.2)
   check("long chain ok", run(j) == "done" and #j.path == 30)
+  coords, links = {}, {}
+  for i = 1, 20002 do
+    coords[i] = { i, 0, 0 }
+    links[i] = i < 20002 and { i + 1 } or {}
+  end
+  local cross_world = mkgraph(coords, links)
+  j = N.path_new(cross_world, 1, 20002)
+  check("cap scales with graph and completes past 20000 expansions",
+    j.cap == 40004 and run(j) == "done" and j.expanded > 20000
+      and #j.path == 20002)
 
   -- resumable on a 40x50 grid
   local W, H = 40, 50
@@ -347,6 +357,15 @@ do
     calls = calls + 1
   end
   check("nearest budgeted", st == "done" and nj.best == 3 and calls > 1)
+
+  local masked = mkgraph({ { 0, 0, 0 }, { 1, 0, 0 }, { 2, 0, 0 } },
+    { { 2 }, { 1, 3 }, { 2 } })
+  masked.ok = { true, false, true }
+  nj = N.nearest_new(masked, 1, 0, 0)
+  check("nearest skips disabled graph nodes",
+    N.nearest_step(nj, 1e9, function() return 0 end) == "done" and nj.best ~= 2)
+  j = N.path_new(masked, 1, 3)
+  check("path cannot traverse a disabled graph node", run(j) == "failed")
 end
 
 -- route_pairs
@@ -425,6 +444,8 @@ do
   n = N.route_polyline(pairs1, ends, fit, 1, out)
   check("polyline mode 1", n == 10 and out[3] == 12 and out[4] == 22
     and out[7] == 16 and out[8] == 26 and out[9] == 5 and out[10] == 6)
+  n = N.route_polyline({ { i = 1, j = 3 } }, ends, fit, 1, out)
+  check("polyline walking path omits missing geometry", n == 0 and #out == 0)
   n = N.route_polyline(pairs1, ends, fit, 0, out)
   check("polyline mode 1 off", n == 4)
   n = N.route_polyline(pairs1, ends, nil, 1, out)

@@ -758,7 +758,7 @@ do
     elseif status.state == "locating" then detail = "locating route endpoints"
     elseif status.state == "finding" then detail = "finding walking paths"
     elseif status.state == "waiting" then detail = "waiting to start"
-    elseif status.state == "unavailable" then detail = "navigation graph unavailable"
+    elseif status.state == "unavailable" then detail = "walking path unavailable"
     end
     return string.format("Route paths: %d/%d ready - %s",
       status.ready or 0, status.total or 0, detail)

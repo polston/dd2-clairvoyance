@@ -4624,9 +4624,18 @@ do
     rdef("schedule_now", function() return d.day, d.hour end)
     rdef("current_row", function() return { area = 1, location = 1 } end)
     rdef("area_nodes", function() return nil end)
+    rdef("graph_state", function()
+      if d.graph_state_fail then error("fake graph state transition") end
+      return d.graph_state or { index = 0, signature = "0:", disabled = {} }
+    end)
     rdef("graph_block_count", function() return #cur end)
-    rdef("graph_block", function(i, out, first, count)
+    rdef("graph_block", function(i, out, first, count, state)
+      if d.before_read then d.before_read(i, first, count) end
       if d.graph_fail_at == i then error("fake graph failure") end
+      if d.reject_stale_state and d.graph_state ~= nil
+          and state.index ~= d.graph_state.index then
+        error("fake selected graph disabled")
+      end
       local blk = cur[i + 1]
       local lo = first or 1
       local hi = count and math.min(#blk, lo + count - 1) or #blk
@@ -4635,6 +4644,9 @@ do
         local nd = blk[k]
         fl = fl + 1
         out.x[fl], out.y[fl], out.z[fl] = nd[1], nd[2], nd[3]
+        local hash = i * 100000 + k - 1
+        out.hash[fl] = hash
+        out.ok[fl] = state == nil or state.disabled[hash] ~= true
         out.lc[fl] = #nd[4]
         for _, l in ipairs(nd[4]) do
           nl = nl + 1
@@ -4941,6 +4953,122 @@ do
       and w:route_paths(true)[2001][1].pts ~= nil)
   end
 
+  -- An enabled-graph switch can occur between budgeted copy slices.  A read
+  -- against the now-disabled selection must restart from the fresh state; it
+  -- is not a permanent copy failure and must not consume a retry.
+  do
+    local f, d = gfix()
+    f.tick = 0.001
+    d.graph_state = { index = 0, signature = "0:", disabled = {} }
+    d.reject_stale_state = true
+    d.on_read = function()
+      if d.graph_state.index == 0 then
+        d.graph_state = { index = 1, signature = "1:", disabled = {} }
+      end
+    end
+    local w = with_route(f, { P(0, 0, 0), P(40, 0, 0) })
+    for _ = 1, 100 do w:path_step(0.5, 1, true) end
+    check("graph copy transition: enabled-index switch restarts without spending a retry",
+      w.graph ~= nil and w.graph.index == 1 and w.copy_tries == 0
+        and w:path_status(1, 2001) == "path ready")
+  end
+
+  -- The same transition can occur during the very first copy slice, after
+  -- graph_state supplied the selection but before the first block read.  That
+  -- state is already part of the live copy and must be available to recovery.
+  do
+    local f, d = gfix()
+    d.graph_state = { index = 0, signature = "0:", disabled = {} }
+    d.reject_stale_state = true
+    d.before_read = function()
+      d.before_read = nil
+      d.graph_state = { index = 1, signature = "1:", disabled = {} }
+    end
+    local w = with_route(f, { P(0, 0, 0), P(40, 0, 0) })
+    for _ = 1, 20 do w:path_step(1e6, 1, true) end
+    check("graph copy transition: first-slice switch restarts without spending a retry",
+      w.graph ~= nil and w.graph.index == 1 and w.copy_tries == 0
+        and w:path_status(1, 2001) == "path ready")
+  end
+
+  -- A settled pair with no graph path is unavailable, never ready.  Its
+  -- missing geometry must remain distinguishable from a completed path.
+  do
+    local isolated = { {
+      { 0, 0, 0, {} },
+      { 100, 0, 0, {} },
+    } }
+    local f = gfix(isolated)
+    local w = with_route(f, { P(0, 0, 0), P(100, 0, 0) })
+    for _ = 1, 10 do w:path_step(1e6, 1, true) end
+    local status = w:route_status(1, true)
+    local pair = w:route_paths(true)[2001][1]
+    check("route failure: pair status is unavailable",
+      w:path_status(1, 2001) == "path unavailable")
+    check("route failure: summary is unavailable, not ready",
+      status.ready == 0 and status.state == "unavailable")
+    check("route failure: no walking geometry is published", pair.pts == nil)
+  end
+
+  -- Walking endpoints must be close enough to the graph to justify the
+  -- exact endpoint connector. A distant nearest node is not a walking route.
+  do
+    local line = { {
+      { 0, 0, 0, { { 0, 1 } } },
+      { 100, 0, 0, { { 0, 0 } } },
+    } }
+    local near_w = with_route(gfix(line), { P(0, 0, 0), P(110, 0, 0) })
+    for _ = 1, 10 do near_w:path_step(1e6, 1, true) end
+    check("route endpoint: the inclusive 10 m connector limit remains a walking route",
+      near_w:path_status(1, 2001) == "path ready")
+    local far_w = with_route(gfix(line), { P(0, 0, 0), P(111, 0, 0) })
+    for _ = 1, 10 do far_w:path_step(1e6, 1, true) end
+    check("route endpoint: an 11 m connector is unavailable",
+      far_w:path_status(1, 2001) == "path unavailable"
+        and far_w:route_paths(true)[2001][1].pts == nil)
+  end
+
+  -- A live door/phase mask change invalidates cached nearest nodes and paths,
+  -- but the immutable graph topology does not need another full copy.
+  do
+    local line = { {
+      { 0, 0, 0, { { 0, 1 } } },
+      { 5, 0, 0, { { 0, 0 }, { 0, 2 } } },
+      { 10, 0, 0, { { 0, 1 } } },
+    } }
+    local f, d = gfix(line)
+    d.graph_state = { index = 0, signature = "0:1=1,", disabled = { [1] = true } }
+    local w = with_route(f, { P(0, 0, 0), P(10, 0, 0) })
+    for _ = 1, 10 do w:path_step(1e6, 1, true) end
+    local graph = w.graph
+    check("graph mask refresh: disabled middle node blocks the route",
+      graph ~= nil and w:path_status(1, 2001) == "path unavailable")
+    d.graph_state = { index = 0, signature = "0:", disabled = {} }
+    f.clock_t = f.clock_t + 2
+    for _ = 1, 10 do w:path_step(1e6, 1, true) end
+    check("graph mask refresh: enabling the node rebuilds cached paths without recopying",
+      w.graph == graph and w:path_status(1, 2001) == "path ready"
+        and f.reads_n.graph_block_count == 1)
+    local copy_tries = w.copy_tries
+    d.graph_state_fail = true
+    f.clock_t = f.clock_t + 2
+    for _ = 1, 10 do w:path_step(1e6, 1, true) end
+    check("graph mask refresh: a transient poll failure fails closed without spending copy retries",
+      w.graph == graph and w:path_status(1, 2001) == "path unavailable"
+        and w.copy_tries == copy_tries)
+    d.graph_state_fail = nil
+    f.clock_t = f.clock_t + 2
+    for _ = 1, 10 do w:path_step(1e6, 1, true) end
+    check("graph mask refresh: the next successful poll recovers without a route toggle",
+      w.graph == graph and w:path_status(1, 2001) == "path ready"
+        and w.copy_tries == copy_tries)
+    d.graph_state = { index = 0, signature = "0:1=1,", disabled = { [1] = true } }
+    f.clock_t = f.clock_t + 2
+    for _ = 1, 10 do w:path_step(1e6, 1, true) end
+    check("graph mask refresh: disabling the node invalidates a cached ready path",
+      w.graph == graph and w:path_status(1, 2001) == "path unavailable")
+  end
+
   -- Focus lifecycle integration: the exact objective publication is cleared,
   -- then restored from a moved player origin.  Success is not merely a route
   -- entry or a settled job: the walking-path pair must feed intermediate
@@ -5225,36 +5353,68 @@ do
   end
   local blk0 = obj({ Nodes = list({ node(1, 2, 3, { { 0, 1 } }), node(4, 5, 6, {}) }) })
   local blk1 = obj({ Nodes = list({ node(7, 8, 9, { { 0, 0 }, { 1, 0 } }) }) })
+  local graph0 = obj({ Nodes = list({ obj({ Nodes = list({ node(-1, -1, -1, {}) }) }) }) })
   local graph = obj({ Nodes = list({ blk0, blk1 }) })
-  local mgr = obj({ AIWorldGraphDatas = list({ obj({ ["<GraphData>k__BackingField"] =
-    obj({ AIWorldGraph = graph }) }) }) })
+  local disabled_entries = {}
+  function disabled_entries:get_elements()
+    return { obj({ key = 100, value = 1 }), obj({ key = 101, value = 0 }) }
+  end
+  local counters = obj({ _entries = disabled_entries, _count = 2 }, {
+    get_Count = function() return 2 end,
+  })
+  local disable_info = obj({ ["<NodeDisableCounterDict>k__BackingField"] = counters })
+  local disable_dict = obj(nil, { ContainsKey = function(g) return g == graph end,
+    get_Item = function(g) if g == graph then return disable_info end end })
+  local data0 = obj({ ["<GraphData>k__BackingField"] = obj({ AIWorldGraph = graph0 }) })
+  local data1 = obj({ ["<GraphData>k__BackingField"] = obj({ AIWorldGraph = graph }),
+    NodeDisableInfoDict = disable_dict })
+  local mgr = obj({ AIWorldGraphDatas = list({ data0, data1 }), NodeDisableInfoDict = disable_dict }, {
+    isEnebleAIWorldGraphData = function(i) return i == 1 end,
+  })
   local singletons, fetches = { ["app.AIWorldGraphManager"] = mgr }, 0
   local saved_sdk = sdk
   sdk = {
     get_managed_singleton = function(n) fetches = fetches + 1; return singletons[n] end,
     is_managed_object = function(o) return not bad[o] end,
-    find_type_definition = function() return nil end,
+    find_type_definition = function(n)
+      if n ~= "app.AIWorldGraph.NodeID" then return nil end
+      return { get_method = function(_, name)
+        if name ~= "getHash" then return nil end
+        return { call = function(_, _, b, i) return b * 100 + i end }
+      end }
+    end,
   }
   local R = world.game_reads()
-  check("graph reads: block count", R.graph_block_count() == 2)
-  local out = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {} }
-  local n = R.graph_block(1, out)
+  local state = R.graph_state()
+  check("graph reads: selects the one enabled graph",
+    state.index == 1 and R.graph_block_count(state) == 2)
+  local out = { x = {}, y = {}, z = {}, lc = {}, lb = {}, ln = {}, ok = {}, hash = {} }
+  local n = R.graph_block(1, out, nil, nil, state)
   check("graph reads: block 1 as plain tables", n == 1 and out.x[1] == 7 and out.y[1] == 8
     and out.z[1] == 9 and out.lc[1] == 2 and out.lb[1] == 0 and out.ln[1] == 0
-    and out.lb[2] == 1 and out.ln[2] == 0 and type(out.x) == "table")
-  local nc, nf = R.graph_block(1, out, 1, 16)
+    and out.lb[2] == 1 and out.ln[2] == 0 and out.ok[1] == false
+    and out.hash[1] == 100 and type(out.x) == "table")
+  local nc, nf = R.graph_block(1, out, 1, 16, state)
   check("graph reads: clamp reports node count and filled", nc == 1 and nf == 1)
-  local nc2, nf2 = R.graph_block(0, out, 2, 5)
+  local nc2, nf2 = R.graph_block(0, out, 2, 5, state)
   check("graph reads: partial read from node 2", nc2 == 2 and nf2 == 1 and out.x[1] == 4
     and out.lc[1] == 0)
-  local nc3, nf3 = R.graph_block(0, out, 3, 5)
+  local nc3, nf3 = R.graph_block(0, out, 3, 5, state)
   check("graph reads: past the end fills none", nc3 == 2 and nf3 == 0)
-  local n0 = R.graph_block(0, out)
+  local n0 = R.graph_block(0, out, nil, nil, state)
   check("graph reads: block 0", n0 == 2 and out.x[2] == 4 and out.lc[1] == 1
     and out.lc[2] == 0 and out.ln[1] == 1)
-  check("graph reads: chain re-acquired each call", fetches == 6)
+  local populated_info = disable_info
+  local empty_counters = obj({}, { get_Count = function() return 0 end })
+  disable_info = obj({ ["<NodeDisableCounterDict>k__BackingField"] = empty_counters })
+  local empty_state = R.graph_state()
+  check("graph reads: an empty disable dictionary is a valid enabled graph state",
+    empty_state.index == 1 and empty_state.signature == "1:"
+      and empty_state.disabled_count == 0 and next(empty_state.disabled) == nil)
+  disable_info = populated_info
+  check("graph reads: chain re-acquired each call", fetches >= 6)
   bad[blk0] = true
-  check("graph reads: failed managed check raises", not pcall(R.graph_block, 0, out))
+  check("graph reads: failed managed check raises", not pcall(R.graph_block, 0, out, nil, nil, state))
   bad[blk0] = nil
   bad[graph] = true
   check("graph reads: failed check up the chain raises", not pcall(R.graph_block_count))
@@ -6654,7 +6814,7 @@ do
     if f.fail.area_nodes then error("area nodes unreadable") end
     return f.data.area_nodes and f.data.area_nodes[row.area]
   end
-  f.data.kpos = { [77] = P(10, 20, 30) }
+  f.data.kpos = { [77] = P(10, 20, 30), [79] = P(13, 23, 33) }
   f.data.area_nodes = { [0] = { P(40, 50, 60) }, [7] = { P(70, 80, 90) } }
   local base_providers = {
     { provider = "placed", generation = 4, status = "unknown",
@@ -6673,11 +6833,14 @@ do
     read_status = "ok", live_destination = nil, item_ownership = {},
     task_destinations = {
       { kind = "place", task_index = 0, destination_index = 2,
-        target = { place = { kind = "local_area", local_area = 0 } }, eligibility = "eligible" },
+        target = { place = { kind = "local_area", local_area = 0 }, pos = P(900, 900, 900) },
+        eligibility = "eligible" },
       { kind = "place", task_index = 0, destination_index = 3,
-        target = { place = { kind = "key_location", key = 77 } }, eligibility = "eligible" },
+        target = { place = { kind = "key_location", key = 77 }, pos = P(901, 901, 901) },
+        eligibility = "eligible" },
       { kind = "place", task_index = 0, destination_index = 4,
-        target = { place = { kind = "local_area", local_area = 7 } }, eligibility = "eligible" },
+        target = { place = { kind = "local_area", local_area = 7 }, pos = P(902, 902, 902) },
+        eligibility = "eligible" },
     }, guidance = {} } } }
   local resolved_places = w:objective_place_snapshot(task)
   local resolved_generation = resolved_places.generation
@@ -6692,6 +6855,22 @@ do
       and table.concat(f.data.area_rows_seen, ",") == "0,7"
       and f.data.last_area_row.location == nil
       and (f.reads_n.key_pos or 0) == 1 and (f.reads_n.area_nodes or 0) == 2)
+
+  local live_task = { need_generation = 4, journal_generation = 2, quests = { {
+    qid = 30041, task_index = 0, read_status = "ok", item_ownership = {},
+    task_destinations = {}, guidance = {}, live_destination = { task_index = 0,
+      target = { place = { kind = "key_location", key = 79 }, pos = P(999, 999, 999) },
+      eligibility = "eligible" },
+  } } }
+  local live_w = f.new()
+  local live_places = live_w:objective_place_snapshot(live_task)
+  local live_objective = core.objective_snapshot(live_task, live_places, {}, core.target_registry_new())
+  check("objective places: live-only place identity overrides raw destination position",
+    live_places.status == "ok" and #live_places.places == 1
+      and live_places.places[1].pos.x == 13
+      and live_objective ~= nil and #live_objective.targets == 1
+      and live_objective.targets[1].provider == "live_destination"
+      and live_objective.targets[1].target.pos.x == 13)
   task.journal_generation = 3
   local identical_places = w:objective_place_snapshot(task)
   check("objective places: identical observations keep an independent stable generation",

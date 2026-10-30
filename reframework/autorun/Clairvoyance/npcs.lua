@@ -882,14 +882,17 @@ function M.nearest_step(job, budget_ms, clock)
   if job.status == "done" then return "done" end
   local g, x, y, z = job.g, job.x, job.y, job.z
   local gx, gy, gz = g.x, g.y, g.z
+  local ok_nodes = g.ok
   local n = g.n
   local limit = (budget_ms or 0) / 1000
   local t0 = clock()
   local i, best, bd = job.i, job.best, job.bestd2
   while i <= n do
-    local dx, dy, dz = gx[i] - x, gy[i] - y, gz[i] - z
-    local d2 = dx * dx + dy * dy + dz * dz
-    if d2 < bd then bd = d2; best = i end
+    if ok_nodes == nil or ok_nodes[i] ~= false then
+      local dx, dy, dz = gx[i] - x, gy[i] - y, gz[i] - z
+      local d2 = dx * dx + dy * dy + dz * dz
+      if d2 < bd then bd = d2; best = i end
+    end
     i = i + 1
     if clock() - t0 >= limit then break end
   end
@@ -947,10 +950,13 @@ end
 
 function M.path_new(g, a, b, opt)
   opt = opt or {}
-  local job = { g = g, a = a, b = b, cap = opt.cap or 20000,
+  local graph_cap = type(g.n) == "number" and g.n * 2 or 0
+  local job = { g = g, a = a, b = b, cap = opt.cap or math.max(20000, graph_cap),
     weight = opt.weight or 1.2, expanded = 0, status = "running",
     hk = {}, hv = {}, hn = 0, gs = { [a] = 0 }, parent = {}, closed = {} }
-  if a == b then
+  if g.ok ~= nil and (g.ok[a] == false or g.ok[b] == false) then
+    finish(job, "failed")
+  elseif a == b then
     job.path = { a }
     finish(job, "done")
   else
@@ -996,16 +1002,18 @@ function M.path_step(job, budget_ms, clock)
       local s = ls[u]
       for slot = s, s + lc[u] - 1 do
         local t = lt[slot]
-        local tx, ty, tz = gx[t], gy[t], gz[t]
-        local dx, dy, dz = tx - ux, ty - uy, tz - uz
-        local ng = gu + sqrt(dx * dx + dy * dy + dz * dz)
-        local old = gs[t]
-        if old == nil or ng < old then
-          gs[t] = ng
-          parent[t] = u
-          closed[t] = nil
-          dx, dy, dz = tx - bx, ty - by, tz - bz
-          heap_push(job, ng + w * sqrt(dx * dx + dy * dy + dz * dz), t)
+        if g.ok == nil or g.ok[t] ~= false then
+          local tx, ty, tz = gx[t], gy[t], gz[t]
+          local dx, dy, dz = tx - ux, ty - uy, tz - uz
+          local ng = gu + sqrt(dx * dx + dy * dy + dz * dz)
+          local old = gs[t]
+          if old == nil or ng < old then
+            gs[t] = ng
+            parent[t] = u
+            closed[t] = nil
+            dx, dy, dz = tx - bx, ty - by, tz - bz
+            heap_push(job, ng + w * sqrt(dx * dx + dy * dy + dz * dz), t)
+          end
         end
       end
       if clock() - t0 >= limit then return "running" end
@@ -1140,11 +1148,11 @@ function M.route_polyline(pairs_, ends, fit, mode, out, starts)
       if e2.lx then x2, y2 = e2.lx, e2.ly
       elseif fit and e2.mx then x2, y2 = M.fit_apply(fit, e2.mx, e2.mz) end
     end
-    if x1 and x2 then
+    local pts = p.pts
+    if x1 and x2 and (mode ~= 1 or pts ~= nil) then
       if n > 0 then n = n + 1; out[n] = false end
       if starts then starts[k] = n + 1 end
       out[n + 1] = x1; out[n + 2] = y1; n = n + 2
-      local pts = p.pts
       if mode == 1 and pts and fit then
         local fa, fb, fc, fd, fox, foy = fit.a, fit.b, fit.c, fit.d, fit.ox, fit.oy
         for q = 1, #pts - 2, 3 do

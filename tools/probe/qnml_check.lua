@@ -347,6 +347,7 @@ reviewed_methods = {
   ["get_Executed"] = true,
   ["get_FakeShopCompleteTime"] = true,
   ["get_FakeShopKeepedItem"] = true,
+  ["get_FilterInfo"] = true,
   ["get_GimmickID"] = true,
   ["get_GmContext"] = true,
   ["get_IsAllItem"] = true,
@@ -381,6 +382,7 @@ reviewed_methods = {
   ["isEventPlayable"] = true,
   ["isFinish"] = true,
   ["canTalkEventInteract"] = true,
+  ["castRay"] = true,
   ["isShopTalkEventAvailableForChara"] = true,
   ["isTalkEventInteractDisabled"] = true,
 }
