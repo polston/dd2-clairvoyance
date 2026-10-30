@@ -2909,22 +2909,24 @@ function M.new(a, reads, io)
   -- World-owned live source readers are optional until their managed gates are
   -- proven. Missing or partial reads publish unknown and never retain rows.
   local function objective_live_sources(provider, read_name, normalize, task_snapshot, need_snapshot,
-      publish_status, freshness_read_name)
+      publish_status, freshness_read_name, allow_unowned, cache_scope,
+      source_query, source_query_signature)
+    cache_scope = cache_scope or provider
     local function unknown_status(generation, reason)
       return { generation = generation, complete = false, reason_code = reason,
         rows = { { scope = "provider", generation = generation,
           identity = "provider:" .. provider, provider = provider, qid = nil,
           task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
     end
-    local need_generation = type(task_snapshot) == "table"
-      and to_int(task_snapshot.need_generation) or nil
+    local need_generation = allow_unowned and 1 or (type(task_snapshot) == "table"
+      and to_int(task_snapshot.need_generation) or nil)
     local current_tasks = objective_task_rows(task_snapshot)
     local owns_current_work = objective_need_proves_current_work(task_snapshot,
       need_snapshot, current_tasks)
-    if not owns_current_work then
-      S.objective_live_source_cache[provider] = nil
+    if not allow_unowned and not owns_current_work then
+      S.objective_live_source_cache[cache_scope] = nil
       local evidence = { status = "unknown", reason = "current_work_unavailable" }
-      local key = "world-" .. provider
+      local key = "world-" .. cache_scope
       local state = S.objective_source_observations[key]
       local generation = state and state.generation or 1
       if state ~= nil and not objective_same(state.value, evidence) then
@@ -2939,9 +2941,10 @@ function M.new(a, reads, io)
       end
       return result
     end
-    local source_generation = need_snapshot.source_generation
-    local need_signature = objective_need_signature(need_snapshot)
-    local cached = S.objective_live_source_cache[provider]
+    local source_generation = allow_unowned and 1 or need_snapshot.source_generation
+    local need_signature = allow_unowned and source_query_signature
+      or objective_need_signature(need_snapshot)
+    local cached = S.objective_live_source_cache[cache_scope]
     local cache_matches = cached ~= nil and cached.round == last_round
       and cached.need_generation == need_generation
       and cached.source_generation == source_generation
@@ -2954,7 +2957,9 @@ function M.new(a, reads, io)
         and objective_same(freshness, cached.freshness)
     end
     if cache_matches then return objective_clone(cached.value) end
-    local ok, raw = call(read_name, task_snapshot, objective_catalog, need_snapshot)
+    local ok, raw
+    if allow_unowned then ok, raw = call(read_name, source_query)
+    else ok, raw = call(read_name, task_snapshot, objective_catalog, need_snapshot) end
     local rows = type(raw) == "table" and raw.rows or nil
     local dense, n = type(rows) == "table", type(rows) == "table" and #rows or 0
     if dense then
@@ -3021,7 +3026,7 @@ function M.new(a, reads, io)
       if valid then status = "ok" else candidates = {} end
     end
     local evidence = { status = status, reason = reason, raw = raw }
-    local key = "world-" .. provider
+    local key = "world-" .. cache_scope
     local state = S.objective_source_observations[key]
     local generation = state and state.generation or 1
     if state ~= nil and not objective_same(state.value, evidence) then
@@ -3045,7 +3050,7 @@ function M.new(a, reads, io)
         result.source_status = unknown_status(generation, reason)
       end
     end
-    S.objective_live_source_cache[provider] = { round = last_round,
+    S.objective_live_source_cache[cache_scope] = { round = last_round,
       need_generation = need_generation, source_generation = source_generation,
       need_signature = need_signature,
       freshness = type(raw) == "table" and objective_clone(raw.freshness) or nil,
@@ -3105,50 +3110,108 @@ function M.new(a, reads, io)
     end, task_snapshot, need_snapshot)
   end
 
+  local function objective_monster_normalize(row)
+    if type(row) ~= "table" then return nil, "monster_row_malformed" end
+    local drop_id = row.drop_row_id
+    local valid_drop_id = (type(drop_id) == "string" and drop_id ~= "")
+      or (to_int(drop_id) ~= nil and drop_id > 0)
+    if type(row.uid) ~= "string" or row.uid == "" or not valid_drop_id
+        or type(row.alive) ~= "boolean" or type(row.enabled) ~= "boolean"
+        or type(row.started) ~= "boolean" or type(row.valid) ~= "boolean"
+        or type(row.accessible) ~= "boolean" then
+      return nil, "monster_identity_or_gate_unreadable"
+    end
+    if row.drop_table_readable ~= true then return nil, "monster_drop_table_unreadable" end
+    local item_id, count, raw_rate = to_int(row.item_id), to_int(row.count),
+      to_int(row.raw_rate)
+    if item_id == nil or item_id <= 0 or count == nil or count < 0
+      or not valid_pos(row.pos) or near_zero(row.pos)
+      or raw_rate == nil or raw_rate < 0 then
+      return nil, "monster_drop_evidence_invalid"
+    end
+    local source_id = { "source", "monster_drop", row.uid, drop_id }
+    local unavailable_reason
+    if count == 0 then unavailable_reason = "monster_zero_count"
+    elseif raw_rate == 0 then unavailable_reason = "monster_zero_chance"
+    elseif not row.alive then unavailable_reason = "monster_dead"
+    elseif not row.enabled then unavailable_reason = "monster_disabled"
+    elseif not row.started then unavailable_reason = "monster_not_started"
+    elseif not row.valid then unavailable_reason = "monster_invalid"
+    elseif not row.accessible then unavailable_reason = "monster_inaccessible" end
+    local status_row = { source_id = source_id, item_ids = { item_id },
+      state = unavailable_reason and "unavailable" or "available",
+      reason_code = unavailable_reason or "available" }
+    if unavailable_reason then return false, nil, status_row end
+    return { source_id = source_id, provider = "monster",
+      target = { kind = "monster", uid = row.uid, drop_row_id = drop_id,
+        pos = { x = row.pos.x, y = row.pos.y, z = row.pos.z } },
+      outputs = { { item_id = item_id, count = count } },
+      capacity_pool_id = { "capacity", "monster_drop", row.uid, drop_id },
+      capacity_kind = "probabilistic", available_acquisitions = nil,
+      certainty = "probabilistic", probability = nil,
+      eligibility = "eligible", evidence = { raw_rate = raw_rate, alive = true,
+        enabled = true, started = true, valid = true, accessible = true,
+        drop_table_readable = true } }, nil, status_row
+  end
+
+  local function objective_monster_unknown(reason)
+    local state = S.objective_source_observations["world-monster"]
+    local generation = state and state.generation or 1
+    return { provider = "monster", status = "unknown", complete = false,
+      generation = generation, reason = reason, candidates = {},
+      source_status = { generation = generation, complete = false,
+        reason_code = reason, rows = { { scope = "provider", generation = generation,
+          identity = "provider:monster", provider = "monster", qid = nil,
+          task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } } }
+  end
+
+  local function objective_monster_query(item_ids)
+    local ids, seen, valid = {}, {}, type(item_ids) == "table"
+    local n = valid and #item_ids or 0
+    if n > 64 then valid = false end
+    if valid then
+      local count = 0
+      for key, value in pairs(item_ids) do
+        count = count + 1
+        local id = to_int(value)
+        if type(key) ~= "number" or math.type(key) ~= "integer" or key < 1 or key > n
+            or id == nil or id <= 0 or id > 2147483647 or seen[id] then
+          valid = false; break
+        end
+        seen[id] = true; ids[#ids + 1] = id
+      end
+      if count ~= n then valid = false end
+    end
+    table.sort(ids)
+    return valid and ids or nil
+  end
+
+  -- One normalized live monster provider snapshot serves both item search and
+  -- focused routing. Callers own view/focus policy; discovery owns only evidence.
+  function w:objective_monster_source_snapshot(item_ids)
+    local ids = objective_monster_query(item_ids)
+    if ids == nil then return objective_monster_unknown("monster_source_query_invalid") end
+    local signature = #ids == 0 and "empty" or table.concat(ids, ",")
+    return objective_live_sources("monster", "objective_monster_source_rows",
+      objective_monster_normalize, nil, nil, true, "objective_monster_freshness",
+      true, "monster", ids, signature)
+  end
+
   function w:objective_monster_observations(task_snapshot, need_snapshot)
-    return objective_live_sources("monster", "objective_monster_rows", function(row)
-      if type(row) ~= "table" then return nil, "monster_row_malformed" end
-      local drop_id = row.drop_row_id
-      local valid_drop_id = (type(drop_id) == "string" and drop_id ~= "")
-        or (to_int(drop_id) ~= nil and drop_id > 0)
-      if type(row.uid) ~= "string" or row.uid == "" or not valid_drop_id
-          or type(row.alive) ~= "boolean" or type(row.enabled) ~= "boolean"
-          or type(row.started) ~= "boolean" or type(row.valid) ~= "boolean"
-          or type(row.accessible) ~= "boolean" then
-        return nil, "monster_identity_or_gate_unreadable"
+    local current_tasks = objective_task_rows(task_snapshot)
+    if not objective_need_proves_current_work(task_snapshot, need_snapshot, current_tasks) then
+      return objective_monster_unknown("current_work_unavailable")
+    end
+    local ids, seen = {}, {}
+    for _, group in ipairs(need_snapshot.groups or {}) do
+      for _, option in ipairs(group.options or {}) do
+        if not seen[option.item_id] then
+          seen[option.item_id] = true; ids[#ids + 1] = option.item_id
+        end
       end
-      if row.drop_table_readable ~= true then return nil, "monster_drop_table_unreadable" end
-      local item_id, count, raw_rate = to_int(row.item_id), to_int(row.count),
-        to_int(row.raw_rate)
-      if item_id == nil or item_id <= 0 or count == nil or count < 0
-        or not valid_pos(row.pos) or near_zero(row.pos)
-        or raw_rate == nil or raw_rate < 0 then
-        return nil, "monster_drop_evidence_invalid"
-      end
-      local source_id = { "source", "monster_drop", row.uid, drop_id }
-      local unavailable_reason
-      if count == 0 then unavailable_reason = "monster_zero_count"
-      elseif raw_rate == 0 then unavailable_reason = "monster_zero_chance"
-      elseif not row.alive then unavailable_reason = "monster_dead"
-      elseif not row.enabled then unavailable_reason = "monster_disabled"
-      elseif not row.started then unavailable_reason = "monster_not_started"
-      elseif not row.valid then unavailable_reason = "monster_invalid"
-      elseif not row.accessible then unavailable_reason = "monster_inaccessible" end
-      local status_row = { source_id = source_id, item_ids = { item_id },
-        state = unavailable_reason and "unavailable" or "available",
-        reason_code = unavailable_reason or "available" }
-      if unavailable_reason then return false, nil, status_row end
-      return { source_id = source_id, provider = "monster",
-        target = { kind = "monster", uid = row.uid, drop_row_id = drop_id,
-          pos = { x = row.pos.x, y = row.pos.y, z = row.pos.z } },
-        outputs = { { item_id = item_id, count = count } },
-        capacity_pool_id = { "capacity", "monster_drop", row.uid, drop_id },
-        capacity_kind = "probabilistic", available_acquisitions = nil,
-        certainty = "probabilistic", probability = nil,
-        eligibility = "eligible", evidence = { raw_rate = raw_rate, alive = true,
-          enabled = true, started = true, valid = true, accessible = true,
-          drop_table_readable = true } }, nil, status_row
-    end, task_snapshot, need_snapshot, true, "objective_monster_freshness")
+    end
+    table.sort(ids)
+    return w:objective_monster_source_snapshot(ids)
   end
 
   -- the next refresh runs a round even inside the throttle window
@@ -5590,36 +5653,23 @@ function M.game_reads()
   -- preserved without converting it into a percentage. Behavior and game-
   -- object state prove that the current instance is enabled, started, valid
   -- and participating in world updates.
-  function R.objective_monster_rows(task_snapshot, _, need_snapshot)
+  function R.objective_monster_source_rows(item_ids)
     local function fail(reason)
       return { complete = false, rows = {}, reason = reason }
     end
-    if type(task_snapshot) ~= "table" or not monster_integer(task_snapshot.need_generation, 1)
-        or type(need_snapshot) ~= "table" or need_snapshot.status ~= "ok"
-        or need_snapshot.complete ~= true
-        or need_snapshot.generation ~= task_snapshot.need_generation
-        or not monster_integer(need_snapshot.source_generation, 1) then
-      return fail("current_need_unavailable")
-    end
-    local wanted = {}
-    for _, group in ipairs(need_snapshot.groups or {}) do
-      if type(group) ~= "table" or not monster_integer(group.qid, 1)
-          or not monster_integer(group.task_index, 0) or group.status ~= "eligible"
-          or group.complete ~= true or group.generation ~= need_snapshot.source_generation
-          or not monster_integer(group.remaining, 1) or type(group.options) ~= "table"
-          or #group.options == 0 then
-        return fail("current_need_malformed")
+    local wanted, n, count = {}, type(item_ids) == "table" and #item_ids or -1, 0
+    if n < 0 or n > 64 then return fail("source_query_invalid") end
+    for key, item_id in pairs(item_ids) do
+      count = count + 1
+      if not monster_integer(key, 1) or key > n or not monster_integer(item_id, 1)
+          or item_id > 2147483647 or wanted[item_id] then
+        return fail("source_query_invalid")
       end
-      for _, option in ipairs(group.options) do
-        if type(option) ~= "table" or not monster_integer(option.item_id, 1)
-            or not monster_integer(option.accepted_count, 1) then
-          return fail("current_need_malformed")
-        end
-        wanted[option.item_id] = true
-      end
+      wanted[item_id] = true
     end
+    if count ~= n then return fail("source_query_invalid") end
     if next(wanted) == nil then
-      return { complete = true, rows = {}, reason = "no_focused_items" }
+      return { complete = true, rows = {}, reason = "no_requested_items" }
     end
     local live = objective_monster_live_state()
     if live.complete ~= true then return fail(live.reason) end

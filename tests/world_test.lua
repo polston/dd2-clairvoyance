@@ -1571,14 +1571,7 @@ do
       monster_drop_entry(1001, 502, 3, 9000),
     }),
   })
-  local monster_task = { need_generation = 1, focused_item_ids = { [501] = true },
-    quests = { { qid = 1, task_index = 0, read_status = "ok" } } }
-  local monster_need = { status = "ok", complete = true, generation = 1,
-    source_generation = 1, groups = { { qid = 1, task_index = 0, remaining = 1,
-      options = { { item_id = 501, accepted_count = 1 } }, complete = true,
-      generation = 1, status = "eligible" } } }
-  local monster_ok, monster_snapshot = pcall(R.objective_monster_rows,
-    monster_task, nil, monster_need)
+  local monster_ok, monster_snapshot = pcall(R.objective_monster_source_rows, { 501 })
   check("reads: live monster rows preserve instance identity and raw drops",
     monster_ok and monster_snapshot.complete and #monster_snapshot.rows == 3
       and monster_snapshot.rows[1].uid ~= monster_snapshot.rows[2].uid
@@ -1615,9 +1608,7 @@ do
       monster_drop_entry(1001, 503, 4, 5000, 7002),
       monster_drop_entry(1001, 501, 2, 2500, 7001),
     }), EnemyItemDropDataDict = drop_dictionary({}) })
-  monster_need.groups[1].options[2] = { item_id = 503, accepted_count = 1 }
-  local reordered_ok, reordered = pcall(R.objective_monster_rows,
-    monster_task, nil, monster_need)
+  local reordered_ok, reordered = pcall(R.objective_monster_source_rows, { 501, 503 })
   local ids_after = {}
   for _, row in ipairs(reordered.rows or {}) do ids_after[row.item_id] = row.drop_row_id end
   check("reads: monster drop identity uses native dictionary key, not traversal order",
@@ -1631,17 +1622,14 @@ do
     EnemyDefaultItemDropDataDict = drop_dictionary({
       monster_drop_entry(signed_cid, 501, 2, 2500, signed_cid),
     }), EnemyItemDropDataDict = drop_dictionary({}) })
-  monster_need.groups[1].options[2] = nil
-  local signed_ok, signed = pcall(R.objective_monster_rows,
-    monster_task, nil, monster_need)
+  local signed_ok, signed = pcall(R.objective_monster_source_rows, { 501 })
   check("reads: objective monster CIDs normalize signed values to u32",
     signed_ok and signed.complete and #signed.rows == 1
       and signed.rows[1].item_id == 501)
   singletons["app.EnemyManager"] = obj({ _EnemyList = list({
     live_monster("instance-unreadable", 1001, false, nil),
   }) })
-  local partial_monster_ok, partial_monsters = pcall(R.objective_monster_rows,
-    monster_task, nil, monster_need)
+  local partial_monster_ok, partial_monsters = pcall(R.objective_monster_source_rows, { 501 })
   check("reads: unreadable live position clears the whole monster snapshot",
     partial_monster_ok and partial_monsters.complete == false
       and #partial_monsters.rows == 0)
@@ -1652,8 +1640,7 @@ do
   singletons["app.EnemyManager"] = obj({ _EnemyList = list({
     live_monster("instance-disabled", 1001, false, P(30, 0, 40), { enabled = false }),
   }) })
-  local disabled_ok, disabled = pcall(R.objective_monster_rows,
-    monster_task, nil, monster_need)
+  local disabled_ok, disabled = pcall(R.objective_monster_source_rows, { 501 })
   check("reads: disabled live monsters retain complete negative evidence",
     disabled_ok and disabled.complete and #disabled.rows == 1
       and disabled.rows[1].enabled == false)
@@ -1661,8 +1648,7 @@ do
     live_monster("instance-gate-unreadable", 1001, false, P(30, 0, 40),
       { accessible_unreadable = true }),
   }) })
-  local gate_ok, gate_unreadable = pcall(R.objective_monster_rows,
-    monster_task, nil, monster_need)
+  local gate_ok, gate_unreadable = pcall(R.objective_monster_source_rows, { 501 })
   check("reads: unreadable live monster access clears the whole snapshot",
     gate_ok and gate_unreadable.complete == false and #gate_unreadable.rows == 0)
 
@@ -1922,7 +1908,7 @@ do
     setdrops({}, {})
     check("reads: empty walk raises", not pcall(R.monster_drops))
     check("reads: live objective monster drop reader is available",
-      type(R.objective_monster_rows) == "function")
+      type(R.objective_monster_source_rows) == "function")
   end
 
   -- v14 reads: schedule rows, current row, area nodes, holders, sentiment
@@ -7652,7 +7638,7 @@ do
     end
     return { complete = true, rows = rows }
   end
-  mf.reads.objective_monster_rows = function()
+  mf.reads.objective_monster_source_rows = function()
     monster_rows.freshness = monster_freshness()
     return monster_rows
   end
@@ -7745,6 +7731,68 @@ do
     partial_monsters.status == "unknown" and #partial_monsters.candidates == 0
       and partial_monsters.generation > monsters.generation)
 
+  local bf = fixture()
+  local browser_reads = 0
+  bf.reads.objective_monster_source_rows = function(item_ids)
+    browser_reads = browser_reads + 1
+    local wanted = {}
+    for _, item_id in ipairs(item_ids or {}) do wanted[item_id] = true end
+    local rows = {}
+    if wanted[501] then
+      rows[1] = { uid = "browser-live", drop_row_id = "browser-drop", item_id = 501,
+        count = 1, raw_rate = 2500, alive = true, enabled = true, started = true,
+        valid = true, accessible = true, drop_table_readable = true, pos = P(80, 0, 90) }
+    end
+    return { complete = true, rows = rows,
+      freshness = { complete = true, rows = { { uid = "browser-live", alive = true } } } }
+  end
+  bf.reads.objective_monster_freshness = function()
+    return { complete = true, rows = { { uid = "browser-live", alive = true } } }
+  end
+  local browser_world = bf.new()
+  local shared_snapshot = browser_world:objective_monster_source_snapshot({ 501 })
+  check("monster registry: bounded query returns normalized live sources without task ownership",
+    shared_snapshot and shared_snapshot.provider == "monster" and shared_snapshot.status == "ok"
+      and shared_snapshot.complete == true and #shared_snapshot.candidates == 1
+      and shared_snapshot.source_status.complete == true
+      and shared_snapshot.source_status.generation == shared_snapshot.generation
+      and shared_snapshot.source_status.rows[1].identity
+        == core.target_key(shared_snapshot.candidates[1].source_id)
+      and browser_reads == 1)
+  local repeated_snapshot = browser_world:objective_monster_source_snapshot({ 501 })
+  check("monster registry: unchanged live evidence reuses the shared provider cache",
+    repeated_snapshot and repeated_snapshot.generation == shared_snapshot.generation
+      and browser_reads == 1)
+  local focused_shared = browser_world:objective_monster_observations(source_task, need_proof)
+  check("monster registry: focused routing consumes the same generation and source identity",
+    focused_shared and focused_shared.generation == shared_snapshot.generation
+      and focused_shared.candidates[1].source_id[3] == shared_snapshot.candidates[1].source_id[3]
+      and focused_shared.source_status.rows[1].identity
+        == shared_snapshot.source_status.rows[1].identity and browser_reads == 1)
+  local malformed_snapshot = browser_world:objective_monster_source_snapshot({ 501, 501 })
+  check("monster registry: malformed queries fail closed without invoking live reads",
+    malformed_snapshot and malformed_snapshot.status == "unknown"
+      and malformed_snapshot.complete == false and #malformed_snapshot.candidates == 0
+      and malformed_snapshot.source_status.complete == false and browser_reads == 1)
+  local changed_snapshot = browser_world:objective_monster_source_snapshot({ 502 })
+  check("monster registry: changed bounded query replaces the shared filtered view",
+    changed_snapshot and changed_snapshot.status == "ok" and #changed_snapshot.candidates == 0
+      and changed_snapshot.source_status.complete == true and browser_reads == 2)
+  local exact_limit = {}
+  for i = 1, 64 do exact_limit[i] = 600 + i end
+  local exact_limit_snapshot = browser_world:objective_monster_source_snapshot(exact_limit)
+  local over_limit = {}; for i = 1, 65 do over_limit[i] = 700 + i end
+  local over_limit_snapshot = browser_world:objective_monster_source_snapshot(over_limit)
+  check("monster registry: 64 item ids are accepted and 65 fail closed before live reads",
+    exact_limit_snapshot and exact_limit_snapshot.status == "ok"
+      and over_limit_snapshot and over_limit_snapshot.status == "unknown"
+      and #over_limit_snapshot.candidates == 0 and browser_reads == 3)
+  local rejected_focus = provider_map(browser_world:objective_source_snapshots(nil,
+    { need_generation = 1, quests = {} }))
+  check("monster registry: rejected focus cannot publish shared browser evidence as a route",
+    rejected_focus.monster.status == "unknown"
+      and #rejected_focus.monster.candidates == 0 and browser_reads == 3)
+
   local integrated = fixture()
   integrated.shop_reads, integrated.monster_reads, integrated.base_reads = 0, 0, 0
   integrated.adapter.objective_item_source_snapshots = function(_, _, source_catalog)
@@ -7762,7 +7810,7 @@ do
       capacity_kind = "finite", unlimited = false, stock = 1, restock_readable = true,
       released = true, talk_available = true, interactable = true, pos = P(50, 0, 60) },
   } } end
-  integrated.reads.objective_monster_rows = function() integrated.monster_reads = integrated.monster_reads + 1; return { complete = true, rows = {
+  integrated.reads.objective_monster_source_rows = function() integrated.monster_reads = integrated.monster_reads + 1; return { complete = true, rows = {
     { uid = "live-c", drop_row_id = "drop-c", item_id = 502, count = 1, raw_rate = 3000,
       alive = true, enabled = true, started = true, valid = true, accessible = true,
       drop_table_readable = true, pos = P(70, 0, 80) },

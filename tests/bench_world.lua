@@ -363,11 +363,11 @@ local monster_singletons = {
 local saved_sdk = sdk
 sdk = { get_managed_singleton = function(name) return monster_singletons[name] end }
 local production_monster_reads = world.game_reads()
-local production_monster_rows = production_monster_reads.objective_monster_rows
+local production_monster_rows = production_monster_reads.objective_monster_source_rows
 local monster_reads, monster_raw_reason = 0, nil
-f.reads.objective_monster_rows = function(task, catalog, need)
+f.reads.objective_monster_source_rows = function(item_ids)
   monster_reads = monster_reads + 1
-  local ok, snapshot = pcall(production_monster_rows, task, catalog, need)
+  local ok, snapshot = pcall(production_monster_rows, item_ids)
   if not ok then monster_raw_reason = snapshot; error(snapshot) end
   monster_raw_reason = snapshot.reason
   return snapshot
