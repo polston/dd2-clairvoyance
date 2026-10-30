@@ -4878,7 +4878,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         identity = "provider:" .. tostring(provider), provider = provider, qid = nil,
         task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
   end
-  local function reward_status(provider)
+  local function reward_status(provider, accepted_contracts, rejected_sources, rejected_pools)
     if provider.provider ~= "reward" or provider.source_status == nil then return end
     local raw = provider.source_status
     local reason
@@ -4921,6 +4921,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         if type(r) ~= "table" or not only_keys(r, row_keys, 9)
             or (r.scope ~= "provider" and r.scope ~= "source")
             or type(r.identity) ~= "string" or #r.identity == 0
+            or raw.complete == true and r.scope == "source" and not canonical_key_valid(r.identity)
             or r.provider ~= "reward" or not objective_generation(r.generation)
             or (r.qid ~= nil and not objective_uint(r.qid, 2147483647))
             or (r.task_index ~= nil and not objective_index(r.task_index, 2147483647))
@@ -4991,12 +4992,14 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
     if not reason and raw.complete == true then
       local eligible_by_key, available_by_key = {}, {}
       for _, candidate in ipairs(objective_array(provider.candidates) or {}) do
-        local tuple = type(candidate) == "table" and objective_tuple_copy(candidate.source_id) or nil
-        local key = tuple and tuple[1] == "source" and M.target_key(tuple) or nil
+        local contract = accepted_contracts[candidate]
+        local tuple = contract and contract.source_tuple or nil
+        local key = contract and contract.source_key or nil
         if type(candidate) == "table" and candidate.provider == "reward"
-            and candidate.eligibility == "eligible" and key ~= nil then
+            and candidate.eligibility == "eligible" and key ~= nil
+            and not rejected_sources[key] and not rejected_pools[contract.capacity_key] then
           if eligible_by_key[key] ~= nil then reason = "status_duplicate_identity"; break end
-          eligible_by_key[key] = { candidate = candidate, tuple = tuple }
+          eligible_by_key[key] = { candidate = candidate, tuple = tuple, outputs = contract.outputs }
         end
       end
       if not reason then
@@ -5009,7 +5012,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
               reason = "status_aggregate_mismatch"; break
             end
             local expected, outputs = {}, {}
-            for _, output in ipairs(aggregate.candidate.outputs or {}) do
+            for _, output in ipairs(aggregate.outputs or {}) do
               local needed = not grouped_needs
               if grouped_needs then
                 for _, quest_items in pairs(grouped_need_items) do
@@ -5256,7 +5259,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         candidate_count = provider_candidates and #provider_candidates or nil,
         diagnostic_rows = provider.provider == "reward" and copy_reward_diagnostics(provider.diagnostic_rows)
           or nil }
-      reward_status(provider)
+      reward_status(provider, grouped_contracts, invalid_sources, invalid_pools)
       if grouped_needs then
         if not grouped_needs_valid then
           diagnostic(provider.provider, "need_snapshot_invalid")

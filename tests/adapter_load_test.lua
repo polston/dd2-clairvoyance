@@ -4933,14 +4933,17 @@ do
     get_CanceledAction = function() return reward_fixture.overlay.action_canceled == true end,
     get_ActionResultNo = function() return reward_fixture.overlay.action_result or 0 end })
   reward_fixture.trigger_action.fields.__type = "app.quest.action.Trigger"
+  reward_fixture.trigger_action.fields.__address = 0x7790
   reward_fixture.reward_action = reward_fixture.managed({}, {
     get_CurrentPhase = 2, get_DoneAction = false, get_CanceledAction = false,
     get_ActionResultNo = 0 })
   reward_fixture.reward_action.fields.__type = "app.quest.action.QuestReward"
+  reward_fixture.reward_action.fields.__address = 0x7791
   reward_fixture.reward_action_two = reward_fixture.managed({}, {
     get_CurrentPhase = 2, get_DoneAction = false, get_CanceledAction = false,
     get_ActionResultNo = 0 })
   reward_fixture.reward_action_two.fields.__type = "app.quest.action.QuestReward"
+  reward_fixture.reward_action_two.fields.__address = 0x7792
   reward_fixture.trigger_process = reward_fixture.managed({ QuestAction = reward_fixture.trigger_action }, {
     get_CurrentPhase = function() return reward_fixture.overlay.process_phase or 1 end,
     get_Executed = function() return reward_fixture.overlay.process_executed == true end,
@@ -5092,6 +5095,7 @@ do
     reward_fixture.diagnostic(20040, 42, 78, 1) }
   own_catalog.quests[888].reward_diagnostics = {}
   own_catalog.quests[889].reward_diagnostics = {}
+  own_catalog.quests[890].reward_diagnostics = {}
   og.test_process.calls.evaluate = false
   owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
   assert(owned_snapshot._condition_case.item_ownership[1].eligibility == "ineligible"
@@ -5279,6 +5283,24 @@ do
       .. "/" .. tostring(#reward_fixture.reused.candidates) .. "/"
       .. tostring(reward_fixture.reused.generation) .. "/" .. tostring(reward_fixture.first_generation))
   do (function()
+  local original_reward_diagnostics = own_catalog.quests[20040].reward_diagnostics
+  own_catalog.quests[20040].reward_diagnostics = false
+  local false_array = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(false_array.status == "unknown" and not false_array.complete
+      and #false_array.candidates == 0,
+    "quest-level malformed reward sentinel reaches the provider atomically")
+  own_catalog.quests[20040].reward_diagnostics = { false }
+  local false_member = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(false_member.status == "unknown" and not false_member.complete
+      and #false_member.candidates == 0,
+    "member-level malformed reward sentinel reaches the provider atomically")
+  own_catalog.quests[20040].reward_diagnostics = original_reward_diagnostics
+  local sentinel_restored = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(sentinel_restored.status == "ok" and sentinel_restored.complete
+      and #sentinel_restored.candidates == 1,
+    "restoring valid reward diagnostics restores the eligible provider")
+  end)() end
+  do (function()
   local overlay_event = A.read_objective_talk_grant_observation({}, { 20040 }).events[1]
   assert(overlay_event and overlay_event.playable == true
     and overlay_event.speaker_present == true and overlay_event.history.present == false,
@@ -5369,7 +5391,7 @@ do
   local original_controller_list = reward_fixture.processor_list
   local processor_elements_before_count = reward_fixture.scans.processors_elements or 0
   local type_defs_before_count = reward_fixture.scans.type_defs
-  local extra_action = reward_fixture.managed({}, { get_CurrentPhase = 2, get_DoneAction = false,
+  local extra_action = reward_fixture.managed({ __address = 0x7794 }, { get_CurrentPhase = 2, get_DoneAction = false,
     get_CanceledAction = false, get_ActionResultNo = 0 })
   extra_action.fields.__type = "app.quest.action.Trigger"
   local extra_process = reward_fixture.managed({ QuestAction = extra_action }, {
@@ -5397,6 +5419,37 @@ do
     owned_snapshot, own_catalog.quests)
   assert(restored_processors.complete and #restored_processors.controllers[1].processors == 4,
     "restoring processor count returns the structural snapshot to four processors")
+  do (function()
+  local original_reward_action = reward_fixture.reward_process.fields.QuestAction
+  local swapped_reward_action = reward_fixture.managed({ __address = 0x7793,
+    __type = "app.quest.action.Trigger" }, {
+    get_CurrentPhase = 2, get_DoneAction = false, get_CanceledAction = false,
+    get_ActionResultNo = 0 })
+  local type_defs_before_action_swap = reward_fixture.scans.type_defs
+  reward_fixture.reward_process.fields.QuestAction = swapped_reward_action
+  local swapped_action = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    owned_snapshot, own_catalog.quests)
+  local swapped_type
+  for _, processor in ipairs(swapped_action.controllers[1] and
+      swapped_action.controllers[1].processors or {}) do
+    if processor.processor_id == 40 then swapped_type = processor.quest_action_type end
+  end
+  assert(swapped_action.complete and swapped_type == "app.quest.action.Trigger"
+      and reward_fixture.scans.type_defs > type_defs_before_action_swap,
+    "same-count action replacement rebuilds the processor type structure immediately")
+  reward_fixture.reward_process.fields.QuestAction = original_reward_action
+  local restored_action = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    owned_snapshot, own_catalog.quests)
+  local restored_action_type
+  for _, processor in ipairs(restored_action.controllers[1] and
+      restored_action.controllers[1].processors or {}) do
+    if processor.processor_id == 40 then restored_action_type = processor.quest_action_type end
+  end
+  assert(restored_action.complete and restored_action_type == "app.quest.action.QuestReward",
+    "restoring the action object restores the reward processor type")
+  end)() end
   reward_fixture.progressing_qids = { 20040, 20041 }
   local progressing_change = ai.read_objective_reward_observation(
     { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },

@@ -7048,7 +7048,7 @@ do
       and #snapshot.source_status[1].rows[1].item_ids == 1
       and snapshot.source_status[1].rows[1].item_ids[1] == snapshot.targets[1].outputs[1].item_id)
 
-  local function source_status_snapshot(source_status, eligibility)
+  local function source_status_snapshot(source_status, eligibility, mutate_candidate)
     local provider = {}
     for key, value in pairs(reward_provider) do provider[key] = value end
     provider.candidates = {}
@@ -7057,14 +7057,19 @@ do
         provider.candidates[i] = {}
         for key, value in pairs(candidate) do provider.candidates[i][key] = value end
         if eligibility ~= nil then provider.candidates[i].eligibility = eligibility end
+        if mutate_candidate then mutate_candidate(provider.candidates[i], i) end
       end
     end
     provider.source_status = source_status
     return core.objective_snapshot(task, nil, { provider }, core.target_registry_new())
   end
+  local function status_identity(label)
+    if type(label) == "string" and label:sub(1, 1) == "t" then return label end
+    return core.target_key({ "source", "reward_status_test", label })
+  end
   local function source_row(identity, scope, state, generation)
     return { scope = scope or "source", generation = generation or 12,
-      identity = identity, provider = "reward", qid = 20090, task_index = 0,
+      identity = status_identity(identity), provider = "reward", qid = 20090, task_index = 0,
       item_ids = { 300 }, state = state or "available", reason_code = state or "available" }
   end
   for _, state in ipairs({ "available", "unavailable", "unknown" }) do
@@ -7090,12 +7095,12 @@ do
     source_row("zeta", "source", "unknown"), source_row("alpha", "source", "unknown"),
     source_row("beta", "source", "unknown") } }, "none")
   check("reward source status copies rows and orders scope ties canonically",
-    sorted_snapshot.source_status[1].rows[1].identity == "alpha"
-      and sorted_snapshot.source_status[1].rows[2].identity == "beta"
-      and sorted_snapshot.source_status[1].rows[3].identity == "zeta")
+    sorted_snapshot.source_status[1].rows[1].identity == status_identity("beta")
+      and sorted_snapshot.source_status[1].rows[2].identity == status_identity("zeta")
+      and sorted_snapshot.source_status[1].rows[3].identity == status_identity("alpha"))
   check("reward source status row copies do not mutate provider input",
     canonical_status.rows[1].identity == "mutated"
-      and canonical_status.rows[2].identity == "alpha")
+      and canonical_status.rows[2].identity == status_identity("alpha"))
   local function rejected_status(name, raw, reason)
     local observed = source_status_snapshot(raw)
     check("reward source status rejects " .. name,
@@ -7113,6 +7118,10 @@ do
     rows = { extra_row } }, "status_malformed")
   rejected_status("extra envelope fields", { generation = 12, complete = true,
     rows = {}, extra = true }, "status_malformed")
+  local noncanonical_identity = source_row("canonical-first")
+  noncanonical_identity.identity = "not-a-canonical-source"
+  rejected_status("noncanonical complete source identity", { generation = 12, complete = true,
+    rows = { noncanonical_identity } }, "status_malformed")
   rejected_status("duplicate scoped identity", { generation = 12, complete = true,
     rows = { source_row("dup"), source_row("dup") } }, "status_duplicate_identity")
   rejected_status("row generation mismatch", { generation = 12, complete = true,
@@ -7185,6 +7194,11 @@ do
     reason_code = "unexpected", rows = {} }, "status_malformed")
   rejected_status("available row without aggregate", { generation = 12, complete = true,
     rows = { source_row("not-an-aggregate") } }, "status_aggregate_mismatch")
+  local invalid_contract = source_status_snapshot(reward_provider.source_status, nil,
+    function(candidate) candidate.target = {} end)
+  check("reward source status rejects an available row whose candidate contract is unpublished",
+    #invalid_contract.targets == 0 and invalid_contract.source_status[1].complete == false
+      and invalid_contract.source_status[1].reason_code == "status_aggregate_mismatch")
   local diagnostic_input = { member_id = "reward-member", gate = "history_played",
     status = "ineligible" }
   local diagnostic_provider = {}

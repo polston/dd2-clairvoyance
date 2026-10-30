@@ -7119,17 +7119,35 @@ function A.make()
       end
       local controller_key = controller_token .. ":" .. tostring(processor_count)
       local structure_cache = objective_task_state.reward_controller_structure[qid]
-      local structural_processors
-      if type(structure_cache) ~= "table" or structure_cache.key ~= controller_key then
-        structural_processors = list(raw_processors, 512)
-        if #structural_processors ~= processor_count then return fail("reward_controller_unreadable") end
+      local structural_processors = list(raw_processors, 512)
+      if #structural_processors ~= processor_count then return fail("reward_controller_unreadable") end
+      local current_tokens, current_ids, structure_changed = {}, {},
+        type(structure_cache) ~= "table" or structure_cache.key ~= controller_key
+          or type(structure_cache.action_token_by_id) ~= "table"
+      for _, processor in ipairs(structural_processors) do
+        local proc_id = int_value(safe_field(processor, "ProcID"))
+        local action_token = token(safe_field(safe_field(processor, "Process"), "QuestAction"))
+        if type(proc_id) ~= "number" or proc_id < 0 or proc_id > 4294967295
+            or proc_id ~= math.floor(proc_id) or current_ids[proc_id] or action_token == nil then
+          return fail("reward_processor_identity_invalid")
+        end
+        current_ids[proc_id], current_tokens[proc_id] = true, action_token
+        if not structure_changed and structure_cache.action_token_by_id[proc_id] ~= action_token then
+          structure_changed = true
+        end
+      end
+      if not structure_changed then
+        for proc_id in pairs(structure_cache.action_token_by_id) do
+          if not current_ids[proc_id] then structure_changed = true; break end
+        end
+      end
+      if structure_changed then
         local type_by_id, identity_parts = {}, {}
         for _, processor in ipairs(structural_processors) do
           local proc_id = int_value(safe_field(processor, "ProcID"))
           local process = safe_field(processor, "Process")
           local action_type = type_name(safe_field(process, "QuestAction"))
-          if type(proc_id) ~= "number" or proc_id < 0 or proc_id > 4294967295
-              or proc_id ~= math.floor(proc_id) or type_by_id[proc_id] ~= nil or action_type == nil then
+          if type_by_id[proc_id] ~= nil or action_type == nil then
             return fail("reward_processor_identity_invalid")
           end
           type_by_id[proc_id] = action_type
@@ -7137,7 +7155,7 @@ function A.make()
         end
         table.sort(identity_parts)
         structure_cache = { key = controller_key, type_by_id = type_by_id,
-          identity_signature = table.concat(identity_parts, ",") }
+          action_token_by_id = current_tokens, identity_signature = table.concat(identity_parts, ",") }
         objective_task_state.reward_controller_structure[qid] = structure_cache
       end
       local processor_rows, processor_seen = {}, {}
@@ -7447,11 +7465,29 @@ function A.make()
     local all_reward_rows = {}
     for _, qid in ipairs(reward_qids) do
       local quest = reward_quests[qid]
-      for _, row in ipairs(type(quest) == "table" and quest.reward_diagnostics or {}) do
-        if type(row) == "table" then
-          local catalog_row = copy(row)
-          catalog_row.quest_id = qid
-          all_reward_rows[#all_reward_rows + 1] = catalog_row
+      local rows
+      if type(quest) == "table" then rows = quest.reward_diagnostics else rows = false end
+      if rows == false then
+        all_reward_rows[#all_reward_rows + 1] = false
+      elseif rows ~= nil then
+        local count, maximum, valid = 0, 0, type(rows) == "table"
+        if valid then for key in pairs(rows) do
+          if type(key) ~= "number" or math.tointeger(key) == nil or key < 1 then valid = false; break end
+          count = count + 1; if key > maximum then maximum = key end
+        end end
+        if not valid or count ~= maximum then
+          all_reward_rows[#all_reward_rows + 1] = false
+        else
+          for index = 1, maximum do
+            local row = rows[index]
+            if type(row) == "table" then
+              local catalog_row = copy(row)
+              catalog_row.quest_id = qid
+              all_reward_rows[#all_reward_rows + 1] = catalog_row
+            else
+              all_reward_rows[#all_reward_rows + 1] = false
+            end
+          end
         end
       end
     end
