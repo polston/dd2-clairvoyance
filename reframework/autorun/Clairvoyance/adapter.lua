@@ -1,6 +1,7 @@
 local A = {}
 local qnml_core = require("Clairvoyance.core")
 A.objective_need_builder = require("Clairvoyance.objective_needs")
+A.access = require("Clairvoyance.access")
 
 -- ===== debug flag =====
 local DEBUG = false
@@ -1799,6 +1800,11 @@ end
 local items = {}
 items.observed_task_indices = {}
 items.task_observation_generation = 0
+items.access = { current = {}, last_known = {}, at = {} }
+
+function items.reset_access()
+  items.access = { current = {}, last_known = {}, at = {} }
+end
 
 -- Count observed changes to the live quest-log task, including a task that
 -- moves away and later returns to the same zero-based index.
@@ -1898,6 +1904,7 @@ end
 
 local function reset_item_state()
     items.invalidate()
+    items.reset_access()
     ITEM_COND_CACHE = {}
     items.objective_cond_cache = {}
     ITEM_NAME_CACHE = {}
@@ -2269,7 +2276,6 @@ local function reset_runtime_caches()
     CATALOG_RETRY_AT = 0
     CATALOG_BUILT_AT = 0
     QUEST_STATE_CACHE = {}
-    A.MASQUERADE_DOOR_LAST = nil
     NPC_HOLDER_CACHE = {}
     OBJECTIVE_TABLE = nil
     OBJECTIVE_FAILED_STREAK = 0
@@ -2958,6 +2964,7 @@ local K = {
     STORAGE_BOX_KEY = 65535,
     HELD_OWNER_CAP = 512,
     MANAGED_CAP = 4096,
+    ACCESS_SLOT_CAP = 8192,
     DROP_CAP = 64,
     BOX_CAP = 64,
     BOX_ITEMS_CAP = 16,
@@ -3289,46 +3296,232 @@ function items.objective_loot_observations(wanted, generation)
     return result
 end
 
--- v14 (SPEC 22.11.3): read the masquerade passage leaf. The full fingerprint
--- prevents another nearby saloon door from deciding this one hint pin.
-function A.read_masquerade_door_closed(gm)
-    local dict = safe_field(gm, "<ManagedGimmicksByIDs>k__BackingField")
-    local outer = items.elements(safe_field(dict, "_entries"))
-    if outer == nil then return nil end
-    local matched, matches = nil, 0
-    for i = 1, #outer do
-        if int_value(safe_field(outer[i], "key")) == 85 then
-            local hs = safe_field(outer[i], "value")
-            local inner = items.elements(safe_field(hs, "_entries"))
-            if inner == nil then return nil end
-            for k = 1, #inner do
-                local g = safe_field(inner[k], "Value")
-                if g == nil then g = safe_field(inner[k], "value") end
-                if g ~= nil then
-                    local ok = pcall(function()
-                        local gt = g:get_type_definition()
-                        if gt == nil or gt:get_full_name() ~= "app.gm05_046" then return end
-                        local go = safe_call(g, "get_GameObject")
-                        if safe_call(go, "get_Name") ~= "gm80_026" then return end
-                        local tr = safe_call(go, "get_Transform")
-                        local x, y, z = vec_xyz(safe_call(tr, "get_UniversalPosition"))
-                        if x == nil then return end
-                        local dx, dy, dz = x - 396.075, y - 73.5, z + 819.250
-                        if dx * dx + dy * dy + dz * dz > 0.0625 then return end
-                        local rok, leaves, n = read_collection_items(safe_field(g, "CompDoorList"))
-                        if not rok or n ~= 1 then error("door leaf unreadable") end
-                        local closed = safe_field(leaves[1], "IsClose")
-                        if type(closed) ~= "boolean" then error("door state unreadable") end
-                        matches = matches + 1
-                        matched = closed
-                    end)
-                    if not ok then return nil end
-                end
+-- SPEC 40.22: one bounded fingerprint scan for all requested access gates.
+-- Every requested result is unknown if either managed collection is partial
+-- or the managed-object cap is exceeded.
+function A.read_world_access_gates(gm, requested)
+    local selected = A.access.requested_gate_ids(A.access.registry, requested)
+    local out = {}
+    if selected == nil then return out, false end
+    if #selected == 0 then return out, true end
+    local gates, by_bucket = {}, {}
+    for _, id in ipairs(selected) do
+        out[id] = { status = "unknown" }
+        for _, gate in ipairs(A.access.registry.gates) do
+            if gate.id == id then
+                gates[#gates + 1] = gate
+                by_bucket[gate.fingerprint.bucket_id] = by_bucket[gate.fingerprint.bucket_id] or {}
+                by_bucket[gate.fingerprint.bucket_id][#by_bucket[gate.fingerprint.bucket_id] + 1] = gate
+                break
             end
         end
     end
-    if matches ~= 1 then return nil end
-    return matched
+    if gm == nil then return out, false end
+    local function bounded_entries(value)
+        if value == nil then return nil end
+        local expected = safe_call(value, "get_Count")
+        local used = int_value(safe_field(value, "_count"))
+        local free = int_value(safe_field(value, "_freeCount"))
+        if type(expected) ~= "number" or expected < 0 or expected ~= math.floor(expected)
+            or type(used) ~= "number" or used < 0 or used ~= math.floor(used)
+            or type(free) ~= "number" or free < 0 or free ~= math.floor(free)
+            or expected > K.MANAGED_CAP or used > K.ACCESS_SLOT_CAP
+            or expected > used or expected + free ~= used then
+            return nil
+        end
+        local array = safe_field(value, "_entries")
+        local raw = A.read_elements(array, used)
+        if raw == nil then return nil end
+        local entries, occupied = {}, 0
+        for index = 1, used do
+            local entry = raw[index]
+            if entry == nil then return nil end
+            local next_index = safe_field(entry, "Next")
+            if next_index == nil then next_index = safe_field(entry, "next") end
+            if type(next_index) ~= "number" then return nil end
+            if next_index >= -1 then
+                occupied = occupied + 1
+                entries[#entries + 1] = entry
+            end
+        end
+        if occupied ~= expected then return nil end
+        return entries
+    end
+    local complete = true
+    local ok, results = pcall(function()
+        local dict = safe_field(gm, "<ManagedGimmicksByIDs>k__BackingField")
+        local outer = bounded_entries(dict)
+        if outer == nil then error("access outer collection incomplete") end
+        local matches, bad, observations, seen = {}, {}, {}, 0
+        for _, gate in ipairs(gates) do matches[gate.id] = 0 end
+        for _, outer_entry in ipairs(outer) do
+            local bucket_id = int_value(safe_field(outer_entry, "key"))
+            local hs = safe_field(outer_entry, "value")
+            if type(bucket_id) ~= "number" or hs == nil then
+                error("access outer entry incomplete")
+            end
+            local bucket_gates = by_bucket[bucket_id]
+            local inner = bounded_entries(hs)
+            if inner == nil then error("access inner collection incomplete") end
+            for _, inner_entry in ipairs(inner) do
+                local g = safe_field(inner_entry, "Value")
+                if g == nil then g = safe_field(inner_entry, "value") end
+                if g == nil then error("access inner entry incomplete") end
+                seen = seen + 1
+                if seen > K.MANAGED_CAP then error("access object cap exceeded") end
+                if bucket_gates ~= nil then
+                    local inspected, value = pcall(function()
+                            local gt = g:get_type_definition()
+                            local type_name = gt and gt:get_full_name() or nil
+                            if type(type_name) ~= "string" then error("door type unreadable") end
+                            local possible
+                            for _, gate in ipairs(bucket_gates) do
+                                if gate.fingerprint.type_name == type_name then possible = true; break end
+                            end
+                            if not possible then return nil end
+                            local go = safe_call(g, "get_GameObject")
+                            if go == nil then error("door game object unreadable") end
+                            local name = safe_call(go, "get_Name")
+                            if type(name) ~= "string" then error("door name unreadable") end
+                            local tr = safe_call(go, "get_Transform")
+                            local x, y, z = vec_xyz(safe_call(tr, "get_UniversalPosition"))
+                            if x == nil then error("door position unreadable") end
+                            for _, gate in ipairs(bucket_gates) do
+                                local fp = gate.fingerprint
+                                if fp.type_name == type_name and fp.game_object_name == name then
+                                    local dx, dy, dz = x - fp.position.x, y - fp.position.y,
+                                        z - fp.position.z
+                                    if dx * dx + dy * dy + dz * dz <= fp.tolerance * fp.tolerance then
+                                        local rok, leaves, count = read_collection_items(
+                                            safe_field(g, "CompDoorList"))
+                                        if not rok or count ~= fp.leaf_count then
+                                            bad[gate.id] = true
+                                        else
+                                            local closed, locked = safe_field(leaves[1], "IsClose"),
+                                                safe_field(leaves[1], "IsLock")
+                                            if type(closed) ~= "boolean" or type(locked) ~= "boolean" then
+                                                bad[gate.id] = true
+                                            else
+                                                matches[gate.id] = matches[gate.id] + 1
+                                                observations[gate.id] = { status = "known",
+                                                    values = { closed = closed, locked = locked } }
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        return true
+                    end)
+                    if not inspected then error(value) end
+                end
+            end
+        end
+        for _, gate in ipairs(gates) do
+            if matches[gate.id] ~= 1 or bad[gate.id] then
+                observations[gate.id] = { status = "unknown" }
+            end
+        end
+        return observations
+    end)
+    if not ok then
+        complete = false
+        return out, complete
+    end
+    return results, complete
+end
+
+function items.refresh_access(gm, requested)
+    local selected = A.access.requested_gate_ids(A.access.registry, requested)
+    if selected == nil or #selected == 0 then return {} end
+    local now, stale = os.clock(), {}
+    for _, id in ipairs(selected) do
+        if items.access.at[id] == nil or now - items.access.at[id] >= K.ROUND_INTERVAL then
+            stale[#stale + 1] = id
+        end
+    end
+    if #stale > 0 then
+        gm = gm or sdk.get_managed_singleton("app.GimmickManager")
+        local current, complete = A.read_world_access_gates(gm, stale)
+        for _, id in ipairs(stale) do
+            local observation = current[id] or { status = "unknown" }
+            items.access.current[id], items.access.at[id] = observation, now
+            if complete and observation.status == "known" then
+                items.access.last_known[id] = observation
+            end
+        end
+    end
+    local out = {}
+    for _, id in ipairs(selected) do out[id] = items.access.current[id] end
+    return out
+end
+
+function items.access_decision(target, gm, current)
+    local binding, match_reason = A.access.match_binding(A.access.registry, target)
+    if match_reason == "ambiguous" then
+        return false, { target_kind = target and target.target_kind or "unknown",
+            current_status = "unknown", used_last_known = false, allowed = false,
+            reason = "ambiguous_binding" }
+    end
+    if binding == nil then return true end
+    local observation = type(current) == "table" and current[binding.gate_id]
+      or items.refresh_access(gm, { binding.gate_id })[binding.gate_id]
+    local allowed, source = A.access.evaluate(binding, observation,
+        items.access.last_known[binding.gate_id])
+    return allowed, { gate_id = binding.gate_id, target_kind = binding.target_kind,
+        current_status = type(observation) == "table" and observation.status or "unknown",
+        used_last_known = source == "last_known", allowed = allowed,
+        reason = source == "unknown" and (allowed and "unknown_allowed" or "unknown_denied")
+          or (allowed and "predicate_matched" or "predicate_not_matched") }
+end
+
+function items.filter_access_targets(targets, gm)
+    local list, requested_set, requested = type(targets) == "table" and targets or {}, {}, {}
+    for _, target in ipairs(list) do
+        local binding = A.access.match_binding(A.access.registry, target)
+        if binding ~= nil and not requested_set[binding.gate_id] then
+            requested_set[binding.gate_id] = true
+            requested[#requested + 1] = binding.gate_id
+        end
+    end
+    local current = items.refresh_access(gm, requested)
+    local out, decisions = {}, {}
+    for _, target in ipairs(list) do
+        local allowed, decision = items.access_decision(target, gm, current)
+        if allowed then out[#out + 1] = target end
+        if decision ~= nil then decisions[#decisions + 1] = decision end
+    end
+    return out, decisions
+end
+
+function items.filter_placed_provider_snapshot(provider, gm)
+    if type(provider) ~= "table" or provider.provider ~= "placed"
+        or provider.status ~= "ok" then return provider end
+    local copy = {}
+    for key, value in pairs(provider) do copy[key] = value end
+    local targets, candidate_targets = {}, {}
+    for index, candidate in ipairs(provider.candidates or {}) do
+        candidate_targets[index] = {}
+        for _, output in ipairs(candidate.outputs or {}) do
+            local target = { target_kind = "placed_item",
+                type_name = "app.Gm82_000", item_id = output.item_id,
+                position = candidate.target and candidate.target.pos or nil }
+            targets[#targets + 1] = target
+            candidate_targets[index][#candidate_targets[index] + 1] = target
+        end
+    end
+    local filtered = items.filter_access_targets(targets, gm)
+    local allowed_targets = {}
+    for _, target in ipairs(filtered) do allowed_targets[target] = true end
+    local candidates = {}
+    for index, candidate in ipairs(provider.candidates or {}) do
+        local allowed = true
+        for _, target in ipairs(candidate_targets[index]) do
+            if not allowed_targets[target] then allowed = false; break end
+        end
+        if allowed then candidates[#candidates + 1] = candidate end
+    end
+    copy.candidates = candidates
+    return copy
 end
 
 -- Each scan returns records, skipped, capped - or nil when its
@@ -3363,7 +3556,7 @@ local function scan_placed(gm)
                             local pos, live = gimmick_pos(g)
                             if pos == nil then skipped = skipped + 1 return end
                             recs[#recs + 1] = { id = id, pos = pos, live = live,
-                                src = "placed" }
+                                src = "placed", type_name = tn }
                         end)
                         if not okg then skipped = skipped + 1 end
                     end
@@ -3372,7 +3565,24 @@ local function scan_placed(gm)
         end)
         if not ok then skipped = skipped + 1 end
     end
-    return recs, skipped, capped
+    local targets, target_by_record = {}, {}
+    for _, rec in ipairs(recs) do
+        local target = { target_kind = "placed_item", type_name = rec.type_name,
+            item_id = rec.id, position = rec.pos }
+        targets[#targets + 1] = target
+        target_by_record[rec] = target
+    end
+    local filtered = items.filter_access_targets(targets, gm)
+    local allowed_targets = {}
+    for _, target in ipairs(filtered) do allowed_targets[target] = true end
+    local kept = {}
+    for _, rec in ipairs(recs) do
+        if allowed_targets[target_by_record[rec]] then
+            rec.type_name = nil
+            kept[#kept + 1] = rec
+        end
+    end
+    return kept, skipped, capped
 end
 
 -- Shared frame of the drop and box scans: reads `field` of gm as a
@@ -5524,11 +5734,11 @@ function A.make()
   a.journal_now = journal.now
   a.journal_all = journal.all
   a.quest_step = journal.quest_step
-  function a.masquerade_door_closed()
-    local v = A.read_masquerade_door_closed(
-      sdk.get_managed_singleton("app.GimmickManager"))
-    if type(v) == "boolean" then A.MASQUERADE_DOOR_LAST = v end
-    return A.MASQUERADE_DOOR_LAST
+  function a.filter_access_targets(targets)
+    return items.filter_access_targets(targets)
+  end
+  function a.filter_placed_provider_snapshot(provider)
+    return items.filter_placed_provider_snapshot(provider)
   end
   a.npc_name = journal.npc_name
   a.journal_stats = journal.stats_copy
@@ -6560,6 +6770,7 @@ function A.make()
       provider.guidance_delivery_refs = copy(deliveries)
       providers[#providers + 1] = provider
     end
+    providers[1] = items.filter_placed_provider_snapshot(providers[1])
     return providers
   end
   -- Pure classification for synthetic/research evidence only. The live service,
