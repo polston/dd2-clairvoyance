@@ -3687,17 +3687,8 @@ do
       and #projected_markers == 2 and projected_markers[1].cid == 12
       and projected_markers[2].cat == "hint_pin"
       and kro == true and khp == true and #kpts == 2)
-  local pins = {
-    { qid = 20090, i = 1, label = "Ordinary" },
-    { qid = 30040, i = 1, label = "Hidden door" },
-    { qid = 30040, i = 2, label = "Other" },
-  }
-  local pc = core.filter_hint_pins(pins, true)
-  local po = core.filter_hint_pins(pins, false)
-  local pu = core.filter_hint_pins(pins, nil)
-  check("npc 15e: only the open target door pin is filtered",
-    #pc == 3 and #pu == 3 and #po == 2
-      and po[1].label == "Ordinary" and po[2].label == "Other")
+  check("npc 15e: core has no quest-specific access-gate filter",
+    core.filter_hint_pins == nil)
 
   local wl = core.wrap_text("one two three four", 7, function(s) return #s end)
   check("npc 15f: hint prose wraps at measured word boundaries",

@@ -14,7 +14,7 @@ $allowed = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread",
   "tonumber","pcall","xpcall","error","assert","select","print","package",
   "rawget","rawset","setmetatable","getmetatable","next","io","_G","coroutine","draw","d2dx")
 # Pure modules take every game access by injection: no host globals at all.
-$pure = @("core.lua","settings_util.lua","minimap.lua","jump.lua","icons.lua","npcs.lua","style.lua")
+$pure = @("core.lua","settings_util.lua","minimap.lua","jump.lua","icons.lua","npcs.lua","style.lua","access.lua")
 $hostGlobals = @("sdk","re","imgui","json","log","Vector3f","ValueType","thread","draw","_G","d2dx")
 Get-ChildItem -Recurse -Filter *.lua -Path (Join-Path $root "reframework") | ForEach-Object {
     $luaPath = ConvertTo-LuaPathLiteral $_.FullName

@@ -49,6 +49,24 @@ local function ordered(name, body, tokens)
   end
 end
 
+local hint_inputs = slice("hint access-gate wiring",
+  "wt.hint_inputs = function()",
+  "wt.hint_text = function(text)")
+ordered("every hint pin uses the generic adapter access filter", hint_inputs, {
+  'target_kind = "hint_pin", quest_id = qid, pin_index = i,',
+  "pcall(adapter.filter_access_targets, pins)",
+  'if ok and type(filtered) == "table" then',
+  "pins = filtered",
+  "return qids, pins",
+})
+check("hint access selection has no quest-specific branch",
+  hint_inputs:find("qid == 30040", 1, true) == nil
+    and hint_inputs:find("needs_door", 1, true) == nil
+    and hint_inputs:find("masquerade", 1, true) == nil
+    and hint_inputs:find("core.filter_hint_pins", 1, true) == nil)
+check("main source contains no legacy masquerade access API",
+  src:find("masquerade_door_closed", 1, true) == nil)
+
 local overhead_wiring = slice("overhead cache wiring",
   "wt.overhead_state = { frame = -1, reason = nil }",
   "-- Records why this frame drew nothing")
@@ -288,6 +306,12 @@ check("focus debug copies provider generations and registry diagnostics",
     and debug_focus:find("need_generation = objective_snapshot.stamp", 1, true) ~= nil
     and debug_focus:find("registry_diagnostics", 1, true) ~= nil
     and debug_focus:find("key_type = diagnostic.key_type", 1, true) ~= nil)
+check("focus debug exposes only plain access-gate decisions",
+  debug_focus:find("access_gates = {}", 1, true) ~= nil
+    and debug_focus:find("gate_id = decision.gate_id", 1, true) ~= nil
+    and debug_focus:find("current_status = decision.current_status", 1, true) ~= nil
+    and debug_focus:find("used_last_known = decision.used_last_known", 1, true) ~= nil
+    and debug_focus:find("reason = decision.reason", 1, true) ~= nil)
 check("focus debug exposes grouped need and source capacity evidence",
   debug_focus:find("need_groups", 1, true) ~= nil
     and debug_focus:find("capacity_pool_id =", 1, true) ~= nil

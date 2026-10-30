@@ -234,13 +234,14 @@ end
 -- v14 (SPEC 22.11.3): the opened Hints nodes' qids, and the pins of those
 -- whose step is the active one now (pins bypass the search and the cap).
 wt.hints, wt.hints_open, wt.hint_wrap = {}, {}, {}   -- hints; open step; text layout cache
+wt.access_gate_debug = {}
 wt.quest_rel, wt.quest_pak, wt.focus_tracked_qid = nil, nil, nil   -- quest focus (SPEC 32)
 wt.quest_catalog = nil
 wt.objective_registry = core.target_registry_new()
 wt.objective_route_sig = nil
 wt.routes_n, wt.routes_total = 0, 0
 wt.hint_inputs = function()
-  local qids, pins, needs_door = {}, {}, false
+  local qids, pins = {}, {}
   local rb = snapshot ~= nil and snapshot.rec_by or nil
   for qid in pairs(wt.hints_open) do
     local rec = rb ~= nil and rb[qid] or nil
@@ -256,16 +257,21 @@ wt.hint_inputs = function()
         and npcs.hint_step(wt.hints, qid, n) or nil
       if st ~= nil then
         for i, p in ipairs(st.pins) do
-          pins[#pins + 1] = { qid = qid, i = i, label = p.label,
-            pos = { x = p.x, y = p.y, z = p.z } }
-          if qid == 30040 and i == 1 then needs_door = true end
+          pins[#pins + 1] = { qid = qid, i = i,
+            target_kind = "hint_pin", quest_id = qid, pin_index = i,
+            label = p.label, pos = { x = p.x, y = p.y, z = p.z } }
         end
       end
     end
   end
-  if needs_door and adapter.masquerade_door_closed ~= nil then
-    local ok, closed = pcall(adapter.masquerade_door_closed)
-    pins = core.filter_hint_pins(pins, ok and closed or nil)
+  if adapter.filter_access_targets ~= nil then
+    local ok, filtered, decisions = pcall(adapter.filter_access_targets, pins)
+    if ok and type(filtered) == "table" then
+      pins = filtered
+      wt.access_gate_debug = type(decisions) == "table" and decisions or {}
+    else
+      wt.access_gate_debug = {}
+    end
   end
   return qids, pins
 end
@@ -2338,7 +2344,14 @@ local function install_debug()
         local fs = snapshot ~= nil and snapshot.focus or nil
         local out = { active = {}, quests = {}, counts = snapshot ~= nil and snapshot.focus_counts or nil,
           walks = wt.obj_walks or 0, focus_pokes = wt.focus_pokes or 0, routes = {},
-          routes_total = wt.routes_total }
+          routes_total = wt.routes_total, access_gates = {} }
+        for i, decision in ipairs(wt.access_gate_debug or {}) do
+          out.access_gates[i] = { gate_id = decision.gate_id,
+            target_kind = decision.target_kind,
+            current_status = decision.current_status,
+            used_last_known = decision.used_last_known,
+            allowed = decision.allowed, reason = decision.reason }
+        end
         local objective_snapshot = snapshot ~= nil and snapshot.objective_snapshot or nil
         if objective_snapshot ~= nil then
           local function scalar_array(values)

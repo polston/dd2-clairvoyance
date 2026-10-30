@@ -3779,18 +3779,6 @@ function M.overhead_points(markers, cam, radius)
   return out
 end
 
--- v14 (SPEC 22.11.3): the one shared hint-pin list feeds every surface.
--- Unknown door state is visible; only a confirmed open passage drops its pin.
-function M.filter_hint_pins(pins, masquerade_closed)
-  local out = {}
-  for _, p in ipairs(type(pins) == "table" and pins or {}) do
-    if not (p.qid == 30040 and p.i == 1 and masquerade_closed == false) then
-      out[#out + 1] = p
-    end
-  end
-  return out
-end
-
 -- Fit prose to a measured width without changing its words. A word wider than
 -- the line remains intact rather than being split into unreadable fragments.
 function M.wrap_text(text, max_width, measure)
