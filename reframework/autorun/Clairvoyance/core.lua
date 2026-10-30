@@ -4120,6 +4120,18 @@ end
 
 local function valid_target_tuple(tuple, count)
   local family = tuple[1]
+  if family == "reward_status_endpoint" then
+    if count < 8 or count > 29 or (count - 5) % 3 ~= 0 then return false end
+    if not canonical_integer(tuple[2]) or tuple[2] < 1 or tuple[2] > 2147483647
+        or not canonical_integer(tuple[3]) or tuple[3] < 1 or tuple[3] > 2147483647
+        or not canonical_integer(tuple[4]) or math.abs(tuple[4]) > 2147483647
+        or not canonical_integer(tuple[5]) or tuple[5] < 1 or tuple[5] > 8
+        or count ~= 5 + tuple[5] * 3 then return false end
+    for i = 6, count do
+      if not canonical_integer(tuple[i]) or tuple[i] < 0 or tuple[i] > 4294967295 then return false end
+    end
+    return true
+  end
   if family == "source" or family == "capacity" or family == "need" then
     if count < 2 or count > 32 then return false end
     if (family == "source" or family == "capacity")

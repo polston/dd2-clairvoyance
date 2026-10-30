@@ -679,6 +679,35 @@ do
     and exact_reward_event.events[1].history.played_readable
     and exact_reward_event.events[1].history.played == false,
     "exact event-ID mode reads graph choices, End fields, owner identity and false overlays")
+  local destination_number = { task_index = 1, destination_index = 2, kind = "place",
+    target = { key = 7, place = { kind = "key_location", key = 8, local_area = 0 } } }
+  local destination_string = { task_index = 1, destination_index = 2, kind = "place",
+    target = { key = "7", place = { kind = "key_location", key = 8, local_area = 0 } } }
+  assert(A.objective_destination_signature({ destination_number })
+      ~= A.objective_destination_signature({ destination_string }),
+    "destination identity encoding preserves numeric versus string place keys")
+  local many_destinations = {}
+  for i = 1, 30 do
+    many_destinations[i] = { task_index = 1, destination_index = i, kind = "place",
+      target = { key = i, place = { kind = "key_location", key = 100 + i, local_area = 0 } } }
+  end
+  local many_signature = A.objective_destination_signature(many_destinations)
+  local reordered_destinations = {}
+  for i = 1, #many_destinations do
+    reordered_destinations[i] = many_destinations[#many_destinations - i + 1]
+  end
+  assert(type(many_signature) == "string"
+      and many_signature == A.objective_destination_signature(reordered_destinations),
+    "destination identity remains canonical beyond the target tuple component cap")
+  many_destinations[30].target.place.key = 999
+  assert(many_signature ~= A.objective_destination_signature(many_destinations),
+    "length-prefixed destination identity detects a changed member beyond the tuple cap")
+  local too_many_reward_events = {}
+  for i = 1, 65 do too_many_reward_events[i] = 1900 + i end
+  local over_cap_events = A.read_objective_talk_grant_observation({}, too_many_reward_events)
+  assert(not over_cap_events.complete and over_cap_events.reason == "talk_grant_event_ids_truncated"
+    and #over_cap_events.events == 0,
+    "talk reader rejects 65 requested event IDs before catalog preflight")
   local absent_speaker_event = A.read_objective_talk_grant_observation({}, { 1902 })
   assert(absent_speaker_event.complete and #absent_speaker_event.events == 1
     and absent_speaker_event.events[1].initial_speaker_readable
@@ -4890,7 +4919,8 @@ do
         return qid == 20040 and reward_fixture.managed({}, {
           get_CurrentTaskIndex = function() return reward_fixture.current_task_index or 0 end }) or nil
       end }) }, {
-    getProgressingQuestIds = function() return mcoll(reward_fixture.progressing_qids or { 20040 }) end,
+    getProgressingQuestIds = function() return reward_fixture.progressing_collection
+      or mcoll(reward_fixture.progressing_qids or { 20040 }) end,
     getCurrentTask = function(qid) return qid == 20040 and reward_fixture.current_task or nil end })
   reward_fixture.overlay = {}
   reward_fixture.trigger_action = reward_fixture.managed({}, {
@@ -5124,6 +5154,21 @@ do
   owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   reward_fixture.original_need_generation = owned_snapshot.need_generation
   sdk.get_managed_singleton = reward_fixture.singleton
+  do (function()
+    local singleton_reads = 0
+    sdk.get_managed_singleton = function(name)
+      if name == "app.QuestLogManager" or name == "app.QuestManager" then
+        singleton_reads = singleton_reads + 1
+      end
+      return reward_fixture.singleton(name)
+    end
+    local empty_wanted = ai.read_objective_reward_observation({ false }, {}, nil, nil)
+    sdk.get_managed_singleton = reward_fixture.singleton
+    assert(empty_wanted.complete and empty_wanted.owner_token == "empty-wanted"
+      and singleton_reads == 0 and #empty_wanted.reward_outputs == 0
+      and #empty_wanted.progressing_qids == 0,
+      "empty reward wanted set returns before QuestLogManager or QuestManager reads")
+  end)() end
   ai.objective_need_groups = function()
     return { status = "ok", complete = true, groups = { { options = {
       { item_id = reward_fixture.wanted_id or 9001 } } } } }
@@ -5197,11 +5242,9 @@ do
       reward_fixture.claimed_source_markers = reward_fixture.claimed_source_markers + 1
     end
   end
-  assert(#reward_fixture.claimed.candidates == 2
+  assert(#reward_fixture.claimed.candidates == 1
     and reward_fixture.claimed.candidates[1].eligibility == "ineligible"
-    and reward_fixture.claimed.candidates[1].outputs[1].count
-      + reward_fixture.claimed.candidates[2].outputs[1].count == 5
-    and reward_fixture.claimed.candidates[2].eligibility == "ineligible"
+    and reward_fixture.claimed.candidates[1].outputs[1].count == 5
     and #reward_fixture.claimed_core.targets == 1
     and #reward_fixture.claimed_routes.members == 0
     and reward_fixture.claimed_source_markers == 0,
@@ -5359,6 +5402,21 @@ do
     "progressing quest ID changes are observed in the structural snapshot")
   reward_fixture.progressing_qids = nil
   do (function()
+    local progressing_rows = {}
+    for i = 1, 65 do progressing_rows[i] = 21000 + i end
+    reward_fixture.scans.progressing = 0
+    reward_fixture.progressing_collection = reward_fixture.sequence(progressing_rows, "progressing")
+    local progressing_bounded = ai.read_objective_reward_observation(
+      { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+      owned_snapshot, own_catalog.quests)
+    assert(not progressing_bounded.complete and progressing_bounded.reason == "progressing_set_truncated"
+      and (reward_fixture.scans.progressing_elements or 0) == 0,
+      "progressing managed IDs are capped before collection materialization: "
+        .. tostring(progressing_bounded.complete) .. "/" .. tostring(progressing_bounded.reason)
+        .. "/" .. tostring(reward_fixture.scans.progressing_elements))
+    reward_fixture.progressing_collection = nil
+  end)() end
+  do (function()
     local many_rows, many_catalog = {}, {}
     for i = 1, 65 do
       local qid = 21000 + i
@@ -5483,9 +5541,8 @@ do
   local graph_before_overlay = reward_fixture.scans.graph
   reward_fixture.overlay.process_executed = true
   reward_fixture.overlay_changed = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
-  assert(#reward_fixture.overlay_changed.candidates == 2
+  assert(#reward_fixture.overlay_changed.candidates == 1
     and reward_fixture.overlay_changed.candidates[1].eligibility == "unknown"
-    and reward_fixture.overlay_changed.candidates[2].eligibility == "unknown"
     and reward_fixture.scans.graph == graph_before_overlay
     and reward_fixture.scans.entries == reward_fixture.entries_after_first,
     "processor live-state change reclassifies without a structural rescan")

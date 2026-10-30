@@ -32,7 +32,10 @@ local function observation(overrides)
     tasks = { { qid = 10, task_index = 3, targets = {
       { kind = "npc", task_index = 3, cid = 40, eligibility = "eligible" } } } },
     controllers = { { qid = 10, owner_token = "b2", processors = {
-      { processor_id = 100, quest_action_type = "app.quest.action.QuestReward", processor_phase = "Standby" },
+      { processor_id = 100, quest_action_type = "app.quest.action.QuestReward", processor_phase = "Standby",
+        process_type = "ExecuteAction", process_phase = "ExecuteAction", process_completed = false,
+        process_canceled = false, nested_action_type = "ExecuteAction", nested_action_phase = "ExecuteAction",
+        nested_action_completed = false, nested_action_canceled = false, nested_action_result = 0 },
       { processor_id = 90, quest_action_type = "app.quest.action.Trigger", processor_phase = "Waiting",
         process_type = "ExecuteAction", process_phase = "ExecuteAction", process_completed = false,
         process_canceled = false, nested_action_type = "CheckTrigger", nested_action_phase = "CheckTrigger",
@@ -55,6 +58,12 @@ local function observation(overrides)
   }
   for k, v in pairs(overrides or {}) do o[k] = v end
   return o
+end
+local function reward_processor(id, phase)
+  return { processor_id=id, quest_action_type="app.quest.action.QuestReward", processor_phase=phase or "Standby",
+    process_type="ExecuteAction", process_phase="ExecuteAction", process_completed=false,
+    process_canceled=false, nested_action_type="ExecuteAction", nested_action_phase="ExecuteAction",
+    nested_action_completed=false, nested_action_canceled=false, nested_action_result=0 }
 end
 local function classify(rows, obs, generation)
   obs = obs or observation()
@@ -108,8 +117,9 @@ do
   -- Complete negative versus incomplete global observations.
   local obs = observation({ progressing_qids = {} })
   local s = classify({ row() }, obs)
-  eq(#s.candidates, 1); eq(s.candidates[1].eligibility, "ineligible")
+  eq(#s.candidates, 0)
   eq(s.source_status.rows[1].state, "unavailable"); eq(s.source_status.rows[1].reason_code, "quest_not_progressing")
+  eq(s.source_status.rows[1].task_index,nil)
   obs = observation({ complete = false })
   s = classify({ row() }, obs); eq(s.complete, false); eq(#s.candidates, 0)
   eq(s.reason, "reward_observation_incomplete")
@@ -119,8 +129,7 @@ do
   obs = observation({ reward_outputs = {
     { name_hash = 30, outputs = { { item_id = 500, count = 1 } } },
     { name_hash = 31, outputs = { { item_id = 500, count = 1 } } } } })
-  obs.controllers[1].processors[#obs.controllers[1].processors + 1] = {
-    processor_id = 101, quest_action_type = "app.quest.action.QuestReward", processor_phase = "Standby" }
+  obs.controllers[1].processors[#obs.controllers[1].processors + 1] = reward_processor(101)
   obs.controllers[1].processors[#obs.controllers[1].processors + 1] = {
     processor_id = 91, quest_action_type = "app.quest.action.Trigger", processor_phase = "Waiting",
     process_type = "ExecuteAction", process_phase = "ExecuteAction", process_completed = false,
@@ -215,6 +224,10 @@ do
     { "reward uninitialized", function(o) o.controllers[1].processors[1].processor_phase="Uninitialized" end, "unknown", "processor_state_unreadable" },
     { "predecessor standby", function(o) o.controllers[1].processors[2].processor_phase="Standby" end, "unknown", "processor_state_unreadable" },
     { "reward unsupported phase", function(o) o.controllers[1].processors[1].processor_phase="Setup" end, "unknown", "processor_state_unreadable" },
+    { "reward process phase", function(o) o.controllers[1].processors[1].process_phase="Executed" end, "unknown", "processor_state_unreadable" },
+    { "reward completed flag", function(o) o.controllers[1].processors[1].process_completed=true end, "unknown", "processor_state_unreadable" },
+    { "reward canceled flag", function(o) o.controllers[1].processors[1].process_canceled=true end, "unknown", "processor_state_unreadable" },
+    { "reward action result", function(o) o.controllers[1].processors[1].nested_action_result=1 end, "unknown", "processor_state_unreadable" },
     { "reward completed", function(o) o.controllers[1].processors[1].processor_phase="Completed" end, "unavailable", "processor_completed" },
     { "predecessor completed flag", function(o) o.controllers[1].processors[2].process_completed=true end, "unknown", "processor_state_unreadable" },
     { "predecessor completed phase", function(o) o.controllers[1].processors[2].processor_phase="Completed" end, "unknown", "processor_state_unreadable" },
@@ -355,8 +368,7 @@ do
   eq(s.complete,false,"incomplete sibling event invalidates provider"); eq(#s.candidates,0)
 
   local unsupported=row({action_ordinal=1,processor_id=101,predecessor_processor_id=91,accept_minus_one=true})
-  o=observation(); o.controllers[1].processors[#o.controllers[1].processors+1]={
-    processor_id=101,quest_action_type="app.quest.action.QuestReward",processor_phase="Standby"}
+  o=observation(); o.controllers[1].processors[#o.controllers[1].processors+1]=reward_processor(101)
   o.controllers[1].processors[#o.controllers[1].processors+1]={
     processor_id=91,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",
     process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,
@@ -381,8 +393,7 @@ do
     {name_hash=30,outputs={{item_id=500,count=1}}},
     {name_hash=31,outputs={{item_id=501,count=1}}}}})
   o.wanted={500,501}
-  o.controllers[1].processors[#o.controllers[1].processors+1]={
-    processor_id=101,quest_action_type="app.quest.action.QuestReward",processor_phase="Completed"}
+  o.controllers[1].processors[#o.controllers[1].processors+1]=reward_processor(101,"Completed")
   o.controllers[1].processors[#o.controllers[1].processors+1]={
     processor_id=91,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",
     process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,
@@ -391,6 +402,7 @@ do
   s=classify({row(),completed},o)
   eq(s.complete,true); eq(#s.candidates,1,"completed sibling excluded from eligible aggregate")
   eq(s.candidates[1].eligibility,"eligible"); eq(s.candidates[1].source_id[7],1)
+  eq(#s.candidates[1].outputs,1,"completed sibling output is excluded from eligible aggregate")
   eq(s.candidates[1].outputs[1].item_id,500)
   local excluded=false
   for _,d in ipairs(s.diagnostic_rows) do if d.member_id and d.status=="ineligible" then excluded=true end end
@@ -435,6 +447,104 @@ do
 end
 
 do
+  -- Reward endpoint relevance belongs to the whole endpoint group, so every
+  -- co-granted member contributes to identity and complete outputs.
+  local a=row()
+  local b=row({action_ordinal=3,processor_id=103,predecessor_processor_id=93,
+    reward_hashes={31}})
+  local o=observation({reward_outputs={
+    {name_hash=30,outputs={{item_id=500,count=1}}},
+    {name_hash=31,outputs={{item_id=501,count=4}}}}})
+  o.wanted={500}
+  o.controllers[1].processors[#o.controllers[1].processors+1]=reward_processor(103)
+  o.controllers[1].processors[#o.controllers[1].processors+1]={
+    processor_id=93,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",
+    process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,
+    nested_action_type="CheckTrigger",nested_action_phase="CheckTrigger",nested_action_completed=false,
+    nested_action_canceled=false,nested_action_result=0}
+  local s=classify({a,b},o)
+  eq(s.complete,true); eq(#s.candidates,1)
+  eq(s.candidates[1].source_id[7],2,"all members of relevant endpoint are identified")
+  eq(s.candidates[1].outputs[1].item_id,500)
+  eq(s.candidates[1].outputs[2].item_id,501,"nonwanted co-grant remains in complete outputs")
+
+  local by_id={}
+  for _,processor in ipairs(o.controllers[1].processors) do by_id[processor.processor_id]=processor end
+  by_id[100].processor_phase="Completed"
+  s=classify({a,b},o)
+  local eligible=0
+  for _,candidate in ipairs(s.candidates) do
+    if candidate.eligibility=="eligible" then eligible=eligible+1 end
+  end
+  eq(eligible,0,"active nonwanted co-grant cannot make a completed wanted member drawable")
+
+  by_id[100].processor_phase="Standby"
+  by_id[103].processor_phase="Completed"
+  s=classify({a,b},o)
+  eq(#s.candidates,1); eq(s.candidates[1].eligibility,"eligible")
+  eq(s.candidates[1].source_id[7],1,"completed nonwanted co-grant is excluded from source identity")
+  eq(#s.candidates[1].outputs,1,"completed nonwanted co-grant is excluded from outputs")
+  eq(s.candidates[1].outputs[1].item_id,500)
+
+  by_id[103].processor_phase="Uninitialized"
+  s=classify({a,b},o)
+  eq(#s.candidates,1); eq(s.candidates[1].eligibility,"eligible")
+  eq(s.candidates[1].source_id[7],1,"unknown nonwanted co-grant is excluded from source identity")
+  eq(#s.candidates[1].outputs,1,"unknown nonwanted co-grant is excluded from outputs")
+  eq(s.candidates[1].outputs[1].item_id,500)
+
+  local bad=row(); bad.reward_rows={}
+  s=classify({bad},observation())
+  eq(s.complete,false,"empty reward membership is indeterminate")
+
+  for _,mutation in ipairs({
+    function(p) p.process_phase="Executed" end,
+    function(p) p.process_completed=true end,
+    function(p) p.process_canceled=true end,
+    function(p) p.nested_action_phase="Executed" end,
+    function(p) p.nested_action_completed=true end,
+    function(p) p.nested_action_canceled=true end,
+    function(p) p.nested_action_result=1 end,
+  }) do
+    o=observation(); mutation(o.controllers[1].processors[2]); s=classify({row()},o)
+    eq(s.candidates[1].eligibility,"unknown","unsupported trigger phase, flag or result stays unknown")
+  end
+end
+
+do
+  -- Once one occurrence of a scalar member identity is relevant, every
+  -- occurrence participates even when endpoint evidence differs.
+  local wanted=row()
+  local duplicate=row({talk_event_id=21,end_no=8,reward_hashes={31}})
+  local o=observation({reward_outputs={
+    {name_hash=30,outputs={{item_id=500,count=1}}},
+    {name_hash=31,outputs={{item_id=600,count=1}}}}})
+  local s=classify({wanted,duplicate},o)
+  eq(s.complete,false,"cross-endpoint duplicate scalar identity fails closed")
+  fallback(s,"status_duplicate_identity")
+end
+
+do
+  -- Nonprogressing endpoint status aggregates all matched item IDs and uses
+  -- a canonical status-only identity without inventing a task index.
+  local a=row(); local b=row({action_ordinal=3,processor_id=103,
+    predecessor_processor_id=93,reward_hashes={31}})
+  local o=observation({progressing_qids={},reward_outputs={
+    {name_hash=30,outputs={{item_id=500,count=1}}},
+    {name_hash=31,outputs={{item_id=501,count=2}}}}})
+  o.wanted={500,501}
+  local s=classify({a,b},o)
+  eq(s.complete,true); eq(#s.candidates,0); eq(#s.source_status.rows,1)
+  eq(s.source_status.rows[1].scope,"source"); eq(s.source_status.rows[1].task_index,nil)
+  eq(s.source_status.rows[1].reason_code,"quest_not_progressing")
+  eq(#s.source_status.rows[1].item_ids,2)
+  eq(s.source_status.rows[1].item_ids[1],500); eq(s.source_status.rows[1].item_ids[2],501)
+  local core=require("Clairvoyance.core")
+  eq(s.source_status.rows[1].identity,core.target_key({"reward_status_endpoint",10,20,7,2,
+    2,100,90,3,103,93}),"status identity encodes the ordered endpoint member triples")
+end
+
+do
   local r1=row(); local r2=row({ action_ordinal=1, processor_id=101, predecessor_processor_id=91,
     reward_hashes={31} })
   local o=observation({ reward_outputs={
@@ -442,7 +552,7 @@ do
     {name_hash=31,outputs={{item_id=500,count=4},{item_id=502,count=1}}} } })
   o.wanted={500,501,502}
   for _, id in ipairs({101,91}) do
-    local p = id==101 and {processor_id=101,quest_action_type="app.quest.action.QuestReward",processor_phase="Standby"}
+    local p = id==101 and reward_processor(101)
       or {processor_id=91,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,nested_action_type="CheckTrigger",nested_action_phase="CheckTrigger",nested_action_completed=false,nested_action_canceled=false,nested_action_result=0}
     o.controllers[1].processors[#o.controllers[1].processors+1]=p
   end
@@ -465,7 +575,7 @@ do
       local id=base+j; wanted[#wanted+1]=id
       outputs[i].outputs[j]={item_id=id,count=1}
     end
-    processors[#processors+1]={processor_id=100+i,quest_action_type="app.quest.action.QuestReward",processor_phase="Standby"}
+    processors[#processors+1]=reward_processor(100+i)
     processors[#processors+1]={processor_id=200+i,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",
       process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,
       nested_action_type="CheckTrigger",nested_action_phase="CheckTrigger",nested_action_completed=false,
@@ -488,7 +598,7 @@ do
       for i=1,9 do
         a[i]=row({action_ordinal=i-1,processor_id=100+i,predecessor_processor_id=200+i,reward_hashes={29+i}})
         outs[i]={name_hash=29+i,outputs={{item_id=500,count=1}}}
-        ps[#ps+1]={processor_id=100+i,quest_action_type="app.quest.action.QuestReward",processor_phase="Standby"}
+        ps[#ps+1]=reward_processor(100+i)
         ps[#ps+1]={processor_id=200+i,quest_action_type="app.quest.action.Trigger",processor_phase="Waiting",
           process_type="ExecuteAction",process_phase="ExecuteAction",process_completed=false,process_canceled=false,
           nested_action_type="CheckTrigger",nested_action_phase="CheckTrigger",nested_action_completed=false,
@@ -536,7 +646,7 @@ do
   fallback(duplicate,"status_duplicate_identity")
   local many={}
   for i=1,513 do many[i]=row({action_ordinal=i,processor_id=100+i,
-    predecessor_processor_id=1000+i,accept_minus_one=true}) end
+    predecessor_processor_id=1000+i,end_no=i,accept_minus_one=true}) end
   local overflow=classify(many,observation())
   eq(overflow.complete,true); eq(#overflow.candidates,513)
   fallback(overflow,"status_row_overflow")

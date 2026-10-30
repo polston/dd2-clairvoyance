@@ -4,6 +4,50 @@ A.objective_need_builder = require("Clairvoyance.objective_needs")
 A.access = require("Clairvoyance.access")
 A.reward_sources = require("Clairvoyance.reward_sources")
 
+function A.objective_destination_signature(rows)
+    if type(rows) ~= "table" then return nil end
+    local identities = {}
+    for _, destination in ipairs(rows) do
+        if type(destination) ~= "table" or type(destination.target) ~= "table" then return nil end
+        local place = destination.target.place
+        local fields = { "task_index", "destination_index", "kind", "target.cid", "target.key",
+            "place.kind", "place.key", "place.local_area" }
+        local function value(path)
+            local current = destination
+            for part in path:gmatch("[^.]+") do
+                if part == "place" then current = place
+                else current = type(current) == "table" and current[part] or nil end
+            end
+            return current
+        end
+        local tuple = { "source" }
+        for _, path in ipairs(fields) do
+            local v = value(path)
+            local kind, encoded = type(v), v
+            if v == nil then encoded = "-"
+            elseif kind == "number" then
+                encoded = math.tointeger(v)
+                if encoded == nil or math.abs(encoded) > 9007199254740991 then return nil end
+            elseif kind == "boolean" then encoded = v and "true" or "false"
+            elseif kind ~= "string" then return nil end
+            tuple[#tuple + 1] = path
+            tuple[#tuple + 1] = kind
+            tuple[#tuple + 1] = encoded
+        end
+        local key = qnml_core.target_key(tuple)
+        if key == nil then return nil end
+        identities[#identities + 1] = key
+    end
+    table.sort(identities)
+    local parts = { "destinations:", tostring(#identities), ":" }
+    for _, identity in ipairs(identities) do
+        parts[#parts + 1] = tostring(#identity)
+        parts[#parts + 1] = ":"
+        parts[#parts + 1] = identity
+    end
+    return table.concat(parts)
+end
+
 -- ===== debug flag =====
 local DEBUG = false
 
@@ -4573,7 +4617,25 @@ function A.read_objective_talk_grant_observation(wanted, requested_event_ids)
   end
   table.sort(out.wanted)
   local requested_set = {}
-  for _, event_id in ipairs(type(requested_event_ids) == "table" and requested_event_ids or {}) do
+  local request_rows = type(requested_event_ids) == "table" and requested_event_ids or {}
+  local request_count, request_max = 0, 0
+  for index in pairs(request_rows) do
+    if type(index) ~= "number" or index ~= math.floor(index) or index < 1 or index > 4096 then
+      out.reason = "talk_grant_event_ids_invalid"
+      return out
+    end
+    request_count = request_count + 1
+    request_max = math.max(request_max, index)
+  end
+  if request_count ~= request_max then
+    out.reason = "talk_grant_event_ids_invalid"
+    return out
+  end
+  if request_count > 64 then
+    out.reason = "talk_grant_event_ids_truncated"
+    return out
+  end
+  for _, event_id in ipairs(request_rows) do
     if type(event_id) ~= "number" or event_id <= 0 or event_id ~= math.floor(event_id)
         or requested_set[event_id] then
       out.reason = "talk_grant_event_ids_invalid"
@@ -4581,6 +4643,10 @@ function A.read_objective_talk_grant_observation(wanted, requested_event_ids)
     end
     requested_set[event_id] = true
     out.event_ids[#out.event_ids + 1] = event_id
+    if #out.event_ids > 64 then
+      out.reason = "talk_grant_event_ids_truncated"
+      return out
+    end
   end
   table.sort(out.event_ids)
   if #out.wanted == 0 and #out.event_ids == 0 then out.complete = true; return out end
@@ -6782,6 +6848,21 @@ function A.make()
     table.sort(out.wanted)
     for i = 2, #out.wanted do if out.wanted[i] == out.wanted[i - 1] then return fail("need_set_invalid") end end
     if #out.wanted > 256 then return fail("need_set_overflow") end
+    if #out.wanted == 0 then
+      out.owner_token = "empty-wanted"
+      out.complete = true
+      return out
+    end
+    if type(catalog_rows) ~= "table" then return fail("reward_catalog_invalid") end
+    local catalog_count, catalog_max = 0, 0
+    for index in pairs(catalog_rows) do
+      if type(index) ~= "number" or index ~= math.floor(index) or index < 1 or index > 4096 then
+        return fail("reward_catalog_invalid")
+      end
+      catalog_count = catalog_count + 1
+      catalog_max = math.max(catalog_max, index)
+    end
+    if catalog_count ~= catalog_max then return fail("reward_catalog_invalid") end
     local qlm = sdk.get_managed_singleton("app.QuestLogManager")
     local qm = sdk.get_managed_singleton("app.QuestManager")
     local manager_token = token(qm)
@@ -6851,21 +6932,73 @@ function A.make()
       out.reward_outputs[#out.reward_outputs + 1] = { name_hash = hash, outputs = copied }
       output_by_hash[hash] = copied
     end
-    local relevant, members_by_qid = {}, {}
-    for _, member in ipairs(type(catalog_rows) == "table" and catalog_rows or {}) do
-      local identity, matched = type(member) == "table" and member.source_identity or nil, false
-      for _, reward in ipairs(type(member) == "table" and member.reward_rows or {}) do
-        local outputs = type(reward) == "table" and output_by_hash[reward.name_hash] or nil
-        for _, value in ipairs(outputs or {}) do if wanted[value.item_id] then matched = true end end
+    local groups, row_groups, unsupported_relevant = {}, {}, {}
+    local function membership(member)
+      if type(member) ~= "table" or type(member.reward_rows) ~= "table" then return nil end
+      local count, maximum = 0, 0
+      for index, reward in pairs(member.reward_rows) do
+        if type(index) ~= "number" or index ~= math.floor(index) or index < 1 or index > 32
+            or type(reward) ~= "table" or reward.ordinal ~= index - 1
+            or type(reward.name_hash) ~= "number" or reward.name_hash < 0
+            or reward.name_hash > 4294967295 or reward.name_hash ~= math.floor(reward.name_hash) then
+          return nil
+        end
+        count, maximum = count + 1, math.max(maximum, index)
       end
-      if matched and type(member.quest_id) == "number" and type(identity) == "table" then
-        relevant[member.quest_id] = true
-        members_by_qid[member.quest_id] = members_by_qid[member.quest_id] or {}
-        members_by_qid[member.quest_id][#members_by_qid[member.quest_id] + 1] = member
+      if count == 0 or count ~= maximum then return nil end
+      local matched = false
+      for _, reward in ipairs(member.reward_rows) do
+        local outputs = output_by_hash[reward.name_hash]
+        if outputs == nil then return nil end
+        for _, value in ipairs(outputs) do if wanted[value.item_id] then matched = true end end
+      end
+      return matched
+    end
+    for _, member in ipairs(type(catalog_rows) == "table" and catalog_rows or {}) do
+      local matched = membership(member)
+      if matched == nil then return fail("reward_catalog_membership_unreadable") end
+      local evidence = member.endpoint_evidence
+      local qid_valid = type(member.quest_id) == "number" and member.quest_id > 0
+        and member.quest_id == math.floor(member.quest_id)
+      if not qid_valid and matched then return fail("reward_catalog_invalid") end
+      if qid_valid and type(evidence) == "table" and type(evidence.talk_event_id) == "number"
+          and type(evidence.end_no) == "number" then
+        local key = qnml_core.target_key({ "source", "reward_endpoint", member.quest_id,
+          evidence.talk_event_id, evidence.end_no })
+        if key == nil then return fail("reward_catalog_invalid") end
+        groups[key] = groups[key] or { relevant = false }
+        groups[key].relevant = groups[key].relevant or matched
+        row_groups[#row_groups + 1] = { member = member, key = key }
+      elseif matched then
+        unsupported_relevant[#unsupported_relevant + 1] = member
       end
     end
-    local progressing = read_quest_id_list("getProgressingQuestIds", "progressing")
-    if type(progressing) ~= "table" then return fail("progressing_set_invalid") end
+    local relevant, members_by_qid = {}, {}
+    local function add_relevant(member)
+      relevant[member.quest_id] = true
+      members_by_qid[member.quest_id] = members_by_qid[member.quest_id] or {}
+      members_by_qid[member.quest_id][#members_by_qid[member.quest_id] + 1] = member
+    end
+    for _, ref in ipairs(row_groups) do
+      if groups[ref.key].relevant then add_relevant(ref.member) end
+    end
+    for _, member in ipairs(unsupported_relevant) do add_relevant(member) end
+    local qlm = sdk.get_managed_singleton("app.QuestLogManager")
+    local raw_progressing = safe_call(qlm, "getProgressingQuestIds")
+    local progress_count_ok, raw_progress_count = managed_try_call(raw_progressing, "get_size")
+    if not progress_count_ok or type(raw_progress_count) ~= "number" then
+      progress_count_ok, raw_progress_count = managed_try_call(raw_progressing, "get_Count")
+    end
+    local progress_count = progress_count_ok and A.count_of(raw_progress_count) or nil
+    if progress_count == nil then return fail("progressing_set_invalid") end
+    if progress_count > 64 then return fail("progressing_set_truncated") end
+    local progressing = {}
+    for index = 0, progress_count - 1 do
+      local item_ok, item = managed_try_call(raw_progressing, "get_element", index)
+      if not item_ok or item == nil then item_ok, item = managed_try_call(raw_progressing, "get_Item", index) end
+      if not item_ok or item == nil then return fail("progressing_set_invalid") end
+      progressing[#progressing + 1] = item
+    end
     table.sort(progressing)
     if #progressing > 64 then return fail("progressing_set_truncated") end
     for i, qid in ipairs(progressing) do
@@ -6880,6 +7013,17 @@ function A.make()
     end
     table.sort(qids)
     if #qids > 64 then return fail("reward_source_qids_truncated") end
+    for _, qid in ipairs(qids) do
+      for _, member in ipairs(members_by_qid[qid] or {}) do
+        local evidence = member.endpoint_evidence
+        if type(evidence) == "table" and type(evidence.talk_event_id) == "number" then
+          event_ids[evidence.talk_event_id] = true
+        end
+      end
+    end
+    local requested_event_count = 0
+    for _ in pairs(event_ids) do requested_event_count = requested_event_count + 1 end
+    if requested_event_count > 64 then return fail("reward_event_ids_truncated") end
     for _, qid in ipairs(qids) do
       for _, member in ipairs(members_by_qid[qid] or {}) do
         local identity, evidence = member.source_identity, member.endpoint_evidence
@@ -6912,22 +7056,6 @@ function A.make()
       tostring(dict_free), tostring(type(task_snapshot) == "table" and task_snapshot.need_generation),
       table.concat(out.wanted, ","), table.concat(out.progressing_qids, ","),
       table.concat(member_parts, "|") }
-    local function destination_signature(rows)
-      if type(rows) ~= "table" then return nil end
-      local identities = {}
-      for _, destination in ipairs(rows) do
-        if type(destination) ~= "table" or type(destination.target) ~= "table" then return nil end
-        local place = destination.target.place
-        identities[#identities + 1] = table.concat({ tostring(destination.task_index),
-          tostring(destination.destination_index), tostring(destination.kind),
-          tostring(destination.target.cid), tostring(destination.target.key),
-          tostring(type(place) == "table" and place.kind),
-          tostring(type(place) == "table" and place.key),
-          tostring(type(place) == "table" and place.local_area) }, ":")
-      end
-      table.sort(identities)
-      return table.concat(identities, "|")
-    end
     for _, qid in ipairs(qids) do
       local entry = type(catalog_quests) == "table" and catalog_quests[qid] or nil
       local task_reader = objective_task_state.reward_task_reader
@@ -6943,8 +7071,8 @@ function A.make()
             and (task_quest.read_status ~= "ok" or task_quest.task_index ~= task_row.task_index) then
           return fail("current_task_changed")
         elseif type(task_quest) == "table" and task_quest.qid == qid then
-          local snapshot_destinations = destination_signature(task_quest.task_destinations)
-          local live_destinations = destination_signature(task_row.task_destinations)
+          local snapshot_destinations = A.objective_destination_signature(task_quest.task_destinations)
+          local live_destinations = A.objective_destination_signature(task_row.task_destinations)
           if snapshot_destinations == nil or live_destinations == nil
               or snapshot_destinations ~= live_destinations then
             return fail("current_task_changed")
@@ -7272,22 +7400,6 @@ function A.make()
     local forgery_observation, forgery_generation = provider_observation("forgery")
     local talk = A.objective_talk_grant_provider_snapshot(talk_observation, talk_generation)
     local forgery = A.objective_forgery_provider_snapshot(forgery_observation, forgery_generation)
-    local function destination_signature(rows)
-      if type(rows) ~= "table" then return nil end
-      local identities = {}
-      for _, destination in ipairs(rows) do
-        if type(destination) ~= "table" or type(destination.target) ~= "table" then return nil end
-        local place = destination.target.place
-        identities[#identities + 1] = table.concat({ tostring(destination.task_index),
-          tostring(destination.destination_index), tostring(destination.kind),
-          tostring(destination.target.cid), tostring(destination.target.key),
-          tostring(type(place) == "table" and place.kind),
-          tostring(type(place) == "table" and place.key),
-          tostring(type(place) == "table" and place.local_area) }, ":")
-      end
-      table.sort(identities)
-      return table.concat(identities, "|")
-    end
     local signature_parts = { tostring(type(task_snapshot) == "table" and task_snapshot.focus_epoch or 0),
       tostring(type(task_snapshot) == "table" and task_snapshot.need_generation or 0),
       tostring(version), tostring(extension), wanted == nil and "needs:unknown" or "needs:complete" }
@@ -7296,7 +7408,7 @@ function A.make()
         signature_parts[#signature_parts + 1] = tostring(quest.qid) .. ":"
           .. tostring(quest.task_index) .. ":" .. tostring(quest.read_status)
         signature_parts[#signature_parts + 1] = "destinations:" .. tostring(
-          destination_signature(quest.task_destinations))
+          A.objective_destination_signature(quest.task_destinations))
       end
     end
     local wanted_ids = {}
