@@ -6094,11 +6094,19 @@ do
         { qid = 42, task_index = 0, read_status = "ok", issued_npcs = {},
           task_destinations = {}, guidance = {}, item_ownership = {
             { proof_kind = "delivery", eligibility = "unknown", task_index = 0,
-              concierge_index = 0, destination_index = 3, delivery = { groups = {
+              concierge_index = 0, destination_index = 3,
+              delivery = { is_not = false, check_storage = true, groups = {
                 { qid = 42, ref_key = 0, delivery = { groups = {
                   { index = 0, item_ids = { 800, 801 }, count = 1,
                     is_all_item = false, is_infinite = false },
                   { index = 1, item_ids = { 802, 803 }, count = 2,
+                    is_all_item = false, is_infinite = false },
+                } } },
+              } } },
+            { proof_kind = "delivery", eligibility = "unknown", task_index = 0,
+              delivery = { is_not = true, check_storage = true, groups = {
+                { delivery = { groups = {
+                  { index = 2, item_ids = { 805 }, count = 1,
                     is_all_item = false, is_infinite = false },
                 } } },
               } } },
@@ -6125,12 +6133,46 @@ do
         and current_task._delivery_snapshot.checklist[3].check_index == 5
         and current_task._delivery_snapshot.checklist[3].item_id == 804
         and current_task._delivery_snapshot.checklist[3].inventory_done == true)
+    local storage_scope = { catalog_version = 2, focus_epoch = 1,
+      journal_generation = 1, need_generation = 1, quests = {
+        { qid = 44, task_index = 0, read_status = "ok", issued_npcs = {},
+          task_destinations = {}, guidance = {}, item_ownership = {
+            { proof_kind = "delivery", task_index = 0,
+              delivery = { is_not = false, check_storage = false, groups = {
+                { delivery = { groups = { { index = 0, item_ids = { 820 }, count = 1,
+                  is_all_item = false, is_infinite = false } } } },
+              } } },
+            { proof_kind = "delivery", task_index = 0,
+              delivery = { is_not = false, check_storage = true, groups = {
+                { delivery = { groups = { { index = 1, item_ids = { 820 }, count = 1,
+                  is_all_item = false, is_infinite = false } } } },
+              } } },
+          } },
+      }, objective_needs = { status = "ok", complete = true, generation = 1,
+        source_generation = 2, groups = {}, held = { [820] = 1 }, held_carried = {} } }
+    local storage_scope_snapshot = core.objective_snapshot(storage_scope,
+      nil, {}, core.target_registry_new())
+    check("objective checklist: delivery storage scope distinguishes carried from boxed items",
+      storage_scope_snapshot and #storage_scope_snapshot.checklist == 2
+        and storage_scope_snapshot.checklist[1].inventory_done == false
+        and storage_scope_snapshot.checklist[2].inventory_done == true)
+    local incoherent_checklist = core.objective_checklist({ quests = {}, objective_needs = {
+      status = "unknown", complete = false, groups = {} } })
+    check("objective checklist: incomplete need observations do not publish an empty overlay",
+      incoherent_checklist == nil)
+    local cached_overlay = { generation = 1, checklist = { { qid = 1 } }, targets = {} }
+    local presented_overlay = type(core.objective_snapshot_with_checklist) == "function"
+      and core.objective_snapshot_with_checklist(cached_overlay, { { qid = 2 } }) or nil
+    check("objective checklist: presentation overlay does not mutate the stability cache",
+      presented_overlay ~= nil and presented_overlay ~= cached_overlay
+        and presented_overlay.checklist[1].qid == 2
+        and cached_overlay.checklist[1].qid == 1)
     current_task._selected_delivery = { catalog_version = 2, focus_epoch = 1,
       journal_generation = 1, need_generation = 1, quests = {
         { qid = 43, task_index = 0, read_status = "ok", issued_npcs = {},
           task_destinations = {}, guidance = {}, item_ownership = {
             { proof_kind = "delivery", eligibility = "unknown", task_index = 0,
-              delivery = { group_id = 1, groups = {
+              delivery = { is_not = false, check_storage = true, group_id = 1, groups = {
                 { delivery = { groups = {
                   { index = 0, item_ids = { 810 }, count = 1,
                     is_all_item = false, is_infinite = false },
@@ -6140,7 +6182,8 @@ do
               } } },
           } },
       }, objective_needs = { status = "ok", complete = true, generation = 1,
-        source_generation = 2, groups = {}, held = { [810] = 1, [811] = 1 } } }
+        source_generation = 2, groups = {}, held = { [810] = 1, [811] = 1 },
+        held_carried = {} } }
     current_task._selected_delivery_snapshot = core.objective_snapshot(
       current_task._selected_delivery, nil, {}, core.target_registry_new())
     check("objective checklist: delivery group id selects only its exact checklist row",

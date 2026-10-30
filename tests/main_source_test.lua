@@ -156,9 +156,8 @@ ordered("objective inputs flow through one snapshot before compute", tick_body, 
   "pcall(adapter.refresh_objectives)",
   "pcall(adapter.refresh_items, mode)",
   "adapter.objective_task_snapshot,",
-  "pcall(adapter.objective_need_groups,",
-  "observed_task_snapshot.objective_needs = observed_need_snapshot",
   "core.objective_task_projection(",
+  "pcall(adapter.objective_need_groups,",
   "task_snapshot.objective_needs = need_snapshot",
   'wt.q("objective_place_snapshot",',
   'wt.q("objective_source_snapshots",',
@@ -168,7 +167,7 @@ ordered("objective inputs flow through one snapshot before compute", tick_body, 
   "local result = core.compute(adapter, show)",
 })
 check("objective need grouping fails closed before provider and core processing",
-  tick_body:find('local observed_need_snapshot = { status = "unknown", complete = false,', 1, true) ~= nil
+  tick_body:find('local failed_need_snapshot = { status = "unknown", complete = false,', 1, true) ~= nil
     and tick_body:find('reason = "need_snapshot_failed"', 1, true) ~= nil)
 local compute_at = tick_body:find("local result = core.compute(adapter, show)", 1, true)
 local route_at = tick_body:find('wt.q("set_routes", nil, result.objective_routes)', 1, true)
@@ -196,7 +195,11 @@ check("tree checklist separately observes visible progressing quests without pub
   tick_body:find("local checklist_qids", 1, true) ~= nil
     and tick_body:find("if tree_live and type(show.objective_snapshot)", 1, true) ~= nil
     and tick_body:find("pcall(core.objective_checklist,", 1, true) ~= nil
-    and tick_body:find("show.objective_snapshot.checklist = tree_checklist", 1, true) ~= nil)
+  and tick_body:find("core.objective_snapshot_with_checklist(", 1, true) ~= nil)
+check("tree-only checklist failures cannot poison focused objective needs",
+  tick_body:find("pcall(adapter.objective_need_groups,\n      task_snapshot", 1, true) ~= nil
+    and tick_body:find("observed_tree_needs = pcall(adapter.objective_need_groups,", 1, true) ~= nil
+    and tick_body:find("observed_task_snapshot)", 1, true) ~= nil)
 local objective_task_reads = 0
 for _ in tick_body:gmatch("adapter%.objective_task_snapshot") do
   objective_task_reads = objective_task_reads + 1
@@ -204,6 +207,8 @@ end
 check("tree checklist and focused targets share one task observation per tick",
   objective_task_reads == 1
     and tick_body:find("core.objective_task_projection(", 1, true) ~= nil)
+check("save/session reset clears the objective stability cache",
+  tick_body:find("wt.objective_snapshot_cache, wt.objective_snapshot_held = nil, false", 1, true) ~= nil)
 check("localized objective names cover every target owner",
   tick_body:find("for _, owner in ipairs(target.owners or {}) do", 1, true) ~= nil)
 check("shown ancillary routes use the semantic route list without requiring markers",

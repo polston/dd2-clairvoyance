@@ -4768,13 +4768,18 @@ do
   reward_fixture.delivery_group = own_catalog.quests[777].deliveries[1].groups[1]
   reward_fixture.delivery_group.item_ids = { 9002, 9003 }
   reward_fixture.delivery_group.is_all_item = false
-  IS.dict = storage({ { key = 65535, value = ilist({ sd(9003, 1) }) } })
+  IS.dict = storage({ { key = 65535, value = ilist({ sd(9003, 1) }) },
+    { key = PL, value = ilist({ sd(9002, 1) }) } })
   owned_snapshot._alternative_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   owned_snapshot._alternative_needs = ai.objective_need_groups(owned_snapshot._alternative_snapshot)
   assert(owned_snapshot._alternative_needs.status == "ok"
       and owned_snapshot._alternative_needs.complete
-      and owned_snapshot._alternative_needs.held[9003] == 1,
-    "structured delivery alternatives extend the coherent held snapshot")
+      and owned_snapshot._alternative_needs.held[9002] == 1
+      and owned_snapshot._alternative_needs.held[9003] == 1
+      and type(owned_snapshot._alternative_needs.held_carried) == "table"
+      and owned_snapshot._alternative_needs.held_carried[9002] == 1
+      and owned_snapshot._alternative_needs.held_carried[9003] == nil,
+    "structured delivery alternatives preserve carried and storage-scoped held counts")
   IS.dict = reward_fixture.prior_storage
   IS.prog = { 20040, 20090 }
   IS.procs = {

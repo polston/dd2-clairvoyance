@@ -1691,11 +1691,6 @@ function M.new(a, reads, io)
     for i, st in ipairs(c.value.stops) do
       local n = {}
       for k, v in pairs(st) do n[k] = v end
-      if valid_pos(st.pos) then
-        local dkey = "r:" .. tostring(st.area) .. ":" .. tostring(st.location)
-        if type(st.key) == "number" and st.key > 0 then dkey = "r:k:" .. st.key end
-        n.discovered = discovered(dkey, st.pos)
-      end
       stops[i] = n
     end
     -- the stop whose hours hold the game hour (nil when none does)
@@ -1708,6 +1703,21 @@ function M.new(a, reads, io)
           current = i
           break
         end
+      end
+    end
+    -- The schedule signature does not include transform position. Refresh the
+    -- active stop on every render so a walking NPC cannot outrun a cached route.
+    if current ~= nil then
+      local okp, current_pos = pcall(seller_pos, cid)
+      if okp and valid_pos(current_pos) and not near_zero(current_pos) then
+        stops[current].pos = pcopy(current_pos)
+      end
+    end
+    for _, st in ipairs(stops) do
+      if valid_pos(st.pos) then
+        local dkey = "r:" .. tostring(st.area) .. ":" .. tostring(st.location)
+        if type(st.key) == "number" and st.key > 0 then dkey = "r:k:" .. st.key end
+        st.discovered = discovered(dkey, st.pos)
       end
     end
     return route_contract({ cid = cid, name = name, stops = stops, unplaced = c.value.unplaced,

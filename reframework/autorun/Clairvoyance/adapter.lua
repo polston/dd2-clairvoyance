@@ -1883,7 +1883,7 @@ local ITEM_STATS = items.new_stats()
 local ITEM_LAST_AT = -math.huge
 items.objective_group_state = { status = "unknown", complete = false,
     generation = 0, task_generation = items.task_observation_generation,
-    groups = {}, records = {}, held = {}, task_index = {}, task_versions = {} }
+    groups = {}, records = {}, held = {}, held_carried = {}, task_index = {}, task_versions = {} }
 items.objective_checklist_held_state = nil
 items.objective_loot_state = { status = "unknown", complete = false,
     generation = 0, at = -math.huge, candidates = {} }
@@ -1903,7 +1903,7 @@ function items.invalidate()
     ITEM_STATS.needs_fresh = false
     items.objective_group_state = { status = "unknown", complete = false,
         generation = items.objective_group_state.generation + 1,
-        groups = {}, records = {}, held = {}, task_index = {}, task_versions = {} }
+        groups = {}, records = {}, held = {}, held_carried = {}, task_index = {}, task_versions = {} }
     items.objective_loot_state = { status = "unknown", complete = false,
         generation = items.objective_loot_state.generation + 1,
         at = -math.huge, candidates = {} }
@@ -3121,7 +3121,7 @@ function items.read_held(ids)
     local en = safe_field(dict, "_entries")
     local entries = items.elements(en)
     if entries == nil then return nil end
-    local held, skipped, complete = {}, 0, true
+    local held, carried, skipped, complete = {}, {}, 0, true
     for i = 1, #entries do
         local ok = pcall(function()
             local e = entries[i]
@@ -3147,14 +3147,17 @@ function items.read_held(ids)
                         complete = false
                         return
                     end
-                    if ids[id] then held[id] = (held[id] or 0) + num end
+                    if ids[id] then
+                        held[id] = (held[id] or 0) + num
+                        if key ~= 65535 then carried[id] = (carried[id] or 0) + num end
+                    end
                 end)
                 if not okd then skipped = skipped + 1; complete = false end
             end
         end)
         if not ok then skipped = skipped + 1; complete = false end
     end
-    return held, skipped, complete
+    return held, skipped, complete, carried
 end
 
 -- Installs a need table and derives ITEM_WANTED. An empty table clears
@@ -3181,7 +3184,7 @@ local function item_round_failed()
     ITEM_STATS.needs_fresh = false
     items.objective_group_state = { status = "unknown", complete = false,
         generation = items.objective_group_state.generation + 1,
-        groups = {}, records = {}, held = {}, task_index = {}, task_versions = {} }
+        groups = {}, records = {}, held = {}, held_carried = {}, task_index = {}, task_versions = {} }
     if ITEM_FAILED_STREAK >= 3 then commit_item_needs({}) end
 end
 
@@ -3705,7 +3708,7 @@ local function item_round_needs(now)
         items.objective_group_state = { status = "ok", complete = true,
             generation = ITEM_STATS.rounds,
             task_generation = items.task_observation_generation,
-            groups = {}, records = {}, held = {}, task_index = {}, task_versions = {} }
+            groups = {}, records = {}, held = {}, held_carried = {}, task_index = {}, task_versions = {} }
         ITEM_FAILED_STREAK = 0
         ITEM_STATS.ignored = 0
         return
@@ -3781,7 +3784,7 @@ local function item_round_needs(now)
     local records, skipped, objective_records, objective_complete =
         with_index_retry(list, n, pass, item_round_failed)
     if records == nil then return end
-    local held, ids, held_complete = {}, {}, true
+    local held, held_carried, ids, held_complete = {}, {}, {}, true
     for _, r in ipairs(records) do
         if r.op == "more" or r.op == "morethan" then ids[r.id] = true end
     end
@@ -3789,9 +3792,10 @@ local function item_round_needs(now)
         for _, option in ipairs(group.options) do ids[option.item_id] = true end
     end
     if next(ids) ~= nil then
-        local h, hsk, hcomplete = items.read_held(ids)
+        local h, hsk, hcomplete, hcarried = items.read_held(ids)
         if h == nil then item_round_failed() return end
         held = h
+        held_carried = hcarried or {}
         skipped = skipped + hsk
         held_complete = hcomplete == true
     end
@@ -3827,7 +3831,8 @@ local function item_round_needs(now)
         complete = records_complete, generation = group_generation,
         task_generation = items.task_observation_generation,
         groups = {}, records = records_complete and objective_records or {},
-        held = records_complete and held or {}, task_index = task_index,
+        held = records_complete and held or {},
+        held_carried = records_complete and held_carried or {}, task_index = task_index,
         task_versions = task_versions }
     commit_item_needs(t)
     if type(rel) == "table" then items.related = rel end
@@ -5706,8 +5711,9 @@ function A.make()
       local ri = right.options[1] and right.options[1].item_id or 0
       return li < ri
     end)
-    local held = {}
+    local held, held_carried = {}, {}
     for item_id, count in pairs(state.held or {}) do held[item_id] = count end
+    for item_id, count in pairs(state.held_carried or {}) do held_carried[item_id] = count end
     local checklist_ids = {}
     for _, row in ipairs(task_snapshot.quests) do
       for _, owner in ipairs(type(row) == "table" and type(row.item_ownership) == "table"
@@ -5743,9 +5749,10 @@ function A.make()
       local extra = items.objective_checklist_held_state
       if type(extra) ~= "table" or extra.generation ~= state.generation
           or extra.signature ~= signature then
-        local extra_held, skipped, complete = items.read_held(checklist_ids)
+        local extra_held, skipped, complete, extra_carried = items.read_held(checklist_ids)
         extra = { generation = state.generation, signature = signature,
           held = type(extra_held) == "table" and extra_held or {},
+          held_carried = type(extra_carried) == "table" and extra_carried or {},
           complete = type(extra_held) == "table" and complete == true and skipped == 0 }
         items.objective_checklist_held_state = extra
       end
@@ -5755,8 +5762,10 @@ function A.make()
           source_generation = state.generation, reason = "checklist_held_unreadable" }
       end
       for item_id, count in pairs(extra.held) do held[item_id] = count end
+      for item_id, count in pairs(extra.held_carried) do held_carried[item_id] = count end
     end
     return { status = "ok", complete = true, groups = groups, held = held,
+      held_carried = held_carried,
       generation = task_snapshot.need_generation, source_generation = state.generation,
       task_generation = state.task_generation }
   end

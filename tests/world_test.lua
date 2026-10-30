@@ -5411,6 +5411,14 @@ do
       r ~= nil and r.stops ~= nil and r.stops[3] ~= nil
       and r.stops[3].pos.x == 422.7 and r.stops[3].pos.y == 57.4
       and r.stops[3].pos.z == -903.8)
+    d.npcpos[2696] = P(430.5, 58.0, -900.0)
+    w:poke()
+    w:refresh(2, true, tg)
+    r = route_in(w)
+    check("real route: cached active stop follows a moving NPC without a schedule change",
+      r ~= nil and r.stops ~= nil and r.stops[3] ~= nil
+        and r.stops[3].pos.x == 430.5 and r.stops[3].pos.y == 58.0
+        and r.stops[3].pos.z == -900.0)
   end
 
   -- a key that does not resolve is unplaced and never asks for area nodes

@@ -4535,7 +4535,8 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
       for _, owner in ipairs(objective_array(quest.item_ownership) or {}) do
         if type(owner) == "table" and owner.proof_kind == "delivery"
             and (owner.task_index == nil or owner.task_index == task_index)
-            and type(owner.delivery) == "table" then
+            and type(owner.delivery) == "table" and owner.delivery.is_not == false
+            and type(owner.delivery.check_storage) == "boolean" then
           local selected_group = objective_index(owner.delivery.group_id, 2147483647)
             and owner.delivery.group_id or nil
           for _, ref in ipairs(objective_array(owner.delivery.groups) or {}) do
@@ -4565,7 +4566,8 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
                 checklist_specs[#checklist_specs + 1] = { qid = qid,
                   task_index = task_index, check_index = group.index + 1,
                   item_id = item_ids[1], item_ids = item_ids,
-                  required = group.count, source = "delivery" }
+                  required = group.count, source = "delivery",
+                  check_storage = owner.delivery.check_storage }
               end
             end
           end
@@ -4676,7 +4678,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
     end
   end
   local grouped_needs_valid = not grouped_needs
-  local held_counts = {}
+  local held_counts, carried_counts = {}, {}
   if grouped_needs then
     local snapshot = task_snapshot.objective_needs
     grouped_needs_valid = type(snapshot) == "table" and snapshot.status == "ok"
@@ -4695,6 +4697,18 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
               grouped_needs_valid = false; break
             end
             held_counts[item_id] = count
+          end
+        end
+      end
+      if snapshot.held_carried ~= nil then
+        if type(snapshot.held_carried) ~= "table" then grouped_needs_valid = false
+        else
+          for item_id, count in pairs(snapshot.held_carried) do
+            if not objective_uint(item_id, 2147483647)
+                or not objective_uint(count, 2147483647) then
+              grouped_needs_valid = false; break
+            end
+            carried_counts[item_id] = count
           end
         end
       end
@@ -4760,6 +4774,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         if previous == nil then by_row[key] = row
         else
           local same = previous.required == row.required
+            and previous.check_storage == row.check_storage
             and #previous.item_ids == #row.item_ids
           if same then
             for i, item_id in ipairs(row.item_ids) do
@@ -4772,8 +4787,10 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
       for key, row in pairs(by_row) do
         if not ambiguous[key] then
           local held = 0
+          local counts = row.source == "delivery" and row.check_storage == false
+            and carried_counts or held_counts
           for _, item_id in ipairs(row.item_ids) do
-            held = held + (held_counts[item_id] or 0)
+            held = held + (counts[item_id] or 0)
           end
           checklist[#checklist + 1] = { qid = row.qid, task_index = row.task_index,
             check_index = row.check_index, item_id = row.item_id, item_ids = row.item_ids,
@@ -5112,9 +5129,21 @@ end
 -- snapshot. Tree rows use this without publishing targets for quests that are
 -- visible in the tree but are not part of the map's focused objective set.
 function M.objective_checklist(task_snapshot)
+  local needs = type(task_snapshot) == "table" and task_snapshot.objective_needs or nil
+  if type(needs) ~= "table" or needs.status ~= "ok" or needs.complete ~= true then
+    return nil
+  end
   local projected = M.objective_snapshot(task_snapshot,
     { generation = 0, status = "unknown", places = {} }, {}, M.target_registry_new())
   return type(projected) == "table" and projected.checklist or {}
+end
+
+function M.objective_snapshot_with_checklist(snapshot, checklist)
+  if type(snapshot) ~= "table" or type(checklist) ~= "table" then return snapshot end
+  local copy = {}
+  for key, value in pairs(snapshot) do copy[key] = value end
+  copy.checklist = checklist
+  return copy
 end
 
 local function objective_name(policy, obj)

@@ -1129,6 +1129,7 @@ re.on_frame(function()
       snapshot = nil
       committed = {}
       wt.objective_route_sig = nil
+      wt.objective_snapshot_cache, wt.objective_snapshot_held = nil, false
       wt.routes_n, wt.routes_total = 0, 0
       want_update = true
       pcall(wt.reset, wt)
@@ -1350,17 +1351,17 @@ re.on_frame(function()
         or type(observed_task_snapshot.quests) ~= "table" then
       observed_task_snapshot = { quests = {} }
     end
-    local observed_need_snapshot = { status = "unknown", complete = false,
+    local failed_need_snapshot = { status = "unknown", complete = false,
       generation = observed_task_snapshot.need_generation, groups = {},
       reason = "need_snapshot_failed" }
+    local task_snapshot = core.objective_task_projection(observed_task_snapshot,
+      failed_need_snapshot, objective_qids)
+    local need_snapshot = failed_need_snapshot
     local ok_needs, observed_needs = pcall(adapter.objective_need_groups,
-      observed_task_snapshot)
+      task_snapshot)
     if ok_needs and type(observed_needs) == "table" then
-      observed_need_snapshot = observed_needs
+      need_snapshot = observed_needs
     end
-    observed_task_snapshot.objective_needs = observed_need_snapshot
-    local task_snapshot, need_snapshot = core.objective_task_projection(
-      observed_task_snapshot, observed_need_snapshot, objective_qids)
     task_snapshot.objective_needs = need_snapshot
     local place_snapshot = wt.q("objective_place_snapshot",
       { generation = 0, status = "unknown", places = {} }, task_snapshot)
@@ -1372,12 +1373,22 @@ re.on_frame(function()
         task_snapshot, need_snapshot, objective_candidate)
     local ok_tree_checklist, tree_checklist = false, nil
     if tree_live then
-      ok_tree_checklist, tree_checklist = pcall(core.objective_checklist,
-        observed_task_snapshot)
+      local tree_need_snapshot = need_snapshot
+      if #checklist_qids ~= #objective_qids then
+        tree_need_snapshot = failed_need_snapshot
+        local ok_tree_needs, observed_tree_needs = pcall(adapter.objective_need_groups,
+          observed_task_snapshot)
+        if ok_tree_needs and type(observed_tree_needs) == "table" then
+          tree_need_snapshot = observed_tree_needs
+        end
+      end
+      observed_task_snapshot.objective_needs = tree_need_snapshot
+      ok_tree_checklist, tree_checklist = pcall(core.objective_checklist, observed_task_snapshot)
     end
     if tree_live and type(show.objective_snapshot) == "table"
         and ok_tree_checklist and type(tree_checklist) == "table" then
-      show.objective_snapshot.checklist = tree_checklist
+      show.objective_snapshot = core.objective_snapshot_with_checklist(
+        show.objective_snapshot, tree_checklist)
     end
     local objective_names = { npcs = {}, targets = {}, items = {} }
     local named_npcs, named_targets, named_items, objective_quest_names = {}, {}, {}, {}
