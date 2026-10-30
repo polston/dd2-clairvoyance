@@ -39,9 +39,25 @@ function Resolve-Python {
     return $candidate
 }
 
+function ConvertTo-WindowsCommandLineArgument([string]$Argument) {
+    if ($Argument.Length -eq 0) { return '""' }
+    if ($Argument -notmatch '[\s"]') { return $Argument }
+    $escaped = $Argument -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
 function Invoke-ProjectPowerShell([string]$Script, [string[]]$Arguments) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Script @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "$(Split-Path $Script -Leaf) failed with exit $LASTEXITCODE" }
+    $processArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        (ConvertTo-WindowsCommandLineArgument $Script))
+    foreach ($argument in $Arguments) {
+        $processArgs += (ConvertTo-WindowsCommandLineArgument $argument)
+    }
+    $process = Start-Process -FilePath "powershell.exe" -ArgumentList $processArgs `
+        -NoNewWindow -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+        throw "$(Split-Path $Script -Leaf) failed with exit $($process.ExitCode)"
+    }
 }
 
 function Add-FilePair([System.Collections.Generic.List[object]]$Pairs,
@@ -158,6 +174,7 @@ try {
             $env:PATH = (Split-Path $python -Parent) + [System.IO.Path]::PathSeparator + $env:PATH
             Invoke-ProjectPowerShell (Join-Path $PSScriptRoot "deploy.ps1") `
                 @("-GameDir", $GameDir, "-Lua", $lua, "-Luac", $luac)
+            Test-InstalledFiles
         }
         "probe" {
             if (-not $Chunk) { throw "probe requires -Chunk <file>" }

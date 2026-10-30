@@ -1545,6 +1545,11 @@ do
     and d.lines[2] == "He is lost." and d.lines[3] == "[x] Ask" and d.lines[4] == "[ ] Look"
     and d.lines[5] == "Destination: Slums")
   check("jd DM3: in progress jump = dest", d.jump.x == 9 and d.jump.z == 7)
+  d = core.row_detail({ cat = "in_progress" }, {
+    checks = { { text = "Bring the item", done = false, inventory_done = true } },
+  }, nil, false)
+  check("jd DM3b: coherent carried-item state completes a stale game checklist row",
+    d.lines[1] == "[x] Bring the item")
   d = core.row_detail({ cat = "in_progress", pos = { x = 1, y = 1, z = 1 } }, { missing = true }, nil, false)
   check("jd DM4: no journal data -> no lines, jump = pos", #d.lines == 0 and d.jump.x == 1)
   d = core.row_detail({ cat = "locked", waiting = " (waiting on: X)", pos = { x = 1, y = 1, z = 1 } },
@@ -3657,6 +3662,31 @@ do
     { { cid = -77, place = 77, stops = { { pos = P(8) } } } })
   check("npc 15d2: a place route keeps route drawing active without stop markers",
     pro == true and php == true and #ppts == 0)
+  local manual_route = { cid = 12, stops = { { pos = P(1) } } }
+  local stale_objective_route = { cid = -21, qid = 7, kind = "place", direct = true,
+    target_key = "old", ordinal = 21, name = "Old objective", objective = true,
+    objective_generation = 3, stops = { { pos = P(2) } } }
+  local current_publication = { objective_generation = 4, members = { {
+    route_id = -22, qid = 7, kind = "place", direct = true, target_key = "new",
+    ordinal = 22, name = "New objective", objective = true,
+    objective_generation = 4,
+  } } }
+  local projected_routes, projected_objectives = core.route_render_projection(
+    { manual_route, stale_objective_route }, current_publication)
+  local projected_markers = core.filter_route_points({
+    { key = "r:12:1", cat = "route_stop", cid = 12, stop = 1, pos = P(1) },
+    { key = "r:-21:1", cat = "route_stop", cid = -21, stop = 1,
+      objective_generation = 3, pos = P(2) },
+    { key = "h:7:1", cat = "hint_pin", qid = 7, i = 1, pos = P(3) },
+  }, projected_objectives)
+  local kro, khp, kpts = core.route_point_state(
+    { markers = projected_markers }, projected_routes, false, false, {})
+  check("npc 15d3: objective churn preserves stable manual route rendering",
+    #projected_routes == 1 and projected_routes[1] == manual_route
+      and projected_objectives[-21] == nil and projected_objectives[-22] == nil
+      and #projected_markers == 2 and projected_markers[1].cid == 12
+      and projected_markers[2].cat == "hint_pin"
+      and kro == true and khp == true and #kpts == 2)
   check("npc 15e: core has no quest-specific access-gate filter",
     core.filter_hint_pins == nil)
 
@@ -5157,6 +5187,16 @@ do
     route.capacity_key = member.capacity_key
     route.group_keys = { core.target_key({ "need", 30150, 0, "item", 378, "exact" }) }
     check("objective route member comparator checks groups", not route_member_equal(route, member))
+
+    local npc_member = { route_id = 260732951, qid = 30100, kind = "npc",
+      direct = false, target_key = core.target_key({ 30100, "task", 1, 0, "npc" }), ordinal = 1,
+      name = "Silas", objective = true, objective_generation = 9 }
+    local npc_route = { cid = npc_member.route_id, qid = npc_member.qid,
+      kind = "npc", target_key = npc_member.target_key, ordinal = npc_member.ordinal,
+      name = npc_member.name, objective = true, objective_generation = 8,
+      item_ids = {}, group_keys = {} }
+    check("objective route member comparator treats absent and empty optional lists equally",
+      route_member_equal(npc_route, npc_member))
   end
   if type(route_id_fn) == "function" then
     local route_ids = {}
@@ -5578,7 +5618,11 @@ do
       and type(core.target_registry_allocate) == "function"
       and type(core.objective_snapshot) == "function"
       and type(core.objective_markers) == "function"
-      and type(core.objective_routes) == "function")
+      and type(core.objective_routes) == "function"
+      and type(core.objective_label) == "function"
+      and type(core.objective_checklist) == "function"
+      and type(core.objective_task_projection) == "function"
+      and type(core.apply_objective_checklist) == "function")
   if type(core.target_key) == "function" and type(core.target_registry_new) == "function"
       and type(core.objective_snapshot) == "function" then
     local tk = core.target_key
@@ -5654,24 +5698,33 @@ do
         and routes.members[1].route_id == core.objective_direct_route_id(snap.targets[2].ordinal))
     local named_marker = core.objective_markers({}, nil, snap, { names = {
       npcs = {}, targets = { { key = snap.targets[2].key, name = "Wakestone" } } },
-      category_visibility = {} })
+      quest_names = { [10] = "The Stolen Throne" }, category_visibility = {} })
     local named_routes, named_shown, named_total = core.objective_routes(snap, pos(0), {
       npc_route_mode = 1, objective_places = true, focus_order = { 10 },
       names = { npcs = {}, targets = { { key = snap.targets[2].key, name = "Wakestone" } } },
       quest_names = { [10] = "The Stolen Throne" }, route_cap = 1 })
     check("objective marker and route names use structured target names",
-      named_marker[1].label == "Objective: Wakestone"
-        and named_routes.members[1].name == "Objective: Wakestone (for The Stolen Throne)"
+      named_marker[1].label == "Wakestone - Pickup - The Stolen Throne"
+        and named_routes.members[1].name == named_marker[1].label
         and named_shown == 1 and named_total == 1)
+    local unnamed_place_snapshot = { generation = 92, targets = { {
+      key = tk({ 10, "task", 0, 0, "place" }), ordinal = 1, kind = "place",
+      generation = 92, target = { pos = pos(3) },
+      owners = { { qid = 10, task_index = 0 } }, item_ids = {}, eligibility = "eligible" } } }
+    local unnamed_place_markers = core.objective_markers({}, nil, unnamed_place_snapshot,
+      { quest_names = { [10] = "The Stolen Throne" }, focus_order = { 10 } })
+    check("objective place marker identifies an unnamed destination and its quest",
+      #unnamed_place_markers == 1
+        and unnamed_place_markers[1].label == "Destination - The Stolen Throne")
     local named_npc_snapshot = { generation = 91, targets = { {
       key = tk({ 10, "issued_npc", 78 }), ordinal = 1, kind = "npc", generation = 91,
       target = { cid = 78, pos = pos(1) }, owners = { { qid = 10, task_index = 0 } },
       item_ids = {}, eligibility = "eligible" } } }
     local named_npc_routes = core.objective_routes(named_npc_snapshot, pos(0), {
       npc_route_mode = 1, names = { npcs = { { cid = 78, name = "Captain Brant" } },
-        targets = {} }, category_visibility = {} })
+        targets = {} }, quest_names = { [10] = "The Stolen Throne" }, category_visibility = {} })
     check("objective NPC routes use the structured name policy",
-      named_npc_routes.members[1].name == "Captain Brant")
+      named_npc_routes.members[1].name == "Captain Brant - The Stolen Throne")
 
     local snapshots = core.objective_snapshot({ generation = 5, quests = {
         { qid = 11, task_index = 1, read_status = "ok", issued_npcs = {},
@@ -5969,22 +6022,247 @@ do
       #dedicated == 1 and dedicated[1].cid == 4294967295
         and table.concat(dedicated[1].qids, ",") == "20" and signature_call)
     check("objective markers: SPEC name arrays supply NPC labels",
-      dedicated[1].label == "Objective: U32 NPC")
+      dedicated[1].label == "U32 NPC - Quest 20")
 
     local current_task = { catalog_version = 2, focus_epoch = 3, journal_generation = 4,
       need_generation = 5, quests = { { qid = 40, task_index = 2, read_status = "ok",
-        issued_npcs = "malformed", task_destinations = {}, item_ownership = {}, guidance = {
+        issued_npcs = "malformed", task_destinations = {}, item_ownership = {
+          { item_id = 777, count = 1, proof_kind = "condition", eligibility = "eligible",
+            task_index = 2, concierge_index = 6, destination_index = 9 },
+        }, guidance = {
           { concierge_index = 6, destination_index = 9, eligibility = "eligible", signals = {
             { kind = "npc", task_index = 2, target = { cid = 70, pos = pos(7) }, eligibility = "eligible" },
+            { kind = "place", task_index = 2, target = { pos = pos(8) }, eligibility = "eligible" },
           } },
-        } } } }
+        } } }, objective_needs = { status = "ok", complete = true, generation = 5,
+          source_generation = 6, groups = {}, held = { [777] = 1 } } }
     local task_registry = core.target_registry_new()
     local guidance_ok, guidance = pcall(core.objective_snapshot, current_task,
+      { generation = 1, status = "unknown", places = {} }, {}, task_registry)
+    check("objective guidance: a storage-satisfied item keeps no marker or route target",
+      guidance_ok and guidance and #guidance.targets == 0)
+    current_task._satisfied = guidance
+    current_task._needed = {
+      catalog_version = current_task.catalog_version, focus_epoch = current_task.focus_epoch,
+      journal_generation = current_task.journal_generation,
+      need_generation = current_task.need_generation, quests = current_task.quests,
+      objective_needs = { status = "ok", complete = true, generation = 5,
+        source_generation = 6, held = {}, groups = {
+          { id = { "need", 40, "condition", 777 }, qid = 40, task_index = 2,
+            remaining = 1, options = { { item_id = 777, accepted_count = 1 } },
+            status = "eligible", complete = true, generation = 6 },
+        } },
+    }
+    guidance_ok, guidance = pcall(core.objective_snapshot, current_task._needed,
       { generation = 1, status = "unknown", places = {} }, {}, task_registry)
     local guidance_obj = guidance_ok and guidance.targets[1] or nil
     check("objective guidance: parent index and current quest task own child target key",
       guidance_obj and guidance_obj.key == tk({ 40, "guidance", 6, 9, "npc" })
-        and guidance_obj.owners[1].task_index == 2)
+        and guidance_obj.owners[1].task_index == 2
+        and guidance_obj.item_ids[1] == 777)
+    local guidance_markers = core.objective_markers({}, nil, guidance, { names = {
+      npcs = { { cid = 70, name = "Target NPC" } },
+      items = { { item_id = 777, name = "Test Grimoire" } }, targets = {},
+    }, quest_names = { [40] = "Test Quest" }, objective_places = true })
+    local guidance_routes = core.objective_routes(guidance, pos(0), { npc_route_mode = 1,
+      objective_places = true, focus_order = { 40 }, names = {
+        npcs = { { cid = 70, name = "Target NPC" } },
+        items = { { item_id = 777, name = "Test Grimoire" } }, targets = {},
+      }, quest_names = { [40] = "Test Quest" } })
+    local labels, route_labels = {}, {}
+    for _, marker in ipairs(guidance_markers) do labels[marker.objective_kind] = marker.label end
+    for _, member in ipairs(guidance_routes.members) do route_labels[member.kind] = member.name end
+    check("objective labels: item, target kind and quest match on markers and routes",
+      labels.npc == "Test Grimoire - Target NPC - Test Quest"
+        and labels.place == "Test Grimoire - Destination - Test Quest"
+        and route_labels.npc == labels.npc and route_labels.place == labels.place)
+    check("objective checklist: exact current guidance item carries held completion proof",
+      current_task._satisfied and #current_task._satisfied.checklist == 1
+        and current_task._satisfied.checklist[1].qid == 40
+        and current_task._satisfied.checklist[1].check_index == 10
+        and current_task._satisfied.checklist[1].item_id == 777
+        and current_task._satisfied.checklist[1].inventory_done == true)
+    local tree_checklist = type(core.objective_checklist) == "function"
+      and core.objective_checklist(current_task) or {}
+    check("objective checklist: standalone tree projection uses the coherent ownership snapshot",
+      #tree_checklist == 1 and tree_checklist[1].qid == 40
+        and tree_checklist[1].check_index == 10
+        and tree_checklist[1].item_id == 777
+        and tree_checklist[1].inventory_done == true)
+    current_task._delivery = { catalog_version = 2, focus_epoch = 1,
+      journal_generation = 1, need_generation = 1, quests = {
+        { qid = 42, task_index = 0, read_status = "ok", issued_npcs = {},
+          task_destinations = {}, guidance = {}, item_ownership = {
+            { proof_kind = "delivery", eligibility = "unknown", task_index = 0,
+              concierge_index = 0, destination_index = 3,
+              delivery = { is_not = false, check_storage = true, groups = {
+                { qid = 42, ref_key = 0, delivery = { groups = {
+                  { index = 0, item_ids = { 800, 801 }, count = 1,
+                    is_all_item = false, is_infinite = false },
+                  { index = 1, item_ids = { 802, 803 }, count = 2,
+                    is_all_item = false, is_infinite = false },
+                } } },
+              } } },
+            { proof_kind = "delivery", eligibility = "unknown", task_index = 0,
+              delivery = { is_not = true, check_storage = true, groups = {
+                { delivery = { groups = {
+                  { index = 2, item_ids = { 805 }, count = 1,
+                    is_all_item = false, is_infinite = false },
+                } } },
+              } } },
+            { proof_kind = "condition", eligibility = "eligible", task_index = 0,
+              destination_index = 4, item_id = 804, count = 1 },
+          } },
+      }, objective_needs = { status = "ok", complete = true, generation = 1,
+        source_generation = 2, groups = {},
+        held = { [801] = 1, [802] = 1, [803] = 1, [804] = 1 } } }
+    current_task._delivery_snapshot = core.objective_snapshot(current_task._delivery,
+      nil, {}, core.target_registry_new())
+    check("objective checklist: structured delivery groups map alternatives to exact checklist rows",
+      current_task._delivery_snapshot and #current_task._delivery_snapshot.checklist == 3
+        and current_task._delivery_snapshot.checklist[1].check_index == 1
+        and current_task._delivery_snapshot.checklist[1].item_id == 800
+        and table.concat(current_task._delivery_snapshot.checklist[1].item_ids, ",") == "800,801"
+        and current_task._delivery_snapshot.checklist[1].held == 1
+        and current_task._delivery_snapshot.checklist[1].inventory_done == true
+        and current_task._delivery_snapshot.checklist[2].check_index == 2
+        and current_task._delivery_snapshot.checklist[2].item_id == 802
+        and table.concat(current_task._delivery_snapshot.checklist[2].item_ids, ",") == "802,803"
+        and current_task._delivery_snapshot.checklist[2].held == 2
+        and current_task._delivery_snapshot.checklist[2].inventory_done == true
+        and current_task._delivery_snapshot.checklist[3].check_index == 5
+        and current_task._delivery_snapshot.checklist[3].item_id == 804
+        and current_task._delivery_snapshot.checklist[3].inventory_done == true)
+    local storage_scope = { catalog_version = 2, focus_epoch = 1,
+      journal_generation = 1, need_generation = 1, quests = {
+        { qid = 44, task_index = 0, read_status = "ok", issued_npcs = {},
+          task_destinations = {}, guidance = {}, item_ownership = {
+            { proof_kind = "delivery", task_index = 0,
+              delivery = { is_not = false, check_storage = false, groups = {
+                { delivery = { groups = { { index = 0, item_ids = { 820 }, count = 1,
+                  is_all_item = false, is_infinite = false } } } },
+              } } },
+            { proof_kind = "delivery", task_index = 0,
+              delivery = { is_not = false, check_storage = true, groups = {
+                { delivery = { groups = { { index = 1, item_ids = { 820 }, count = 1,
+                  is_all_item = false, is_infinite = false } } } },
+              } } },
+          } },
+      }, objective_needs = { status = "ok", complete = true, generation = 1,
+        source_generation = 2, groups = {}, held = { [820] = 1 }, held_carried = {} } }
+    local storage_scope_snapshot = core.objective_snapshot(storage_scope,
+      nil, {}, core.target_registry_new())
+    check("objective checklist: delivery storage scope distinguishes carried from boxed items",
+      storage_scope_snapshot and #storage_scope_snapshot.checklist == 2
+        and storage_scope_snapshot.checklist[1].inventory_done == false
+        and storage_scope_snapshot.checklist[2].inventory_done == true)
+    local incoherent_checklist = core.objective_checklist({ quests = {}, objective_needs = {
+      status = "unknown", complete = false, groups = {} } })
+    check("objective checklist: incomplete need observations do not publish an empty overlay",
+      incoherent_checklist == nil)
+    local malformed_group_checklist = core.objective_checklist({ need_generation = 1,
+      quests = {}, objective_needs = { status = "ok", complete = true,
+        generation = 1, source_generation = 1, groups = { "malformed" }, held = {} } })
+    local malformed_held_checklist = core.objective_checklist({ need_generation = 1,
+      quests = {}, objective_needs = { status = "ok", complete = true,
+        generation = 1, source_generation = 1, groups = {}, held = { [820] = -1 } } })
+    check("objective checklist: normalized snapshot validity rejects malformed groups and held counts",
+      malformed_group_checklist == nil and malformed_held_checklist == nil)
+    local cached_overlay = { generation = 1, checklist = { { qid = 1 } }, targets = {} }
+    local presented_overlay = type(core.objective_snapshot_with_checklist) == "function"
+      and core.objective_snapshot_with_checklist(cached_overlay, { { qid = 2 } }) or nil
+    check("objective checklist: presentation overlay does not mutate the stability cache",
+      presented_overlay ~= nil and presented_overlay ~= cached_overlay
+        and presented_overlay.checklist[1].qid == 2
+        and cached_overlay.checklist[1].qid == 1)
+    current_task._selected_delivery = { catalog_version = 2, focus_epoch = 1,
+      journal_generation = 1, need_generation = 1, quests = {
+        { qid = 43, task_index = 0, read_status = "ok", issued_npcs = {},
+          task_destinations = {}, guidance = {}, item_ownership = {
+            { proof_kind = "delivery", eligibility = "unknown", task_index = 0,
+              delivery = { is_not = false, check_storage = true, group_id = 1, groups = {
+                { delivery = { groups = {
+                  { index = 0, item_ids = { 810 }, count = 1,
+                    is_all_item = false, is_infinite = false },
+                  { index = 1, item_ids = { 811 }, count = 1,
+                    is_all_item = false, is_infinite = false },
+                } } },
+              } } },
+          } },
+      }, objective_needs = { status = "ok", complete = true, generation = 1,
+        source_generation = 2, groups = {}, held = { [810] = 1, [811] = 1 },
+        held_carried = {} } }
+    current_task._selected_delivery_snapshot = core.objective_snapshot(
+      current_task._selected_delivery, nil, {}, core.target_registry_new())
+    check("objective checklist: delivery group id selects only its exact checklist row",
+      current_task._selected_delivery_snapshot
+        and #current_task._selected_delivery_snapshot.checklist == 1
+        and current_task._selected_delivery_snapshot.checklist[1].check_index == 2
+        and current_task._selected_delivery_snapshot.checklist[1].item_id == 811)
+    local observed_task = {
+      catalog_version = current_task.catalog_version, focus_epoch = current_task.focus_epoch,
+      journal_generation = current_task.journal_generation,
+      need_generation = current_task.need_generation,
+      quests = { current_task.quests[1], { qid = 41, task_index = 0, read_status = "ok" } },
+    }
+    local observed_needs = {
+      status = "ok", complete = true, generation = current_task.need_generation,
+      source_generation = 6, held = { [777] = 1, [888] = 1 }, groups = {
+        { qid = 40, task_index = 2 }, { qid = 41, task_index = 0 },
+      },
+    }
+    local focused_task, focused_needs = nil, nil
+    if type(core.objective_task_projection) == "function" then
+      focused_task, focused_needs = core.objective_task_projection(
+        observed_task, observed_needs, { 40 })
+    end
+    check("objective task projection keeps tree observation separate from focused targets",
+      focused_task and #focused_task.quests == 1 and focused_task.quests[1].qid == 40
+        and focused_task.focus_epoch == observed_task.focus_epoch
+        and focused_needs and #focused_needs.groups == 1
+        and focused_needs.groups[1].qid == 40 and focused_needs.held[888] == 1
+        and focused_task.objective_needs == focused_needs)
+    if type(core.objective_snapshot_stabilize) == "function" then
+      current_task._stable_snapshot, current_task._stable_cache,
+        current_task._stable_held = core.objective_snapshot_stabilize(nil,
+          current_task._needed, current_task._needed.objective_needs, guidance)
+      current_task._unknown_needs = { status = "unknown", complete = false,
+        generation = current_task._needed.need_generation, groups = {},
+        reason = "need_or_task_observation_unknown" }
+      current_task._held_snapshot, current_task._held_cache,
+        current_task._held = core.objective_snapshot_stabilize(current_task._stable_cache,
+          current_task._needed, current_task._unknown_needs, { generation = 99, targets = {} })
+      current_task._changed_task = {
+        catalog_version = 2, focus_epoch = 3, journal_generation = 5,
+        need_generation = 5, quests = {
+          { qid = 40, task_index = 3, read_status = "ok" },
+        }, objective_needs = current_task._unknown_needs,
+      }
+      current_task._changed_snapshot, current_task._changed_cache,
+        current_task._changed_held = core.objective_snapshot_stabilize(
+          current_task._stable_cache, current_task._changed_task,
+          current_task._unknown_needs, { generation = 100, targets = {} })
+      current_task._complete_empty, current_task._complete_cache,
+        current_task._complete_held = core.objective_snapshot_stabilize(
+          current_task._stable_cache, current_task._needed,
+          current_task._needed.objective_needs, { generation = 101, targets = {} })
+    end
+    check("objective snapshot stability: incomplete same-task refresh holds only the last coherent snapshot",
+      current_task._stable_snapshot == guidance and current_task._stable_held == false
+        and current_task._held_snapshot == guidance and current_task._held == true
+        and current_task._changed_snapshot.generation == 100
+        and current_task._changed_held == false
+        and current_task._complete_empty.generation == 101
+        and current_task._complete_held == false)
+    local checklist_journal = { [40] = { checks = {} } }
+    for i = 1, 10 do
+      checklist_journal[40].checks[i] = { text = "Check " .. i, done = false }
+    end
+    core.apply_objective_checklist(checklist_journal, current_task._satisfied)
+    check("objective checklist: shared overlay updates only the exact journal row",
+      checklist_journal[40].checks[10].inventory_done == true
+        and checklist_journal[40].checks[10].item_id == 777
+        and checklist_journal[40].checks[9].inventory_done == nil)
     local stale_task_snapshot = { catalog_version = 2, focus_epoch = 3, journal_generation = 4,
       need_generation = 5, quests = { { qid = 40, task_index = 2, read_status = "ok",
         issued_npcs = {}, item_ownership = {}, task_destinations = {
@@ -6084,7 +6362,8 @@ do
     check("objective markers: every covering target owner is unioned",
       source_marker[1] ~= nil and type(source_marker[1].objective_qids) == "table"
         and table.concat(source_marker[1].objective_qids, ",") == "50")
-    local multi_cover_input = { { key = "n:70", cat = "quest", cid = 70, qids = {} } }
+    local multi_cover_input = { { key = "n:70", cat = "quest", cid = 70, qids = {},
+      objective_labels = { "Existing label" } } }
     local multi_cover = core.objective_markers(multi_cover_input, nil,
       { generation = 3, targets = {
         { key = tk({ 40, "issued_npc", 70 }), ordinal = 1, kind = "npc", target = { cid = 70 },
@@ -6095,7 +6374,23 @@ do
     check("objective markers: shared covering marker unions owner qids",
       multi_cover[1] ~= nil and type(multi_cover[1].objective_qids) == "table"
         and table.concat(multi_cover[1].objective_qids, ",") == "40,41"
+        and multi_cover[1].label:find("Quest 40", 1, true) ~= nil
+        and multi_cover[1].label:find("Quest 41", 1, true) ~= nil
         and #multi_cover_input[1].qids == 0)
+    check("objective markers: cloned label arrays do not mutate the source projection",
+      #multi_cover_input[1].objective_labels == 1
+        and multi_cover_input[1].objective_labels[1] == "Existing label"
+        and multi_cover[1].objective_labels ~= multi_cover_input[1].objective_labels
+        and #multi_cover[1].objective_labels == 3)
+    check("objective labels: multi-item sources name every matched output",
+      core.objective_label({ names = {
+        items = { { item_id = 900, name = "First" },
+          { item_id = 901, name = "Second" } },
+        targets = { { key = "source", name = "First" } },
+      }, quest_names = { [50] = "Shared Quest" } }, {
+        key = "source", kind = "source", provider = "placed",
+        item_ids = { 900, 901 }, owners = { { qid = 50 } },
+      }) == "First / Second - Pickup - Shared Quest")
 
     local route_cid_source = core.objective_routes(matched, nil,
       { npc_route_mode = 0, objective_places = true, focus_order = { 50 },

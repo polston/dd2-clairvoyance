@@ -4891,6 +4891,9 @@ do
   do
     local f = gfix()
     local w = with_route(f, R3)
+    local waiting = w:route_status(1, true)
+    check("route summary: fresh walking routes report waiting before work starts",
+      waiting.total == 1 and waiting.ready == 0 and waiting.state == "waiting")
     w:path_step(1e6, 1, true)
     check("route: pairs listed before steps", #w:route_paths(true)[2001] == 2
       and w:route_paths(true)[2001][1].pts == nil)
@@ -4908,6 +4911,9 @@ do
     check("route: pair 2 runs node 4 to 5", l[2].pts ~= nil and l[2].pts[1] == 30
       and l[2].pts[#l[2].pts - 2] == 40)
     check("route: status ready", w:path_status(1, 2001) == "path ready")
+    local ready = w:route_status(1, true)
+    check("route summary: all walking paths report ready",
+      ready.total == 1 and ready.ready == 1 and ready.state == "ready")
     check("route: list is cached", w:route_paths(true)[2001] == l)
     check("route: stats", w.last_expanded ~= nil and w.search_ms_max >= 0 and w.last_pair ~= nil)
     local np = 0
@@ -5380,6 +5386,51 @@ do
     check("real route: albert stop 3 at the live position, no off_schedule",
       r ~= nil and r.err == nil and r.stops ~= nil and r.stops[3] ~= nil and r.stops[3].pos.x == 576.0 and r.stops[3].key == 2309
       and r.off_schedule == nil)
+  end
+
+  -- The quest marker and the active route stop must use the same current
+  -- NPC position. Otherwise the named marker can sit visibly off its route.
+  do
+    local f, d = rfix()
+    d.sched_ids = { 2696 }
+    d.npcname[2696] = "Albert"
+    d.npcpos[2696] = P(422.7, 57.4, -903.8)
+    d.rows[2696] = { row(6, 18, -1, 7), row(18, 6, 42, -1) }
+    d.cur[2696] = { area = -1, location = -1, key = 2309,
+      pos = P(576.0, 19.0, -1011.0), overwrite = { row(20, 22, -1, -1, 2309) } }
+    d.keypos[2309] = P(576.3, 19.3, -1011.1)
+    d.area_nodes["-1:7"] = { P(100, 0, 100) }
+    d.area_nodes["42:-1"] = { P(300, 0, 300) }
+    d.icons = {
+      { type = K.SETTLEMENT_TYPE, pos = P(422, 0, -904), disp_id = "a", icon_id = 1 },
+      { type = K.SETTLEMENT_TYPE, pos = P(1000, 0, 1000), disp_id = "b", icon_id = 2 } }
+    d.msgs = { a = "Town A", b = "Town B" }
+    d.icons_found = { [2] = true }
+    d.disc_n = 1
+    local w = f.new()
+    local tg = on("search")
+    w:refresh(0, true, tg)
+    w:set_route(2696, "Albert")
+    w:refresh(1, true, tg)
+    local r = route_in(w)
+    check("real route: active Albert stop aligns with the quest marker position",
+      r ~= nil and r.stops ~= nil and r.stops[3] ~= nil
+      and r.stops[3].pos.x == 422.7 and r.stops[3].pos.y == 57.4
+      and r.stops[3].pos.z == -903.8)
+    check("real route: active Albert stop starts in the undiscovered settlement cell",
+      r ~= nil and r.stops ~= nil and r.stops[3] ~= nil
+        and r.stops[3].discovered == false)
+    d.npcpos[2696] = P(990.5, 58.0, 990.0)
+    w:poke()
+    w:refresh(2, true, tg)
+    r = route_in(w)
+    check("real route: cached active stop follows a moving NPC without a schedule change",
+      r ~= nil and r.stops ~= nil and r.stops[3] ~= nil
+        and r.stops[3].pos.x == 990.5 and r.stops[3].pos.y == 58.0
+        and r.stops[3].pos.z == 990.0)
+    check("real route: moving active stop recomputes discovery in its new position cell",
+      r ~= nil and r.stops ~= nil and r.stops[3] ~= nil
+        and r.stops[3].discovered == true)
   end
 
   -- a key that does not resolve is unplaced and never asks for area nodes
@@ -6819,7 +6870,7 @@ do
   local envelope = { objective_generation = 9, total = 2, omitted = 0, members = {
     { route_id = 2001, cid = 2001, place = 2001, qid = 30040, kind = "npc",
       direct = false, target_key = core.target_key({ 30040, "issued_npc", 2001 }),
-      ordinal = 1, pos = P(1, 0, 1), item_ids = {}, objective_generation = 9 },
+      ordinal = 1, pos = P(1, 0, 1), item_ids = { 381 }, objective_generation = 9 },
     { route_id = core.objective_direct_route_id(1), qid = 30040, kind = "place", direct = true,
       target_key = core.target_key({ 30040, "task", 0, 1, "place" }), ordinal = 1,
       place = 0, pos = P(10, 20, 30), item_ids = {}, objective_generation = 9 },
@@ -6829,6 +6880,9 @@ do
   w:refresh(0, true, route_tg)
   check("objective routes: accepts the core publication count metadata",
     w.route_gen > 0)
+  check("objective routes: scheduled NPC render retains generic item identity",
+    route_in(w, 2001) ~= nil and route_in(w, 2001).item_ids ~= nil
+      and #route_in(w, 2001).item_ids == 1 and route_in(w, 2001).item_ids[1] == 381)
   local generation = w.route_gen
   w:set_routes(envelope)
   check("objective routes: same generation and membership is idempotent",
@@ -7079,6 +7133,20 @@ do
   check("static catalog: returned values cannot mutate private closure catalog",
     not mutation_ok and not nested_mutation_ok
       and w:objective_static_source_catalog().placements[1].outputs[1].count == 2)
+  local generated_file = assert(io.open("data/Clairvoyance_places.json", "rb"))
+  local generated_places = decode_fixture_json(generated_file:read("*a")); generated_file:close()
+  local generated_catalog = fixture({ files = { [K.PLACES] = generated_places } })
+    :new():objective_static_source_catalog()
+  local beggar_garb = find(generated_catalog.placements,
+    "713067a2-f243-49ca-85bb-d368ec0709a9")
+  local layer3
+  for _, placement in ipairs(generated_catalog.placements) do
+    if placement.layer == 3 then layer3 = placement; break end
+  end
+  check("static catalog: actual generated places file satisfies the runtime contract",
+    generated_catalog.status == "ok" and generated_catalog.complete == true
+      and beggar_garb ~= nil and beggar_garb.outputs[1].item_id == 300
+      and beggar_garb.layer == 2 and layer3 ~= nil)
   local malformed = fixture({ files = { [K.PLACES] = places({
     { k = "item", uid = "dup", id = 501, n = 1, x = 0, y = 0, z = 0,
       index = 0, table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
@@ -7118,6 +7186,14 @@ do
   check("static catalog: missing native metadata fails closed",
     malformed_metadata.status == "unknown" and malformed_metadata.complete == false
       and #malformed_metadata.placements == 0)
+  local malformed_layer = fixture({ files = { [K.PLACES] = places({
+    { k = "item", uid = "negative-layer", id = 501, n = 1, x = 0, y = 1, z = 2,
+      index = 0, table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = -1,
+      src = "normal" },
+  }) } }):new():objective_static_source_catalog()
+  check("static catalog: negative native layer fails closed",
+    malformed_layer.status == "unknown" and malformed_layer.complete == false
+      and #malformed_layer.placements == 0)
 
   local sf = fixture()
   local shop_rows = { complete = true, rows = {

@@ -2176,7 +2176,8 @@ function M.row_detail(rec, j, ja, spoilers)
       if nonempty(j.base) then add("Now: " .. j.base) end
       add(j.detail)
       for _, c in ipairs(j.checks or {}) do
-        add((c.done and "[x] " or "[ ] ") .. tostring(c.text))
+        add(((c.done == true or c.inventory_done == true) and "[x] " or "[ ] ")
+          .. tostring(c.text))
       end
       if type(j.dest) == "table" then
         if nonempty(j.dest.caption) then add("Destination: " .. j.dest.caption) end
@@ -2931,6 +2932,10 @@ function M.compute(adapter, show)
     tracked_qid, nearest_qid, journal, journal_all = M.tree_detail(adapter, quests,
       show, rec_by, focus_journal)
   end
+  if type(show.objective_snapshot) == "table" then
+    M.apply_objective_checklist(focus_journal, show.objective_snapshot)
+    M.apply_objective_checklist(journal, show.objective_snapshot)
+  end
 
   -- v8 (SPEC 15.3h): item markers, appended AFTER every quest marker
   local item_capped = 0
@@ -3036,7 +3041,8 @@ function M.compute(adapter, show)
             key = string.format("r:%d:0", math.floor(route.cid)),
             cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
             label = "", cid = route.cid, stop = n, num = 0,
-            slot = route.slot, calibration = true }
+            slot = route.slot, calibration = true,
+            objective_generation = route.objective_generation }
         elseif route.direct ~= true and type(s) == "table" and valid_pos(s.pos)
           and (s.discovered ~= false or undisc) then
           -- SPEC 32.14.11.4: num is the number shown; a lead entry's first
@@ -3047,7 +3053,8 @@ function M.compute(adapter, show)
             cat = "route_stop", qids = {}, pos = pos_copy(s.pos),
             label = string.format("%s %02d-%02d", tostring(route.name),
               math.floor(tonumber(s.from) or 0), math.floor(tonumber(s.to) or 0)),
-            cid = route.cid, stop = n, num = num, slot = route.slot }
+            cid = route.cid, stop = n, num = num, slot = route.slot,
+            objective_generation = route.objective_generation }
         end
       end
     end
@@ -4372,6 +4379,82 @@ local function objective_stamp(task_snapshot, place_snapshot, provider_snapshots
   return hash + 1
 end
 
+-- Keep one coherent task observation while projecting only the focused quest
+-- rows and need groups into map objectives. The full observation can still
+-- drive visible quest-tree checklist rows without publishing their targets.
+function M.objective_task_projection(task_snapshot, need_snapshot, qids)
+  task_snapshot = type(task_snapshot) == "table" and task_snapshot or {}
+  need_snapshot = type(need_snapshot) == "table" and need_snapshot or {
+    status = "unknown", complete = false, generation = task_snapshot.need_generation,
+    groups = {}, reason = "need_snapshot_failed",
+  }
+  local wanted, by_qid = {}, {}
+  for _, qid in ipairs(type(qids) == "table" and qids or {}) do
+    if type(qid) == "number" then wanted[qid] = true end
+  end
+  for _, quest in ipairs(type(task_snapshot.quests) == "table" and task_snapshot.quests or {}) do
+    if type(quest) == "table" and type(quest.qid) == "number" then
+      by_qid[quest.qid] = quest
+    end
+  end
+  local projected = {
+    catalog_version = task_snapshot.catalog_version,
+    focus_epoch = task_snapshot.focus_epoch,
+    journal_generation = task_snapshot.journal_generation,
+    need_generation = task_snapshot.need_generation,
+    quests = {},
+  }
+  for _, qid in ipairs(type(qids) == "table" and qids or {}) do
+    if wanted[qid] and by_qid[qid] ~= nil then
+      projected.quests[#projected.quests + 1] = by_qid[qid]
+      wanted[qid] = nil
+    end
+  end
+  local projected_needs = {}
+  for key, value in pairs(need_snapshot) do
+    if key ~= "groups" then projected_needs[key] = value end
+  end
+  projected_needs.groups = {}
+  local focused = {}
+  for _, quest in ipairs(projected.quests) do focused[quest.qid] = true end
+  for _, group in ipairs(type(need_snapshot.groups) == "table" and need_snapshot.groups or {}) do
+    if type(group) == "table" and focused[group.qid] then
+      projected_needs.groups[#projected_needs.groups + 1] = group
+    end
+  end
+  projected.objective_needs = projected_needs
+  return projected, projected_needs
+end
+
+-- Hold the last coherent objective publication only while a refresh is
+-- incomplete for the exact same ordered focused quest/task set. A completed
+-- observation, including an empty one, replaces the cache immediately.
+function M.objective_snapshot_stabilize(cache, task_snapshot, need_snapshot, candidate)
+  task_snapshot = type(task_snapshot) == "table" and task_snapshot or {}
+  local identity = { tostring(task_snapshot.catalog_version), "|" }
+  local quests = type(task_snapshot.quests) == "table" and task_snapshot.quests or {}
+  for i, quest in ipairs(quests) do
+    identity[#identity + 1] = tostring(i)
+    identity[#identity + 1] = ":"
+    identity[#identity + 1] = tostring(type(quest) == "table" and quest.qid or nil)
+    identity[#identity + 1] = ":"
+    identity[#identity + 1] = tostring(type(quest) == "table" and quest.task_index or nil)
+    identity[#identity + 1] = "|"
+  end
+  identity = table.concat(identity)
+  local coherent = type(need_snapshot) == "table"
+    and need_snapshot.status == "ok" and need_snapshot.complete == true
+    and type(need_snapshot.groups) == "table"
+  if coherent then
+    return candidate, { identity = identity, snapshot = candidate }, false
+  end
+  if type(cache) == "table" and cache.identity == identity
+      and type(cache.snapshot) == "table" then
+    return cache.snapshot, cache, true
+  end
+  return candidate, nil, false
+end
+
 -- Purely normalize exact task/provider snapshots. No game reads or settings.
 function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots, registry)
   if type(task_snapshot) ~= "table" or type(task_snapshot.quests) ~= "table"
@@ -4389,6 +4472,8 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
   end
   local grouped_needs = task_snapshot.objective_needs ~= nil
   local item_owners, current_tasks, need_groups, targets, by_key = {}, {}, {}, {}, {}
+  local grouped_need_items = {}
+  local checklist_specs, checklist = {}, {}
   local diagnostics = {}
   local function diagnostic(provider, reason, id)
     diagnostics[#diagnostics + 1] = { provider = provider, reason = reason, id = id }
@@ -4446,6 +4531,69 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         and quest.read_status == "ok" then
       local qid, task_index = quest.qid, quest.task_index
       current_tasks[qid] = task_index
+      local guidance_items = {}
+      for _, owner in ipairs(objective_array(quest.item_ownership) or {}) do
+        if type(owner) == "table" and owner.proof_kind == "delivery"
+            and (owner.task_index == nil or owner.task_index == task_index)
+            and type(owner.delivery) == "table" and owner.delivery.is_not == false
+            and type(owner.delivery.check_storage) == "boolean" then
+          local selected_group = objective_index(owner.delivery.group_id, 2147483647)
+            and owner.delivery.group_id or nil
+          for _, ref in ipairs(objective_array(owner.delivery.groups) or {}) do
+            local delivery = type(ref) == "table" and ref.delivery or nil
+            for _, group in ipairs(type(delivery) == "table"
+                and (objective_array(delivery.groups) or {}) or {}) do
+              local group_items = type(group) == "table"
+                and objective_array(group.item_ids) or nil
+              local valid = type(group) == "table"
+                and objective_index(group.index, 2147483647)
+                and (selected_group == nil or group.index == selected_group)
+                and objective_uint(group.count, 2147483647) and group.count > 0
+                and group.is_all_item == false and group.is_infinite == false
+                and group_items ~= nil and #group_items > 0
+              local item_ids, seen_items = {}, {}
+              if valid then
+                for _, item_id in ipairs(group_items) do
+                  if not objective_uint(item_id, 2147483647) or seen_items[item_id] then
+                    valid = false; break
+                  end
+                  seen_items[item_id] = true
+                  item_ids[#item_ids + 1] = item_id
+                end
+              end
+              if valid then
+                table.sort(item_ids)
+                checklist_specs[#checklist_specs + 1] = { qid = qid,
+                  task_index = task_index, check_index = group.index + 1,
+                  item_id = item_ids[1], item_ids = item_ids,
+                  required = group.count, source = "delivery",
+                  check_storage = owner.delivery.check_storage }
+              end
+            end
+          end
+        end
+        if type(owner) == "table" and owner.eligibility == "eligible"
+            and objective_uint(owner.item_id, 2147483647)
+            and objective_uint(owner.count, 2147483647) and owner.count > 0
+            and objective_index(owner.destination_index, 2147483647)
+            and (owner.task_index == nil or owner.task_index == task_index)
+            and (owner.concierge_index == nil
+              or objective_index(owner.concierge_index, 2147483647))
+            and (owner.proof_kind == "condition" or owner.proof_kind == "delivery") then
+          local owner_kind = owner.concierge_index == nil and "task" or "guidance"
+          local owner_index = owner.concierge_index or task_index
+          local key = table.concat({ owner_kind, tostring(owner_index),
+            tostring(owner.destination_index) }, ":")
+          local ids = guidance_items[key]
+          if ids == nil then ids = {}; guidance_items[key] = ids end
+          local duplicate = false
+          for _, id in ipairs(ids) do if id == owner.item_id then duplicate = true; break end end
+          if not duplicate then ids[#ids + 1] = owner.item_id end
+          checklist_specs[#checklist_specs + 1] = { qid = qid, task_index = task_index,
+            check_index = owner.destination_index + 1, item_id = owner.item_id,
+            item_ids = { owner.item_id }, required = owner.count, source = "condition" }
+        end
+      end
       for _, owner in ipairs(not grouped_needs and (objective_array(quest.item_ownership) or {}) or {}) do
         if type(owner) == "table" and owner.eligibility == "eligible"
             and objective_uint(owner.item_id, 2147483647)
@@ -4495,18 +4643,22 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
               end
             end
             target = { cid = target.cid, place = target.place, pos = pos }
+            local item_key = table.concat({ owner_kind,
+              tostring(owner_kind == "task" and ti or owner_index or signal.concierge_index),
+              tostring(index) }, ":")
+            local signal_items = guidance_items[item_key] or {}
             if signal_kind == "npc" and type(target.cid) == "number" then
               local identity = owner_kind == "task"
                 and { qid, "task", ti, index, "npc" }
                 or { qid, "guidance", owner_index or signal.concierge_index, index, "npc" }
               add(qid, task_index, identity,
-                "npc", target, owner_kind, nil, nil, signal.eligibility, signal.reason)
+                "npc", target, owner_kind, nil, signal_items, signal.eligibility, signal.reason)
             elseif signal_kind == "place" and pos then
               local identity = owner_kind == "task"
                 and { qid, "task", ti, index, "place" }
                 or { qid, "guidance", owner_index or signal.concierge_index, index, "place" }
               add(qid, task_index, identity,
-                "place", target, owner_kind, nil, nil, signal.eligibility, signal.reason)
+                "place", target, owner_kind, nil, signal_items, signal.eligibility, signal.reason)
             end
           end
         end
@@ -4526,6 +4678,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
     end
   end
   local grouped_needs_valid = not grouped_needs
+  local held_counts, carried_counts = {}, {}
   if grouped_needs then
     local snapshot = task_snapshot.objective_needs
     grouped_needs_valid = type(snapshot) == "table" and snapshot.status == "ok"
@@ -4534,6 +4687,32 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
       and objective_generation(snapshot.source_generation)
       and objective_array(snapshot.groups) ~= nil
     local seen = {}
+    if grouped_needs_valid then
+      if snapshot.held ~= nil then
+        if type(snapshot.held) ~= "table" then grouped_needs_valid = false
+        else
+          for item_id, count in pairs(snapshot.held) do
+            if not objective_uint(item_id, 2147483647)
+                or not objective_uint(count, 2147483647) then
+              grouped_needs_valid = false; break
+            end
+            held_counts[item_id] = count
+          end
+        end
+      end
+      if snapshot.held_carried ~= nil then
+        if type(snapshot.held_carried) ~= "table" then grouped_needs_valid = false
+        else
+          for item_id, count in pairs(snapshot.held_carried) do
+            if not objective_uint(item_id, 2147483647)
+                or not objective_uint(count, 2147483647) then
+              grouped_needs_valid = false; break
+            end
+            carried_counts[item_id] = count
+          end
+        end
+      end
+    end
     if grouped_needs_valid then
       for _, group in ipairs(snapshot.groups) do
         local id = type(group) == "table" and objective_tuple_copy(group.id) or nil
@@ -4575,12 +4754,87 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
           task_index = group.task_index, remaining = group.remaining, options = options,
           option_ids = option_ids, status = "eligible", complete = true,
           generation = group.generation }
+        local quest_items = grouped_need_items[group.qid]
+        if quest_items == nil then quest_items = {}; grouped_need_items[group.qid] = quest_items end
+        local task_items = quest_items[group.task_index]
+        if task_items == nil then task_items = {}; quest_items[group.task_index] = task_items end
+        for item_id in pairs(option_ids) do task_items[item_id] = true end
       end
     else
       diagnostic("needs", "need_snapshot_invalid")
     end
     if not grouped_needs_valid then need_groups = {} end
     table.sort(need_groups, function(a, b) return M.byte_less(a.key, b.key) end)
+    if grouped_needs_valid and type(snapshot.held) == "table" then
+      local by_row, ambiguous = {}, {}
+      for _, row in ipairs(checklist_specs) do
+        local key = table.concat({ tostring(row.qid), tostring(row.task_index),
+          tostring(row.check_index) }, ":")
+        local previous = by_row[key]
+        if previous == nil then by_row[key] = row
+        else
+          local same = previous.required == row.required
+            and previous.check_storage == row.check_storage
+            and #previous.item_ids == #row.item_ids
+          if same then
+            for i, item_id in ipairs(row.item_ids) do
+              if previous.item_ids[i] ~= item_id then same = false; break end
+            end
+          end
+          if not same then ambiguous[key] = true end
+        end
+      end
+      for key, row in pairs(by_row) do
+        if not ambiguous[key] then
+          local held = 0
+          local counts = row.source == "delivery" and row.check_storage == false
+            and carried_counts or held_counts
+          for _, item_id in ipairs(row.item_ids) do
+            held = held + (counts[item_id] or 0)
+          end
+          checklist[#checklist + 1] = { qid = row.qid, task_index = row.task_index,
+            check_index = row.check_index, item_id = row.item_id, item_ids = row.item_ids,
+            held = held, required = row.required,
+            inventory_done = held >= row.required }
+        end
+      end
+      table.sort(checklist, function(a, b)
+        if a.qid ~= b.qid then return a.qid < b.qid end
+        return a.check_index < b.check_index
+      end)
+    end
+  end
+  if grouped_needs then
+    local filtered, filtered_by_key = {}, {}
+    for _, obj in ipairs(targets) do
+      if #obj.item_ids == 0 then
+        filtered[#filtered + 1] = obj
+        filtered_by_key[obj.key] = obj
+      elseif grouped_needs_valid then
+        local kept_ids, kept_owners, seen_ids = {}, {}, {}
+        for _, owner in ipairs(obj.owners) do
+          local task_items = grouped_need_items[owner.qid]
+          task_items = task_items and task_items[owner.task_index] or nil
+          local owner_kept = false
+          for _, item_id in ipairs(obj.item_ids) do
+            if task_items and task_items[item_id] then
+              owner_kept = true
+              if not seen_ids[item_id] then
+                seen_ids[item_id] = true
+                kept_ids[#kept_ids + 1] = item_id
+              end
+            end
+          end
+          if owner_kept then kept_owners[#kept_owners + 1] = owner end
+        end
+        if #kept_ids > 0 then
+          obj.item_ids, obj.owners = kept_ids, kept_owners
+          filtered[#filtered + 1] = obj
+          filtered_by_key[obj.key] = obj
+        end
+      end
+    end
+    targets, by_key = filtered, filtered_by_key
   end
   local provider_generations = {}
   local invalid_sources, invalid_pools, capacity_pools = {}, {}, {}
@@ -4862,13 +5116,36 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
     end
   end
   return { generation = objective_gen, grouped_needs = grouped_needs,
-    need_groups = need_groups,
+    grouped_needs_valid = grouped_needs_valid,
+    need_groups = need_groups, checklist = checklist,
     stamp = { focus_epoch = task_snapshot.focus_epoch, journal_generation = task_snapshot.journal_generation,
       need_generation = task_snapshot.need_generation,
       need_source_generation = type(task_snapshot.objective_needs) == "table"
         and task_snapshot.objective_needs.source_generation or nil,
       providers = provider_generations }, targets = kept,
       diagnostics = diagnostics, registry_diagnostics = registry.diagnostics }
+end
+
+-- Project only the exact ownership/checklist overlay from a coherent task
+-- snapshot. Tree rows use this without publishing targets for quests that are
+-- visible in the tree but are not part of the map's focused objective set.
+function M.objective_checklist(task_snapshot)
+  local needs = type(task_snapshot) == "table" and task_snapshot.objective_needs or nil
+  if type(needs) ~= "table" or needs.status ~= "ok" or needs.complete ~= true then
+    return nil
+  end
+  local projected = M.objective_snapshot(task_snapshot,
+    { generation = 0, status = "unknown", places = {} }, {}, M.target_registry_new())
+  if type(projected) ~= "table" or projected.grouped_needs_valid ~= true then return nil end
+  return projected.checklist or {}
+end
+
+function M.objective_snapshot_with_checklist(snapshot, checklist)
+  if type(snapshot) ~= "table" or type(checklist) ~= "table" then return snapshot end
+  local copy = {}
+  for key, value in pairs(snapshot) do copy[key] = value end
+  copy.checklist = checklist
+  return copy
 end
 
 local function objective_name(policy, obj)
@@ -4890,6 +5167,81 @@ local function objective_name(policy, obj)
     if name then return name end
   end
   return obj.source_id or (obj.target.cid and tostring(obj.target.cid)) or "Objective"
+end
+
+local OBJECTIVE_PROVIDER_LABEL = {
+  placed = "Pickup", pickup = "Pickup", chest = "Chest", loot = "Loot",
+  shop = "Shop", monster = "Monster drop", talk_grant = "NPC grant",
+  forgery = "Forgery", reward = "Quest reward",
+}
+
+local function objective_lookup(rows, key, field)
+  if type(rows) ~= "table" then return nil end
+  local direct = rows[key]
+  if type(direct) == "string" and direct ~= "" then return direct end
+  for _, row in ipairs(objective_array(rows) or {}) do
+    if type(row) == "table" and row[field] == key
+        and type(row.name) == "string" and row.name ~= "" then return row.name end
+  end
+end
+
+function M.objective_label(policy, obj, explicit_npc_name)
+  policy, obj = policy or {}, obj or {}
+  local names, parts = policy.names or {}, {}
+  local item_names = {}
+  for _, item_id in ipairs(objective_array(obj.item_ids) or {}) do
+    local name = objective_lookup(names.items, item_id, "item_id")
+    if name == nil then name = "Item " .. tostring(item_id) end
+    item_names[#item_names + 1] = name
+  end
+  local item = #item_names > 0 and table.concat(item_names, " / ") or nil
+  if obj.kind == "npc" then
+    local npc = explicit_npc_name or objective_lookup(names.npcs,
+      type(obj.target) == "table" and obj.target.cid or nil, "cid")
+    if npc == nil then
+      local cid = type(obj.target) == "table" and obj.target.cid or nil
+      npc = cid and ("NPC " .. tostring(cid)) or "NPC"
+    end
+    if item ~= nil then parts[#parts + 1] = item end
+    parts[#parts + 1] = npc
+  elseif obj.kind == "source" then
+    local target_name = objective_lookup(names.targets, obj.key, "key")
+    parts[#parts + 1] = (#item_names > 1 and item) or target_name or item
+      or ("Item " .. tostring((objective_array(obj.item_ids) or {})[1] or "?"))
+    parts[#parts + 1] = OBJECTIVE_PROVIDER_LABEL[obj.provider]
+      or tostring(obj.provider or "Source")
+  else
+    local target_name = objective_lookup(names.targets, obj.key, "key")
+    if item ~= nil then parts[#parts + 1] = item end
+    parts[#parts + 1] = target_name or "Destination"
+  end
+  local quest_names, seen = {}, {}
+  local by_qid = policy.quest_names or {}
+  for _, owner in ipairs(objective_array(obj.owners) or {}) do
+    local name = by_qid[owner.qid]
+    if type(name) ~= "string" or name == "" then name = "Quest " .. tostring(owner.qid) end
+    if not seen[name] then seen[name] = true; quest_names[#quest_names + 1] = name end
+  end
+  if #quest_names > 0 then parts[#parts + 1] = table.concat(quest_names, " / ") end
+  return table.concat(parts, " - ")
+end
+
+function M.apply_objective_checklist(journal_rows, snapshot)
+  for _, entry in pairs(type(journal_rows) == "table" and journal_rows or {}) do
+    for _, check in ipairs(type(entry) == "table" and entry.checks or {}) do
+      check.inventory_done, check.item_id, check.held, check.required = nil, nil, nil, nil
+    end
+  end
+  for _, row in ipairs(type(snapshot) == "table" and snapshot.checklist or {}) do
+    local entry = type(journal_rows) == "table" and journal_rows[row.qid] or nil
+    local check = type(entry) == "table" and type(entry.checks) == "table"
+      and entry.checks[row.check_index] or nil
+    if type(check) == "table" then
+      check.inventory_done, check.item_id = row.inventory_done == true, row.item_id
+      check.held, check.required = row.held, row.required
+    end
+  end
+  return journal_rows
 end
 
 local function objective_record_valid(snapshot, obj)
@@ -4947,7 +5299,8 @@ function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
       local copy = {}
       for k, v in pairs(original) do
         if k == "qids" or k == "objective_qids" or k == "objective_group_keys"
-            or k == "objective_group_qids" or k == "objective_item_ids" then
+            or k == "objective_group_qids" or k == "objective_item_ids"
+            or k == "objective_labels" then
           copy[k] = {}
           for i, qid in ipairs(objective_array(v) or {}) do copy[k][i] = qid end
         else copy[k] = v end
@@ -5037,11 +5390,19 @@ function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
       end
     end
     if obj.kind == "source" then index.source_claim[marker] = obj.key end
+    local label = M.objective_label(policy, obj)
+    marker.objective_labels = objective_array(marker.objective_labels) or {}
+    local label_seen = false
+    for _, previous in ipairs(marker.objective_labels) do
+      if previous == label then label_seen = true; break end
+    end
+    if not label_seen then marker.objective_labels[#marker.objective_labels + 1] = label end
+    marker.label = table.concat(marker.objective_labels, " / ")
   end
   local function make_marker(obj)
     local marker = { key = "objective:" .. tostring(obj.ordinal), cat = "objective",
       cid = obj.target.cid, qids = {}, pos = objective_copy_pos(obj.target.pos),
-      label = "Objective: " .. objective_name(policy, obj), objective_qids = {} }
+      label = M.objective_label(policy, obj), objective_qids = {} }
     return marker
   end
   local function attach_or_add(list, index, obj)
@@ -5165,8 +5526,11 @@ function M.objective_route_member_equal(route, member)
       or route.capacity_key ~= member.capacity_key
       or route.capacity_kind ~= member.capacity_kind then return false end
   local function same_values(a, b)
+    if a == nil or b == nil then
+      local other = a == nil and b or a
+      return other == nil or (type(other) == "table" and next(other) == nil)
+    end
     if type(a) ~= type(b) then return false end
-    if a == nil then return true end
     if #a ~= #b then return false end
     for i, value in ipairs(a) do if value ~= b[i] then return false end end
     return true
@@ -5177,6 +5541,51 @@ function M.objective_route_member_equal(route, member)
   return route.place == member.place and type(route.pos) == "table"
     and type(member.pos) == "table" and route.pos.x == member.pos.x
     and route.pos.y == member.pos.y and route.pos.z == member.pos.z
+end
+
+-- A route publication changes before the world path worker can publish its
+-- replacement routes. Keep every non-objective route and only those objective
+-- routes that still match the new publication, so one stale objective cannot
+-- blank an unrelated manual/search route for the transition tick.
+function M.route_render_projection(routes, publication)
+  local expected, kept, current_objectives = {}, {}, {}
+  for _, member in ipairs(type(publication) == "table"
+      and type(publication.members) == "table" and publication.members or {}) do
+    if type(member) == "table" and type(member.route_id) == "number" then
+      expected[member.route_id] = member
+    end
+  end
+  for _, route in ipairs(type(routes) == "table" and routes or {}) do
+    if type(route) == "table" then
+      if route.objective_generation == nil then
+        kept[#kept + 1] = route
+      else
+        local member = expected[route.cid]
+        if member ~= nil and M.objective_route_member_equal(route, member) then
+          kept[#kept + 1] = route
+          current_objectives[route.cid] = true
+        end
+      end
+    end
+  end
+  return kept, current_objectives
+end
+
+-- Route-stop records inherit their source route's objective generation. Drop
+-- only stale objective records; manual/search stops and every non-route point
+-- remain available to the render gate.
+function M.filter_route_points(markers, current_objectives)
+  if type(markers) ~= "table" then return markers end
+  current_objectives = type(current_objectives) == "table" and current_objectives or {}
+  local kept = {}
+  for _, marker in ipairs(markers) do
+    if type(marker) ~= "table" or marker.cat ~= "route_stop"
+        or marker.objective_generation == nil
+        or current_objectives[marker.cid] == true then
+      kept[#kept + 1] = marker
+    end
+  end
+  return kept
 end
 
 local function objective_grouped_routes(snapshot, player_origin, policy)
@@ -5226,21 +5635,8 @@ local function objective_grouped_routes(snapshot, player_origin, policy)
       for _, group in ipairs(objective_array(obj.groups) or {}) do
         member.group_keys[#member.group_keys + 1] = group.key
       end
-      local item = objective_name(policy, obj)
-      if item == obj.source_id then item = "Item " .. tostring(obj.item_ids[1] or "?") end
-      local quest = (policy.quest_names or {})[member.qid]
-        or ("Quest " .. tostring(member.qid or "?"))
-      member.name = "Objective: " .. item .. " (for " .. quest .. ")"
-    elseif obj.kind == "npc" then
-      member.name = objective_name(policy, obj)
-    else
-      local caption = objective_name(policy, obj)
-      if caption == "Objective" and first then
-        caption = (policy.quest_names or {})[first.qid] or ("Quest " .. tostring(first.qid))
-      end
-      member.name = caption:sub(1, 11) == "Objective: " and caption
-        or ("Objective: " .. caption)
     end
+    member.name = M.objective_label(policy, obj)
     if direct then member.place = 0 else member.cid, member.place = cid, cid end
     by_endpoint[endpoint] = true
     members[#members + 1] = member
@@ -5526,25 +5922,7 @@ function M.objective_routes(snapshot, player_origin, policy)
     local member = { route_id = route_id, qid = first and first.qid, target_key = obj.key,
       ordinal = obj.ordinal, kind = obj.kind, direct = direct, pos = pos, item_ids = obj.item_ids,
       objective = true, objective_generation = generation }
-    if obj.kind == "npc" then
-      member.name = objective_name(policy, obj)
-    elseif obj.kind == "place" then
-      local caption = objective_name(policy, obj)
-      if caption == "Objective" and first ~= nil then
-        caption = (policy.quest_names or {})[first.qid] or ("Quest " .. tostring(first.qid))
-      end
-      member.name = caption:sub(1, 11) == "Objective: " and caption or ("Objective: " .. caption)
-    else
-      local item = objective_name(policy, obj)
-      if item == obj.source_id then
-        item = "Item " .. tostring((objective_array(obj.item_ids) or {})[1] or "?")
-      end
-      local quest = first ~= nil and (policy.quest_names or {})[first.qid] or nil
-      if type(quest) ~= "string" or quest == "" then
-        quest = "Quest " .. tostring(first and first.qid or "?")
-      end
-      member.name = "Objective: " .. item .. " (for " .. quest .. ")"
-    end
+    member.name = M.objective_label(policy, obj)
     if direct then member.place = 0 else member.cid, member.place = cid, cid end
     by_endpoint[endpoint] = true; members[#members + 1] = member
   end

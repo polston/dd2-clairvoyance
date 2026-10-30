@@ -78,6 +78,31 @@ try {
          (Test-Path (Join-Path $allowed.Root "check-ran.txt"))) `
         "code $($result.Code), installed '$($installed.Trim())', output $($result.Text)"
 
+    $devSource = Get-Content -Raw (Join-Path $repo "scripts/dev.ps1")
+    $deployStart = $devSource.IndexOf('        "deploy" {')
+    $probeStart = $devSource.IndexOf('        "probe" {', $deployStart + 1)
+    $deployBlock = if ($deployStart -ge 0 -and $probeStart -gt $deployStart) {
+        $devSource.Substring($deployStart, $probeStart - $deployStart)
+    } else { "" }
+    $invokeAt = $deployBlock.IndexOf("Invoke-ProjectPowerShell")
+    $verifyAt = $deployBlock.IndexOf("Test-InstalledFiles")
+    Assert-True "deploy_wrapper_verifies_installed_hashes_before_success" `
+        (($invokeAt -ge 0) -and ($verifyAt -gt $invokeAt)) `
+        "deploy action does not verify installed hashes after deployment"
+    $invokeStart = $devSource.IndexOf("function Invoke-ProjectPowerShell")
+    $pairStart = $devSource.IndexOf("function Add-FilePair", $invokeStart + 1)
+    $invokeBlock = if ($invokeStart -ge 0 -and $pairStart -gt $invokeStart) {
+        $devSource.Substring($invokeStart, $pairStart - $invokeStart)
+    } else { "" }
+    Assert-True "deploy_wrapper_waits_for_nested_powershell_process_tree" `
+        ($invokeBlock.Contains("Start-Process") -and $invokeBlock.Contains("-Wait") -and
+         $invokeBlock.Contains("-PassThru")) `
+        "Invoke-ProjectPowerShell does not explicitly wait for the nested process tree"
+    Assert-True "deploy_wrapper_quotes_windows_arguments" `
+        ($devSource.Contains("function ConvertTo-WindowsCommandLineArgument") -and
+         $invokeBlock.Contains("ConvertTo-WindowsCommandLineArgument")) `
+        "Invoke-ProjectPowerShell does not use Windows-correct argv quoting"
+
     $requiredSources = @(
         @{
             Name = "main_file"
