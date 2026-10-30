@@ -2491,7 +2491,8 @@ local function install_debug()
         for _, r in ipairs((wt.q("input", nil) or {}).routes or {}) do
           local e = { cid = r.cid, name = r.name, stops = #(r.stops or {}),
             slot = r.slot, current = r.current, place = r.place, lead = r.lead,
-            direct = r.direct, objective = r.objective, qid = r.qid, kind = r.kind }
+            direct = r.direct, objective = r.objective, qid = r.qid, kind = r.kind,
+            target_key = r.target_key, objective_generation = r.objective_generation }
           if type(r.pos) == "table" then
             e.pos = { x = r.pos.x, y = r.pos.y, z = r.pos.z }
           end

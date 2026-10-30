@@ -52,3 +52,6 @@ here and never pushed; roadmap and spec edits are committed there, not in this r
 7. Commit titles must follow Conventional Commits: `type(scope)?!?: description` with type feat, fix, perf, refactor, docs, test, build, ci, chore, style or revert.
 8. README install and requirements steps may name the release page, a mod manager and the required plugins (operator ruling 2026-10-24); the no-naming rule covers code provenance, other mods' authors and hint sources, not install instructions.
 9. How the work is done (game research, in-game probes in `tools/probe/`, and the spec, plan, parallel-lane build and landing process): `.claude/skills/clairvoyance-workflow/SKILL.md`. Read it before starting a ROADMAP item.
+10. Before any deploy, Reset Scripts request, live correction or handoff, read
+    `.claude/skills/verified-live-handoff/SKILL.md` and obey its whole-product
+    acceptance gate. A provider-local pass cannot close a live regression.

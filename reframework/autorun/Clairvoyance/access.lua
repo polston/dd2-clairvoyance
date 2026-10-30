@@ -47,7 +47,7 @@ M.registry = {
       },
       gate_id = "beggars_garb_entrance",
       predicate = { field = "locked", equals = false },
-      unknown_policy = "deny",
+      unknown_policy = "allow",
       may_use_last_known = false,
     },
   },

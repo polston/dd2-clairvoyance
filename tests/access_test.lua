@@ -122,6 +122,7 @@ check("non-matching typed target does not bind", access.match_binding(registry, 
 
 local source_binding = registry.bindings[1]
 local hint_binding = registry.bindings[2]
+local production_source_binding = production_registry.bindings[2]
 local function observation(values) return { status = "known", values = values } end
 local unknown = { status = "unknown" }
 local function eval(binding, current, last)
@@ -134,6 +135,8 @@ check("door open and unlocked passes source predicate",
 check("door closed and locked blocks source predicate",
   eval(source_binding, observation({ closed = true, locked = true }), unknown) == false)
 check("unknown source gate fails closed", eval(source_binding, unknown, unknown) == false)
+check("focused placed source survives an unloaded production access gate",
+  eval(production_source_binding, unknown, unknown) == true)
 check("closed hint gate preserves pin", eval(hint_binding,
   observation({ closed = true }), unknown) == true)
 check("open hint gate filters pin", eval(hint_binding,

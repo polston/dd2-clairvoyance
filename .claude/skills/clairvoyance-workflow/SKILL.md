@@ -107,6 +107,24 @@ the world tracker as the `wt` upvalue of `D.state`.
 6. One probe runs every variant and logs each result. Never ask the operator
    to repeat a test.
 
+### Live regression handoff gate
+
+1. A provider-specific positive or negative is never whole-product acceptance.
+   After every deployment and Reset Scripts, run `just accept-routes`. It checks
+   the complete focused-objective projection across every provider.
+2. A focused need with zero total targets, or published targets with zero total
+   objective routes, is a regression gate failure. Do not reinterpret it as an
+   expected negative for the provider currently being changed.
+3. Add the smallest RED regression before fixing any live failure. Keep that
+   regression plus this live gate green before asking the operator to evaluate
+   the game.
+4. Reset Scripts is an intermediate event. After the operator reports the reset,
+   immediately run the remaining probes and continue the active plan; never use
+   the reset response as a session boundary.
+5. When operator feedback exposes a repeatable process failure, add or strengthen
+   a durable test, command, workflow rule or skill in the same correction. A
+   promise about future behavior is not remediation.
+
 ### 3. Screens and input
 
 1. `powershell -File tools/probe/focus.ps1` brings the game window to the front.

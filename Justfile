@@ -19,6 +19,10 @@ deploy:
 probe chunk timeout="12":
     & './scripts/dev.ps1' probe -Chunk {{ quote(chunk) }} -Timeout {{ timeout }}
 
+# Fail unless the live focused-objective projection has converged to targets and routes.
+accept-routes:
+    & './scripts/dev.ps1' probe -Chunk 'tools/probe/objective_acceptance.lua' -Timeout 30
+
 # Capture the game window into a local scratch image.
 shot output=".tmp-tests/shot.png":
     & './scripts/dev.ps1' shot -Output {{ quote(output) }}

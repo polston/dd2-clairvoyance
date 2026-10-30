@@ -342,6 +342,9 @@ check("focus debug exposes grouped need and source capacity evidence",
     and debug_focus:find("certainty = target.certainty", 1, true) ~= nil
     and debug_focus:find("probability = target.probability", 1, true) ~= nil
     and debug_focus:find("groups = {}", 1, true) ~= nil)
+check("focus debug preserves route ownership for live acceptance",
+  debug_focus:find("target_key = r.target_key", 1, true) ~= nil
+    and debug_focus:find("objective_generation = r.objective_generation", 1, true) ~= nil)
 check("focus debug exposes provider status and cap omissions",
   debug_focus:find("status = provider.status", 1, true) ~= nil
     and debug_focus:find("complete = provider.complete", 1, true) ~= nil

@@ -3717,7 +3717,8 @@ do
     IS.gm = gmgr({ managed = managed({ hset({ placed(300, V, L) }) }),
       drops = {}, boxes = {} }, nil, true)
     ai.refresh_items()
-    assert(#ai.item_locations() == 0, "unknown Garb placement is omitted before item commit")
+    assert(#ai.item_locations() == 1,
+      "unknown Garb access preserves the placement before item commit")
     ifresh()
     IS.gm = gmgr({ managed = managed({ hset({ placed(300, V, L) }) }),
       drops = {}, boxes = {} })
@@ -6288,11 +6289,13 @@ end
   now = now + 11
   filtered, decisions = a.filter_access_targets({ hint, garb, unrelated })
   local unknown_provider = a.filter_placed_provider_snapshot(provider)
-  assert(#filtered == 2 and filtered[1] == hint and filtered[2] == unrelated
-    and decisions[1].used_last_known == true
-    and #unknown_provider.candidates == 1 and unknown_provider.candidates[1] == other_candidate
+  assert(#filtered == 3 and filtered[1] == hint and filtered[2] == garb
+    and filtered[3] == unrelated and decisions[1].used_last_known == true
+    and decisions[2].allowed == true and decisions[2].reason == "unknown_allowed"
+    and #unknown_provider.candidates == 2 and unknown_provider.candidates[1] == candidate
+    and unknown_provider.candidates[2] == other_candidate
     and unknown_provider.complete and unknown_provider.generation == 7,
-    "unknown source fails closed while hint uses last-known state")
+    "unknown production gate preserves focused Garb while hint uses last-known state")
   local fixture_gate = { id = "fixture_second_entrance", observer_family = "door_leaf",
     fingerprint = { bucket_id = 86, type_name = "app.gm05_046",
       game_object_name = "gm_fixture", position = { x = 1, y = 2, z = 3 },
@@ -6355,7 +6358,11 @@ end
   assert(#ps.targets == 1 and #pm == 1 and #pf == 1 and #pmini == 1
     and #po == 1 and #pr.members == 1,
     "unlocked real filter output reaches map, full map, minimap, overhead and route")
-  for label, denied in pairs({ locked = locked_provider, unknown = unknown_provider }) do
+  local xs, xm, xf, xmini, xo, xr = projected(unknown_provider)
+  assert(#xs.targets == 1 and #xm == 1 and #xf == 1 and #xmini == 1
+    and #xo == 1 and #xr.members == 1,
+    "unknown production gate preserves map, full map, minimap, overhead and route")
+  for label, denied in pairs({ locked = locked_provider }) do
     local ds, dm, df, dmini, doh, dr = projected(denied)
     assert(#ds.targets == 0 and #dm == 0 and #df == 0 and #dmini == 0
       and #doh == 0 and #dr.members == 0,
@@ -6400,13 +6407,17 @@ end
   a.objective_need_groups = saved_need_groups
   assert(#published_unlocked[1].candidates == 1
     and #published_locked[1].candidates == 0
-    and #published_unknown[1].candidates == 0,
-    "objective provider publication applies unlocked, locked and unknown access membership")
+    and #published_unknown[1].candidates == 1,
+    "objective provider publication preserves unknown, allows unlocked and blocks known locked access")
   local us, um, uf, umini, uoh, ur = projected(published_unlocked)
   assert(#us.targets == 1 and #um == 1 and #uf == 1 and #umini == 1
     and #uoh == 1 and #ur.members == 1,
     "unlocked published envelope reaches every presentation surface")
-  for label, denied in pairs({ locked = published_locked, unknown = published_unknown }) do
+  local psu, pmu, pfu, pminiu, pou, pru = projected(published_unknown)
+  assert(#psu.targets == 1 and #pmu == 1 and #pfu == 1 and #pminiu == 1
+    and #pou == 1 and #pru.members == 1,
+    "unknown published envelope reaches every presentation surface")
+  for label, denied in pairs({ locked = published_locked }) do
     local ds, dm, df, dmini, doh, dr = projected(denied)
     assert(#ds.targets == 0 and #dm == 0 and #df == 0 and #dmini == 0
       and #doh == 0 and #dr.members == 0,
@@ -6415,13 +6426,15 @@ end
   a.invalidate_items()
   now = now + 11
   filtered, decisions = a.filter_access_targets({ hint, garb })
-  assert(#filtered == 1 and filtered[1] == hint and decisions[1].used_last_known == true,
-    "ordinary item invalidation retains session last-known hint observation")
+  assert(#filtered == 2 and filtered[1] == hint and filtered[2] == garb
+    and decisions[1].used_last_known == true and decisions[2].allowed == true,
+    "ordinary item invalidation retains hint history and preserves unknown Garb access")
   owner = {}
   assert(a.reset_session_caches() == true, "session owner reset executes")
   filtered, decisions = a.filter_access_targets({ hint, garb })
-  assert(#filtered == 1 and filtered[1] == hint and decisions[1].used_last_known == false,
-    "session reset clears current and last-known observations")
+  assert(#filtered == 2 and filtered[1] == hint and filtered[2] == garb
+    and decisions[1].used_last_known == false and decisions[2].allowed == true,
+    "session reset clears observations without hiding unknown focused Garb access")
   sdk.get_managed_singleton, os.clock = old_gms, old_clock
 end)()
 
