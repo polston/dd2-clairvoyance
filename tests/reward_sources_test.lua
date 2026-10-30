@@ -251,6 +251,56 @@ do
 end
 
 do
+  -- Residual fix-round cases: provider atomicity, status vocabulary and canonical tuples.
+  local failures={}
+  local function expect(label, ok)
+    if not ok then failures[#failures+1]=label end
+  end
+  local unreadable=observation(); unreadable.events[1].playable_readable=false; unreadable.events[1].playable=nil
+  local play=classify({row()},unreadable)
+  expect("unreadable absent playability stays unknown",play.candidates[1]
+    and play.candidates[1].eligibility=="unknown")
+
+  local history=observation(); history.events[1].history.result_readable=true
+  local absent_history=classify({row()},history)
+  expect("absent history requires unreadable result flag",absent_history.candidates[1]
+    and absent_history.candidates[1].eligibility=="unknown")
+  history=observation(); history.events[1].history.played_readable=true
+  history.events[1].history.played=false
+  absent_history=classify({row()},history)
+  expect("absent history has no played payload",absent_history.candidates[1]
+    and absent_history.candidates[1].eligibility=="unknown")
+
+  local missing=observation(); missing.events={}
+  local absent=classify({row()},missing)
+  expect("required event missing is provider-atomic",absent.complete==false and #absent.candidates==0
+    and #absent.source_status.rows==1 and absent.source_status.rows[1].scope=="provider")
+  local duplicated=observation(); duplicated.events[2]=clone(duplicated.events[1])
+  local repeated=classify({row()},duplicated)
+  expect("required event duplicate is provider-atomic",repeated.complete==false and #repeated.candidates==0
+    and #repeated.source_status.rows==1 and repeated.source_status.rows[1].scope=="provider")
+
+  local negative=classify({row()},observation({progressing_qids={}}))
+  expect("diagnostic uses ineligible status",negative.diagnostic_rows[1].status=="ineligible")
+
+  local float_row=row()
+  float_row.quest_id=10.0; float_row.source_identity.quest_id=10.0
+  float_row.source_identity.action_ordinal=2.0; float_row.source_identity.processor_id=100.0
+  float_row.endpoint_evidence.predecessor_processor_id=90.0
+  float_row.endpoint_evidence.talk_event_id=20.0; float_row.endpoint_evidence.end_no=7.0
+  local float_obs=observation(); float_obs.tasks[1].task_index=3.0
+  float_obs.tasks[1].targets[1].task_index=3.0
+  local canonical=classify({float_row},float_obs)
+  local core=require("Clairvoyance.core")
+  local tuple=canonical.candidates[1] and canonical.candidates[1].source_id or {}
+  local all_integer=true
+  for _,v in ipairs(tuple) do if type(v)=="number" and math.type(v)~="integer" then all_integer=false end end
+  expect("integral floats normalized before tuple publication",all_integer and core.target_key(tuple)~=nil)
+
+  assert(#failures==0,"residual RED cases: "..table.concat(failures,"; "))
+end
+
+do
   -- Adversarial review regressions.
   local o=observation(); o.controllers[1].processors[2].nested_action_result=0
   local s=classify({row()},o)
@@ -308,7 +358,7 @@ do
   eq(s.candidates[1].eligibility,"eligible"); eq(s.candidates[1].source_id[7],1)
   eq(s.candidates[1].outputs[1].item_id,500)
   local excluded=false
-  for _,d in ipairs(s.diagnostic_rows) do if d.member_id and d.status=="unavailable" then excluded=true end end
+  for _,d in ipairs(s.diagnostic_rows) do if d.member_id and d.status=="ineligible" then excluded=true end end
   eq(excluded,true,"excluded sibling retains diagnostics")
 
   o=observation({reward_outputs={{name_hash=30,outputs={{item_id=500,count=1},{item_id=501,count=4}}}}})
@@ -339,6 +389,8 @@ do
   eq(canonical_sources,1,"real core accepts canonical task/member tuple")
   for _,d in ipairs(two.diagnostic_rows) do
     eq(type(d.member_id),"string"); eq(type(d.gate),"string"); eq(type(d.status),"string")
+    eq(d.status=="eligible" or d.status=="ineligible" or d.status=="unknown",true,
+      "diagnostic uses frozen eligibility vocabulary")
     local fields=0;for _ in pairs(d) do fields=fields+1 end
     eq(fields,3,"diagnostic row has exact member_id/gate/status shape")
   end

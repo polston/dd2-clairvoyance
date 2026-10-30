@@ -9,6 +9,10 @@ local function integer(v, lo, hi)
   return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
     and v % 1 == 0 and v >= lo and v <= hi
 end
+local function canonical_integer(v, lo, hi)
+  if not integer(v, lo, hi) then return nil end
+  return math.tointeger(v)
+end
 local function dense(a, cap)
   if type(a) ~= "table" then return false end
   local n, max = 0, 0
@@ -246,11 +250,12 @@ local function normalize_catalog_member(row)
   end
   if not integer(qid,1,MAX) or not integer(ordinal,0,MAX) or not integer(processor,0,U32)
       or not dense(hashes,32) or #hashes==0 then return nil,"reward_catalog_invalid" end
-  local out={ qid=qid, action_ordinal=ordinal, processor_id=processor,
-    predecessor_processor_id=supported and e.predecessor_processor_id or nil,
+  local out={ qid=canonical_integer(qid,1,MAX), action_ordinal=canonical_integer(ordinal,0,MAX),
+    processor_id=canonical_integer(processor,0,U32),
+    predecessor_processor_id=supported and canonical_integer(e.predecessor_processor_id,0,U32) or nil,
     reward_action_type=REWARD, predecessor_action_type=supported and e.predecessor_action_type or nil,
-    talk_event_id=supported and e.talk_event_id or nil,
-    end_no=supported and e.end_no or nil,
+    talk_event_id=supported and canonical_integer(e.talk_event_id,1,MAX) or nil,
+    end_no=supported and canonical_integer(e.end_no,-MAX,MAX) or nil,
     endpoint_supported=supported, reward_hashes=hashes }
   if supported then out.accept_minus_one=e.accept_minus_one end
   return out
@@ -299,6 +304,7 @@ local function classify_member(member, obs, mappings, wanted)
           or target.eligibility~="eligible" then return nil,"task_endpoint_unreadable" end
       previous_cid=target.cid
     end
+    task={qid=task.qid,task_index=canonical_integer(task.task_index,0,MAX),targets=task.targets}
   end
   local progress=false; for _, x in ipairs(obs.progressing_qids) do if x==qid then progress=true end end
   if not progress then return { state="unavailable", reason="quest_not_progressing", outputs=complete_outputs, matched=matched, task=task } end
@@ -342,6 +348,7 @@ local function classify_member(member, obs, mappings, wanted)
   if type(event.playable_readable)~="boolean" then return unknown_event("event_playability_unreadable") end
   if not event.playable_readable and event.playable~=nil then return unknown_event("observation_contradictory") end
   if event.playable_readable and type(event.playable)~="boolean" then return unknown_event("event_playability_unreadable") end
+  if not event.playable_readable then return unknown_event("event_playability_unreadable") end
   if not event.playable then return {state="unavailable",reason="event_not_playable",outputs=complete_outputs,matched=matched,task=task,event=event} end
   if type(event.initial_speaker_readable)~="boolean" then return unknown_event("initial_speaker_unreadable") end
   if not event.initial_speaker_readable and event.initial_speaker_cid~=nil then return unknown_event("observation_contradictory") end
@@ -393,7 +400,7 @@ local function classify_member(member, obs, mappings, wanted)
   if h.present then
     if h.played_readable~=true or type(h.played)~="boolean" then return unknown_event("history_unreadable") end
     if h.played then return {state="unavailable",reason="already_claimed",outputs=complete_outputs,matched=matched,task=task,event=event} end
-  elseif h.played_readable~=false or h.played~=nil or h.result_no~=nil then return unknown_event("observation_contradictory") end
+  elseif h.played_readable~=false or h.played~=nil or h.result_readable~=false or h.result_no~=nil then return unknown_event("observation_contradictory") end
   return {state="available",reason="available",outputs=complete_outputs,matched=matched,task=task,event=event, speaker=speaker}
 end
 
@@ -424,6 +431,12 @@ function M.classify(catalog_rows, observation, generation)
     if type(member)~="table" then provider_fallback(snapshot,"status_malformed"); return snapshot end
     local normalized, normalize_error=normalize_catalog_member(member)
     if not normalized then snapshot.reason=normalize_error; provider_fallback(snapshot,"status_malformed"); return snapshot end
+    if normalized.endpoint_supported then
+      local event, event_dup=find_one(obs.events,"event_id",normalized.talk_event_id)
+      if event_dup or not event then
+        snapshot.reason="event_unreadable"; provider_fallback(snapshot,snapshot.reason); return snapshot
+      end
+    end
     local function ident(v) return v==nil and "~" or tostring(v) end
     local mk=table.concat({ident(normalized.qid),ident(normalized.action_ordinal),ident(normalized.processor_id),
       ident(normalized.predecessor_processor_id),ident(normalized.talk_event_id),ident(normalized.end_no)},":")
@@ -527,7 +540,11 @@ function M.classify(catalog_rows, observation, generation)
   end
   for _,count in pairs(capacity_claims) do if count>1 then snapshot.status="unknown";snapshot.complete=false;snapshot.reason="reward_capacity_conflict";snapshot.candidates={};snapshot.diagnostic_rows={};provider_fallback(snapshot,snapshot.reason);return snapshot end end
   snapshot.candidates=candidates
-  for _,o in ipairs(outcomes) do snapshot.diagnostic_rows[#snapshot.diagnostic_rows+1]={member_id=o.key,gate=o.reason,status=o.state} end
+  for _,o in ipairs(outcomes) do
+    local diagnostic_status=o.state=="available" and "eligible"
+      or o.state=="unavailable" and "ineligible" or "unknown"
+    snapshot.diagnostic_rows[#snapshot.diagnostic_rows+1]={member_id=o.key,gate=o.reason,status=diagnostic_status}
+  end
   table.sort(statuses,function(a,b)return a.identity<b.identity end)
   status_degrade(snapshot,statuses)
   return snapshot
