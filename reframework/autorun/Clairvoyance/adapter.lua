@@ -6,6 +6,13 @@ A.reward_sources = require("Clairvoyance.reward_sources")
 
 function A.objective_destination_signature(rows)
     if type(rows) ~= "table" then return nil end
+    local count, maximum = 0, 0
+    for key in pairs(rows) do
+        if type(key) ~= "number" or math.tointeger(key) == nil or key < 1 or key > 256 then return nil end
+        count = count + 1
+        if key > maximum then maximum = key end
+    end
+    if count ~= maximum then return nil end
     local identities = {}
     for _, destination in ipairs(rows) do
         if type(destination) ~= "table" or type(destination.target) ~= "table" then return nil end

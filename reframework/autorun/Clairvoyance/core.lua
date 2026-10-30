@@ -4127,8 +4127,19 @@ local function valid_target_tuple(tuple, count)
         or not canonical_integer(tuple[4]) or math.abs(tuple[4]) > 2147483647
         or not canonical_integer(tuple[5]) or tuple[5] < 1 or tuple[5] > 8
         or count ~= 5 + tuple[5] * 3 then return false end
-    for i = 6, count do
-      if not canonical_integer(tuple[i]) or tuple[i] < 0 or tuple[i] > 4294967295 then return false end
+    local previous_ordinal, previous_reward, previous_predecessor
+    for i = 6, count, 3 do
+      local ordinal, reward, predecessor = tuple[i], tuple[i + 1], tuple[i + 2]
+      if not canonical_integer(ordinal) or ordinal < 0 or ordinal > 2147483647
+          or not canonical_integer(reward) or reward < 0 or reward > 4294967295
+          or not canonical_integer(predecessor) or predecessor < 0 or predecessor > 4294967295 then
+        return false
+      end
+      if previous_ordinal ~= nil and (ordinal < previous_ordinal
+          or ordinal == previous_ordinal and reward < previous_reward
+          or ordinal == previous_ordinal and reward == previous_reward
+            and predecessor <= previous_predecessor) then return false end
+      previous_ordinal, previous_reward, previous_predecessor = ordinal, reward, predecessor
     end
     return true
   end

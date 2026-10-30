@@ -5638,6 +5638,13 @@ do
       tk({ true }) == nil and tk({ 1.5 }) == nil and tk({ 10.0, "issued_npc", 7 }) == nil
         and tk({ 10, "task", 0, 1, true }) == nil
         and tk({}) == nil)
+    check("objective key: reward status endpoint requires bounded ordered unique member triples",
+      tk({ "reward_status_endpoint", 10, 20, 7, 1, 2, 100, 90 }) ~= nil
+        and tk({ "reward_status_endpoint", 10, 20, 7, 1, 2147483648, 100, 90 }) == nil
+        and tk({ "reward_status_endpoint", 10, 20, 7, 2,
+          2, 100, 90, 2, 100, 90 }) == nil
+        and tk({ "reward_status_endpoint", 10, 20, 7, 2,
+          3, 103, 93, 2, 100, 90 }) == nil)
     local reg = core.target_registry_new()
     local allocated = core.target_registry_allocate(reg, { tk({ "source", "z" }), tk({ "source", "é" }), tk({ "source", "a" }) })
     check("objective registry: allocates new keys in unsigned byte order",

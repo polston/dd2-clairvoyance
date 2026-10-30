@@ -464,7 +464,7 @@ function M.classify(catalog_rows, observation, generation)
     local ref={member=member,identity_key=identity_key}
     row_refs[#row_refs+1]=ref
     local group_key
-    if type(identity)=="table" and integer(member.quest_id,1,MAX)
+    if integer(member.quest_id,1,MAX)
         and type(evidence)=="table" and integer(evidence.talk_event_id,1,MAX)
         and integer(evidence.end_no,-MAX,MAX) then
       group_key=target_key({"reward_endpoint",member.quest_id,evidence.talk_event_id,evidence.end_no})
@@ -490,10 +490,13 @@ function M.classify(catalog_rows, observation, generation)
       end
     end
   end
+  for _, ref in ipairs(unsupported_rows) do
+    include(ref)
+    if ref.identity_key then relevant_identities[ref.identity_key]=true end
+  end
   for _, ref in ipairs(row_refs) do
     if ref.identity_key and relevant_identities[ref.identity_key] then include(ref) end
   end
-  for _, ref in ipairs(unsupported_rows) do include(ref) end
   for _, raw_member in ipairs(relevant_rows) do
       local normalized, normalize_error=normalize_catalog_member(raw_member)
       if not normalized then snapshot.reason=normalize_error; provider_fallback(snapshot,"status_malformed"); return snapshot end

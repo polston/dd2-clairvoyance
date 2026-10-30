@@ -522,6 +522,18 @@ do
   local s=classify({wanted,duplicate},o)
   eq(s.complete,false,"cross-endpoint duplicate scalar identity fails closed")
   fallback(s,"status_duplicate_identity")
+
+  local unsupported=row({endpoint=false})
+  local supported_nonwanted=row({reward_hashes={31}})
+  s=classify({unsupported,supported_nonwanted},o)
+  eq(s.complete,false,"unsupported wanted duplicate propagates relevance to every occurrence")
+  fallback(s,"status_duplicate_identity")
+
+  local malformed_nonwanted=row({reward_hashes={31}})
+  malformed_nonwanted.source_identity=nil
+  s=classify({wanted,malformed_nonwanted},o)
+  eq(s.complete,false,"malformed nonwanted member cannot disappear from a relevant endpoint")
+  fallback(s,"status_malformed")
 end
 
 do

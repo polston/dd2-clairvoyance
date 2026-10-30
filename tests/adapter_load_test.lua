@@ -702,6 +702,10 @@ do
   many_destinations[30].target.place.key = 999
   assert(many_signature ~= A.objective_destination_signature(many_destinations),
     "length-prefixed destination identity detects a changed member beyond the tuple cap")
+  local sparse_destinations = { destination_number }
+  sparse_destinations[3] = destination_string
+  assert(A.objective_destination_signature(sparse_destinations) == nil,
+    "destination identity rejects sparse arrays instead of ignoring later rows")
   local too_many_reward_events = {}
   for i = 1, 65 do too_many_reward_events[i] = 1900 + i end
   local over_cap_events = A.read_objective_talk_grant_observation({}, too_many_reward_events)
