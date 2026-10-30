@@ -59,6 +59,7 @@ function M.defaults()
     -- quest focus (SPEC 32)
     focus_qids = {}, focus_tracked = false, focus_unrelated = 0, focus_routes = 1,
     focus_related_qids = {},
+    objective_marker_off = {}, objective_route_off = {},
     color_focus_place = 0xFFFFAB40, icon_focus_place = 26,
     color_focus_objective = 0xFFFFD54F, icon_focus_objective = 34,
   }
@@ -347,7 +348,8 @@ M.PANEL_ORDER = {
     "coords_map_cursor", "coords_minimap" } },
   { id = "appearance", keys = panel_appearance },
   { id = "quest_tree", keys = { "focus_qids", "focus_related_qids", "focus_tracked", "focus_unrelated",
-    "focus_dim_alpha", "focus_routes", "focus_place_routes" } },
+    "focus_dim_alpha", "focus_routes", "focus_place_routes",
+    "objective_marker_off", "objective_route_off" } },
   { id = "world", keys = {} },
   { id = "status", keys = { "debug" } },
 }
@@ -388,6 +390,8 @@ RULE.focus_unrelated = { "int", 0, 1 }
 RULE.focus_routes = { "int", 0, 2 }
 RULE.focus_qids = { "qid_list", 16 }
 RULE.focus_related_qids = { "qid_list", 17 }
+RULE.objective_marker_off = { "stable_list", 512, 2050 }
+RULE.objective_route_off = { "stable_list", 512, 2050 }
 RULE.focus_dim_alpha = { "int", 5, 100 }
 RULE.route_colors = { "color_list", M.ROUTE_SLOTS }
 
@@ -408,6 +412,33 @@ local function qid_list_field(v, cap)
       end
     end
   end
+  return out
+end
+
+-- Dense, sorted stable-identity lists for per-objective controls. Identities
+-- are opaque canonical byte strings supplied by the objective projection;
+-- settings never derive them from labels, positions or transient ordinals.
+local function stable_list_field(v, cap, byte_cap)
+  local out = {}
+  if type(v) ~= "table" then return out end
+  local n, count = #v, 0
+  if n > cap then return out end
+  for key in pairs(v) do
+    if type(key) ~= "number" or math.type(key) ~= "integer" or key < 1 or key > n then
+      return out
+    end
+    count = count + 1
+  end
+  if count ~= n then return out end
+  local seen = {}
+  for _, identity in ipairs(v) do
+    if type(identity) == "string" and #identity >= 4 and #identity <= byte_cap
+        and identity:match("^k:[0-9a-f]+$") ~= nil and (#identity - 2) % 2 == 0
+        and not seen[identity] then
+      seen[identity] = true; out[#out + 1] = identity
+    end
+  end
+  table.sort(out)
   return out
 end
 
@@ -438,6 +469,7 @@ local function field(raw, k, d)
   elseif kind == "float" then return range_field(raw, k, d, r[2], r[3])
   elseif kind == "size" then return number_size_field(raw, k)
   elseif kind == "qid_list" then return qid_list_field(raw[k], r[2])
+  elseif kind == "stable_list" then return stable_list_field(raw[k], r[2], r[3])
   elseif kind == "color_list" then return color_list_field(raw[k], r[2])
   end
   return M.cut_search(raw[k])
@@ -643,7 +675,8 @@ function M.validate(raw)
   for _, k in ipairs(STYLE_COLOR_KEYS) do out[k] = field(raw, k, d) end
   for _, k in ipairs({ "overhead_distance", "world_max_markers", "search_text",
     "overhead_names", "route_number_size", "route_path", "focus_qids", "focus_related_qids",
-    "focus_unrelated", "focus_routes", "focus_dim_alpha" }) do
+    "focus_unrelated", "focus_routes", "focus_dim_alpha",
+    "objective_marker_off", "objective_route_off" }) do
     out[k] = field(raw, k, d)
   end
   -- route_colors; the retired route_line_color seeds entry 1 when no list
@@ -672,7 +705,8 @@ function M.set_key(settings, key, v)
   local kind = r[1]
   local want = (kind == "bool" and "boolean")
     or ((kind == "int" or kind == "float" or kind == "size") and "number")
-    or (kind == "text" and "string") or (kind == "qid_list" and "table")
+    or (kind == "text" and "string")
+    or ((kind == "qid_list" or kind == "stable_list") and "table")
     or (kind == "color_list" and "table") or nil
   if want and (type(v) ~= want or v ~= v) then return false end
   if kind == "color_list" then
@@ -680,6 +714,17 @@ function M.set_key(settings, key, v)
     for i = 1, r[2] do
       if not is_argb(v[i]) then return false end
     end
+  end
+  if kind == "stable_list" then
+    local n, count = #v, 0
+    if n > r[2] then return false end
+    for key, identity in pairs(v) do
+      if type(key) ~= "number" or math.type(key) ~= "integer" or key < 1 or key > n
+          or type(identity) ~= "string" or #identity < 4 or #identity > r[3]
+          or identity:match("^k:[0-9a-f]+$") == nil or (#identity - 2) % 2 ~= 0 then return false end
+      count = count + 1
+    end
+    if count ~= n then return false end
   end
   local out = field({ [key] = v }, key, DEFAULTS)
   if (kind == "color" or kind == "icon" or kind == "float") and out ~= v then

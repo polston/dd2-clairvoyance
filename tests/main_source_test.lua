@@ -366,5 +366,52 @@ check("README describes objective and related-NPC focus behavior",
     and readme_words:find("current objective", 1, true) ~= nil
     and readme_words:find("unresolved", 1, true) ~= nil)
 
+local objective_ui = slice("objective source UI wiring",
+  "wt.objective_ui = require(\"Clairvoyance.objective_ui\")", "-- v14 (SPEC 22.11.2): the Hints node")
+check("focused quest detail exposes objectives and sources with independent controls",
+  objective_ui:find("Objectives & sources###qos_", 1, true) ~= nil
+    and objective_ui:find("Show marker##qom_", 1, true) ~= nil
+    and objective_ui:find("Draw route##qor_", 1, true) ~= nil
+    and objective_ui:find("entry.status_text", 1, true) ~= nil
+    and objective_ui:find("entry.reason_text", 1, true) ~= nil
+    and objective_ui:find("Path:", 1, true) ~= nil)
+check("source UI uses stable settings and never labels controls by transient ordinals",
+  objective_ui:find("objective_marker_off", 1, true) ~= nil
+    and objective_ui:find("objective_route_off", 1, true) ~= nil
+    and objective_ui:find("entry.identity", 1, true) ~= nil
+    and objective_ui:find("entry.ordinal", 1, true) == nil)
+check("item search has an explicit non-routing source browser lifecycle",
+  src:find("Sources for this search###qnml_source_browser", 1, true) ~= nil
+    and src:find("wt.objective_ui.browser_step", 1, true) ~= nil
+    and src:find("source_browser_open", 1, true) ~= nil
+    and src:find('wt.q("objective_source_browser", nil,', 1, true) ~= nil)
+local wf = assert(io.open("reframework/autorun/Clairvoyance/world.lua", "rb"))
+local world_src = wf:read("*a"):gsub("\r\n", "\n"); wf:close()
+local af = assert(io.open("reframework/autorun/Clairvoyance/adapter.lua", "rb"))
+local adapter_src = af:read("*a"):gsub("\r\n", "\n"); af:close()
+check("source browser is backed by an open-only bounded provider query",
+  world_src:find("function w:objective_source_browser", 1, true) ~= nil
+    and world_src:find("S.source_browser_open ~= true", 1, true) ~= nil
+    and world_src:find("#rows >= 512", 1, true) ~= nil
+    and world_src:find("source_browser_generation", 1, true) ~= nil
+    and adapter_src:find("function a.objective_source_registry", 1, true) ~= nil
+    and adapter_src:find("objective_browser_state", 1, true) ~= nil)
+check("source registry evidence is query-independent and never swaps focused task state",
+  adapter_src:find("objective_task_state = objective_browser_state", 1, true) == nil
+    and adapter_src:find("browser_query", 1, true) == nil
+    and adapter_src:find("browser_wanted", 1, true) == nil
+    and adapter_src:find("read_objective_forgery_observation({}, true)", 1, true) ~= nil)
+check("source browser rows never enter the focused snapshot or route publication",
+  tick_body:find("wt.source_browser_observation =", 1, true) ~= nil
+    and src:find("core.objective_snapshot%(task_snapshot, place_snapshot,%s*source_snapshots",
+      1, false) ~= nil
+    and src:find("source_browser_observation, wt.objective_registry", 1, true) == nil)
+check("source browser never invents alternate shop or monster identities",
+  world_src:find('"monster_drop_browser"', 1, true) == nil
+    and world_src:find('{ "source", "shop", shop.shop, item.id }', 1, true) == nil
+    and world_src:find('{ "source", "seller", seller.shop, seller.item }', 1, true) == nil
+    and world_src:find("objective_shop_source_snapshot", 1, true) ~= nil
+    and world_src:find("objective_monster_source_snapshot", 1, true) ~= nil)
+
 if failures > 0 then os.exit(1) end
 print("main_source_test: all OK")

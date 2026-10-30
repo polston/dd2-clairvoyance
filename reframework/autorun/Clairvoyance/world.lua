@@ -157,6 +157,7 @@ end
 function M.wants_round(tg, members)
   return (tg.chests or tg.treasure or tg.tokens or tg.beetles or tg.monsters
     or tg.small_monsters or tg.sellers or tg.search or tg.shops
+    or tg.source_browser
     or tg.first_token or type(tg.focus) == "table" or (members or 0) > 0) and true or false
 end
 
@@ -291,6 +292,7 @@ function M.new(a, reads, io)
       target_member = nil, members = {}, member_of = {}, objective_generation = nil,
       objective_publication = nil, objective_place_observation = nil,
       objective_source_observations = {}, objective_live_source_cache = {}, route_cache = {},
+      source_browser_open = false, source_browser_cache = nil, source_browser_generation = 0,
       route_fail = {}, fail_seq = 0,
       -- SPEC 32.14: sticky route colour slots; slot_of (cid -> slot) and
       -- slot_cid (slot -> cid) together are the spec's S.slots
@@ -2038,8 +2040,8 @@ function M.new(a, reads, io)
     for k in pairs(ACCUM) do stats.ms[k] = nil end
     for _, k in ipairs(CONDITIONAL_READS) do stats.ms[k] = nil end
     res_reused = false
-    local any_rec = tg.chests or tg.tokens or tg.beetles or fq
-    local need_shops = tg.search or tg.shops
+    local any_rec = tg.chests or tg.tokens or tg.beetles or fq or tg.source_browser
+    local need_shops = tg.search or tg.shops or tg.source_browser
     local t = clock()
     local cast_ok = ensure_cast()
     lap("cast", t)
@@ -2047,7 +2049,7 @@ function M.new(a, reads, io)
     ensure_boss()
     lap("boss", t)
     local boss_ok = S.boss ~= nil
-    local any_monsters = tg.monsters or tg.small_monsters
+    local any_monsters = tg.monsters or tg.small_monsters or tg.source_browser
     if any_monsters then
       t = clock()
       read_loaded_boss()
@@ -2198,7 +2200,7 @@ function M.new(a, reads, io)
           end
           if has then state = picked and "opened" or "unopened" end
         end
-        local wanted = tg.chests and true or false
+        local wanted = (tg.chests or tg.source_browser) and true or false
         if not wanted and fq then
           for _, q in ipairs(gate_qids or EMPTY) do
             if fq[q] then wanted = true; break end
@@ -2318,7 +2320,7 @@ function M.new(a, reads, io)
     end
 
     -- sellers
-    if tg.sellers or fq then
+    if tg.sellers or fq or tg.source_browser then
       t = clock()
       local list, fresh = guarded("sellers", compute_sellers)
       lap("sellers", t)
@@ -2345,7 +2347,8 @@ function M.new(a, reads, io)
       local monsters_t0 = clock()
       -- each class is skipped before clustering when its own toggle is off
       -- (SPEC 28.7.1, 28.12.2)
-      local want_large, want_small = tg.monsters == true, tg.small_monsters == true
+      local want_large = tg.monsters == true or tg.source_browser == true
+      local want_small = tg.small_monsters == true or tg.source_browser == true
       local units = guarded("respawn", function() return need_table("respawn_units") end)
       local items = {}
       local function add_monster(uid, e)
@@ -2407,7 +2410,7 @@ function M.new(a, reads, io)
     end
 
     -- drops: deferred past the round whose shop index first succeeds (19.12.3.3)
-    if tg.search and any_monsters then
+    if (tg.search or tg.source_browser) and any_monsters then
       local drops_t0 = clock()
       if first_shops and stats.search_first_ms ~= nil and S.drop_ids == nil then
         again = true
@@ -2507,6 +2510,16 @@ function M.new(a, reads, io)
   -- merely due; a round whose throttle was cleared (a poke, the run-again
   -- flag, set_route) or whose NPC list changed still runs (SPEC 28.8.1)
   function w:refresh(now, gate, toggles, hold)
+    if type(toggles) == "table" then
+      local next_browser_open = toggles.source_browser == true
+      if S.source_browser_open and not next_browser_open then
+        S.source_browser_cache = nil
+        if type(a.objective_source_browser_close) == "function" then
+          pcall(a.objective_source_browser_close)
+        end
+      end
+      S.source_browser_open = next_browser_open
+    end
     if not gate or type(toggles) ~= "table" then return false end
     local tg = toggles
     if not M.wants_round(tg, #S.members) then return false end
@@ -2906,6 +2919,160 @@ function M.new(a, reads, io)
     return providers
   end
 
+  -- Explicit item-search source browser (SPEC 40.16 / ROADMAP 97). This is a
+  -- separate observational lifecycle: it can read providers only while the
+  -- view is open, and its rows are never fed into objective_snapshot/routes.
+  function w:objective_source_browser(query, quest_catalog, task_snapshot, focused_providers)
+    if S.source_browser_open ~= true or type(query) ~= "string" or query == "" then return nil end
+    query = query:sub(1, 64)
+    local cache_key = table.concat({ query, tostring(last_round),
+      tostring(type(task_snapshot) == "table" and task_snapshot.need_generation or 0),
+      tostring(quest_catalog), tostring(focused_providers) }, "|")
+    local cached = S.source_browser_cache
+    if cached ~= nil and cached.key == cache_key then return objective_clone(cached.value) end
+    local providers = {}
+    for _, provider in ipairs(type(focused_providers) == "table" and focused_providers or {}) do
+      providers[#providers + 1] = provider
+    end
+    if type(a.objective_source_registry) == "function" then
+      local ok, observed = pcall(a.objective_source_registry,
+        w:objective_static_source_catalog(), quest_catalog)
+      if ok and type(observed) == "table" then
+        for _, provider in ipairs(observed) do providers[#providers + 1] = provider end
+      end
+    end
+    local rows, seen = {}, {}
+    local input = input_tbl or {}
+    local needle = query:lower()
+    local function item_ids_of(candidate)
+      local ids, used = {}, {}
+      for _, output in ipairs(type(candidate) == "table" and type(candidate.outputs) == "table"
+          and candidate.outputs or {}) do
+        local item_id = type(output) == "table" and to_int(output.item_id) or nil
+        if item_id ~= nil and item_id > 0 and not used[item_id] then
+          used[item_id] = true; ids[#ids + 1] = item_id
+        end
+      end
+      table.sort(ids)
+      return ids
+    end
+    local function label_of(provider, item_ids)
+      local names = {}
+      for _, item_id in ipairs(item_ids) do
+        local name = a.item_name(item_id)
+        if type(name) == "string" and name ~= "" then names[#names + 1] = name end
+      end
+      local kinds = { placed = "Placed item", chest = "Chest", loot = "Loot",
+        talk_grant = "NPC grant", reward = "Quest reward", forgery = "Forgery",
+        shop = "Shop", seller = "Seller", monster = "Monster drop" }
+      return (#names > 0 and table.concat(names, " / ") or "Item source")
+        .. " - " .. (kinds[provider] or tostring(provider or "Source"))
+    end
+    local function add(row)
+      if #rows >= 512 or type(row) ~= "table" or type(row.identity) ~= "string"
+          or row.identity == "" or #row.identity > 1024 or seen[row.identity] then return end
+      seen[row.identity] = true
+      row.item_ids = type(row.item_ids) == "table" and row.item_ids or {}
+      row.label = type(row.label) == "string" and row.label
+        or label_of(row.provider, row.item_ids)
+      rows[#rows + 1] = row
+    end
+    local function add_provider(provider, include_provider_status)
+      local status = type(provider) == "table" and provider.source_status or nil
+      if type(status) == "table" and type(status.rows) == "table" then
+        for _, source in ipairs(status.rows) do
+          local copied = objective_clone(source)
+          if type(copied) == "table"
+              and (copied.scope ~= "provider" or include_provider_status) then
+            local matched = copied.scope == "provider"
+            for _, item_id in ipairs(type(copied.item_ids) == "table" and copied.item_ids or {}) do
+              local name = a.item_name(item_id)
+              if type(name) == "string" and name:lower():find(needle, 1, true) then
+                matched = true; break
+              end
+            end
+            if matched then add(copied) end
+          end
+        end
+      elseif type(provider) == "table" then
+        for _, candidate in ipairs(type(provider.candidates) == "table" and provider.candidates or {}) do
+          local identity = type(candidate) == "table" and core.target_key(candidate.source_id) or nil
+          if identity ~= nil then
+            local ids = item_ids_of(candidate)
+            local matched = false
+            for _, item_id in ipairs(ids) do
+              local name = a.item_name(item_id)
+              if type(name) == "string" and name:lower():find(needle, 1, true) then
+                matched = true; break
+              end
+            end
+            if matched then
+              add({ scope = "source", generation = provider.generation, identity = identity,
+                provider = provider.provider, qid = candidate.qid, task_index = candidate.task_index,
+                state = candidate.eligibility == "eligible" and "available" or "unknown",
+                reason_code = candidate.reason or (candidate.eligibility == "eligible"
+                  and "available" or "source_state_unreadable"), item_ids = ids })
+            end
+          end
+        end
+      end
+    end
+    for _, provider in ipairs(providers) do
+      add_provider(provider, provider.provider == "reward")
+    end
+    local shop_ids, shop_seen = {}, {}
+    local function add_shop_item(item_id)
+      item_id = to_int(item_id)
+      if item_id ~= nil and item_id > 0 and not shop_seen[item_id] then
+        shop_seen[item_id] = true; shop_ids[#shop_ids + 1] = item_id
+      end
+    end
+    for _, shop in ipairs(type(input.shops) == "table" and input.shops or {}) do
+      for _, item in ipairs(type(shop.items) == "table" and shop.items or {}) do
+        if type(item.name) == "string" and item.name:lower():find(needle, 1, true) then
+          add_shop_item(item.id)
+        end
+      end
+    end
+    for _, seller in ipairs(type(input.sellers) == "table" and input.sellers or {}) do
+      if type(seller.item_name) == "string" and seller.item_name:lower():find(needle, 1, true) then
+        add_shop_item(seller.item)
+      end
+    end
+    table.sort(shop_ids)
+    while #shop_ids > 64 do shop_ids[#shop_ids] = nil end
+    if #shop_ids > 0 and type(w.objective_shop_source_snapshot) == "function" then
+      local ok, provider = pcall(w.objective_shop_source_snapshot, w, shop_ids)
+      if ok and type(provider) == "table" then add_provider(provider, true) end
+    end
+    local monster_ids, monster_seen = {}, {}
+    for _, drop_ids in pairs(type(S.drop_ids) == "table" and S.drop_ids or {}) do
+      for _, item_id in ipairs(type(drop_ids) == "table" and drop_ids or {}) do
+        local name = a.item_name(item_id)
+        if type(name) == "string" and name:lower():find(needle, 1, true)
+            and not monster_seen[item_id] then
+          monster_seen[item_id] = true; monster_ids[#monster_ids + 1] = item_id
+        end
+      end
+    end
+    table.sort(monster_ids)
+    while #monster_ids > 64 do monster_ids[#monster_ids] = nil end
+    if #monster_ids > 0 and type(w.objective_monster_source_snapshot) == "function" then
+      local ok, provider = pcall(w.objective_monster_source_snapshot, w, monster_ids)
+      if ok and type(provider) == "table" then add_provider(provider, true) end
+    end
+    table.sort(rows, function(left, right) return left.identity < right.identity end)
+    local evidence = { query = query, rows = rows }
+    if cached == nil or not objective_same(cached.evidence, evidence) then
+      S.source_browser_generation = math.min(2147483647, S.source_browser_generation + 1)
+    end
+    local result = { generation = math.max(1, S.source_browser_generation), complete = true,
+      reason_code = nil, rows = rows }
+    S.source_browser_cache = { key = cache_key, evidence = objective_clone(evidence),
+      value = objective_clone(result) }
+    return result
+  end
+
   -- World-owned live source readers are optional until their managed gates are
   -- proven. Missing or partial reads publish unknown and never retain rows.
   local function objective_live_sources(provider, read_name, normalize, task_snapshot, need_snapshot,
@@ -3058,7 +3225,7 @@ function M.new(a, reads, io)
     return result
   end
 
-  function w:objective_shop_observations(task_snapshot, need_snapshot)
+  function w:objective_shop_source_snapshot(item_ids)
     local offers = {}
     return objective_live_sources("shop", "objective_shop_rows", function(row)
       if type(row) ~= "table" then return nil, "shop_row_malformed" end
@@ -3095,9 +3262,18 @@ function M.new(a, reads, io)
       else
         by_ordinal[ordinal] = signature
       end
-      if not row.released or not row.talk_available or not row.interactable
-        or (capacity_kind == "finite" and available == 0) then return false end
       local source_id = { "source", "shop_offer", sid, ordinal, cid }
+      local unavailable_reason
+      if not row.released then unavailable_reason = "shop_unreleased"
+      elseif not row.talk_available or not row.interactable then
+        unavailable_reason = "source_inaccessible"
+      elseif capacity_kind == "finite" and available == 0 then
+        unavailable_reason = "stock_exhausted"
+      end
+      local status_row = { source_id = source_id, item_ids = { item_id },
+        state = unavailable_reason and "unavailable" or "available",
+        reason_code = unavailable_reason or "available" }
+      if unavailable_reason then return false, nil, status_row end
       local pool_id = { "capacity", "shop_offer", sid, ordinal }
       return { source_id = source_id, provider = "shop",
         target = { kind = "seller", shop_id = sid, offer_ordinal = ordinal,
@@ -3106,8 +3282,35 @@ function M.new(a, reads, io)
         capacity_pool_id = pool_id, capacity_kind = capacity_kind,
         available_acquisitions = available, certainty = "guaranteed",
         eligibility = "eligible", evidence = { released = true, talk_available = true,
-          interactable = true, restock_readable = row.restock_readable } }
-    end, task_snapshot, need_snapshot)
+          interactable = true, restock_readable = row.restock_readable } }, nil, status_row
+    end, nil, nil, true, nil, true, "shop", item_ids,
+      #item_ids == 0 and "empty" or table.concat(item_ids, ","))
+  end
+
+  function w:objective_shop_observations(task_snapshot, need_snapshot)
+    local current_tasks = objective_task_rows(task_snapshot)
+    if not objective_need_proves_current_work(task_snapshot, need_snapshot, current_tasks) then
+      local state = S.objective_source_observations["world-shop"]
+      local generation = state and state.generation or 1
+      local reason = "current_work_unavailable"
+      return { provider = "shop", status = "unknown", complete = false,
+        generation = generation, reason = reason, candidates = {},
+        source_status = { generation = generation, complete = false,
+          reason_code = reason, rows = { { scope = "provider", generation = generation,
+            identity = "provider:shop", provider = "shop", qid = nil, task_index = nil,
+            item_ids = {}, state = "unknown", reason_code = reason } } } }
+    end
+    local ids, seen = {}, {}
+    for _, group in ipairs(need_snapshot.groups) do
+      for _, option in ipairs(group.options) do
+        local item_id = to_int(option.item_id)
+        if item_id ~= nil and item_id > 0 and not seen[item_id] then
+          seen[item_id] = true; ids[#ids + 1] = item_id
+        end
+      end
+    end
+    table.sort(ids)
+    return w:objective_shop_source_snapshot(ids)
   end
 
   local function objective_monster_normalize(row)
@@ -5167,7 +5370,7 @@ function M.game_reads()
   -- Bounded, two-pass shop observation. The first pass collects plain rows;
   -- a second full pass must reproduce its holder fingerprint before any rows
   -- are called complete. No managed holder or BuyParam survives this call.
-  function R.objective_shop_rows(task_snapshot, _, need_snapshot)
+  function R.objective_shop_rows(task_snapshot, _, need_snapshot, explicit_item_ids)
     local function integer(value, minimum)
       return type(value) == "number" and math.type(value) == "integer" and value >= minimum
     end
@@ -5194,37 +5397,61 @@ function M.game_reads()
       for i = 1, #value do hash = ((hash ~ value:byte(i)) * 16777619) & 0xFFFFFFFF end
       return ((hash ~ 255) * 16777619) & 0xFFFFFFFF
     end
-    if type(task_snapshot) ~= "table" or not integer(task_snapshot.need_generation, 1)
-        or type(need_snapshot) ~= "table" or need_snapshot.status ~= "ok"
-        or need_snapshot.complete ~= true
-        or need_snapshot.generation ~= task_snapshot.need_generation
-        or not integer(need_snapshot.source_generation, 1) then
-      shop_scan_state = nil
-      return complete_empty("current_need_unavailable")
+    if explicit_item_ids == nil and need_snapshot == nil and type(task_snapshot) == "table"
+        and task_snapshot.need_generation == nil then
+      explicit_item_ids, task_snapshot = task_snapshot, nil
     end
     local wanted, need_parts = {}, {}
-    for _, group in ipairs(need_snapshot.groups or {}) do
-      if type(group) ~= "table" or not integer(group.qid, 1)
-          or not integer(group.task_index, 0) or group.status ~= "eligible"
-          or group.complete ~= true or group.generation ~= need_snapshot.source_generation
-          or not integer(group.remaining, 1) or type(group.options) ~= "table"
-          or #group.options == 0 then
+    if explicit_item_ids ~= nil then
+      local count = 0
+      if type(explicit_item_ids) ~= "table" then
         shop_scan_state = nil
-        return complete_empty("current_need_malformed")
+        return complete_empty("source_item_query_malformed")
       end
-      local options = {}
-      for _, option in ipairs(group.options) do
-        if type(option) ~= "table" or not integer(option.item_id, 1)
-            or not integer(option.accepted_count, 1) then
+      for key, item_id in pairs(explicit_item_ids) do
+        if not integer(key, 1) or key > 64 or not integer(item_id, 1)
+            or wanted[item_id] then
+          shop_scan_state = nil
+          return complete_empty("source_item_query_malformed")
+        end
+        count = count + 1; wanted[item_id] = true; need_parts[#need_parts + 1] = tostring(item_id)
+      end
+      if count ~= #explicit_item_ids then
+        shop_scan_state = nil
+        return complete_empty("source_item_query_malformed")
+      end
+    else
+      if type(task_snapshot) ~= "table" or not integer(task_snapshot.need_generation, 1)
+          or type(need_snapshot) ~= "table" or need_snapshot.status ~= "ok"
+          or need_snapshot.complete ~= true
+          or need_snapshot.generation ~= task_snapshot.need_generation
+          or not integer(need_snapshot.source_generation, 1) then
+        shop_scan_state = nil
+        return complete_empty("current_need_unavailable")
+      end
+      for _, group in ipairs(need_snapshot.groups or {}) do
+        if type(group) ~= "table" or not integer(group.qid, 1)
+            or not integer(group.task_index, 0) or group.status ~= "eligible"
+            or group.complete ~= true or group.generation ~= need_snapshot.source_generation
+            or not integer(group.remaining, 1) or type(group.options) ~= "table"
+            or #group.options == 0 then
           shop_scan_state = nil
           return complete_empty("current_need_malformed")
         end
-        wanted[option.item_id] = true
-        options[#options + 1] = tostring(option.item_id) .. ":" .. tostring(option.accepted_count)
+        local options = {}
+        for _, option in ipairs(group.options) do
+          if type(option) ~= "table" or not integer(option.item_id, 1)
+              or not integer(option.accepted_count, 1) then
+            shop_scan_state = nil
+            return complete_empty("current_need_malformed")
+          end
+          wanted[option.item_id] = true
+          options[#options + 1] = tostring(option.item_id) .. ":" .. tostring(option.accepted_count)
+        end
+        table.sort(options)
+        need_parts[#need_parts + 1] = table.concat({ tostring(group.qid),
+          tostring(group.task_index), tostring(group.remaining), table.concat(options, ",") }, ":")
       end
-      table.sort(options)
-      need_parts[#need_parts + 1] = table.concat({ tostring(group.qid),
-        tostring(group.task_index), tostring(group.remaining), table.concat(options, ",") }, ":")
     end
     if next(wanted) == nil then
       shop_scan_state = nil

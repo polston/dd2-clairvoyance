@@ -7516,6 +7516,7 @@ do
       generation = 1, status = "eligible" } } }
   local shops = sw:objective_shop_observations(source_task, need_proof)
   local shops_reused = sw:objective_shop_observations(source_task, need_proof)
+  local shared_shops = sw:objective_shop_source_snapshot({ 501 })
   check("shop objectives: finite and unlimited offers publish gated seller targets",
     shops.status == "ok" and shops.complete and #shops.candidates == 4
       and shops.candidates[1].certainty == "guaranteed"
@@ -7523,6 +7524,11 @@ do
       and shops.candidates[4].capacity_kind == "unlimited"
       and shops.candidates[4].evidence.restock_readable == true
       and shops_reused.generation == shops.generation and sf.shop_reads == 1)
+  check("shop objectives: focused and search consumers share one envelope identity and status",
+    shared_shops.generation == shops.generation and sf.shop_reads == 1
+      and core.target_key(shared_shops.candidates[1].source_id)
+        == shared_shops.source_status.rows[1].identity
+      and shared_shops.source_status.rows[1].state == "available")
   check("shop objectives: multiple sellers share one offer capacity",
     shops.candidates[1].source_id[1] == "source"
       and shops.candidates[1].source_id[2] == "shop_offer"
@@ -7924,6 +7930,118 @@ do
   rejected_current_work("no owned objective need groups",
     { need_generation = 53, quests = { { qid = 1001, task_index = 1, read_status = "ok" } } },
     { status = "ok", complete = true, generation = 53, source_generation = 8, groups = {} })
+end
+
+do
+  local f = fixture()
+  f.data.iname[501] = "Fulminous Shield"
+  local browser_closes = 0
+  f.adapter.objective_source_browser_close = function() browser_closes = browser_closes + 1 end
+  f.adapter.objective_source_registry = function()
+    return {
+      { provider = "placed", generation = 1, status = "unknown", complete = false,
+        reason = "placed_catalog_unavailable", candidates = {} },
+      { provider = "reward", generation = 1, status = "ok", complete = true,
+        candidates = { { source_id = { "source", "reward", 7 },
+          outputs = { { item_id = 501, count = 1 } }, eligibility = "eligible" } } },
+    }
+  end
+  local w = f.new()
+  w:refresh(0, true, { source_browser = true }, false)
+  local browser = w:objective_source_browser("shield", {}, { need_generation = 1, quests = {} })
+  check("objective source browser omits unrelated provider-wide unknown rows",
+    type(browser) == "table" and #browser.rows == 1
+      and browser.rows[1].provider == "reward"
+      and browser.rows[1].item_ids[1] == 501)
+  w:refresh(1, true, { source_browser = false }, false)
+  check("closing source browser clears its provider lifecycle", browser_closes == 1)
+end
+
+do
+  local f = fixture({ files = { [K.PLACES] = places({
+    prow("chara", "m5", 5, 0, 0, { name = "ch253000_00" }),
+  }) } })
+  f.data.boss = { ch253 = true }
+  f.data.iname[230] = "Monster Fang"
+  local w = f.new()
+  local shared, shared_calls = nil, 0
+  w.objective_monster_source_snapshot = function(_, item_ids)
+    shared_calls = shared_calls + 1
+    check("objective source browser queries shared monster snapshot with matched item ids",
+      #item_ids == 1 and item_ids[1] == 230)
+    local source_id = { "source", "monster_drop", "live-1", "drop-1" }
+    local identity = core.target_key(source_id)
+    shared = { provider = "monster", generation = 9, status = "ok", complete = true,
+      candidates = { { source_id = source_id, outputs = { { item_id = 230, count = 1 } },
+        eligibility = "eligible" } },
+      source_status = { generation = 9, complete = true, rows = {
+        { scope = "source", generation = 9, identity = identity, provider = "monster",
+          item_ids = { 230 }, state = "available", reason_code = "available" },
+      } } }
+    return shared
+  end
+  w:refresh(0, true, { source_browser = true }, false)
+  w:refresh(0, true, { source_browser = true }, false)
+  local browser = w:objective_source_browser("fang", {}, { need_generation = 1, quests = {} })
+  check("browser and focused routing use the same monster source identity and status",
+    shared_calls == 1 and type(browser) == "table" and #browser.rows == 1
+      and browser.rows[1].identity == core.target_key(shared.candidates[1].source_id)
+      and browser.rows[1].state == shared.source_status.rows[1].state
+      and browser.rows[1].reason_code == shared.source_status.rows[1].reason_code)
+end
+
+do
+  local f = fixture()
+  f.adapter.objective_source_registry = function() return {} end
+  local w = f.new()
+  w:refresh(0, true, { source_browser = true }, false)
+  local reward = { provider = "reward", generation = 4, status = "unknown",
+    complete = false, reason = "quest_not_progressing", candidates = {},
+    source_status = { generation = 4, complete = false,
+      reason_code = "quest_not_progressing", rows = {
+        { scope = "provider", generation = 4, identity = "provider:reward",
+          provider = "reward", item_ids = {}, state = "unknown",
+          reason_code = "quest_not_progressing" },
+      } } }
+  local browser = w:objective_source_browser("shield", {},
+    { need_generation = 1, quests = {} }, { reward })
+  check("inactive reward search cannot synthesize a route-capable source identity",
+    type(browser) == "table" and #browser.rows == 1
+      and browser.rows[1].identity == "provider:reward"
+      and browser.rows[1].state == "unknown")
+end
+
+do
+  local f = fixture()
+  f.data.sched_ids = { 2058 }
+  f.data.shop[2058] = 41
+  f.data.sched[2058] = P(100, 0, 100)
+  f.data.shops[41] = { { item = 501, release_qid = 0 } }
+  f.data.iname[501] = "Fulminous Shield"
+  local w = f.new()
+  local shared, shared_calls = nil, 0
+  w.objective_shop_source_snapshot = function(_, item_ids)
+    shared_calls = shared_calls + 1
+    check("objective source browser queries shared shop snapshot with matched item ids",
+      #item_ids == 1 and item_ids[1] == 501)
+    local source_id = { "source", "shop_offer", 41, 1, 2058 }
+    local identity = core.target_key(source_id)
+    shared = { provider = "shop", generation = 12, status = "ok", complete = true,
+      candidates = { { source_id = source_id, outputs = { { item_id = 501, count = 1 } },
+        eligibility = "eligible" } },
+      source_status = { generation = 12, complete = true, rows = {
+        { scope = "source", generation = 12, identity = identity, provider = "shop",
+          item_ids = { 501 }, state = "available", reason_code = "available" },
+      } } }
+    return shared
+  end
+  w:refresh(0, true, { source_browser = true }, false)
+  local browser = w:objective_source_browser("shield", {}, { need_generation = 1, quests = {} })
+  check("browser and focused routing use the same shop-offer identity and status",
+    shared_calls == 1 and type(browser) == "table" and #browser.rows == 1
+      and browser.rows[1].identity == core.target_key(shared.candidates[1].source_id)
+      and browser.rows[1].state == shared.source_status.rows[1].state
+      and browser.rows[1].reason_code == shared.source_status.rows[1].reason_code)
 end
 
 if failures > 0 then os.exit(1) end

@@ -4411,9 +4411,22 @@ end
 -- observation.  A partial shared scan makes both providers unknown and a
 -- family-local inconsistency clears that family's candidates.
 function A.objective_source_provider_snapshots(catalog, observation, generation)
-  local function envelope(provider, status, reason, candidates)
+  local function envelope(provider, status, reason, candidates, status_rows)
+    local source_status
+    if status == "ok" then
+      source_status = { generation = generation, complete = true,
+        reason_code = nil, rows = status_rows or {} }
+    else
+      local code = type(reason) == "string" and reason or "source_state_unreadable"
+      source_status = { generation = generation, complete = false, reason_code = code,
+        rows = { { scope = "provider", generation = generation,
+          identity = "provider:" .. tostring(provider), provider = provider,
+          qid = nil, task_index = nil, item_ids = {}, state = "unknown",
+          reason_code = code } } }
+    end
     return { provider = provider, generation = generation, status = status,
-      complete = status == "ok", reason = reason, candidates = candidates or {} }
+      complete = status == "ok", reason = reason, candidates = candidates or {},
+      source_status = source_status }
   end
   local function unknown_pair(reason)
     return { envelope("placed", "unknown", reason), envelope("chest", "unknown", reason) }
@@ -4477,7 +4490,7 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
   end
 
   local function classify(provider, rows)
-    local candidates = {}
+    local candidates, status_rows = {}, {}
     for _, row in ipairs(rows) do
       local uid = type(row) == "table" and guid(row.uid) or nil
       local index = type(row) == "table" and row.index or nil
@@ -4501,32 +4514,33 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
       end
       local identity = uid .. ":" .. tostring(index)
       local gate_key = provider .. ":" .. identity
-      local eligible = true
+      local eligible, negative_reason = true, nil
       if row.gate ~= nil then
         local gate = observation.gate_results[gate_key]
         if type(gate) ~= "boolean" then
           return envelope(provider, "unknown", provider .. "_gate_state_unreadable")
         end
         eligible = gate
+        if not gate then negative_reason = "source_inaccessible" end
       end
       if observation.never[identity] or observation.dead[identity]
           or observation.blacklist[uid] or observation.disabled_tables[table_id] then
-        eligible = false
+        eligible, negative_reason = false, "source_exhausted"
       end
       if row.layer ~= 0 then
         local request = observation.requested_tables[table_id]
         if request == nil then
-          eligible = false
+          eligible, negative_reason = false, "source_inaccessible"
         elseif type(request) ~= "table" or type(request.active) ~= "boolean"
             or type(request.failed) ~= "boolean" or type(request.finished) ~= "boolean"
             or type(request.uids) ~= "table" then
           return envelope(provider, "unknown", provider .. "_subquest_request_unreadable")
         elseif request.failed or not request.active then
-          eligible = false
+          eligible, negative_reason = false, "source_inaccessible"
         elseif not request.finished then
           return envelope(provider, "unknown", provider .. "_subquest_request_pending")
         elseif request.uids[identity] ~= true then
-          eligible = false
+          eligible, negative_reason = false, "source_inaccessible"
         end
       end
 
@@ -4547,6 +4561,9 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
           end
           if persisted.pick or persisted.seal == true then eligible = false end
         end
+        if not eligible and negative_reason == nil then
+          negative_reason = provider == "placed" and "pickup_collected" or "chest_opened"
+        end
       end
 
       local loaded = observation.loaded[identity]
@@ -4556,7 +4573,7 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
             or type(loaded.generated) ~= "boolean" or type(loaded.disabled) ~= "boolean" then
           return envelope(provider, "unknown", provider .. "_loaded_identity_unreadable")
         elseif not loaded.generated or loaded.disabled then
-          eligible = false
+          eligible, negative_reason = false, "source_unavailable"
         elseif provider == "placed" then
           if not integer(loaded.freebit, 0) or type(loaded.broken) ~= "boolean"
               or type(loaded.used) ~= "boolean" then
@@ -4564,7 +4581,7 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
           elseif persisted ~= nil and loaded.freebit ~= persisted.freebit then
             return envelope(provider, "unknown", "placed_loaded_state_inconsistent")
           elseif loaded.freebit & 3 ~= 0 or loaded.broken or loaded.used then
-            eligible = false
+            eligible, negative_reason = false, "pickup_collected"
           end
         else
           if type(loaded.pick) ~= "boolean" or type(loaded.keep) ~= "boolean"
@@ -4579,7 +4596,7 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
                 or (persisted.seal ~= nil and loaded.seal ~= persisted.seal))) then
             return envelope(provider, "unknown", "chest_loaded_state_inconsistent")
           elseif loaded.pick or loaded.seal == true then
-            eligible = false
+            eligible, negative_reason = false, "chest_opened"
           end
         end
       end
@@ -4599,8 +4616,20 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
             persisted = persisted ~= nil, loaded = loaded ~= nil },
         }
       end
+      local item_ids, item_seen = {}, {}
+      for _, output in ipairs(outputs) do
+        if not item_seen[output.item_id] then
+          item_seen[output.item_id] = true; item_ids[#item_ids + 1] = output.item_id
+        end
+      end
+      table.sort(item_ids)
+      status_rows[#status_rows + 1] = { scope = "source", generation = generation,
+        identity = qnml_core.target_key({ "source", provider, uid, index }),
+        provider = provider, qid = nil, task_index = nil, item_ids = item_ids,
+        state = eligible and "available" or "unavailable",
+        reason_code = eligible and "available" or (negative_reason or "source_unavailable") }
     end
-    return envelope(provider, "ok", nil, candidates)
+    return envelope(provider, "ok", nil, candidates, status_rows)
   end
   return { classify("placed", catalog.placements), classify("chest", catalog.chests) }
 end
@@ -4613,7 +4642,7 @@ function A.invalidate_objective_provider_catalogs()
   A.objective_provider_catalog_cache = {}
 end
 
-function A.read_objective_talk_grant_observation(wanted, requested_event_ids)
+function A.read_objective_talk_grant_observation(wanted, requested_event_ids, include_all)
   local out = { complete = false, wanted = {}, event_ids = {}, events = {} }
   local wanted_set = {}
   for item_id, enabled in pairs(type(wanted) == "table" and wanted or {}) do
@@ -4652,7 +4681,9 @@ function A.read_objective_talk_grant_observation(wanted, requested_event_ids)
     out.event_ids[#out.event_ids + 1] = event_id
   end
   table.sort(out.event_ids)
-  if #out.wanted == 0 and #out.event_ids == 0 then out.complete = true; return out end
+  if #out.wanted == 0 and #out.event_ids == 0 and include_all ~= true then
+    out.complete = true; return out
+  end
   local requested_signature = table.concat(out.event_ids, ",")
   local function fail(reason) out.reason, out.events = reason, {}; return out end
   local function call(object, method, ...)
@@ -4907,6 +4938,20 @@ function A.read_objective_talk_grant_observation(wanted, requested_event_ids)
       preflight_signature = preflight_signature, events = static_events }
     A.objective_provider_catalog_cache[cache_slot] = cached
   end
+  if include_all == true then
+    for _, event in ipairs(cached.events) do
+      for _, node in ipairs(event.nodes) do
+        for _, grant in ipairs(node.grants) do
+          if not wanted_set[grant.item_id] then
+            if #out.wanted >= 256 then return fail("talk_grant_items_truncated") end
+            wanted_set[grant.item_id] = true
+            out.wanted[#out.wanted + 1] = grant.item_id
+          end
+        end
+      end
+    end
+    table.sort(out.wanted)
+  end
   local playing_rows = bounded_list(safe_field(manager, "_PlayingEventIDList"),
     256, "talk_grant_playing_events")
   local playing_set = nil
@@ -5074,7 +5119,7 @@ end
 -- Bounded atomic scan of the exact typed forgery service, item transforms and
 -- raw order getters.  Mapping enablement and order semantics remain explicit
 -- missing gates because their guarded live controls have not been proved.
-function A.read_objective_forgery_observation(wanted)
+function A.read_objective_forgery_observation(wanted, include_all)
   local out = { complete = false, wanted = {}, services = {}, mappings = {}, order = {} }
   local wanted_set = {}
   for item_id, enabled in pairs(type(wanted) == "table" and wanted or {}) do
@@ -5084,7 +5129,7 @@ function A.read_objective_forgery_observation(wanted)
     end
   end
   table.sort(out.wanted)
-  if #out.wanted == 0 then out.complete = true; return out end
+  if #out.wanted == 0 and include_all ~= true then out.complete = true; return out end
   local function fail(reason)
     out.reason, out.services, out.mappings, out.order = reason, {}, {}, {}
     return out
@@ -5260,6 +5305,18 @@ function A.read_objective_forgery_observation(wanted)
     cached = { talk_owner = talk_owner, item_owner = item_owner,
       services = static_services, mappings = static_mappings }
     A.objective_provider_catalog_cache.forgery = cached
+  end
+  if include_all == true then
+    local discovered = #out.wanted
+    for _, mapping in ipairs(cached.mappings) do
+      if not wanted_set[mapping.output_item_id] then
+        discovered = discovered + 1
+        if discovered > 256 then return fail("forgery_registry_matches_truncated") end
+        wanted_set[mapping.output_item_id] = true
+        out.wanted[#out.wanted + 1] = mapping.output_item_id
+      end
+    end
+    table.sort(out.wanted)
   end
   local mappings = {}
   for _, mapping in ipairs(cached.mappings) do
@@ -5907,16 +5964,21 @@ end
 
 function A.make()
   local a = {}
-  local objective_task_state = { owner = nil, focus = nil, journal = nil,
-    needs = nil, focus_epoch = 0, journal_generation = 0, need_generation = 0,
-    source_generation = 1, source_catalog = nil, source_observation = nil,
-    source_need_generation = nil,
-    filtered_source_owner = nil, filtered_source_signature = nil,
-    filtered_source_catalog = nil,
-    talk_generation = 1, talk_observation = nil,
-    talk_at = -math.huge, forgery_generation = 1, forgery_observation = nil,
-    forgery_at = -math.huge, reward_observation = nil,
-    reward_controller_structure = {} }
+  local function objective_state_new()
+    return { owner = nil, focus = nil, journal = nil,
+      needs = nil, focus_epoch = 0, journal_generation = 0, need_generation = 0,
+      source_generation = 1, source_catalog = nil, source_observation = nil,
+      source_need_generation = nil,
+      filtered_source_owner = nil, filtered_source_signature = nil,
+      filtered_source_catalog = nil,
+      talk_generation = 1, talk_observation = nil,
+      talk_at = -math.huge, forgery_generation = 1, forgery_observation = nil,
+      forgery_at = -math.huge, reward_observation = nil,
+      reward_catalog_generation = 1, reward_catalog_snapshot = nil,
+      reward_controller_structure = {} }
+  end
+  local objective_task_state = objective_state_new()
+  local objective_browser_state = objective_state_new()
   local LOC_KINDS = { "placed", "box", "drop" }   -- item_locations order
   a.overhead_block_reason = A.overhead_block_reason
   function a.acceptable_ids()
@@ -6862,6 +6924,8 @@ function A.make()
     if qlm ~= objective_task_state.owner then
       A.invalidate_objective_provider_catalogs()
       items.reset_task_observations()
+      objective_browser_state = objective_state_new()
+      objective_browser_state.owner = qlm
       objective_task_state.owner = qlm
       objective_task_state.focus, objective_task_state.journal, objective_task_state.needs = nil, nil, nil
       objective_task_state.focus_epoch, objective_task_state.journal_generation,
@@ -6954,6 +7018,283 @@ function A.make()
       journal_generation = objective_task_state.journal_generation,
       need_generation = objective_task_state.need_generation, quests = quests }
   end
+  -- Query-independent half of reward discovery.  This reads only the static
+  -- RewardDict mapping; it never enters quest focus, progressing-task,
+  -- controller, event, or route ownership readers.
+  a.read_objective_reward_mapping = function()
+    local out = { complete = false, owner_token = "", reward_outputs = {} }
+    local function fail(reason)
+      out.reason, out.complete, out.reward_outputs = reason, false, {}
+      return out
+    end
+    local function token(object)
+      if object == nil then return nil end
+      local ok, address = pcall(function() return object:get_address() end)
+      if not ok or type(address) ~= "number" or address <= 0
+          or math.tointeger(address) == nil then return nil end
+      return string.format("%x", math.tointeger(address))
+    end
+    local function list(value, cap)
+      if value == nil then return {}, false, false end
+      local ok, rows, count = read_collection_items(value)
+      if not ok then return {}, false, false end
+      if count > cap then return {}, false, true end
+      return rows, true, false
+    end
+    local qm = sdk.get_managed_singleton("app.QuestManager")
+    local manager_token = token(qm)
+    if manager_token == nil then return fail("reward_owner_unreadable") end
+    out.owner_token = manager_token
+    local reward_dict = safe_field(qm, "RewardDict")
+    local dict_token = token(reward_dict)
+    local dict_count = A.count_of(int_value(safe_call(reward_dict, "get_Count")))
+    local dict_used = A.count_of(int_value(safe_field(reward_dict, "_count")))
+    local dict_free = A.count_of(int_value(safe_field(reward_dict, "_freeCount")))
+    if dict_token == nil or dict_count == nil or dict_used == nil or dict_free == nil
+        or dict_count + dict_free ~= dict_used or dict_used > 512 then
+      return fail("reward_mapping_invalid")
+    end
+    local map_key = table.concat({ manager_token, dict_token, tostring(dict_count),
+      tostring(dict_used), tostring(dict_free) }, ":")
+    local mapping_cache = objective_task_state.reward_mapping
+    if type(mapping_cache) ~= "table" or mapping_cache.key ~= map_key then
+      local entries, entries_ok, entries_truncated = list(
+        safe_field(reward_dict, "_entries"), 512)
+      if not entries_ok or entries_truncated or #entries < dict_used then
+        return fail(entries_truncated and "reward_mapping_truncated"
+          or "reward_mapping_unreadable")
+      end
+      local active, free, outputs = 0, 0, {}
+      for index = 1, dict_used do
+        local entry = entries[index]
+        local next_slot = int_value(safe_field(entry, "next") or safe_field(entry, "Next"))
+        if next_slot == nil or next_slot ~= math.floor(next_slot) then
+          return fail("reward_mapping_unreadable")
+        end
+        if next_slot < -1 then
+          free = free + 1
+        else
+          active = active + 1
+          local hash = int_value(safe_field(entry, "key") or safe_field(entry, "Key"))
+          local reward = safe_field(entry, "value") or safe_field(entry, "Value")
+          local native_items, items_ok, items_truncated = list(
+            safe_field(reward, "_ItemList"), 32)
+          if hash == nil or hash < 0 or hash > 4294967295
+              or outputs[hash] ~= nil or not items_ok or items_truncated
+              or #native_items == 0 then
+            return fail("reward_mapping_unreadable")
+          end
+          local rows = {}
+          for _, native_item in ipairs(native_items) do
+            local item_id, count = int_value(safe_field(native_item, "_ItemId")),
+              int_value(safe_field(native_item, "_Num"))
+            if type(item_id) ~= "number" or item_id <= 0
+                or item_id ~= math.floor(item_id) or type(count) ~= "number"
+                or count <= 0 or count ~= math.floor(count) then
+              return fail("reward_mapping_unreadable")
+            end
+            rows[#rows + 1] = { item_id = item_id, count = count }
+          end
+          table.sort(rows, function(left, right) return left.item_id < right.item_id end)
+          for row_index = 2, #rows do
+            if rows[row_index].item_id == rows[row_index - 1].item_id then
+              return fail("reward_mapping_duplicate_item")
+            end
+          end
+          outputs[hash] = rows
+        end
+      end
+      if active ~= dict_count or free ~= dict_free then
+        return fail("reward_mapping_invalid")
+      end
+      mapping_cache = { key = map_key, outputs = outputs }
+      objective_task_state.reward_mapping = mapping_cache
+    end
+    local hashes = {}
+    for hash in pairs(mapping_cache.outputs) do hashes[#hashes + 1] = hash end
+    table.sort(hashes)
+    for _, hash in ipairs(hashes) do
+      local outputs = {}
+      for _, row in ipairs(mapping_cache.outputs[hash]) do
+        outputs[#outputs + 1] = { item_id = row.item_id, count = row.count }
+      end
+      out.reward_outputs[#out.reward_outputs + 1] = {
+        name_hash = hash, outputs = outputs }
+    end
+    out.complete, out.reason, out.mapping_key = true, nil, map_key
+    return out
+  end
+
+  -- Catalog-only reward rows are searchable while no quest is focused, but
+  -- deliberately have no route-capable source identity or candidate.  Live
+  -- task ownership is joined only by the focused reward classifier below.
+  a.objective_reward_catalog_snapshot = function(objective_catalog, generation)
+    local snapshot = { provider = "reward", status = "unknown", complete = false,
+      reason = "reward_catalog_unavailable", generation = generation,
+      candidates = {}, registry_entries = {} }
+    local function fallback(reason)
+      snapshot.status, snapshot.complete, snapshot.reason = "unknown", false, reason
+      snapshot.source_status = { generation = generation, complete = false,
+        reason_code = reason, rows = {} }
+      return snapshot
+    end
+    if type(generation) ~= "number" or generation < 1
+        or generation ~= math.floor(generation) then
+      return fallback("reward_generation_invalid")
+    end
+    local quests = type(objective_catalog) == "table" and objective_catalog.version == 2
+      and objective_catalog.quests or nil
+    if type(quests) ~= "table" then return fallback("reward_catalog_unavailable") end
+    local mapping = a.read_objective_reward_mapping()
+    if type(mapping) ~= "table" or mapping.complete ~= true then
+      return fallback(type(mapping) == "table" and mapping.reason
+        or "reward_mapping_unreadable")
+    end
+    local outputs_by_hash = {}
+    for _, row in ipairs(mapping.reward_outputs) do outputs_by_hash[row.name_hash] = row.outputs end
+    local qids = {}
+    for qid in pairs(quests) do
+      if type(qid) == "number" and qid > 0 and qid == math.floor(qid) then
+        qids[#qids + 1] = qid
+      end
+    end
+    table.sort(qids)
+    local status_rows, seen, groups = {}, {}, {}
+    for _, qid in ipairs(qids) do
+      local diagnostics = type(quests[qid]) == "table"
+        and quests[qid].reward_diagnostics or nil
+      if type(diagnostics) == "table" then
+        local count, maximum, dense = 0, 0, true
+        for key in pairs(diagnostics) do
+          if type(key) ~= "number" or key < 1 or key ~= math.floor(key) then
+            dense = false; break
+          end
+          count, maximum = count + 1, math.max(maximum, key)
+        end
+        if dense and count == maximum then
+          for index = 1, maximum do
+            local member = diagnostics[index]
+            local identity = type(member) == "table" and member.source_identity or nil
+            local endpoint = type(member) == "table" and member.endpoint_evidence or nil
+            local ordinal = type(identity) == "table" and identity.action_ordinal or nil
+            local processor = type(identity) == "table" and identity.processor_id or nil
+            local predecessor = type(endpoint) == "table"
+              and endpoint.predecessor_processor_id or nil
+            local talk_event = type(endpoint) == "table" and endpoint.talk_event_id or nil
+            local end_no = type(endpoint) == "table" and endpoint.end_no or nil
+            if type(member) == "table" and member.family == "quest_reward"
+                and member.action_type == "app.quest.action.QuestReward"
+                and identity.quest_id == qid and type(ordinal) == "number"
+                and ordinal >= 0 and ordinal == math.floor(ordinal)
+                and type(processor) == "number" and processor >= 0
+                and processor <= 4294967295 and processor == math.floor(processor)
+                and type(predecessor) == "number" and predecessor >= 0
+                and predecessor <= 4294967295 and predecessor == math.floor(predecessor)
+                and type(talk_event) == "number" and talk_event > 0
+                and talk_event <= 2147483647 and talk_event == math.floor(talk_event)
+                and type(end_no) == "number" and math.abs(end_no) <= 2147483647
+                and end_no == math.floor(end_no)
+                and type(member.reward_rows) == "table" then
+              local output_counts, valid = {}, true
+              for reward_index, reward in ipairs(member.reward_rows) do
+                local mapped = type(reward) == "table"
+                  and outputs_by_hash[reward.name_hash] or nil
+                if type(reward) ~= "table" or reward.ordinal ~= reward_index - 1
+                    or type(mapped) ~= "table" then valid = false; break end
+                for _, output in ipairs(mapped) do
+                  output_counts[output.item_id] = (output_counts[output.item_id] or 0)
+                    + output.count
+                  if output_counts[output.item_id] > 2147483647 then
+                    valid = false; break
+                  end
+                end
+                if not valid then break end
+              end
+              local member_key = table.concat({ qid, ordinal, processor }, ":")
+              if not valid then return fallback("reward_catalog_mapping_unreadable") end
+              if seen[member_key] then return fallback("reward_catalog_duplicate_identity") end
+              seen[member_key] = true
+              local group_key = table.concat({ qid, talk_event, end_no }, ":")
+              local group = groups[group_key]
+              if group == nil then
+                group = { qid = qid, talk_event_id = talk_event, end_no = end_no,
+                  members = {}, output_counts = {} }
+                groups[group_key] = group
+              end
+              group.members[#group.members + 1] = { action_ordinal = ordinal,
+                processor_id = processor, predecessor_processor_id = predecessor }
+              for item_id, output_count in pairs(output_counts) do
+                local total = (group.output_counts[item_id] or 0) + output_count
+                if total > 2147483647 then return fallback("reward_count_overflow") end
+                group.output_counts[item_id] = total
+              end
+            end
+          end
+        end
+      end
+    end
+    local group_list = {}
+    for _, group in pairs(groups) do group_list[#group_list + 1] = group end
+    table.sort(group_list, function(left, right)
+      if left.qid ~= right.qid then return left.qid < right.qid end
+      if left.talk_event_id ~= right.talk_event_id then
+        return left.talk_event_id < right.talk_event_id
+      end
+      return left.end_no < right.end_no
+    end)
+    for _, group in ipairs(group_list) do
+      table.sort(group.members, function(left, right)
+        if left.action_ordinal ~= right.action_ordinal then
+          return left.action_ordinal < right.action_ordinal
+        end
+        if left.processor_id ~= right.processor_id then
+          return left.processor_id < right.processor_id
+        end
+        return left.predecessor_processor_id < right.predecessor_processor_id
+      end)
+      if #group.members == 0 or #group.members > 8 then
+        return fallback("reward_member_overflow")
+      end
+      local status_tuple = { "reward_status_endpoint", group.qid,
+        group.talk_event_id, group.end_no, #group.members }
+      for _, member in ipairs(group.members) do
+        status_tuple[#status_tuple + 1] = member.action_ordinal
+        status_tuple[#status_tuple + 1] = member.processor_id
+        status_tuple[#status_tuple + 1] = member.predecessor_processor_id
+      end
+      local canonical = qnml_core.target_key(status_tuple)
+      if canonical == nil then return fallback("reward_status_identity_invalid") end
+      local outputs, item_ids = {}, {}
+      for item_id, output_count in pairs(group.output_counts) do
+        item_ids[#item_ids + 1] = item_id
+        outputs[#outputs + 1] = { item_id = item_id, count = output_count }
+      end
+      table.sort(item_ids)
+      table.sort(outputs, function(left, right) return left.item_id < right.item_id end)
+      status_rows[#status_rows + 1] = { scope = "source", generation = generation,
+        identity = canonical, provider = "reward", qid = group.qid,
+        task_index = nil, item_ids = item_ids, state = "unknown",
+        reason_code = "reward_current_task_unverified" }
+      snapshot.registry_entries[#snapshot.registry_entries + 1] = {
+        source_id = status_tuple, identity = canonical, provider = "reward",
+        outputs = outputs, item_ids = item_ids, target = nil, position = nil,
+        capacity_pool_id = nil, capacity_kind = nil,
+        available_acquisitions = nil, certainty = "guaranteed",
+        state = "unknown", reason_code = "reward_current_task_unverified",
+        generation = generation, qid = group.qid, route_capable = false }
+    end
+    table.sort(status_rows, function(left, right)
+      return qnml_core.byte_less(left.identity, right.identity)
+    end)
+    table.sort(snapshot.registry_entries, function(left, right)
+      return qnml_core.byte_less(left.identity, right.identity)
+    end)
+    snapshot.status, snapshot.complete, snapshot.reason = "ok", true, nil
+    snapshot.source_status = { generation = generation, complete = true,
+      reason_code = nil, rows = status_rows }
+    return snapshot
+  end
+
   a.read_objective_reward_observation = function(catalog_rows, wanted, task_snapshot, catalog_quests)
     local out = { complete = false, owner_token = "", wanted = {}, progressing_qids = {},
       reward_outputs = {}, tasks = {}, controllers = {}, events = {} }
@@ -7699,6 +8040,71 @@ function A.make()
     end
     providers[1] = items.filter_placed_provider_snapshot(providers[1])
     return providers
+  end
+  function a.objective_source_registry(source_catalog, objective_catalog)
+    local function copy(value)
+      if type(value) ~= "table" then return value end
+      local out = {}; for key, child in pairs(value) do out[key] = copy(child) end
+      return out
+    end
+    local function same(left, right)
+      if type(left) ~= type(right) then return false end
+      if type(left) ~= "table" then return left == right end
+      for key, value in pairs(left) do if not same(value, right[key]) then return false end end
+      for key in pairs(right) do if left[key] == nil then return false end end
+      return true
+    end
+    local observation = A.read_objective_source_observation(source_catalog)
+    if objective_browser_state.source_catalog ~= source_catalog
+        or not same(objective_browser_state.source_observation, observation) then
+      if objective_browser_state.source_catalog ~= nil
+          or objective_browser_state.source_observation ~= nil then
+        objective_browser_state.source_generation = math.min(2147483647,
+          objective_browser_state.source_generation + 1)
+      end
+      objective_browser_state.source_catalog = source_catalog
+      objective_browser_state.source_observation = copy(observation)
+    end
+    local providers = A.objective_source_provider_snapshots(source_catalog, observation,
+      objective_browser_state.source_generation)
+    providers[1] = items.filter_placed_provider_snapshot(providers[1])
+    local forgery_observation = A.read_objective_forgery_observation({}, true)
+    if not same(objective_browser_state.forgery_observation, forgery_observation) then
+      if objective_browser_state.forgery_observation ~= nil then
+        objective_browser_state.forgery_generation = math.min(2147483647,
+          objective_browser_state.forgery_generation + 1)
+      end
+      objective_browser_state.forgery_observation = copy(forgery_observation)
+    end
+    providers[#providers + 1] = A.objective_forgery_provider_snapshot(
+      forgery_observation, objective_browser_state.forgery_generation)
+    local talk_observation = A.read_objective_talk_grant_observation({}, nil, true)
+    if not same(objective_browser_state.talk_observation, talk_observation) then
+      if objective_browser_state.talk_observation ~= nil then
+        objective_browser_state.talk_generation = math.min(2147483647,
+          objective_browser_state.talk_generation + 1)
+      end
+      objective_browser_state.talk_observation = copy(talk_observation)
+    end
+    providers[#providers + 1] = A.objective_talk_grant_provider_snapshot(
+      talk_observation, objective_browser_state.talk_generation)
+    local reward = a.objective_reward_catalog_snapshot(objective_catalog,
+      objective_browser_state.reward_catalog_generation)
+    if not same(objective_browser_state.reward_catalog_snapshot, reward) then
+      if objective_browser_state.reward_catalog_snapshot ~= nil then
+        objective_browser_state.reward_catalog_generation = math.min(2147483647,
+          objective_browser_state.reward_catalog_generation + 1)
+        reward = a.objective_reward_catalog_snapshot(objective_catalog,
+          objective_browser_state.reward_catalog_generation)
+      end
+      objective_browser_state.reward_catalog_snapshot = copy(reward)
+    end
+    providers[#providers + 1] = reward
+    return providers
+  end
+  function a.objective_source_browser_close()
+    objective_browser_state = objective_state_new()
+    objective_browser_state.owner = objective_task_state.owner
   end
   -- Pure classification for synthetic/research evidence only. The live service,
   -- mapping, target and order-state join is not proved, so this deliberately

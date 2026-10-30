@@ -150,7 +150,7 @@ check("journal_spoilers stored false kept",
 do
   local n = 0
   for _ in pairs(D) do n = n + 1 end
-  check("defaults key count is 176", n == 176)
+  check("defaults key count is 178", n == 178)
   check("first token default on", D.world_first_token == true)
 end
 
@@ -500,7 +500,8 @@ do
   local allnew = true
   for k, w in pairs(d) do
     if old[k] == nil then
-      if k == "focus_qids" or k == "focus_related_qids" then
+      if k == "focus_qids" or k == "focus_related_qids"
+          or k == "objective_marker_off" or k == "objective_route_off" then
         if type(o[k]) ~= "table" or #o[k] ~= 0 then allnew = false; print("missing default " .. k) end
       elseif k == "route_colors" then
         if type(o[k]) ~= "table" or #o[k] ~= 8 then allnew = false; print("missing default " .. k) end
@@ -882,7 +883,9 @@ do
     and D.focus_tracked == false and D.focus_unrelated == 0 and D.focus_routes == 1)
   check("objective settings defaults", type(D.focus_related_qids) == "table"
     and #D.focus_related_qids == 0 and D.icon_focus_objective == 34
-    and D.color_focus_objective == 0xFFFFD54F)
+    and D.color_focus_objective == 0xFFFFD54F
+    and type(D.objective_marker_off) == "table" and #D.objective_marker_off == 0
+    and type(D.objective_route_off) == "table" and #D.objective_route_off == 0)
   local f = V({ focus_qids = { 3, 3.0, 2.5, -1, 0, "7", math.huge, 0/0, 20010 } }).focus_qids
   check("qid_list keeps whole numbers above 0, once", #f == 2 and f[1] == 3 and f[2] == 20010
     and math.type(f[1]) == "integer")
@@ -921,10 +924,25 @@ do
     and #S.focus_related_qids == 2 and S.focus_related_qids[2] == max_qid)
   check("set_key focus_related_qids filters invalid ids",
     su.set_key(S, "focus_related_qids", { max_qid + 1 }) == true and #S.focus_related_qids == 0)
+  local stable_a, stable_b = "k:7400736f757263650061", "k:7400736f757263650062"
+  local stable = V({ objective_marker_off = { stable_b, stable_a, stable_b, "", string.rep("x", 1025) },
+    objective_route_off = { stable_a } })
+  check("stable objective override lists validate, dedupe and sort",
+    #stable.objective_marker_off == 2 and stable.objective_marker_off[1] == stable_a
+      and stable.objective_marker_off[2] == stable_b
+      and #stable.objective_route_off == 1 and stable.objective_route_off[1] == stable_a)
+  check("stable objective override lists reject sparse input",
+    #V({ objective_marker_off = { [1] = stable_a, [3] = stable_b } }).objective_marker_off == 0)
+  check("stable objective override lists reject raw binary and malformed encodings",
+    #V({ objective_marker_off = { "t\0source", "k:abc", "k:GG" } }).objective_marker_off == 0)
+  check("set_key accepts only bounded stable override arrays",
+    su.set_key(S, "objective_marker_off", { stable_b, stable_a }) == true
+      and S.objective_marker_off[1] == stable_a
+      and su.set_key(S, "objective_route_off", { [2] = stable_a }) == false)
   local qt
   for _, p in ipairs(su.PANEL_ORDER) do if p.id == "quest_tree" then qt = p end end
   check("quest_tree panel keys", table.concat(qt.keys, ",")
-    == "focus_qids,focus_related_qids,focus_tracked,focus_unrelated,focus_dim_alpha,focus_routes,focus_place_routes")
+    == "focus_qids,focus_related_qids,focus_tracked,focus_unrelated,focus_dim_alpha,focus_routes,focus_place_routes,objective_marker_off,objective_route_off")
   local appearance_keys = table.concat(su.PANEL_ORDER[8].keys, ",")
   check("objective appearance controls in panel", appearance_keys:find("icon_focus_objective", 1, true) ~= nil
     and appearance_keys:find("color_focus_objective", 1, true) ~= nil)

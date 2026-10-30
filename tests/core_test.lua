@@ -7271,5 +7271,64 @@ do
       and baseline_routes.members[1].key == degraded_routes.members[1].key)
 end
 
+do
+  local source_id = { "source", "placed", "pickup-1", 0 }
+  local identity = core.target_key(source_id)
+  local provider = { provider = "placed", status = "ok", complete = true, generation = 21,
+    candidates = { { provider = "placed", generation = 21, eligibility = "eligible",
+      source_id = source_id, capacity_pool_id = { "capacity", "placed", "pickup-1", 0 },
+      outputs = { { item_id = 501, count = 1 } },
+      target = { pos = { x = 5, y = 0, z = 0 } },
+      capacity_kind = "finite", available_acquisitions = 1,
+      certainty = "guaranteed" } },
+    source_status = { generation = 21, complete = true, rows = {
+      { scope = "source", generation = 21, identity = identity, provider = "placed",
+        item_ids = { 501 }, state = "available", reason_code = "available" },
+    } } }
+  local task = { focus_epoch = 1, journal_generation = 1, need_generation = 21,
+    objective_needs = { status = "ok", complete = true, generation = 21,
+      source_generation = 21, groups = { { id = { "need", 91, 0, 1 }, qid = 91,
+        task_index = 0, remaining = 1, options = { { item_id = 501, accepted_count = 1 } },
+        status = "eligible", complete = true, generation = 21 } } },
+    quests = { { qid = 91, task_index = 0, read_status = "ok", item_ownership = {},
+      issued_npcs = {}, task_destinations = {}, guidance = {} } } }
+  local snapshot = core.objective_snapshot(task, nil, { provider }, core.target_registry_new())
+  check("non-reward provider status uses the same canonical source identity as routing",
+    #snapshot.targets == 1 and #snapshot.source_status == 1
+      and snapshot.source_status[1].provider == "placed"
+      and snapshot.source_status[1].rows[1].identity == snapshot.targets[1].key
+      and snapshot.source_status[1].rows[1].state == "available")
+end
+
+do
+  local npc_key, place_key = "objective-ui:npc", "objective-ui:place"
+  local snap = { generation = 44, targets = {
+    { key = npc_key, generation = 44, ordinal = 1, eligibility = "eligible", kind = "npc",
+      target = { cid = 700, pos = { x = 1, y = 2, z = 3 } }, owners = { { qid = 90, task_index = 0 } } },
+    { key = place_key, generation = 44, ordinal = 2, eligibility = "eligible", kind = "place",
+      target = { pos = { x = 4, y = 5, z = 6 } }, owners = { { qid = 90, task_index = 0 } } },
+  } }
+  local markers, _, projection = core.objective_markers({}, nil, snap, {
+    marker_cap = 8, marker_objective_keys = { [npc_key] = true },
+  })
+  check("objective UI marker policy suppresses only unchecked stable targets",
+    #markers == 1 and markers[1].objective_key == npc_key
+      and projection.visible_keys[npc_key] == true and projection.visible_keys[place_key] == nil)
+  local routes = core.objective_routes(snap, { x = 0, y = 0, z = 0 }, {
+    npc_route_mode = 1, objective_places = true,
+    visible_objective_keys = projection.visible_keys,
+    route_objective_keys = { [place_key] = true },
+  })
+  check("objective UI route policy requires both a visible marker and checked route",
+    #routes.members == 0)
+  routes = core.objective_routes(snap, { x = 0, y = 0, z = 0 }, {
+    npc_route_mode = 1, objective_places = true,
+    visible_objective_keys = { [npc_key] = true, [place_key] = true },
+    route_objective_keys = { [place_key] = true },
+  })
+  check("objective UI route policy independently keeps a checked visible target",
+    #routes.members == 1 and routes.members[1].target_key == place_key)
+end
+
 if failures > 0 then os.exit(1) end
 print("core_test: all OK")

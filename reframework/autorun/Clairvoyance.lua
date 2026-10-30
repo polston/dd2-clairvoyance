@@ -51,6 +51,7 @@ do
     }
   end
   wt = inst
+  wt.objective_ui = require("Clairvoyance.objective_ui")
   -- v14 (SPEC 23.5): one outline style table per group, refilled in place
   -- each frame; no table is built per frame.
   wt.style = require("Clairvoyance.style")
@@ -1142,6 +1143,11 @@ re.on_frame(function()
       wt.hints_open, wt.route_cid = {}, nil   -- SPEC 22.6.6
       wt.route_names = nil
       wt.route_on, wt.has_pts = false, false
+      if #(settings.objective_marker_off or {}) > 0 or #(settings.objective_route_off or {}) > 0 then
+        su.set_key(settings, "objective_marker_off", {})
+        su.set_key(settings, "objective_route_off", {})
+        save_settings()
+      end
     end
     -- v9: a debug-expanded qid keeps the tree live (QNML_DEBUG, SPEC 16.10)
     local tree_live = core.tree_wanted(now, tree_open_at)
@@ -1240,6 +1246,7 @@ re.on_frame(function()
       for _, k in ipairs(su.WORLD_BOOLS) do tg[k:sub(7)] = settings[k] end
       tg.reveal_gate_names = settings.reveal_gate_names   -- chest quest names (SPEC 27.4.2)
       tg.search = show.search ~= nil
+      tg.source_browser = wt.source_browser_open == true
       tg.npc_cids = snapshot ~= nil and snapshot.npc_match_cids or nil   -- Ruling 10
       -- quest focus (SPEC 32.7): previous snapshot's focus, route members, poke on a set change
       tg.focus, tg.focus_keys = wt.focus_world(snapshot)
@@ -1366,6 +1373,12 @@ re.on_frame(function()
     local place_snapshot = wt.q("objective_place_snapshot",
       { generation = 0, status = "unknown", places = {} }, task_snapshot)
     local source_snapshots = wt.q("objective_source_snapshots", {}, wt.quest_catalog, task_snapshot)
+    if wt.source_browser_open == true then
+      wt.source_browser_observation = wt.q("objective_source_browser", nil,
+        settings.search_text, wt.quest_catalog, task_snapshot, source_snapshots)
+    else
+      wt.source_browser_observation = nil
+    end
     local objective_candidate = core.objective_snapshot(task_snapshot, place_snapshot,
       source_snapshots, wt.objective_registry)
     show.objective_snapshot, wt.objective_snapshot_cache, wt.objective_snapshot_held =
@@ -1391,6 +1404,7 @@ re.on_frame(function()
         show.objective_snapshot, tree_checklist)
     end
     local objective_names = { npcs = {}, targets = {}, items = {} }
+    local objective_item_names = {}
     local named_npcs, named_targets, named_items, objective_quest_names = {}, {}, {}, {}
     for _, target in ipairs(show.objective_snapshot ~= nil
         and show.objective_snapshot.targets or {}) do
@@ -1408,6 +1422,7 @@ re.on_frame(function()
           objective_names.items[#objective_names.items + 1] = { item_id = item_id,
             name = ok_name and type(item_name) == "string" and item_name ~= ""
               and item_name or ("Item " .. tostring(item_id)) }
+          objective_item_names[item_id] = objective_names.items[#objective_names.items].name
           named_items[item_id] = true
         end
       end
@@ -1446,6 +1461,28 @@ re.on_frame(function()
       names = objective_names, quest_names = objective_quest_names,
       category_visibility = category_visibility, search = show.search,
       route_target = wt.route_cid, route_cap = 8, shown_ancillary = {} }
+    local objective_labels = {}
+    for _, target in ipairs(show.objective_snapshot ~= nil
+        and show.objective_snapshot.targets or {}) do
+      if type(target.key) == "string" then
+        objective_labels[target.key] = core.objective_label(objective_policy, target)
+      end
+    end
+    show.objective_ui = wt.objective_ui.build(show.objective_snapshot, {
+      focus_order = objective_qids, labels = objective_labels,
+      item_names = objective_item_names,
+      marker_off = settings.objective_marker_off,
+      route_off = settings.objective_route_off,
+    })
+    local marker_off, route_off, controls_pruned = wt.objective_ui.prune_overrides(
+      settings.objective_marker_off, settings.objective_route_off, show.objective_ui)
+    if controls_pruned then
+      su.set_key(settings, "objective_marker_off", marker_off)
+      su.set_key(settings, "objective_route_off", route_off)
+      save_settings()
+    end
+    objective_policy.marker_objective_keys, objective_policy.route_objective_keys =
+      wt.objective_ui.control_maps(show.objective_ui)
     if wt.route_cid ~= nil then
       for _, target in ipairs(show.objective_snapshot ~= nil
           and show.objective_snapshot.targets or {}) do
@@ -1481,9 +1518,13 @@ re.on_frame(function()
       return   -- game state unavailable: keep last snapshot
     end
     wt.focus_prune_related(result.focus ~= nil and result.focus.active or {})
+    result.objective_ui = show.objective_ui
     if result.objective_snapshot ~= nil then
       local policy = show.objective_policy
       policy.focus_order = result.focus ~= nil and result.focus.active or objective_qids
+      policy.visible_objective_keys = result.focus ~= nil
+        and result.focus.objective_marker_projection ~= nil
+        and result.focus.objective_marker_projection.visible_keys or nil
       policy.shown_ancillary = {}
       if (policy.npc_route_mode or 0) >= 2 and result.focus ~= nil then
         for _, qid in ipairs(result.focus.active or {}) do
@@ -2664,6 +2705,38 @@ wt.focus_toggle = function(qid, on, rec)
   if rec ~= nil then rec.row_label = nil end
 end
 
+wt.objective_toggle = function(key, identity, enabled)
+  local next_values = wt.objective_ui.set_enabled(settings[key], identity, enabled)
+  return wt.focus_set(key, next_values)
+end
+wt.objective_path_text = function(entry)
+  if entry.controls_enabled ~= true or entry.route_supported ~= true then return "Unavailable" end
+  if entry.marker_checked ~= true then return "Not requested (marker hidden)" end
+  if entry.route_checked ~= true then return "Not requested" end
+  if entry.kind == "npc" and (settings.focus_routes or 0) < 1 then
+    return "Not requested by quest route settings"
+  end
+  if entry.kind ~= "npc" and settings.focus_place_routes ~= true then
+    return "Not requested by quest route settings"
+  end
+  local member
+  for _, route in ipairs(snapshot ~= nil and snapshot.objective_routes ~= nil
+      and snapshot.objective_routes.members or {}) do
+    if route.target_key == entry.identity then member = route; break end
+  end
+  if member == nil then return "Not selected (route limit or current policy)" end
+  if settings.route_path ~= 1 then return "Straight line" end
+  local status = wt.q("path_status", nil, settings.route_path, member.route_id)
+  if status == "path ready" then return "Ready" end
+  if status == "path unavailable" then return "Unavailable" end
+  if status == "path: finding" then return "Finding" end
+  if type(status) == "string" and status:sub(1, 6) == "path: " then
+    local detail = status:sub(7)
+    return detail:sub(1, 1):upper() .. detail:sub(2)
+  end
+  return "Waiting"
+end
+
 local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
   if not imgui.tree_node(label) then return false end
   local ok, err = pcall(function()
@@ -2722,6 +2795,46 @@ local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
       end
       local rc, rv = imgui.checkbox("Show related NPCs##qfr_" .. qid, related)
       if rc then wt.related_toggle(qid, rv, rec) end
+    end
+    if wt.is_focused(qid) then
+      local objective_rows = snapshot.objective_ui ~= nil
+        and snapshot.objective_ui.by_qid[qid] or nil
+      if imgui.tree_node("Objectives & sources###qos_" .. tostring(qid)) then
+        if type(objective_rows) ~= "table" or #objective_rows == 0 then
+          imgui.text("No current objective evidence")
+        else
+          for _, entry in ipairs(objective_rows) do
+            if imgui.tree_node(entry.label .. "###qoe_" .. entry.ui_id) then
+              imgui.text(entry.kind_text .. " - " .. entry.status_text)
+              if entry.reason_code ~= "available" then imgui.text(entry.reason_text) end
+              imgui.text("Path: " .. wt.objective_path_text(entry))
+              imgui.begin_disabled(entry.controls_enabled ~= true)
+              local mc, mv = imgui.checkbox("Show marker##qom_" .. entry.ui_id,
+                entry.marker_checked)
+              if mc then wt.objective_toggle("objective_marker_off", entry.persist_key, mv) end
+              if entry.controls_enabled ~= true and imgui.is_item_hovered() then
+                imgui.set_tooltip(entry.status_text .. ": " .. entry.reason_text)
+              end
+              imgui.end_disabled()
+              imgui.same_line()
+              imgui.begin_disabled(entry.controls_enabled ~= true or entry.marker_checked ~= true)
+              local rc, rv = imgui.checkbox("Draw route##qor_" .. entry.ui_id,
+                entry.route_checked)
+              if rc then wt.objective_toggle("objective_route_off", entry.persist_key, rv) end
+              if imgui.is_item_hovered() then
+                if entry.controls_enabled ~= true then
+                  imgui.set_tooltip(entry.status_text .. ": " .. entry.reason_text)
+                elseif entry.marker_checked ~= true then
+                  imgui.set_tooltip("Show the marker to draw its route")
+                end
+              end
+              imgui.end_disabled()
+              imgui.tree_pop()
+            end
+          end
+        end
+        imgui.tree_pop()
+      end
     end
     -- v14 (SPEC 22.11.2): the Hints node. Opening it is the spoiler gate;
     -- the step in its id starts a new step's node closed.
@@ -2822,6 +2935,8 @@ do
 
   sec.search = function()
     local changed
+    local source_browser_was = wt.source_browser_open == true
+    wt.source_browser_open = false
     -- SPEC 19.4: map search. Typing never touches last_tick (one tick, one save per 2 s).
     local sch, sval = imgui.input_text("Map search", settings.search_text)
     if sch then
@@ -2857,6 +2972,27 @@ do
             end
           end
           snapshot.search_n = nres
+        end
+        wt.source_browser_open = imgui.tree_node(
+          "Sources for this search###qnml_source_browser")
+        if wt.source_browser_open then
+          local observed = {}
+          local live = wt.source_browser_observation
+          if type(live) == "table" and type(live.rows) == "table" then
+            observed = live.rows
+          end
+          wt.source_browser = wt.objective_ui.browser_step(wt.source_browser, true,
+            settings.search_text, observed)
+          imgui.text("Source evidence generation " .. tostring(wt.source_browser.generation))
+          if #wt.source_browser.rows == 0 then
+            imgui.text("No known source evidence for this search")
+          else
+            for _, row in ipairs(wt.source_browser.rows) do
+              imgui.text(row.label .. " - " .. row.status_text)
+              if row.reason_code ~= "available" then imgui.text(row.reason_text) end
+            end
+          end
+          imgui.tree_pop()
         end
         if imgui.tree_node(string.format("Search results (%d)###qnml_sr", snapshot.search_n)) then
           -- map space, the same space as every marker position
@@ -2933,6 +3069,13 @@ do
           imgui.tree_pop()
         end
       end
+    end
+    if not wt.source_browser_open then
+      wt.source_browser = wt.objective_ui.browser_step(wt.source_browser, false,
+        settings.search_text, {})
+    end
+    if source_browser_was ~= wt.source_browser_open then
+      want_update = true; last_tick = 0.0; wt.q("poke", nil)
     end
   end
 

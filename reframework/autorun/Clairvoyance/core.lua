@@ -4878,8 +4878,10 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         identity = "provider:" .. tostring(provider), provider = provider, qid = nil,
         task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
   end
-  local function reward_status(provider, accepted_contracts, rejected_sources, rejected_pools)
-    if provider.provider ~= "reward" or provider.source_status == nil then return end
+  local function provider_status(provider, accepted_contracts, rejected_sources, rejected_pools)
+    local provider_name = type(provider) == "table" and provider.provider or nil
+    if type(provider_name) ~= "string" or not provider_name:match("^[a-z][a-z0-9_]*$")
+        or provider.source_status == nil then return end
     local raw = provider.source_status
     local reason
     local function only_keys(value, allowed, cap)
@@ -4922,7 +4924,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
             or (r.scope ~= "provider" and r.scope ~= "source")
             or type(r.identity) ~= "string" or #r.identity == 0
             or raw.complete == true and r.scope == "source" and not canonical_key_valid(r.identity)
-            or r.provider ~= "reward" or not objective_generation(r.generation)
+            or r.provider ~= provider_name or not objective_generation(r.generation)
             or (r.qid ~= nil and not objective_uint(r.qid, 2147483647))
             or (r.task_index ~= nil and not objective_index(r.task_index, 2147483647))
             or type(r.item_ids) ~= "table" or (r.state ~= "available"
@@ -4940,7 +4942,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         if raw.complete == true then
           if raw.reason_code ~= nil or r.scope ~= "source" then reason = "status_malformed"; break end
         elseif raw.complete == false and (#raw.rows ~= 1 or r.scope ~= "provider"
-            or r.identity ~= "provider:reward" or r.qid ~= nil or r.task_index ~= nil
+            or r.identity ~= "provider:" .. provider_name or r.qid ~= nil or r.task_index ~= nil
             or item_count ~= 0 or r.state ~= "unknown" or r.reason_code ~= raw.reason_code) then
           reason = "status_malformed"; break
         end
@@ -4983,7 +4985,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         local item_ids = {}
         for item_index = 1, item_counts[index] do item_ids[item_index] = row.item_ids[item_index] end
         copied[index] = { scope = row.scope, generation = row.generation,
-          identity = row.identity, provider = "reward", qid = row.qid,
+          identity = row.identity, provider = provider_name, qid = row.qid,
           task_index = row.task_index, item_ids = item_ids, state = row.state,
           reason_code = row.reason_code }
       end
@@ -4995,7 +4997,8 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         local contract = accepted_contracts[candidate]
         local tuple = contract and contract.source_tuple or nil
         local key = contract and contract.source_key or nil
-        if type(candidate) == "table" and candidate.provider == "reward"
+        if type(candidate) == "table"
+            and (candidate.provider == nil or candidate.provider == provider_name)
             and candidate.eligibility == "eligible" and key ~= nil
             and not rejected_sources[key] and not rejected_pools[contract.capacity_key] then
           if eligible_by_key[key] ~= nil then reason = "status_duplicate_identity"; break end
@@ -5007,8 +5010,8 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
           if row.scope == "source" and row.state == "available" then
             local aggregate = eligible_by_key[row.identity]
             if aggregate == nil or available_by_key[row.identity] ~= nil
-                or row.qid ~= aggregate.tuple[3]
-                or row.task_index ~= aggregate.tuple[4] then
+                or provider_name == "reward" and (row.qid ~= aggregate.tuple[3]
+                  or row.task_index ~= aggregate.tuple[4]) then
               reason = "status_aggregate_mismatch"; break
             end
             local expected, outputs = {}, {}
@@ -5041,13 +5044,14 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         end
       end
     end
-    if reason then source_status[#source_status + 1] = status_fallback("reward", provider.generation, reason)
+    if reason then
+      source_status[#source_status + 1] = status_fallback(provider_name, provider.generation, reason)
     else
       table.sort(rows, function(a, b)
         if a.identity ~= b.identity then return M.byte_less(a.identity, b.identity) end
         return a.scope < b.scope
       end)
-      source_status[#source_status + 1] = { provider = "reward", generation = provider.generation,
+      source_status[#source_status + 1] = { provider = provider_name, generation = provider.generation,
         complete = raw.complete, reason_code = raw.reason_code, rows = rows }
     end
   end
@@ -5267,7 +5271,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
         candidate_count = provider_candidates and #provider_candidates or nil,
         diagnostic_rows = provider.provider == "reward" and copy_reward_diagnostics(provider.diagnostic_rows)
           or nil }
-      reward_status(provider, grouped_contracts, invalid_sources, invalid_pools)
+      provider_status(provider, grouped_contracts, invalid_sources, invalid_pools)
       if grouped_needs then
         if not grouped_needs_valid then
           diagnostic(provider.provider, "need_snapshot_invalid")
@@ -5548,6 +5552,8 @@ end
 
 function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
   policy = type(policy) == "table" and policy or {}
+  local marker_keys = type(policy.marker_objective_keys) == "table"
+    and policy.marker_objective_keys or nil
   local out, full = {}, {}
   local want_full = fullmap_world ~= nil
   local operations = 0
@@ -5674,7 +5680,8 @@ function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
     end
   end
   for _, obj in ipairs(type(snapshot) == "table" and objective_array(snapshot.targets) or {}) do
-    if objective_record_valid(snapshot, obj) then
+    if objective_record_valid(snapshot, obj)
+        and (marker_keys == nil or marker_keys[obj.key] == true) then
       attach_or_add(out, out_index, obj)
       if want_full then attach_or_add(full, full_index, obj) end
     end
@@ -5850,6 +5857,8 @@ local function objective_grouped_routes(snapshot, player_origin, policy)
   local generation = snapshot.generation
   local visible = type(policy.visible_objective_keys) == "table"
     and policy.visible_objective_keys or nil
+  local route_keys = type(policy.route_objective_keys) == "table"
+    and policy.route_objective_keys or nil
   local focus_rank, focus_order = {}, {}
   for i, qid in ipairs(objective_array(policy.focus_order) or {}) do
     if objective_uint(qid, 2147483647) and focus_rank[qid] == nil then
@@ -5867,7 +5876,9 @@ local function objective_grouped_routes(snapshot, player_origin, policy)
     return best, rank
   end
   local function shown(obj)
-    return objective_record_valid(snapshot, obj) and (visible == nil or visible[obj.key] == true)
+    return objective_record_valid(snapshot, obj)
+      and (visible == nil or visible[obj.key] == true)
+      and (route_keys == nil or route_keys[obj.key] == true)
   end
   local function add_obj(obj, source_group)
     if not shown(obj) then return end
@@ -6115,6 +6126,10 @@ function M.objective_routes(snapshot, player_origin, policy)
     return objective_grouped_routes(snapshot, player_origin, policy)
   end
   local generation = snapshot.generation
+  local visible = type(policy.visible_objective_keys) == "table"
+    and policy.visible_objective_keys or nil
+  local route_keys = type(policy.route_objective_keys) == "table"
+    and policy.route_objective_keys or nil
   local focus_rank = {}
   for i, qid in ipairs(objective_array(policy.focus_order) or {}) do focus_rank[qid] = i end
   local function owner_order(obj)
@@ -6161,6 +6176,8 @@ function M.objective_routes(snapshot, player_origin, policy)
   end)
   local function add(obj)
     if not objective_record_valid(snapshot, obj) then return end
+    if visible ~= nil and visible[obj.key] ~= true then return end
+    if route_keys ~= nil and route_keys[obj.key] ~= true then return end
     if obj.kind == "source" and policy.objective_places ~= true then return end
     local direct = obj.kind ~= "npc"
     if direct and policy.objective_places ~= true then return end

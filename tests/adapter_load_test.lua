@@ -752,6 +752,20 @@ do
   assert(no_talk_need.complete and no_forgery_need.complete
     and talk_reads.reads == 0 and shop_reads.reads == 0 and mapping_reads.reads == 0,
     "no focused item need performs no provider catalog or live scan")
+  local forgery_registry_read = A.read_objective_forgery_observation({}, true)
+  assert(forgery_registry_read.complete and #forgery_registry_read.wanted == 1
+      and forgery_registry_read.wanted[1] == 29
+      and #forgery_registry_read.mappings == 1
+      and forgery_registry_read.mappings[1].output_item_id == 29,
+    "shared source registry discovers all bounded forgery outputs independent of query")
+  ;(function()
+    local registry_read = A.read_objective_talk_grant_observation({}, nil, true)
+    assert(registry_read.complete and #registry_read.wanted == 1
+        and registry_read.wanted[1] == 29
+        and #registry_read.events == 1
+        and registry_read.events[1].event_id == 1900,
+      "shared source registry discovers all bounded talk-grant outputs independent of query")
+  end)()
   local talk_read = A.read_objective_talk_grant_observation({ [29] = true })
   assert(talk_read.complete and #talk_read.wanted == 1 and talk_read.wanted[1] == 29
     and #talk_read.events == 1 and talk_read.events[1].event_id == 1900
@@ -1012,6 +1026,10 @@ do
     and placed.candidates[1].outputs[1].item_id == 501
     and placed.candidates[1].outputs[1].count == 2,
     "placed provider accepts exact persisted evidence of an uncollected source")
+  assert(placed.source_status.complete and #placed.source_status.rows == 1
+      and placed.source_status.rows[1].state == "available"
+      and placed.source_status.rows[1].item_ids[1] == 501,
+    "pickup view status retains an available source row")
   assert(chest.status == "ok" and chest.complete == true and #chest.candidates == 1
     and #chest.candidates[1].outputs == 2
     and chest.candidates[1].outputs[2].item_id == 602
@@ -1022,14 +1040,20 @@ do
   collected.persisted["11111111-1111-1111-1111-111111111111:0"] =
     { family = "placed", freebit = 3 }
   placed = classify(base_catalog(), collected)
-  assert(placed.status == "ok" and #placed.candidates == 0,
-    "pickup free bits 0/1 remove a collected source")
+  assert(placed.status == "ok" and #placed.candidates == 0
+      and placed.source_status.complete and #placed.source_status.rows == 1
+      and placed.source_status.rows[1].state == "unavailable"
+      and placed.source_status.rows[1].reason_code == "pickup_collected",
+    "pickup free bits remove routing but retain a collected browser row")
   local opened = base_observation()
   opened.persisted["22222222-2222-2222-2222-222222222222:0"] =
     { family = "chest", pick = true, keep = false, unlock = false, seal = false }
   _, chest = classify(base_catalog(), opened)
-  assert(chest.status == "ok" and #chest.candidates == 0,
-    "chest Pick/opened removes an emptied source")
+  assert(chest.status == "ok" and #chest.candidates == 0
+      and chest.source_status.complete and #chest.source_status.rows == 1
+      and chest.source_status.rows[1].state == "unavailable"
+      and chest.source_status.rows[1].reason_code == "chest_opened",
+    "chest Pick/opened removes routing but retains an opened browser row")
   local unopened_keep = base_observation()
   unopened_keep.persisted["22222222-2222-2222-2222-222222222222:0"] =
     { family = "chest", pick = false, keep = true, unlock = false, seal = false }
@@ -5264,6 +5288,27 @@ do
   owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   reward_fixture.original_need_generation = owned_snapshot.need_generation
   sdk.get_managed_singleton = reward_fixture.singleton
+  assert(type(ai.objective_reward_catalog_snapshot) == "function",
+    "query-independent reward catalog snapshot is exported")
+  ;(function()
+    local snapshot = ai.objective_reward_catalog_snapshot(own_catalog, 1)
+    assert(snapshot.provider == "reward"
+        and snapshot.status == "ok"
+        and snapshot.complete == true
+        and #snapshot.candidates == 0
+        and snapshot.source_status.complete == true
+        and #snapshot.source_status.rows == 1
+        and snapshot.source_status.rows[1].state == "unknown"
+        and snapshot.source_status.rows[1].reason_code
+          == "reward_current_task_unverified"
+        and snapshot.source_status.rows[1].item_ids[1] == 9001
+        and #snapshot.registry_entries == 1
+        and snapshot.registry_entries[1].source_id[1] == "reward_status_endpoint"
+        and snapshot.registry_entries[1].route_capable == false
+        and snapshot.registry_entries[1].outputs[1].item_id == 9001
+        and snapshot.registry_entries[1].outputs[1].count == 5,
+      "inactive reward catalog publishes searchable unknown rows without route candidates")
+  end)()
   do (function()
     local singleton_reads = 0
     sdk.get_managed_singleton = function(name)
