@@ -74,6 +74,26 @@ local function valid_id(id)
     and id:match("^[a-z0-9][a-z0-9_-]*$") ~= nil
 end
 
+local function same_position(a, b)
+  return a.x == b.x and a.y == b.y and a.z == b.z
+end
+
+local function same_fingerprint(a, b)
+  return a.bucket_id == b.bucket_id and a.type_name == b.type_name
+    and a.game_object_name == b.game_object_name
+    and same_position(a.position, b.position) and a.tolerance == b.tolerance
+    and a.leaf_count == b.leaf_count
+end
+
+local function same_selector(kind, a, b)
+  if kind == "hint_pin" then
+    return a.quest_id == b.quest_id and a.pin_index == b.pin_index
+  end
+  return a.type_name == b.type_name and a.item_id == b.item_id
+    and same_position(a.position, b.position)
+    and a.position_tolerance == b.position_tolerance
+end
+
 local function validate_selector(kind, selector)
   if type(selector) ~= "table" then return false end
   if kind == "hint_pin" then
@@ -111,7 +131,7 @@ function M.validate(registry)
   if gate_count == nil or binding_count == nil then
     return false, "gates and bindings must be dense arrays"
   end
-  local gate_ids, fingerprint_keys, binding_keys = {}, {}, {}
+  local gate_ids, fingerprints, prior_bindings = {}, {}, {}
   for i = 1, gate_count do
     local gate = registry.gates[i]
     local fp = type(gate) == "table" and gate.fingerprint or nil
@@ -126,14 +146,11 @@ function M.validate(registry)
       or fp.leaf_count ~= 1 then
       return false, "invalid gate at index " .. tostring(i)
     end
-    local p = fp.position
-    local fingerprint_key = tostring(fp.bucket_id) .. "\0" .. fp.type_name
-      .. "\0" .. fp.game_object_name .. "\0" .. tostring(p.x)
-      .. "\0" .. tostring(p.y) .. "\0" .. tostring(p.z)
-      .. "\0" .. tostring(fp.tolerance) .. "\0" .. tostring(fp.leaf_count)
-    if fingerprint_keys[fingerprint_key] then return false, "duplicate gate fingerprint" end
+    for _, prior in ipairs(fingerprints) do
+      if same_fingerprint(fp, prior) then return false, "duplicate gate fingerprint" end
+    end
     gate_ids[gate.id] = true
-    fingerprint_keys[fingerprint_key] = true
+    fingerprints[#fingerprints + 1] = fp
   end
   for i = 1, binding_count do
     local binding = registry.bindings[i]
@@ -145,19 +162,13 @@ function M.validate(registry)
       or type(binding.may_use_last_known) ~= "boolean" then
       return false, "invalid binding at index " .. tostring(i)
     end
-    local key = binding.target_kind
-    if binding.target_kind == "hint_pin" then
-      key = key .. "\0" .. tostring(binding.selector.quest_id)
-        .. "\0" .. tostring(binding.selector.pin_index)
-    else
-      local p = binding.selector.position
-      key = key .. "\0" .. binding.selector.type_name
-        .. "\0" .. tostring(binding.selector.item_id)
-        .. "\0" .. tostring(p.x) .. "\0" .. tostring(p.y) .. "\0" .. tostring(p.z)
-        .. "\0" .. tostring(binding.selector.position_tolerance)
+    for _, prior in ipairs(prior_bindings) do
+      if binding.target_kind == prior.target_kind
+          and same_selector(binding.target_kind, binding.selector, prior.selector) then
+        return false, "duplicate binding"
+      end
     end
-    if binding_keys[key] then return false, "duplicate binding" end
-    binding_keys[key] = true
+    prior_bindings[#prior_bindings + 1] = binding
   end
   return true
 end

@@ -60,6 +60,11 @@ check("reject door observers with an undefined multi-leaf aggregation", not vali
 malformed = clone(registry); malformed.gates[2].fingerprint =
   clone(malformed.gates[1].fingerprint)
 check("reject duplicate complete gate fingerprints", not valid(malformed))
+malformed = clone(registry); malformed.gates[2].fingerprint =
+  clone(malformed.gates[1].fingerprint)
+malformed.gates[2].fingerprint.bucket_id = 7.0
+malformed.gates[2].fingerprint.position.x = 1.0
+check("reject numerically equal fingerprints with different representations", not valid(malformed))
 malformed = clone(registry); malformed.bindings[1].predicate = { field = "is_open", equals = true }
 check("reject unknown predicate", not valid(malformed))
 malformed = clone(registry); malformed.bindings[1].selector = {}
@@ -106,6 +111,13 @@ ambiguous_registry.bindings[2].selector = clone(ambiguous_registry.bindings[1].s
 local ambiguous = access.match_binding(ambiguous_registry, placed)
 check("ambiguous target bindings fail closed", ambiguous == nil)
 check("registry validation rejects ambiguous target selectors", not valid(ambiguous_registry))
+ambiguous_registry = clone(registry)
+ambiguous_registry.bindings[2].target_kind = "placed_item"
+ambiguous_registry.bindings[2].selector = clone(ambiguous_registry.bindings[1].selector)
+ambiguous_registry.bindings[2].selector.item_id = 41.0
+ambiguous_registry.bindings[2].selector.position.x = 10.0
+check("registry rejects numerically equal selectors with different representations",
+  not valid(ambiguous_registry))
 check("non-matching typed target does not bind", access.match_binding(registry, hint) == nil)
 
 local source_binding = registry.bindings[1]

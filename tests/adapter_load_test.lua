@@ -5466,6 +5466,12 @@ end
   }), { "masquerade_passage" })
   assert(at_cap_with_tombstone.masquerade_passage.status == "known",
     "exact managed-object cap remains complete with a backing tombstone")
+  local tombstone_overflow = A.read_world_access_gates(manager({
+    { bucket = 85, doors = { door(85, 396.075, "gm80_026", false, true) } },
+    { bucket = 74, doors = {}, free_slots = 8193 },
+  }), { "masquerade_passage" })
+  assert(tombstone_overflow.masquerade_passage.status == "unknown",
+    "backing-slot overflow is bounded even when no live objects occupy it")
   exact[#exact + 1] = door(85, 0, "other", false, false, { type_name = "app.OtherDoor" })
   local over_cap = A.read_world_access_gates(manager({ { bucket = 85, doors = exact } }, false),
     { "masquerade_passage" })

@@ -2964,6 +2964,7 @@ local K = {
     STORAGE_BOX_KEY = 65535,
     HELD_OWNER_CAP = 512,
     MANAGED_CAP = 4096,
+    ACCESS_SLOT_CAP = 8192,
     DROP_CAP = 64,
     BOX_CAP = 64,
     BOX_ITEMS_CAP = 16,
@@ -3324,7 +3325,8 @@ function A.read_world_access_gates(gm, requested)
         if type(expected) ~= "number" or expected < 0 or expected ~= math.floor(expected)
             or type(used) ~= "number" or used < 0 or used ~= math.floor(used)
             or type(free) ~= "number" or free < 0 or free ~= math.floor(free)
-            or expected > K.MANAGED_CAP or expected > used or expected + free ~= used then
+            or expected > K.MANAGED_CAP or used > K.ACCESS_SLOT_CAP
+            or expected > used or expected + free ~= used then
             return nil
         end
         local array = safe_field(value, "_entries")
