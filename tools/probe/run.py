@@ -41,12 +41,12 @@ REVIEWED_METHODS = {
     "get_IsUnlockFreeBit", "get_Item", "get_ItemList", "get_Key",
     "get_KeyLocation", "get_LocalArea", "get_Operator", "get_Process",
     "get_QuestID", "get_SetNpc", "get_Stock", "get_TaskIndex",
-    "get_Transform", "get_UniqId", "get_UniversalPosition",
+    "get_Transform", "get_UniqId", "get_UniversalPosition", "get_FilterInfo",
     "get_Value", "getContext", "hasDeliver", "isEventPlayable",
     "isFakeShopCompleted", "isFakeShopKeeped", "isFakeShopRemainingMinute",
     "isFinish", "canTalkEventInteract",
     "isShopTalkEventAvailableForChara",
-    "isTalkEventInteractDisabled",
+    "isTalkEventInteractDisabled", "castRay",
 }
 REVIEWED_CAPABILITIES = {
     "reviewed_call": 1,

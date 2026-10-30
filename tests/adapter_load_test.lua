@@ -5841,7 +5841,8 @@ do
     "OT1 current task matches the live journal index")
   assert(#row.task_destinations == 2 and row.task_destinations[1].destination_index == 1
     and row.task_destinations[1].kind == "npc" and row.task_destinations[1].target.cid == cid
-    and row.task_destinations[2].kind == "place",
+    and row.task_destinations[1].target.pos.x == 1
+    and row.task_destinations[2].kind == "place" and row.task_destinations[2].target.pos == nil,
     "OT2 exact active object emits independent NPC and place targets")
   assert(row.live_destination == nil,
     "OT2 generated task destinations are not copied into live-only evidence")
@@ -5877,6 +5878,7 @@ do
     and mixed[1].signals[1].kind == "npc" and mixed[1].signals[1].target.pos.x == 1
     and mixed[1].signals[1].target.place == nil
     and mixed[1].signals[2].kind == "place" and mixed[1].signals[2].target.cid == nil
+    and mixed[1].signals[2].target.pos == nil
     and mixed[2].destination_index == 1 and mixed[2].eligibility == "ineligible"
     and #mixed[2].signals == 0,
     "OT3b guidance keeps independent eligibility and emits both positioned targets")
@@ -5942,7 +5944,8 @@ do
   concierge_dest._calls.get_CharaID = 0
   local no_cid = oa.objective_task_snapshot({ qid }, catalog).quests[1].guidance[1]
   assert(no_cid.eligibility == "eligible" and #no_cid.signals == 1
-    and no_cid.signals[1].kind == "place" and no_cid.signals[1].target.cid == nil,
+    and no_cid.signals[1].kind == "place" and no_cid.signals[1].target.cid == nil
+    and no_cid.signals[1].target.pos == nil,
     "OT3c native CID zero is normalized and place-only evidence remains usable")
   original_guidance[1].cid = saved_guidance_cid
   concierge_dest._calls.get_CharaID = saved_concierge_cid
@@ -6143,7 +6146,10 @@ do
     "OT17d missing native task index stays unknown and is never invented")
   info._calls.get_CurrentTaskIndex = saved_current_task_index
   local integrated = integration_core.objective_snapshot(parser_task,
-    { generation = 1, status = "unknown", places = {} }, {}, integration_core.target_registry_new())
+    { generation = 1, status = "ok", places = { { qid = qid, task_index = 0,
+      owner_kind = "task", owner_index = 0, signal_index = 0,
+      target = { kind = "key_location", key = key }, pos = { x = 1, y = 2, z = 3 },
+      eligibility = "eligible" } } }, {}, integration_core.target_registry_new())
   assert(parser_catalog.version == 2 and parser_task.quests[1].read_status == "ok"
     and integrated ~= nil and #integrated.targets == 2
     and integrated.targets[1].kind == "npc" and integrated.targets[2].kind == "place",
