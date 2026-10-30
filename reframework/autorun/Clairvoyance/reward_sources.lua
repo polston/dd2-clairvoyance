@@ -541,9 +541,10 @@ function M.classify(catalog_rows, observation, generation)
   for _,count in pairs(capacity_claims) do if count>1 then snapshot.status="unknown";snapshot.complete=false;snapshot.reason="reward_capacity_conflict";snapshot.candidates={};snapshot.diagnostic_rows={};provider_fallback(snapshot,snapshot.reason);return snapshot end end
   snapshot.candidates=candidates
   for _,o in ipairs(outcomes) do
-    local diagnostic_status=o.state=="available" and "eligible"
-      or o.state=="unavailable" and "ineligible" or "unknown"
-    snapshot.diagnostic_rows[#snapshot.diagnostic_rows+1]={member_id=o.key,gate=o.reason,status=diagnostic_status}
+    if o.state~="available" then
+      local diagnostic_status=o.state=="unavailable" and "ineligible" or "unknown"
+      snapshot.diagnostic_rows[#snapshot.diagnostic_rows+1]={member_id=o.key,gate=o.reason,status=diagnostic_status}
+    end
   end
   table.sort(statuses,function(a,b)return a.identity<b.identity end)
   status_degrade(snapshot,statuses)

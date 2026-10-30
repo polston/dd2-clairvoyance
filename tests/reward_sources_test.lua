@@ -85,6 +85,7 @@ do
   local s = classify()
   eq(s.provider, "reward"); eq(s.status, "ok"); eq(s.complete, true); eq(s.generation, 4)
   eq(#s.candidates, 1); eq(s.candidates[1].eligibility, "eligible")
+  eq(#s.diagnostic_rows,0,"eligible members do not emit diagnostics")
   local c = s.candidates[1]
   eq(c.provider, "reward"); eq(c.generation, 4); eq(c.source_id[1], "source")
   eq(c.source_id[2], "quest_reward_endpoint"); eq(c.source_id[3], 10); eq(c.source_id[4], 3)
@@ -139,7 +140,7 @@ do
   local legacy_mix=classify({row(),legacy},observation())
   eq(legacy_mix.complete,true); eq(#legacy_mix.candidates,1)
   eq(legacy_mix.candidates[1].eligibility,"eligible")
-  eq(legacy_mix.diagnostic_rows[2].status,"unknown")
+  eq(#legacy_mix.diagnostic_rows,1); eq(legacy_mix.diagnostic_rows[1].status,"unknown")
 end
 
 do
@@ -282,6 +283,12 @@ do
 
   local negative=classify({row()},observation({progressing_qids={}}))
   expect("diagnostic uses ineligible status",negative.diagnostic_rows[1].status=="ineligible")
+  local unknown=classify({row({accept_minus_one=true})},observation())
+  expect("unknown member uses unknown diagnostic status",#unknown.diagnostic_rows==1
+    and unknown.diagnostic_rows[1].status=="unknown")
+  for _,d in ipairs(negative.diagnostic_rows) do
+    expect("negative diagnostic status is frozen",d.status=="ineligible" or d.status=="unknown")
+  end
 
   local float_row=row()
   float_row.quest_id=10.0; float_row.source_identity.quest_id=10.0
@@ -372,7 +379,11 @@ do
   local two=classify({row()},o)
   eq(one.candidates[1].source_id[4],3); eq(two.candidates[1].source_id[4],4)
   eq(canonical_key(one.candidates[1].source_id)~=canonical_key(two.candidates[1].source_id),true)
-  eq(one.diagnostic_rows[1].member_id~=two.diagnostic_rows[1].member_id,true,
+  eq(#one.diagnostic_rows,0); eq(#two.diagnostic_rows,0)
+  local unknown_one=classify({row({accept_minus_one=true})},observation())
+  local unknown_obs=observation(); unknown_obs.tasks[1].task_index=4; unknown_obs.tasks[1].targets[1].task_index=4
+  local unknown_two=classify({row({accept_minus_one=true})},unknown_obs)
+  eq(unknown_one.diagnostic_rows[1].member_id~=unknown_two.diagnostic_rows[1].member_id,true,
     "diagnostic identity includes task index")
   eq(core.target_key(one.candidates[1].source_id)~=nil,true,"published source tuple accepted by core")
   eq(core.target_key(two.candidates[1].source_id)~=nil,true,"changed task tuple accepted by core")
@@ -387,10 +398,9 @@ do
     if target.kind=="source" then canonical_sources=canonical_sources+1 end
   end
   eq(canonical_sources,1,"real core accepts canonical task/member tuple")
-  for _,d in ipairs(two.diagnostic_rows) do
+  for _,d in ipairs(unknown_two.diagnostic_rows) do
     eq(type(d.member_id),"string"); eq(type(d.gate),"string"); eq(type(d.status),"string")
-    eq(d.status=="eligible" or d.status=="ineligible" or d.status=="unknown",true,
-      "diagnostic uses frozen eligibility vocabulary")
+    eq(d.status=="ineligible" or d.status=="unknown",true,"diagnostic uses frozen eligibility vocabulary")
     local fields=0;for _ in pairs(d) do fields=fields+1 end
     eq(fields,3,"diagnostic row has exact member_id/gate/status shape")
   end
