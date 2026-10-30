@@ -4650,10 +4650,6 @@ function A.read_objective_talk_grant_observation(wanted, requested_event_ids)
     end
     requested_set[event_id] = true
     out.event_ids[#out.event_ids + 1] = event_id
-    if #out.event_ids > 64 then
-      out.reason = "talk_grant_event_ids_truncated"
-      return out
-    end
   end
   table.sort(out.event_ids)
   if #out.wanted == 0 and #out.event_ids == 0 then out.complete = true; return out end
@@ -6870,7 +6866,6 @@ function A.make()
       catalog_max = math.max(catalog_max, index)
     end
     if catalog_count ~= catalog_max then return fail("reward_catalog_invalid") end
-    local qlm = sdk.get_managed_singleton("app.QuestLogManager")
     local qm = sdk.get_managed_singleton("app.QuestManager")
     local manager_token = token(qm)
     if manager_token == nil then return fail("reward_owner_unreadable") end
@@ -7034,9 +7029,6 @@ function A.make()
     for _, qid in ipairs(qids) do
       for _, member in ipairs(members_by_qid[qid] or {}) do
         local identity, evidence = member.source_identity, member.endpoint_evidence
-        if type(evidence) == "table" and type(evidence.talk_event_id) == "number" then
-          event_ids[evidence.talk_event_id] = true
-        end
         member_parts[#member_parts + 1] = table.concat({ tostring(member.quest_id),
           tostring(member.family), tostring(member.action_type),
           tostring(identity.action_ordinal), tostring(identity.processor_id),

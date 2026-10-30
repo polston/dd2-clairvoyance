@@ -4999,7 +4999,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
             and candidate.eligibility == "eligible" and key ~= nil
             and not rejected_sources[key] and not rejected_pools[contract.capacity_key] then
           if eligible_by_key[key] ~= nil then reason = "status_duplicate_identity"; break end
-          eligible_by_key[key] = { candidate = candidate, tuple = tuple, outputs = contract.outputs }
+          eligible_by_key[key] = { tuple = tuple, outputs = contract.outputs }
         end
       end
       if not reason then

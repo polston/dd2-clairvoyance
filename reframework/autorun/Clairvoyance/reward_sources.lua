@@ -519,7 +519,6 @@ function M.classify(catalog_rows, observation, generation)
         normalized.talk_event_id or "unknown",normalized.end_no or "unknown"}) or mk
       outcomes[#outcomes+1]=outcome
   end
-  if not obs.complete then snapshot.reason="reward_observation_incomplete"; provider_fallback(snapshot,snapshot.reason); return snapshot end
   snapshot.status="ok"; snapshot.complete=true; snapshot.reason=nil
   local groups, candidates={},{}
   for _, outcome in ipairs(outcomes) do

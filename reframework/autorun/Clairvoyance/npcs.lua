@@ -593,7 +593,7 @@ function M.parse_quests(t)
           or root.operator_value ~= e.reward_operator_value
           or not dense_array(root.parameters) or #root.parameters ~= e.reward_relation_count
           or not dense_array(root.children) or #root.children ~= e.reward_child_count
-          or #root.parameters ~= 1 then return nil, false end
+          then return nil, false end
       local relation = root.parameters[1]
       if type(relation) ~= "table" or relation.kind ~= "processor_result"
           or relation.proc_id ~= e.predecessor_processor_id
