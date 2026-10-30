@@ -6783,6 +6783,37 @@ do
         and probability_routes.members[1].target_key
           == tk({ "source", "monster", "near-low" }))
 
+    local raw_weight_snapshot = core.objective_snapshot(
+      grouped_task(quantity_group, 12, 25), nil, {
+        { provider = "monster", generation = 44, status = "ok", complete = true,
+          candidates = {
+            { source_id = { "source", "monster_drop", "far", "drop-a" },
+              provider = "monster",
+              capacity_pool_id = { "capacity", "monster_drop", "far", "drop-a" },
+              outputs = { { item_id = 5, count = 99 } },
+              capacity_kind = "probabilistic", available_acquisitions = nil,
+              certainty = "probabilistic", probability = nil,
+              target = { pos = pos(9) }, eligibility = "eligible", generation = 44,
+              evidence = { raw_rate = 9000 } },
+            { source_id = { "source", "monster_drop", "near", "drop-b" },
+              provider = "monster",
+              capacity_pool_id = { "capacity", "monster_drop", "near", "drop-b" },
+              outputs = { { item_id = 5, count = 99 } },
+              capacity_kind = "probabilistic", available_acquisitions = nil,
+              certainty = "probabilistic", probability = nil,
+              target = { pos = pos(1) }, eligibility = "eligible", generation = 44,
+              evidence = { raw_rate = 2500 } },
+          } },
+      }, core.target_registry_new())
+    local raw_weight_routes = core.objective_routes(raw_weight_snapshot, pos(0), {
+      npc_route_mode = 0, objective_places = true, focus_order = { 60 }, route_cap = 8 })
+    check("objective grouped raw lottery weights route nearest-first without claiming probability or coverage",
+      #raw_weight_snapshot.targets == 2 and #raw_weight_routes.members == 1
+        and raw_weight_routes.members[1].probability == nil
+        and raw_weight_routes.members[1].capacity_kind == "probabilistic"
+        and raw_weight_routes.members[1].target_key
+          == tk({ "source", "monster_drop", "near", "drop-b" }))
+
     local priority_markers, _, priority_projection = core.objective_markers({
       { key = "ordinary", cat = "world", qids = {}, pos = pos(20) },
       { key = "ancillary", cat = "focus_npc", qids = {}, pos = pos(21), ancillary = true },

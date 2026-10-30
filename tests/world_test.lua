@@ -1531,7 +1531,17 @@ do
     return obj({ _entries = array(slots), _count = #slots },
       { get_Count = function() return #rows end })
   end
-  local function live_monster(uid, cid, dead, pos)
+  local function live_monster(uid, cid, dead, pos, gates)
+    gates = gates or {}
+    local function gate(name)
+      local value = gates[name]
+      if value == nil and not gates[name .. "_unreadable"] then return true end
+      return value
+    end
+    local game_object = obj(nil, {
+      get_Valid = function() return gate("game_valid") end,
+      get_Update = function() return gate("accessible") end,
+    })
     local chara = obj(nil, {
       get_UniqId = function() return guid(uid) end,
       get_CharaID = function() return cid end,
@@ -1540,7 +1550,13 @@ do
         get_UniversalPosition = function() return pos end,
       }) end,
     })
-    return obj(nil, { get_Chara = function() return chara end })
+    return obj(nil, {
+      get_Chara = function() return chara end,
+      get_Enabled = function() return gate("enabled") end,
+      get_Started = function() return gate("started") end,
+      get_Valid = function() return gate("valid") end,
+      get_GameObject = function() return game_object end,
+    })
   end
   singletons["app.EnemyManager"] = obj({ _EnemyList = list({
     live_monster("instance-a", 1001, false, P(30, 0, 40)),
@@ -1564,14 +1580,18 @@ do
   local monster_ok, monster_snapshot = pcall(R.objective_monster_rows,
     monster_task, nil, monster_need)
   check("reads: live monster rows preserve instance identity and raw drops",
-    monster_ok and monster_snapshot.complete and #monster_snapshot.rows == 2
+    monster_ok and monster_snapshot.complete and #monster_snapshot.rows == 3
       and monster_snapshot.rows[1].uid ~= monster_snapshot.rows[2].uid
       and monster_snapshot.rows[1].drop_table_readable
       and monster_snapshot.rows[1].item_id == 501
       and monster_snapshot.rows[1].count == 2
       and monster_snapshot.rows[2].item_id == 501
       and monster_snapshot.rows[1].raw_rate == 2500
-      and monster_snapshot.rows[1].accessible == nil
+      and monster_snapshot.rows[1].enabled == true
+      and monster_snapshot.rows[1].started == true
+      and monster_snapshot.rows[1].valid == true
+      and monster_snapshot.rows[1].accessible == true
+      and monster_snapshot.rows[3].alive == false
       and monster_snapshot.rows[1].chance == nil)
   check("reads: live monster rows are bounded to focused current item ids",
     monster_ok and monster_snapshot.complete
@@ -1616,6 +1636,26 @@ do
   check("reads: unreadable live position clears the whole monster snapshot",
     partial_monster_ok and partial_monsters.complete == false
       and #partial_monsters.rows == 0)
+  singletons["app.ItemManager"] = obj({
+    EnemyDefaultItemDropDataDict = drop_dictionary({
+      monster_drop_entry(1001, 501, 2, 2500, 7001),
+    }), EnemyItemDropDataDict = drop_dictionary({}) })
+  singletons["app.EnemyManager"] = obj({ _EnemyList = list({
+    live_monster("instance-disabled", 1001, false, P(30, 0, 40), { enabled = false }),
+  }) })
+  local disabled_ok, disabled = pcall(R.objective_monster_rows,
+    monster_task, nil, monster_need)
+  check("reads: disabled live monsters retain complete negative evidence",
+    disabled_ok and disabled.complete and #disabled.rows == 1
+      and disabled.rows[1].enabled == false)
+  singletons["app.EnemyManager"] = obj({ _EnemyList = list({
+    live_monster("instance-gate-unreadable", 1001, false, P(30, 0, 40),
+      { accessible_unreadable = true }),
+  }) })
+  local gate_ok, gate_unreadable = pcall(R.objective_monster_rows,
+    monster_task, nil, monster_need)
+  check("reads: unreadable live monster access clears the whole snapshot",
+    gate_ok and gate_unreadable.complete == false and #gate_unreadable.rows == 0)
 
   -- reserved rows: List<GenerateSelector> -> <Table> -> set infos
   local function row_obj(f) return obj(f) end
@@ -4058,6 +4098,16 @@ do
         changed and got ~= nil and got.kind == "item"
           and got.certainty == "guaranteed" and got.capacity_kind == "finite"
           and type(got.capacity_key) == "string" and #(got.group_keys or {}) == 1)
+      local probabilistic_source = direct_member("item", "Objective: Monster drop", original)
+      probabilistic_source.certainty = "probabilistic"
+      probabilistic_source.capacity_kind = "probabilistic"
+      probabilistic_source.probability = nil
+      w:set_routes(publication({ probabilistic_source }))
+      w:refresh(1, true, tg)
+      got = route_in(w, direct_id)
+      check("direct route: raw-weight probabilistic source needs no invented percentage",
+        got ~= nil and got.kind == "item" and got.certainty == "probabilistic"
+          and got.capacity_kind == "probabilistic" and got.probability == nil)
       changed, got = replace({ name = "Objective: New Hall" })
       check("direct route: name change pokes and replaces published metadata",
         changed and got ~= nil and got.name == "Objective: New Hall")
@@ -7557,37 +7607,118 @@ do
 
   local mf = fixture()
   local monster_rows = { complete = true, rows = {
-    { uid = "live-a", drop_row_id = "drop-a", item_id = 501, count = 2, chance = 0.25,
-      alive = true, accessible = true, drop_table_readable = true, pos = P(30, 0, 40) },
-    { uid = "live-b", drop_row_id = "drop-a", item_id = 501, count = 2, chance = 0.5,
-      alive = true, accessible = true, drop_table_readable = true, pos = P(31, 0, 40) },
-    { uid = "dead", drop_row_id = "drop-a", item_id = 501, count = 2, chance = 1,
-      alive = false, accessible = true, drop_table_readable = true, pos = P(32, 0, 40) },
-    { uid = "blocked", drop_row_id = "drop-a", item_id = 501, count = 2, chance = 1,
-      alive = true, accessible = false, drop_table_readable = true, pos = P(32, 0, 40) },
-    { uid = "zero", drop_row_id = "drop-a", item_id = 501, count = 2, chance = 0,
-      alive = true, accessible = true, drop_table_readable = true, pos = P(33, 0, 40) },
+    { uid = "live-a", drop_row_id = "drop-a", item_id = 501, count = 2, raw_rate = 2500,
+      alive = true, enabled = true, started = true, valid = true, accessible = true,
+      drop_table_readable = true, pos = P(30, 0, 40) },
+    { uid = "live-b", drop_row_id = "drop-a", item_id = 501, count = 2, raw_rate = 5000,
+      alive = true, enabled = true, started = true, valid = true, accessible = true,
+      drop_table_readable = true, pos = P(31, 0, 40) },
+    { uid = "dead", drop_row_id = "drop-a", item_id = 501, count = 2, raw_rate = 10000,
+      alive = false, enabled = true, started = true, valid = true, accessible = true,
+      drop_table_readable = true, pos = P(32, 0, 40) },
+    { uid = "blocked", drop_row_id = "drop-a", item_id = 501, count = 2, raw_rate = 10000,
+      alive = true, enabled = true, started = true, valid = true, accessible = false,
+      drop_table_readable = true, pos = P(32, 0, 40) },
+    { uid = "zero", drop_row_id = "drop-a", item_id = 501, count = 2, raw_rate = 0,
+      alive = true, enabled = true, started = true, valid = true, accessible = true,
+      drop_table_readable = true, pos = P(33, 0, 40) },
+    { uid = "disabled", drop_row_id = "drop-a", item_id = 501, count = 2, raw_rate = 10000,
+      alive = true, enabled = false, started = true, valid = true, accessible = true,
+      drop_table_readable = true, pos = P(34, 0, 40) },
+    { uid = "not-started", drop_row_id = "drop-a", item_id = 501, count = 2, raw_rate = 10000,
+      alive = true, enabled = true, started = false, valid = true, accessible = true,
+      drop_table_readable = true, pos = P(35, 0, 40) },
+    { uid = "invalid", drop_row_id = "drop-a", item_id = 501, count = 2, raw_rate = 10000,
+      alive = true, enabled = true, started = true, valid = false, accessible = true,
+      drop_table_readable = true, pos = P(36, 0, 40) },
+    { uid = "zero-count", drop_row_id = "drop-a", item_id = 501, count = 0, raw_rate = 10000,
+      alive = true, enabled = true, started = true, valid = true, accessible = true,
+      drop_table_readable = true, pos = P(37, 0, 40) },
   } }
   mf.reads.objective_monster_rows = function() return monster_rows end
   local mw = mf.new()
   local monsters = mw:objective_monster_observations(source_task, need_proof)
-  check("monster objectives: possible future catalog drops remain unknown and unrouted",
-    monsters.status == "unknown" and monsters.complete == false
-      and monsters.reason == "monster_catalog_drop_not_current"
-      and #monsters.candidates == 0)
+  local monster_status_counts = { available = 0, unavailable = 0 }
+  local monster_status_reasons = {}
+  for _, row in ipairs(monsters.source_status and monsters.source_status.rows or {}) do
+    monster_status_counts[row.state] = (monster_status_counts[row.state] or 0) + 1
+    monster_status_reasons[row.reason_code] = true
+  end
+  check("monster objectives: live positive-weight drops publish probabilistic candidates",
+    monsters.status == "ok" and monsters.complete == true
+      and #monsters.candidates == 2
+      and monsters.candidates[1].source_id[2] == "monster_drop"
+      and monsters.candidates[1].capacity_pool_id[2] == "monster_drop"
+      and monsters.candidates[1].certainty == "probabilistic"
+      and monsters.candidates[1].capacity_kind == "probabilistic"
+      and monsters.candidates[1].available_acquisitions == nil
+      and monsters.candidates[1].probability == nil
+      and monsters.candidates[1].evidence.raw_rate == 2500)
+  check("monster objectives: status projection retains available and complete-negative rows",
+    monsters.source_status and monsters.source_status.complete == true
+      and monsters.source_status.generation == monsters.generation
+      and monster_status_counts.available == 2 and monster_status_counts.unavailable == 7
+      and monster_status_reasons.monster_dead
+      and monster_status_reasons.monster_inaccessible
+      and monster_status_reasons.monster_zero_chance
+      and monster_status_reasons.monster_disabled
+      and monster_status_reasons.monster_not_started
+      and monster_status_reasons.monster_invalid
+      and monster_status_reasons.monster_zero_count)
+  local cached_monsters = mw:objective_monster_observations(source_task, need_proof)
+  check("monster objectives: cached candidates and status keep one generation",
+    cached_monsters.generation == monsters.generation
+      and cached_monsters.source_status.generation == monsters.generation
+      and #cached_monsters.source_status.rows == #monsters.source_status.rows)
+  monster_rows.rows[1].alive = false
+  mw:poke()
+  local death = mw:objective_monster_observations(source_task, need_proof)
+  check("monster objectives: death atomically removes the candidate and updates status",
+    death.status == "ok" and #death.candidates == 1
+      and death.source_status.complete == true
+      and death.source_status.generation == death.generation
+      and death.generation > monsters.generation)
+  monster_rows.rows[1].alive = true
   monster_rows.rows[1].accessible = nil
-  mw:refresh(0, true, { chests = true })
+  mw:poke()
   local access_unknown = mw:objective_monster_observations(source_task, need_proof)
   check("monster objectives: missing structured access proof makes the provider unknown",
-    access_unknown.status == "unknown" and #access_unknown.candidates == 0)
+    access_unknown.status == "unknown" and #access_unknown.candidates == 0
+      and access_unknown.source_status.complete == false
+      and access_unknown.source_status.generation == access_unknown.generation
+      and access_unknown.source_status.rows[1].state == "unknown"
+      and access_unknown.generation > death.generation)
   monster_rows.rows[1].accessible = true
-  monster_rows.rows[1].chance, monster_rows.rows[1].raw_rate = nil, 2500
+  monster_rows.rows[1].enabled = nil
   mw:poke()
-  local scale_unknown = mw:objective_monster_observations(source_task, need_proof)
-  check("monster objectives: raw game rate is not normalized probability evidence",
-    scale_unknown.status == "unknown" and #scale_unknown.candidates == 0
-      and scale_unknown.reason == "monster_probability_unproven")
-  monster_rows.rows[1].chance, monster_rows.rows[1].raw_rate = 0, nil
+  local enabled_unknown = mw:objective_monster_observations(source_task, need_proof)
+  check("monster objectives: every live-state gate must be readable",
+    enabled_unknown.status == "unknown" and #enabled_unknown.candidates == 0)
+  monster_rows.rows[1].enabled = true
+  monster_rows.rows[#monster_rows.rows + 1] = monster_rows.rows[1]
+  mw:poke()
+  local duplicate_monsters = mw:objective_monster_observations(source_task, need_proof)
+  check("monster objectives: duplicate source identity invalidates candidates and status atomically",
+    duplicate_monsters.status == "unknown" and #duplicate_monsters.candidates == 0
+      and duplicate_monsters.source_status.complete == false)
+  table.remove(monster_rows.rows)
+  local saved_drop_id = monster_rows.rows[1].drop_row_id
+  monster_rows.rows[1].drop_row_id = ""
+  mw:poke()
+  local identity_unknown = mw:objective_monster_observations(source_task, need_proof)
+  check("monster objectives: unreadable drop-row identity invalidates the provider",
+    identity_unknown.status == "unknown" and #identity_unknown.candidates == 0
+      and identity_unknown.source_status.complete == false)
+  monster_rows.rows[1].drop_row_id = saved_drop_id
+  monster_rows.complete = false
+  mw:poke()
+  local partial_scan = mw:objective_monster_observations(source_task, need_proof)
+  check("monster objectives: partial scans retain no candidates or per-source status",
+    partial_scan.status == "unknown" and #partial_scan.candidates == 0
+      and partial_scan.source_status.complete == false
+      and #partial_scan.source_status.rows == 1
+      and partial_scan.source_status.rows[1].scope == "provider")
+  monster_rows.complete = true
   monster_rows.rows[2].drop_table_readable = false
   mw:poke()
   local partial_monsters = mw:objective_monster_observations(source_task, need_proof)
@@ -7613,8 +7744,9 @@ do
       released = true, talk_available = true, interactable = true, pos = P(50, 0, 60) },
   } } end
   integrated.reads.objective_monster_rows = function() integrated.monster_reads = integrated.monster_reads + 1; return { complete = true, rows = {
-    { uid = "live-c", drop_row_id = "drop-c", item_id = 502, count = 1, chance = 0.3,
-      alive = true, accessible = true, drop_table_readable = true, pos = P(70, 0, 80) },
+    { uid = "live-c", drop_row_id = "drop-c", item_id = 502, count = 1, raw_rate = 3000,
+      alive = true, enabled = true, started = true, valid = true, accessible = true,
+      drop_table_readable = true, pos = P(70, 0, 80) },
   } } end
   local integrated_world = integrated.new()
   local empty_joined = integrated_world:objective_source_snapshots(nil,
@@ -7635,9 +7767,10 @@ do
     joined_by_name.shop.status == "ok"
       and joined_by_name.shop.candidates[1].source_id[2] == "shop_offer"
       and joined_by_name.placed.complete == true
-      and joined_by_name.monster.status == "unknown"
-      and joined_by_name.monster.reason == "monster_catalog_drop_not_current"
-      and #joined_by_name.monster.candidates == 0)
+      and joined_by_name.monster.status == "ok"
+      and joined_by_name.monster.candidates[1].certainty == "probabilistic"
+      and joined_by_name.monster.candidates[1].probability == nil
+      and #joined_by_name.monster.candidates == 1)
   check("objective source snapshot: adapter receives the parsed immutable world source catalog",
     integrated.adapter_catalog ~= nil
       and integrated.adapter_catalog == integrated_world:objective_static_source_catalog())
@@ -7661,7 +7794,11 @@ do
   local suspended_by_name, resumed_by_name = provider_map(suspended), provider_map(resumed)
   check("objective source snapshot: empty work clears cached live candidates before resume",
     suspended_by_name.shop.status == "unknown" and #suspended_by_name.shop.candidates == 0
+      and suspended_by_name.monster.source_status.complete == false
+      and suspended_by_name.monster.source_status.rows[1].state == "unknown"
       and resumed_by_name.shop.status == "ok" and #resumed_by_name.shop.candidates == 1
+      and resumed_by_name.monster.source_status.complete == true
+      and resumed_by_name.monster.source_status.generation == resumed_by_name.monster.generation
       and integrated.shop_reads == 4 and integrated.monster_reads == 4
       and integrated.base_reads == 4)
 

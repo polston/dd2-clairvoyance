@@ -5134,18 +5134,26 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
       and candidate.available_acquisitions > 0
     local unlimited_capacity = candidate.capacity_kind == "unlimited"
       and candidate.available_acquisitions == nil
-    local certainty_ok = candidate.certainty == "guaranteed"
-      or candidate.certainty == "probabilistic"
-    local probability_ok = candidate.certainty ~= "probabilistic"
-      or (type(candidate.probability) == "number" and candidate.probability == candidate.probability
-        and candidate.probability > 0 and candidate.probability < math.huge)
+    local probabilistic = candidate.certainty == "probabilistic"
+    local probabilistic_capacity = probabilistic
+      and candidate.capacity_kind == "probabilistic"
+      and candidate.available_acquisitions == nil
+    local certainty_ok = candidate.certainty == "guaranteed" or probabilistic
+    local known_probability = type(candidate.probability) == "number"
+      and candidate.probability == candidate.probability
+      and candidate.probability > 0 and candidate.probability < math.huge
+    local probability_ok = candidate.certainty == "guaranteed"
+      and candidate.probability == nil
+      or probabilistic_capacity and (candidate.probability == nil or known_probability)
+      or probabilistic and not probabilistic_capacity and known_probability
     local target = type(candidate.target) == "table" and candidate.target or {}
     local candidate_pos = candidate.pos or target.pos
     local target_ok = (valid_pos(candidate_pos) or objective_uint(target.cid, 4294967295))
       and (target.cid == nil or (objective_uint(target.cid, 4294967295)
         and target.place == nil))
       and (target.place == nil or objective_place_key(target.place))
-    valid = valid and (finite_capacity or unlimited_capacity) and certainty_ok
+    valid = valid and (finite_capacity or unlimited_capacity or probabilistic_capacity)
+      and certainty_ok
       and probability_ok and target_ok
     if not valid then return nil end
     return { source_tuple = source_tuple, capacity_tuple = capacity_tuple,
@@ -5514,10 +5522,13 @@ local function objective_record_valid(snapshot, obj)
     if snapshot.grouped_needs then
       if type(obj.source_id) ~= "string" or not canonical_key_valid(obj.source_id)
           or type(obj.capacity_key) ~= "string" or not canonical_key_valid(obj.capacity_key)
-          or (obj.capacity_kind ~= "finite" and obj.capacity_kind ~= "unlimited")
+          or (obj.capacity_kind ~= "finite" and obj.capacity_kind ~= "unlimited"
+            and obj.capacity_kind ~= "probabilistic")
           or (obj.capacity_kind == "finite" and (not objective_index(obj.available_acquisitions,
             2147483647) or obj.available_acquisitions == 0))
           or (obj.capacity_kind == "unlimited" and obj.available_acquisitions ~= nil)
+          or (obj.capacity_kind == "probabilistic"
+            and (obj.available_acquisitions ~= nil or obj.certainty ~= "probabilistic"))
           or (obj.certainty ~= "guaranteed" and obj.certainty ~= "probabilistic")
           or objective_array(obj.outputs) == nil or #obj.outputs == 0
           or objective_array(obj.groups) == nil or #obj.groups == 0 then return false end

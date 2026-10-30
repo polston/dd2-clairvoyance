@@ -2908,7 +2908,14 @@ function M.new(a, reads, io)
 
   -- World-owned live source readers are optional until their managed gates are
   -- proven. Missing or partial reads publish unknown and never retain rows.
-  local function objective_live_sources(provider, read_name, normalize, task_snapshot, need_snapshot)
+  local function objective_live_sources(provider, read_name, normalize, task_snapshot, need_snapshot,
+      publish_status)
+    local function unknown_status(generation, reason)
+      return { generation = generation, complete = false, reason_code = reason,
+        rows = { { scope = "provider", generation = generation,
+          identity = "provider:" .. provider, provider = provider, qid = nil,
+          task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
+    end
     local need_generation = type(task_snapshot) == "table"
       and to_int(task_snapshot.need_generation) or nil
     local current_tasks = objective_task_rows(task_snapshot)
@@ -2925,8 +2932,12 @@ function M.new(a, reads, io)
       end
       S.objective_source_observations[key] = { generation = generation,
         value = objective_clone(evidence) }
-      return { provider = provider, status = "unknown", complete = false,
+      local result = { provider = provider, status = "unknown", complete = false,
         generation = generation, reason = evidence.reason, candidates = {} }
+      if publish_status then
+        result.source_status = unknown_status(generation, evidence.reason)
+      end
+      return result
     end
     local source_generation = need_snapshot.source_generation
     local need_signature = objective_need_signature(need_snapshot)
@@ -2948,7 +2959,7 @@ function M.new(a, reads, io)
       end
       dense = dense and count == n
     end
-    local candidates, reason, status = {}, nil, "unknown"
+    local candidates, status_rows, reason, status = {}, {}, nil, "unknown"
     if not ok or type(raw) ~= "table" then
       reason = provider .. "_live_state_unavailable"
     elseif raw.complete ~= true or not dense then
@@ -2972,12 +2983,30 @@ function M.new(a, reads, io)
       end
       local valid = true
       for _, row in ipairs(rows) do
-        local candidate, row_reason = normalize(row)
+        local candidate, row_reason, status_row = normalize(row)
         if row_reason ~= nil then reason, valid = row_reason, false; break end
-        if candidate ~= nil and candidate ~= false then
-          if already_seen(candidate.source_id) then
-            reason, valid = "duplicate_source_identity", false; break
+        local identity = status_row and status_row.source_id
+          or candidate and candidate ~= false and candidate.source_id or nil
+        if identity ~= nil and already_seen(identity) then
+          reason, valid = "duplicate_source_identity", false; break
+        end
+        if publish_status then
+          local status_key = type(status_row) == "table"
+            and core.target_key(status_row.source_id) or nil
+          local item_ids = type(status_row) == "table" and status_row.item_ids or nil
+          if #status_rows >= 512 then
+            reason, valid = provider .. "_status_overflow", false; break
+          elseif status_key == nil or type(item_ids) ~= "table" or #item_ids ~= 1
+              or to_int(item_ids[1]) == nil or item_ids[1] <= 0
+              or (status_row.state ~= "available" and status_row.state ~= "unavailable")
+              or type(status_row.reason_code) ~= "string" then
+            reason, valid = provider .. "_status_malformed", false; break
           end
+          status_rows[#status_rows + 1] = { identity = status_key,
+            item_ids = { item_ids[1] }, state = status_row.state,
+            reason_code = status_row.reason_code }
+        end
+        if candidate ~= nil and candidate ~= false then
           candidates[#candidates + 1] = candidate
         end
       end
@@ -2995,6 +3024,19 @@ function M.new(a, reads, io)
     for _, candidate in ipairs(candidates) do candidate.generation = generation end
     local result = { provider = provider, status = status, complete = status == "ok",
       generation = generation, reason = reason, candidates = candidates }
+    if publish_status then
+      if status == "ok" then
+        table.sort(status_rows, function(a, b) return core.byte_less(a.identity, b.identity) end)
+        for _, row in ipairs(status_rows) do
+          row.scope, row.generation, row.provider = "source", generation, provider
+          row.qid, row.task_index = nil, nil
+        end
+        result.source_status = { generation = generation, complete = true,
+          reason_code = nil, rows = status_rows }
+      else
+        result.source_status = unknown_status(generation, reason)
+      end
+    end
     S.objective_live_source_cache[provider] = { round = last_round,
       need_generation = need_generation, source_generation = source_generation,
       need_signature = need_signature,
@@ -3061,26 +3103,43 @@ function M.new(a, reads, io)
       local valid_drop_id = (type(drop_id) == "string" and drop_id ~= "")
         or (to_int(drop_id) ~= nil and drop_id > 0)
       if type(row.uid) ~= "string" or row.uid == "" or not valid_drop_id
-          or type(row.alive) ~= "boolean" then
+          or type(row.alive) ~= "boolean" or type(row.enabled) ~= "boolean"
+          or type(row.started) ~= "boolean" or type(row.valid) ~= "boolean"
+          or type(row.accessible) ~= "boolean" then
         return nil, "monster_identity_or_gate_unreadable"
       end
-      if row.chance == nil and to_int(row.raw_rate) ~= nil and row.raw_rate >= 0 then
-        return nil, "monster_probability_unproven"
-      end
-      if type(row.accessible) ~= "boolean" then
-        return nil, "monster_identity_or_gate_unreadable"
-      end
-      if not row.alive or not row.accessible then return false end
       if row.drop_table_readable ~= true then return nil, "monster_drop_table_unreadable" end
-      local item_id, count = to_int(row.item_id), to_int(row.count)
-      if item_id == nil or item_id <= 0 or count == nil or count <= 0
+      local item_id, count, raw_rate = to_int(row.item_id), to_int(row.count),
+        to_int(row.raw_rate)
+      if item_id == nil or item_id <= 0 or count == nil or count < 0
         or not valid_pos(row.pos) or near_zero(row.pos)
-        or not finite(row.chance) or row.chance < 0 then
+        or raw_rate == nil or raw_rate < 0 then
         return nil, "monster_drop_evidence_invalid"
       end
-      if row.chance == 0 then return false end
-      return nil, "monster_catalog_drop_not_current"
-    end, task_snapshot, need_snapshot)
+      local source_id = { "source", "monster_drop", row.uid, drop_id }
+      local unavailable_reason
+      if count == 0 then unavailable_reason = "monster_zero_count"
+      elseif raw_rate == 0 then unavailable_reason = "monster_zero_chance"
+      elseif not row.alive then unavailable_reason = "monster_dead"
+      elseif not row.enabled then unavailable_reason = "monster_disabled"
+      elseif not row.started then unavailable_reason = "monster_not_started"
+      elseif not row.valid then unavailable_reason = "monster_invalid"
+      elseif not row.accessible then unavailable_reason = "monster_inaccessible" end
+      local status_row = { source_id = source_id, item_ids = { item_id },
+        state = unavailable_reason and "unavailable" or "available",
+        reason_code = unavailable_reason or "available" }
+      if unavailable_reason then return false, nil, status_row end
+      return { source_id = source_id, provider = "monster",
+        target = { kind = "monster", uid = row.uid, drop_row_id = drop_id,
+          pos = { x = row.pos.x, y = row.pos.y, z = row.pos.z } },
+        outputs = { { item_id = item_id, count = count } },
+        capacity_pool_id = { "capacity", "monster_drop", row.uid, drop_id },
+        capacity_kind = "probabilistic", available_acquisitions = nil,
+        certainty = "probabilistic", probability = nil,
+        eligibility = "eligible", evidence = { raw_rate = raw_rate, alive = true,
+          enabled = true, started = true, valid = true, accessible = true,
+          drop_table_readable = true } }, nil, status_row
+    end, task_snapshot, need_snapshot, true)
   end
 
   -- the next refresh runs a round even inside the throttle window
@@ -3234,14 +3293,20 @@ function M.new(a, reads, io)
       and e.capacity_kind == nil and e.group_keys == nil
     if legacy then return #e.item_ids > 0 end
     local probabilistic = e.certainty == "probabilistic"
+    local known_probability = type(e.probability) == "number"
+      and e.probability == e.probability and e.probability > 0
+      and e.probability < math.huge
+    local capacity_ok = probabilistic and e.capacity_kind == "probabilistic"
+      or (e.capacity_kind == "finite" or e.capacity_kind == "unlimited")
+    local probability_ok = probabilistic and e.capacity_kind == "probabilistic"
+      and (e.probability == nil or known_probability)
+      or probabilistic and e.capacity_kind ~= "probabilistic" and known_probability
+      or not probabilistic and e.probability == nil
     return #e.item_ids > 0 and (e.certainty == "guaranteed" or probabilistic)
       and route_family_key_valid(e.capacity_key, "capacity")
-      and (e.capacity_kind == "finite" or e.capacity_kind == "unlimited")
+      and capacity_ok
       and route_keys_valid(e.group_keys, "need")
-      and ((probabilistic and type(e.probability) == "number"
-          and e.probability == e.probability and e.probability > 0
-          and e.probability < math.huge)
-        or (not probabilistic and e.probability == nil))
+      and probability_ok
   end
   local function route_count_metadata_valid(publication, member_count)
     local total, omitted = rawget(publication, "total"), rawget(publication, "omitted")
@@ -5440,9 +5505,10 @@ function M.game_reads()
   end
 
   -- Live objective observations retain each spawned Character identity and
-  -- one row per positive structured drop entry. The game rate is preserved
-  -- as raw_rate: without a scale it is neither an availability proof nor a
-  -- probability. Access proof is likewise left absent until a live gate exists.
+  -- one row per positive structured drop entry. The raw lottery weight is
+  -- preserved without converting it into a percentage. Behavior and game-
+  -- object state prove that the current instance is enabled, started, valid
+  -- and participating in world updates.
   function R.objective_monster_rows(task_snapshot, _, need_snapshot)
     local ENEMY_MAX, SOURCE_MAX, TABLE_MAX, ITEM_MAX = 512, 8192, 64, 256
     local function integer(value, minimum)
@@ -5552,10 +5618,10 @@ function M.game_reads()
           for item_index, item in ipairs(items) do
             local item_id, count, rate = int_value(G(item, "_Id")),
               int_value(G(item, "_Num")), int_value(G(item, "_Rate"))
-            if not integer(item_id, 1) or not integer(count, 1) or not integer(rate, 0) then
+            if not integer(item_id, 1) or not integer(count, 0) or not integer(rate, 0) then
               return nil
             end
-            if rate > 0 and wanted[item_id] then
+            if wanted[item_id] then
               rows[#rows + 1] = { item_id = item_id, count = count, raw_rate = rate,
                 drop_row_id = core.target_key({ "source", "monster_drop_row", source.family,
                   source.key, table_index, item_index }) }
@@ -5569,26 +5635,34 @@ function M.game_reads()
     for _, enemy in ipairs(enemies) do
       if enemy == nil then return fail("enemy_identity_unreadable") end
       local chara = C(enemy, "get_Chara")
+      local game_object = C(enemy, "get_GameObject")
       local uid = C(C(chara, "get_UniqId"), "ToString()")
       local cid = u32(int_value(C(chara, "get_CharaID")))
       local dead = C(chara, "get_IsDead")
+      local enabled, started = C(enemy, "get_Enabled"), C(enemy, "get_Started")
+      local component_valid = C(enemy, "get_Valid")
+      local game_valid, accessible = C(game_object, "get_Valid"),
+        C(game_object, "get_Update")
       local transform = C(chara, "get_Transform")
       local pos = xyz(C(transform, "get_UniversalPosition"))
       if chara == nil or type(uid) ~= "string" or uid == "" or seen_uids[uid]
           or not integer(cid, 1)
-          or type(dead) ~= "boolean" or pos == nil or near_zero(pos) then
+          or type(dead) ~= "boolean" or type(enabled) ~= "boolean"
+          or type(started) ~= "boolean" or type(component_valid) ~= "boolean"
+          or type(game_valid) ~= "boolean" or type(accessible) ~= "boolean"
+          or pos == nil or near_zero(pos) then
         return fail("enemy_state_unreadable")
       end
       seen_uids[uid] = true
-      if not dead then
-        local drops = drops_for(cid)
-        if drops == nil then return fail("drop_rows_unreadable") end
-        for _, drop in ipairs(drops) do
-          out[#out + 1] = { uid = uid, drop_row_id = drop.drop_row_id,
-            item_id = drop.item_id, count = drop.count, raw_rate = drop.raw_rate,
-            alive = true, drop_table_readable = true,
-            pos = { x = pos.x, y = pos.y, z = pos.z } }
-        end
+      local valid = component_valid and game_valid
+      local drops = drops_for(cid)
+      if drops == nil then return fail("drop_rows_unreadable") end
+      for _, drop in ipairs(drops) do
+        out[#out + 1] = { uid = uid, drop_row_id = drop.drop_row_id,
+          item_id = drop.item_id, count = drop.count, raw_rate = drop.raw_rate,
+          alive = not dead, enabled = enabled, started = started, valid = valid,
+          accessible = accessible, drop_table_readable = true,
+          pos = { x = pos.x, y = pos.y, z = pos.z } }
       end
     end
     return { complete = true, rows = out }
