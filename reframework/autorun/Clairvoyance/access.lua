@@ -111,7 +111,7 @@ function M.validate(registry)
   if gate_count == nil or binding_count == nil then
     return false, "gates and bindings must be dense arrays"
   end
-  local gate_ids, binding_keys = {}, {}
+  local gate_ids, fingerprint_keys, binding_keys = {}, {}, {}
   for i = 1, gate_count do
     local gate = registry.gates[i]
     local fp = type(gate) == "table" and gate.fingerprint or nil
@@ -123,10 +123,17 @@ function M.validate(registry)
       or type(fp.position) ~= "table" or not finite(fp.position.x)
       or not finite(fp.position.y) or not finite(fp.position.z)
       or not finite(fp.tolerance) or fp.tolerance <= 0
-      or not finite(fp.leaf_count) or fp.leaf_count < 1 or fp.leaf_count % 1 ~= 0 then
+      or fp.leaf_count ~= 1 then
       return false, "invalid gate at index " .. tostring(i)
     end
+    local p = fp.position
+    local fingerprint_key = tostring(fp.bucket_id) .. "\0" .. fp.type_name
+      .. "\0" .. fp.game_object_name .. "\0" .. tostring(p.x)
+      .. "\0" .. tostring(p.y) .. "\0" .. tostring(p.z)
+      .. "\0" .. tostring(fp.tolerance) .. "\0" .. tostring(fp.leaf_count)
+    if fingerprint_keys[fingerprint_key] then return false, "duplicate gate fingerprint" end
     gate_ids[gate.id] = true
+    fingerprint_keys[fingerprint_key] = true
   end
   for i = 1, binding_count do
     local binding = registry.bindings[i]
@@ -138,7 +145,7 @@ function M.validate(registry)
       or type(binding.may_use_last_known) ~= "boolean" then
       return false, "invalid binding at index " .. tostring(i)
     end
-    local key = binding.target_kind .. "\0" .. binding.gate_id
+    local key = binding.target_kind
     if binding.target_kind == "hint_pin" then
       key = key .. "\0" .. tostring(binding.selector.quest_id)
         .. "\0" .. tostring(binding.selector.pin_index)

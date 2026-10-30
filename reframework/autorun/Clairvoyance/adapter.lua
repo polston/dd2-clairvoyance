@@ -3324,7 +3324,7 @@ function A.read_world_access_gates(gm, requested)
         if type(expected) ~= "number" or expected < 0 or expected ~= math.floor(expected)
             or type(used) ~= "number" or used < 0 or used ~= math.floor(used)
             or type(free) ~= "number" or free < 0 or free ~= math.floor(free)
-            or used > K.MANAGED_CAP or expected > used or expected + free ~= used then
+            or expected > K.MANAGED_CAP or expected > used or expected + free ~= used then
             return nil
         end
         local array = safe_field(value, "_entries")
@@ -3359,15 +3359,15 @@ function A.read_world_access_gates(gm, requested)
                 error("access outer entry incomplete")
             end
             local bucket_gates = by_bucket[bucket_id]
-            if bucket_gates ~= nil then
-                local inner = bounded_entries(hs)
-                if inner == nil then error("access inner collection incomplete") end
-                for _, inner_entry in ipairs(inner) do
-                    local g = safe_field(inner_entry, "Value")
-                    if g == nil then g = safe_field(inner_entry, "value") end
-                    if g == nil then error("access inner entry incomplete") end
-                    seen = seen + 1
-                    if seen > K.MANAGED_CAP then error("access object cap exceeded") end
+            local inner = bounded_entries(hs)
+            if inner == nil then error("access inner collection incomplete") end
+            for _, inner_entry in ipairs(inner) do
+                local g = safe_field(inner_entry, "Value")
+                if g == nil then g = safe_field(inner_entry, "value") end
+                if g == nil then error("access inner entry incomplete") end
+                seen = seen + 1
+                if seen > K.MANAGED_CAP then error("access object cap exceeded") end
+                if bucket_gates ~= nil then
                     local inspected, value = pcall(function()
                             local gt = g:get_type_definition()
                             local type_name = gt and gt:get_full_name() or nil
@@ -3496,14 +3496,25 @@ function items.filter_placed_provider_snapshot(provider, gm)
         or provider.status ~= "ok" then return provider end
     local copy = {}
     for key, value in pairs(provider) do copy[key] = value end
-    local candidates = {}
-    for _, candidate in ipairs(provider.candidates or {}) do
-        local allowed = true
+    local targets, candidate_targets = {}, {}
+    for index, candidate in ipairs(provider.candidates or {}) do
+        candidate_targets[index] = {}
         for _, output in ipairs(candidate.outputs or {}) do
-            local keep = items.access_decision({ target_kind = "placed_item",
+            local target = { target_kind = "placed_item",
                 type_name = "app.Gm82_000", item_id = output.item_id,
-                position = candidate.target and candidate.target.pos or nil }, gm)
-            if not keep then allowed = false; break end
+                position = candidate.target and candidate.target.pos or nil }
+            targets[#targets + 1] = target
+            candidate_targets[index][#candidate_targets[index] + 1] = target
+        end
+    end
+    local filtered = items.filter_access_targets(targets, gm)
+    local allowed_targets = {}
+    for _, target in ipairs(filtered) do allowed_targets[target] = true end
+    local candidates = {}
+    for index, candidate in ipairs(provider.candidates or {}) do
+        local allowed = true
+        for _, target in ipairs(candidate_targets[index]) do
+            if not allowed_targets[target] then allowed = false; break end
         end
         if allowed then candidates[#candidates + 1] = candidate end
     end
@@ -3542,12 +3553,8 @@ local function scan_placed(gm)
                             if not ITEM_WANTED[id] then return end
                             local pos, live = gimmick_pos(g)
                             if pos == nil then skipped = skipped + 1 return end
-                            local allowed = items.access_decision({ target_kind = "placed_item",
-                                type_name = tn, item_id = id, position = pos }, gm)
-                            if allowed then
-                                recs[#recs + 1] = { id = id, pos = pos, live = live,
-                                    src = "placed" }
-                            end
+                            recs[#recs + 1] = { id = id, pos = pos, live = live,
+                                src = "placed", type_name = tn }
                         end)
                         if not okg then skipped = skipped + 1 end
                     end
@@ -3556,7 +3563,24 @@ local function scan_placed(gm)
         end)
         if not ok then skipped = skipped + 1 end
     end
-    return recs, skipped, capped
+    local targets, target_by_record = {}, {}
+    for _, rec in ipairs(recs) do
+        local target = { target_kind = "placed_item", type_name = rec.type_name,
+            item_id = rec.id, position = rec.pos }
+        targets[#targets + 1] = target
+        target_by_record[rec] = target
+    end
+    local filtered = items.filter_access_targets(targets, gm)
+    local allowed_targets = {}
+    for _, target in ipairs(filtered) do allowed_targets[target] = true end
+    local kept = {}
+    for _, rec in ipairs(recs) do
+        if allowed_targets[target_by_record[rec]] then
+            rec.type_name = nil
+            kept[#kept + 1] = rec
+        end
+    end
+    return kept, skipped, capped
 end
 
 -- Shared frame of the drop and box scans: reads `field` of gm as a

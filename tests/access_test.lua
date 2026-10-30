@@ -55,6 +55,11 @@ malformed = clone(registry); malformed.gates[1].id = "gate-\195\169"
 check("reject non-ASCII gate ids", not valid(malformed))
 malformed = clone(registry); malformed.gates[1].observer_family = "window"
 check("reject unknown observer family", not valid(malformed))
+malformed = clone(registry); malformed.gates[1].fingerprint.leaf_count = 2
+check("reject door observers with an undefined multi-leaf aggregation", not valid(malformed))
+malformed = clone(registry); malformed.gates[2].fingerprint =
+  clone(malformed.gates[1].fingerprint)
+check("reject duplicate complete gate fingerprints", not valid(malformed))
 malformed = clone(registry); malformed.bindings[1].predicate = { field = "is_open", equals = true }
 check("reject unknown predicate", not valid(malformed))
 malformed = clone(registry); malformed.bindings[1].selector = {}
@@ -100,6 +105,7 @@ ambiguous_registry.bindings[2].target_kind = "placed_item"
 ambiguous_registry.bindings[2].selector = clone(ambiguous_registry.bindings[1].selector)
 local ambiguous = access.match_binding(ambiguous_registry, placed)
 check("ambiguous target bindings fail closed", ambiguous == nil)
+check("registry validation rejects ambiguous target selectors", not valid(ambiguous_registry))
 check("non-matching typed target does not bind", access.match_binding(registry, hint) == nil)
 
 local source_binding = registry.bindings[1]

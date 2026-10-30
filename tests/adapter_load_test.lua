@@ -4288,8 +4288,12 @@ do
   assert(#ai.item_locations() == 1 and ai.item_stats().skipped == 0,
     "IW7 free slots uncounted")
   ifresh()
-  IS.gm = gmgr({ managed = managed({ mobj({ _entries = arr({
-    mobj({ value = placed(300, V, L) }) }) }) }), drops = {}, boxes = {} })
+  do
+    local lower_values = mobj({ _entries = arr({
+      mobj({ value = placed(300, V, L), next = -1 }) }), _count = 1, _freeCount = 0 })
+    lower_values.call = function(_, method) if method == "get_Count" then return 1 end end
+    IS.gm = gmgr({ managed = managed({ lower_values }), drops = {}, boxes = {} })
+  end
   ai.refresh_items()
   assert(#ai.item_locations() == 1, "IW7 hash-set entry read via the lower-case value fallback")
   -- IW8 invalidate_items
@@ -5345,8 +5349,12 @@ end
       for _, native in ipairs(row.doors or {}) do
         values[#values + 1] = obj({ Value = native, next = -1 })
       end
-      local set = obj({ _entries = arr(values, row.fail_inner), _count = #values,
-        _freeCount = 0 }, { get_Count = #values })
+      local free_slots = row.free_slots or 0
+      for _ = 1, free_slots do values[#values + 1] = obj({ next = -2 }) end
+      local expected = row.expected_count or (#values - free_slots)
+      local used = row.used_count or #values
+      local set = obj({ _entries = arr(values, row.fail_inner), _count = used,
+        _freeCount = free_slots }, { get_Count = expected })
       buckets[#buckets + 1] = obj({ key = row.bucket, value = set, next = -1 })
     end
     local dict = obj({ _entries = arr(buckets, fail_outer, true), _count = #buckets,
@@ -5396,6 +5404,19 @@ end
   assert(partial_inner.masquerade_passage.status == "unknown"
     and partial_inner.beggars_garb_entrance.status == "unknown",
     "partial inner collection atomically invalidates requested gates")
+  local partial_unrequested = A.read_world_access_gates(manager({
+    { bucket = 85, doors = { door(85, 396.075, "gm80_026", true, false) } },
+    { bucket = 74, doors = { door(74, 568.247, "gm05_046", true, false) },
+      fail_inner = true },
+  }), { "masquerade_passage" })
+  assert(partial_unrequested.masquerade_passage.status == "unknown",
+    "partial unrequested bucket atomically invalidates requested gates")
+  local oversized_unrequested = A.read_world_access_gates(manager({
+    { bucket = 85, doors = { door(85, 396.075, "gm80_026", true, false) } },
+    { bucket = 74, doors = {}, expected_count = 4097, used_count = 4097 },
+  }), { "masquerade_passage" })
+  assert(oversized_unrequested.masquerade_passage.status == "unknown",
+    "over-cap unrequested bucket atomically invalidates requested gates")
   local valid_native = door(85, 396.075, "gm80_026", true, false)
   local sparse_values = {
     [1] = obj({ Value = valid_native, next = -1 }),
@@ -5440,6 +5461,11 @@ end
   local at_cap = A.read_world_access_gates(manager({ { bucket = 85, doors = exact } }, false),
     { "masquerade_passage" })
   assert(at_cap.masquerade_passage.status == "known", "exact managed-object cap is complete")
+  local at_cap_with_tombstone = A.read_world_access_gates(manager({
+    { bucket = 85, doors = exact, free_slots = 1 },
+  }), { "masquerade_passage" })
+  assert(at_cap_with_tombstone.masquerade_passage.status == "known",
+    "exact managed-object cap remains complete with a backing tombstone")
   exact[#exact + 1] = door(85, 0, "other", false, false, { type_name = "app.OtherDoor" })
   local over_cap = A.read_world_access_gates(manager({ { bucket = 85, doors = exact } }, false),
     { "masquerade_passage" })
@@ -5502,6 +5528,34 @@ end
     and #unknown_provider.candidates == 1 and unknown_provider.candidates[1] == other_candidate
     and unknown_provider.complete and unknown_provider.generation == 7,
     "unknown source fails closed while hint uses last-known state")
+  local fixture_gate = { id = "fixture_second_entrance", observer_family = "door_leaf",
+    fingerprint = { bucket_id = 86, type_name = "app.gm05_046",
+      game_object_name = "gm_fixture", position = { x = 1, y = 2, z = 3 },
+      tolerance = 0.25, leaf_count = 1 } }
+  local fixture_binding = { target_kind = "placed_item",
+    selector = { type_name = "app.Gm82_000", item_id = 301,
+      position = unrelated.position, position_tolerance = 0.25 },
+    gate_id = fixture_gate.id, predicate = { field = "locked", equals = false },
+    unknown_policy = "deny", may_use_last_known = false }
+  A.access.registry.gates[#A.access.registry.gates + 1] = fixture_gate
+  A.access.registry.bindings[#A.access.registry.bindings + 1] = fixture_binding
+  owner = {}
+  assert(a.reset_session_caches() == true, "fixture gate starts with empty access cache")
+  gm = manager({
+    { bucket = 74, doors = { door(74, 568.247, "gm05_046", true, false) } },
+    { bucket = 86, doors = { door(86, 1, "gm_fixture", true, false,
+      { pos = fixture_gate.fingerprint.position }) } },
+  })
+  now = now + 11
+  outer_reads = 0
+  local batched_provider = a.filter_placed_provider_snapshot(provider)
+  assert(#batched_provider.candidates == 2 and outer_reads == 2,
+    "placed provider batches every stale bound gate into one manager scan")
+  table.remove(A.access.registry.bindings)
+  table.remove(A.access.registry.gates)
+  gm = both
+  now = now + 11
+  a.filter_access_targets({ hint })
   local integration_core = require("Clairvoyance.core")
   local task_snapshot = { focus_epoch = 1, journal_generation = 1, need_generation = 9,
     objective_needs = { status = "ok", complete = true, generation = 9,
