@@ -547,7 +547,7 @@ function M.parse_quests(t)
   end
   local function reward_diagnostic_array(raw, qid)
     if raw == nil then return {} end
-    if not dense_array(raw) then fail("quest " .. qid .. " reward diagnostics malformed"); return {} end
+    if not dense_array(raw) then fail("quest " .. qid .. " reward diagnostics malformed"); return false end
     local ownership = { exact = true, missing_owner = true, ambiguous_owner = true,
       duplicate_processor_id = true }
     local branch_status = { unverified = true, unsupported = true }

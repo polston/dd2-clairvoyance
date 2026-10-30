@@ -754,6 +754,30 @@ do
     legacy and legacy.quests[12] and legacy.quests[12].reward_diagnostics[1]
       and legacy.quests[12].reward_diagnostics[1].endpoint_evidence == nil)
 
+  local function parse_diagnostics(diagnostics)
+    local _, result = N.parse_quests({ version = 2, quests = {
+      ["12"] = { tasks = { { index = 0, has_destination = false, destinations = {} } },
+        guidance = {}, deliveries = {}, reward_diagnostics = diagnostics },
+      ["13"] = { tasks = {}, guidance = {}, deliveries = {} },
+    } })
+    return result
+  end
+  local malformed_outer = {
+    { label = "wrong type", value = "not an array" },
+    { label = "sparse array", value = { [1] = fixture(false), [3] = fixture(false) } },
+  }
+  for _, case in ipairs(malformed_outer) do
+    local parsed = parse_diagnostics(case.value)
+    check("quests v2 rewards: " .. case.label .. " outer shape is quest-atomic",
+      parsed and parsed.quests[12] and parsed.quests[12].reward_diagnostics == false
+        and parsed.quests[12].tasks and #parsed.quests[12].tasks == 1
+        and parsed.quests[13] ~= nil and #parsed.diagnostics > 0)
+  end
+  local absent = parse_diagnostics(nil)
+  check("quests v2 rewards: absent outer diagnostics remain legacy empty",
+    absent and absent.quests[12] and type(absent.quests[12].reward_diagnostics) == "table"
+      and #absent.quests[12].reward_diagnostics == 0)
+
   local cases = {}
   local fields = {
     kind = false, reward_root_count = 0, reward_operator = false,
