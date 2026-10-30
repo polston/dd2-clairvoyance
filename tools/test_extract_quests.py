@@ -212,6 +212,18 @@ class RelationTests(unittest.TestCase):
                 with self.assertRaises(ew.ExtractError):
                     eq.decode_reward_diagnostics(rows, 10030)
 
+        malformed_group_refs = [
+            ("null group reference", lambda rows: rows[12].fields.update(_ConditionParam=None)),
+            ("scalar group reference", lambda rows: rows[12].fields.update(_ConditionParam=14)),
+            ("wrong native group type", lambda rows: rows[13].__setattr__("type", "app.Other")),
+        ]
+        for label, mutate in malformed_group_refs:
+            with self.subTest(label=label):
+                rows = reward_endpoint_fixture()
+                mutate(rows)
+                with self.assertRaises(ew.ExtractError):
+                    eq.decode_reward_diagnostics(rows, 10030)
+
     def test_reward_diagnostics_preserve_hash_rows_and_unknown_endpoint(self):
         insts = [
             inst(1, "app.quest.action.QuestReward", _Param=[R(2)], _Data=R(3)),

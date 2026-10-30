@@ -408,6 +408,20 @@ def _reward_ref(insts, value, expected, label):
     return target
 
 
+def _required_reward_ref(insts, value, label, expected=None):
+    if not isinstance(value, qnml_rsz.Ref):
+        raise ew.ExtractError("invalid %s reference" % label)
+    try:
+        target = qnml_rsz.deref(insts, value)
+    except IndexError:
+        raise ew.ExtractError("invalid %s reference" % label)
+    if target is None or not isinstance(target, qnml_rsz.Inst):
+        raise ew.ExtractError("invalid %s reference" % label)
+    if expected is not None and target.type != expected:
+        raise ew.ExtractError("invalid %s type" % label)
+    return target
+
+
 def decode_reward_endpoint_evidence(insts, processors, reward_processor):
     """Return structural evidence only for the closed single-talk Trigger shape."""
     previous = qnml_rsz.deref(insts, reward_processor.fields.get("PrevProcCondition"))
@@ -442,15 +456,13 @@ def decode_reward_endpoint_evidence(insts, processors, reward_processor):
     if trigger is None or trigger.type != TRIGGER_TYPE:
         return None
     parameters = _required_array(_field(trigger, "_Param"), "Trigger parameters")
-    parameter_rows = [_reward_ref(insts, ref, TRIGGER_PARAM_TYPE,
-                                  "Trigger parameter") for ref in parameters]
+    parameter_rows = [_required_reward_ref(insts, ref, "Trigger parameter",
+                                           TRIGGER_PARAM_TYPE) for ref in parameters]
     endpoint_rows = []
     unsupported_condition = False
     for parameter in parameter_rows:
-        group = qnml_rsz.deref(insts, _field(parameter, "_ConditionParam"))
-        if group is None or group.type != TRIGGER_CONDITION_TYPE:
-            unsupported_condition = True
-            continue
+        group = _required_reward_ref(insts, _field(parameter, "_ConditionParam"),
+                                     "Trigger condition group", TRIGGER_CONDITION_TYPE)
         condition_operator_value = _integer(_field(group, "_Operator"),
                                             "Trigger condition operator")
         condition_operator = REWARD_OPERATOR_NAMES.get(condition_operator_value)
@@ -458,10 +470,7 @@ def decode_reward_endpoint_evidence(insts, processors, reward_processor):
                                          "Trigger condition parameters")
         conditions = []
         for ref in condition_refs:
-            condition = qnml_rsz.deref(insts, ref)
-            if condition is None:
-                raise ew.ExtractError("invalid Trigger condition reference")
-            conditions.append(condition)
+            conditions.append(_required_reward_ref(insts, ref, "Trigger condition"))
         if len(parameters) != 1 or len(conditions) != 1:
             unsupported_condition = True
         for condition in conditions:
