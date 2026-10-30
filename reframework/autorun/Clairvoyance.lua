@@ -2422,7 +2422,39 @@ local function install_debug()
             provider_generations[i] = { provider = provider.provider,
               generation = provider.generation, status = provider.status,
               complete = provider.complete, reason = provider.reason,
-              candidate_count = provider.candidate_count }
+              candidate_count = provider.candidate_count,
+              diagnostic_rows = {} }
+            for j = 1, math.min(#(type(provider.diagnostic_rows) == "table"
+                and provider.diagnostic_rows or {}), 512) do
+              local diagnostic = provider.diagnostic_rows[j]
+              if type(diagnostic) == "table" then
+                provider_generations[i].diagnostic_rows[j] = {
+                  member_id = diagnostic.member_id, gate = diagnostic.gate,
+                  status = diagnostic.status }
+              end
+            end
+          end
+          local source_status = {}
+          for i = 1, math.min(#(objective_snapshot.source_status or {}), 16) do
+            local observed = objective_snapshot.source_status[i]
+            if type(observed) == "table" then
+              local copied = { provider = observed.provider, generation = observed.generation,
+                complete = observed.complete, reason_code = observed.reason_code, rows = {} }
+              for j = 1, math.min(#(type(observed.rows) == "table" and observed.rows or {}), 512) do
+                local row = observed.rows[j]
+                if type(row) == "table" then
+                  local copied_row = { scope = row.scope, generation = row.generation,
+                    identity = row.identity, provider = row.provider, qid = row.qid,
+                    task_index = row.task_index, state = row.state,
+                    reason_code = row.reason_code, item_ids = {} }
+                  for k = 1, math.min(#(type(row.item_ids) == "table" and row.item_ids or {}), 256) do
+                    copied_row.item_ids[k] = row.item_ids[k]
+                  end
+                  copied.rows[j] = copied_row
+                end
+              end
+              source_status[i] = copied
+            end
           end
           local need_groups = {}
           for i, group in ipairs(objective_snapshot.need_groups or {}) do
@@ -2446,7 +2478,8 @@ local function install_debug()
             stamp = { focus_epoch = objective_snapshot.stamp and objective_snapshot.stamp.focus_epoch,
               journal_generation = objective_snapshot.stamp and objective_snapshot.stamp.journal_generation,
               need_generation = objective_snapshot.stamp and objective_snapshot.stamp.need_generation,
-              providers = provider_generations }, targets = targets,
+              providers = provider_generations }, source_status = source_status,
+            targets = targets,
             need_groups = need_groups, diagnostics = diagnostics,
             registry_diagnostics = registry_diagnostics,
             marker_omitted = scalar_map(snapshot and snapshot.focus

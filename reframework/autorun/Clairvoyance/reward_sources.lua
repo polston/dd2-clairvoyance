@@ -220,6 +220,18 @@ local function find_one(rows, field, value)
   end
   return found
 end
+local function member_intersects_wanted(row, mappings, wanted)
+  if type(row) ~= "table" or not dense(row.reward_rows, 32) or #row.reward_rows == 0 then return nil end
+  for _, reward in ipairs(row.reward_rows) do
+    if type(reward) ~= "table" or not integer(reward.name_hash, 0, U32) then return nil end
+    local outputs = mappings[reward.name_hash]
+    if outputs == nil then return nil end
+    for _, output in ipairs(outputs) do
+      if wanted[output.item_id] then return true end
+    end
+  end
+  return false
+end
 
 local function normalize_catalog_member(row)
   if type(row) ~= "table" then return nil, "reward_catalog_invalid" end
@@ -293,7 +305,8 @@ local function classify_member(member, obs, mappings, wanted)
   end
   table.sort(complete_outputs,function(a,b)return a.item_id<b.item_id end)
   table.sort(matched,function(a,b)return a.item_id<b.item_id end)
-  if #matched == 0 then return { state="unknown", reason="reward_output_not_current_need", outputs=complete_outputs, matched={} } end
+  local progress=false; for _, x in ipairs(obs.progressing_qids) do if x==qid then progress=true end end
+  if not progress then return { state="unavailable", reason="quest_not_progressing", outputs=complete_outputs, matched=matched } end
   local task, task_dup = find_one(obs.tasks,"qid",qid)
   if task_dup or task and (not integer(task.task_index,0,MAX) or not dense(task.targets,128)) then return nil,"task_endpoint_unreadable" end
   if task then
@@ -306,8 +319,6 @@ local function classify_member(member, obs, mappings, wanted)
     end
     task={qid=task.qid,task_index=canonical_integer(task.task_index,0,MAX),targets=task.targets}
   end
-  local progress=false; for _, x in ipairs(obs.progressing_qids) do if x==qid then progress=true end end
-  if not progress then return { state="unavailable", reason="quest_not_progressing", outputs=complete_outputs, matched=matched, task=task } end
   if not task then return nil,"task_endpoint_unreadable" end
   if not member.endpoint_supported then return {state="unknown",reason="unsupported_reward_graph",outputs=complete_outputs,matched=matched,task=task,unnameable=true} end
   if member.accept_minus_one==true then
@@ -324,14 +335,16 @@ local function classify_member(member, obs, mappings, wanted)
   end
   if nr~=1 or np~=1 then return nil,"reward_runtime_scan_incomplete" end
   if reward.quest_action_type~=REWARD or predecessor.quest_action_type~=TRIGGER then return nil,"reward_runtime_scan_incomplete" end
-  if reward.processor_phase=="Completed" or predecessor.processor_phase=="Completed" or predecessor.process_completed==true
-      or predecessor.nested_action_completed==true then return {state="unavailable",reason="processor_completed",outputs=complete_outputs,matched=matched,task=task} end
-  if reward.processor_phase=="Canceled" or predecessor.processor_phase=="Canceled" or predecessor.process_canceled==true
-      or predecessor.nested_action_canceled==true then return {state="unavailable",reason="processor_canceled",outputs=complete_outputs,matched=matched,task=task} end
-  if reward.processor_phase=="Uninitialized" or reward.processor_phase=="Inactive" then return {state="unavailable",reason="processor_inactive",outputs=complete_outputs,matched=matched,task=task} end
+  if reward.processor_phase=="Completed" then return {state="unavailable",reason="processor_completed",outputs=complete_outputs,matched=matched,task=task} end
+  if reward.processor_phase=="Canceled" then return {state="unavailable",reason="processor_canceled",outputs=complete_outputs,matched=matched,task=task} end
   if reward.processor_phase~="Standby" then return {state="unknown",reason="processor_state_unreadable",outputs=complete_outputs,matched=matched,task=task} end
-  if predecessor.processor_phase=="Uninitialized" or predecessor.processor_phase=="Inactive"
-      or predecessor.processor_phase=="Standby" then return {state="unavailable",reason="processor_inactive",outputs=complete_outputs,matched=matched,task=task} end
+  if reward.process_type~="ExecuteAction" or reward.process_phase~="ExecuteAction"
+      or reward.process_completed~=false or reward.process_canceled~=false
+      or reward.nested_action_type~="ExecuteAction" or reward.nested_action_phase~="ExecuteAction"
+      or reward.nested_action_completed~=false or reward.nested_action_canceled~=false
+      or reward.nested_action_result~=0 then
+    return {state="unknown",reason="processor_state_unreadable",outputs=complete_outputs,matched=matched,task=task}
+  end
   if predecessor.processor_phase~="Waiting" or predecessor.process_type~="ExecuteAction"
       or predecessor.process_phase~="ExecuteAction" or predecessor.process_completed~=false
       or predecessor.process_canceled~=false or predecessor.nested_action_type~="CheckTrigger"
@@ -364,7 +377,7 @@ local function classify_member(member, obs, mappings, wanted)
   if event.speaker_present_readable and type(event.speaker_present)~="boolean" then return unknown_event("speaker_presence_unreadable") end
   if event.speaker_present==false then
     if event.speaker~=nil then return unknown_event("observation_contradictory") end
-    return {state="unavailable",reason="speaker_absent",outputs=complete_outputs,matched=matched,task=task,event=event}
+    return unknown_event("speaker_unreadable")
   end
   local speaker=event.speaker
   if type(speaker)~="table" or speaker.cid~=event.initial_speaker_cid then return unknown_event("speaker_unreadable") end
@@ -415,6 +428,11 @@ function M.classify(catalog_rows, observation, generation)
   if type(obs)~="table" or type(obs.complete)~="boolean" or type(obs.owner_token)~="string" or obs.owner_token=="" then provider_fallback(snapshot,"status_malformed"); return snapshot end
   if not dense(obs.wanted,256) then snapshot.reason="reward_observation_invalid";provider_fallback(snapshot,"status_malformed");return snapshot end
   if not obs.complete then snapshot.reason="reward_observation_incomplete"; provider_fallback(snapshot,snapshot.reason); return snapshot end
+  if #obs.wanted == 0 then
+    snapshot.status="ok"; snapshot.complete=true; snapshot.reason=nil
+    status_degrade(snapshot,{})
+    return snapshot
+  end
   if not dense(obs.events,64) or not sorted_by(obs.events,"event_id",1,MAX) then
     snapshot.reason="reward_observation_incomplete"; provider_fallback(snapshot,snapshot.reason); return snapshot
   end
@@ -426,30 +444,80 @@ function M.classify(catalog_rows, observation, generation)
   local mapping=output_map(obs)
   if obs.complete and not mapping then provider_fallback(snapshot,"status_malformed"); return snapshot end
   local wanted={}; for _, id in ipairs(obs.wanted) do if not integer(id,1,MAX) or wanted[id] then provider_fallback(snapshot,"status_malformed"); return snapshot end; wanted[id]=true end
-  local member_seen, outcomes, statuses = {}, {}, {}
+  if not sorted_unique_positive(obs.progressing_qids,64) then
+    snapshot.reason="progressing_set_invalid";provider_fallback(snapshot,snapshot.reason);return snapshot
+  end
+  local progressing={}; for _,qid in ipairs(obs.progressing_qids) do progressing[qid]=true end
+  local member_seen, outcomes, statuses, endpoint_groups, unsupported_rows = {}, {}, {}, {}, {}
+  local row_refs = {}
   for _, member in ipairs(catalog_rows) do
     if type(member)~="table" then provider_fallback(snapshot,"status_malformed"); return snapshot end
-    local normalized, normalize_error=normalize_catalog_member(member)
-    if not normalized then snapshot.reason=normalize_error; provider_fallback(snapshot,"status_malformed"); return snapshot end
-    if normalized.endpoint_supported then
-      local event, event_dup=find_one(obs.events,"event_id",normalized.talk_event_id)
-      if event_dup or not event then
-        snapshot.reason="event_unreadable"; provider_fallback(snapshot,snapshot.reason); return snapshot
+    local intersects=member_intersects_wanted(member,mapping,wanted)
+    if intersects==nil then snapshot.reason="reward_catalog_invalid";provider_fallback(snapshot,"status_malformed");return snapshot end
+    local identity, evidence = member.source_identity, member.endpoint_evidence
+    local identity_key
+    if type(identity)=="table" and integer(member.quest_id,1,MAX)
+        and identity.quest_id==member.quest_id and integer(identity.action_ordinal,0,MAX)
+        and integer(identity.processor_id,0,U32) then
+      identity_key=table.concat({member.quest_id,identity.action_ordinal,identity.processor_id},":")
+    end
+    local ref={member=member,identity_key=identity_key}
+    row_refs[#row_refs+1]=ref
+    local group_key
+    if integer(member.quest_id,1,MAX)
+        and type(evidence)=="table" and integer(evidence.talk_event_id,1,MAX)
+        and integer(evidence.end_no,-MAX,MAX) then
+      group_key=target_key({"reward_endpoint",member.quest_id,evidence.talk_event_id,evidence.end_no})
+      endpoint_groups[group_key]=endpoint_groups[group_key] or {members={},relevant=false}
+      endpoint_groups[group_key].members[#endpoint_groups[group_key].members+1]=ref
+      endpoint_groups[group_key].relevant=endpoint_groups[group_key].relevant or intersects
+    elseif intersects then
+      unsupported_rows[#unsupported_rows+1]=ref
+    end
+  end
+  local relevant_rows, relevant_identities, included={},{},{}
+  local function include(ref)
+    if not included[ref] then
+      included[ref]=true
+      relevant_rows[#relevant_rows+1]=ref.member
+    end
+  end
+  for _, group in pairs(endpoint_groups) do
+    if group.relevant then
+      for _, ref in ipairs(group.members) do
+        include(ref)
+        if ref.identity_key then relevant_identities[ref.identity_key]=true end
       end
     end
-    local function ident(v) return v==nil and "~" or tostring(v) end
-    local mk=table.concat({ident(normalized.qid),ident(normalized.action_ordinal),ident(normalized.processor_id),
-      ident(normalized.predecessor_processor_id),ident(normalized.talk_event_id),ident(normalized.end_no)},":")
-    if member_seen[mk] then snapshot.reason="reward_catalog_duplicate_identity"; provider_fallback(snapshot,"status_duplicate_identity"); return snapshot end
-    member_seen[mk]=true
-    local outcome, reason=classify_member(normalized,obs,mapping,wanted)
-    if not outcome then snapshot.reason=reason; provider_fallback(snapshot,"status_malformed"); return snapshot end
-    outcome.member=normalized
-    local task_index=outcome.task and outcome.task.task_index or "unknown"
-    outcome.key=target_key({"reward_member",normalized.qid,task_index,normalized.action_ordinal,
-      normalized.processor_id,normalized.predecessor_processor_id or "unknown",
-      normalized.talk_event_id or "unknown",normalized.end_no or "unknown"}) or mk
-    outcomes[#outcomes+1]=outcome
+  end
+  for _, ref in ipairs(unsupported_rows) do
+    include(ref)
+    if ref.identity_key then relevant_identities[ref.identity_key]=true end
+  end
+  for _, ref in ipairs(row_refs) do
+    if ref.identity_key and relevant_identities[ref.identity_key] then include(ref) end
+  end
+  for _, raw_member in ipairs(relevant_rows) do
+      local normalized, normalize_error=normalize_catalog_member(raw_member)
+      if not normalized then snapshot.reason=normalize_error; provider_fallback(snapshot,"status_malformed"); return snapshot end
+      local mk=table.concat({tostring(normalized.qid),tostring(normalized.action_ordinal),
+        tostring(normalized.processor_id)},":")
+      if member_seen[mk] then snapshot.reason="reward_catalog_duplicate_identity"; provider_fallback(snapshot,"status_duplicate_identity"); return snapshot end
+      member_seen[mk]=true
+      if normalized.endpoint_supported and progressing[normalized.qid] then
+        local event, event_dup=find_one(obs.events,"event_id",normalized.talk_event_id)
+        if event_dup or not event then
+          snapshot.reason="event_unreadable"; provider_fallback(snapshot,snapshot.reason); return snapshot
+        end
+      end
+      local outcome, reason=classify_member(normalized,obs,mapping,wanted)
+      if not outcome then snapshot.reason=reason; provider_fallback(snapshot,"status_malformed"); return snapshot end
+      outcome.member=normalized
+      local task_index=outcome.task and outcome.task.task_index or "unknown"
+      outcome.key=target_key({"reward_member",normalized.qid,task_index,normalized.action_ordinal,
+        normalized.processor_id,normalized.predecessor_processor_id or "unknown",
+        normalized.talk_event_id or "unknown",normalized.end_no or "unknown"}) or mk
+      outcomes[#outcomes+1]=outcome
   end
   if not obs.complete then snapshot.reason="reward_observation_incomplete"; provider_fallback(snapshot,snapshot.reason); return snapshot end
   snapshot.status="ok"; snapshot.complete=true; snapshot.reason=nil
@@ -457,10 +525,12 @@ function M.classify(catalog_rows, observation, generation)
   for _, outcome in ipairs(outcomes) do
     local m=outcome.member
     if m.endpoint_supported and m.talk_event_id~=nil and m.end_no~=nil then
-      local group_tail=outcome.state=="available" and "aggregate" or tostring(m.action_ordinal)
-      local gk=table.concat({m.qid,m.talk_event_id,m.end_no,group_tail},":")
+      local gk=target_key({"reward_endpoint",m.qid,m.talk_event_id,m.end_no})
       local g=groups[gk] or {members={},outputs={},task=outcome.task,event=outcome.event,speaker=outcome.speaker}
       groups[gk]=g; g.members[#g.members+1]=outcome
+      if g.task==nil then g.task=outcome.task end
+      if g.event==nil then g.event=outcome.event end
+      if g.speaker==nil then g.speaker=outcome.speaker end
     end
   end
   local group_list={}; for _,g in pairs(groups) do group_list[#group_list+1]=g end
@@ -473,34 +543,44 @@ function M.classify(catalog_rows, observation, generation)
   local eligible_pools={}
   for _,g in ipairs(group_list) do
     local first=g.members[1].member
-    for _,o in ipairs(g.members) do if o.state=="available" then
+    for _,o in ipairs(g.members) do if o.state=="available" and #(o.matched or {})>0 then
       eligible_pools[target_key({"capacity","quest_reward_endpoint",first.qid,first.talk_event_id})]=true
       break
     end end
   end
   local capacity_claims={}
   for _,g in ipairs(group_list) do
-    table.sort(g.members,function(a,b)return a.member.action_ordinal<b.member.action_ordinal end)
+    table.sort(g.members,function(a,b)
+      local x,y=a.member,b.member
+      if x.action_ordinal~=y.action_ordinal then return x.action_ordinal<y.action_ordinal end
+      if x.processor_id~=y.processor_id then return x.processor_id<y.processor_id end
+      return x.predecessor_processor_id<y.predecessor_processor_id
+    end)
     if #g.members>8 then snapshot.status="unknown";snapshot.complete=false
       snapshot.reason="reward_member_overflow";snapshot.candidates={};provider_fallback(snapshot,snapshot.reason);return snapshot end
-    local eligible_members, excluded_members={},{}
+    local active_members, excluded_members, matching_members, active_matching={}, {}, {}, {}
     for _,o in ipairs(g.members) do
-      if o.state=="available" then eligible_members[#eligible_members+1]=o else excluded_members[#excluded_members+1]=o end
+      if o.state=="available" then active_members[#active_members+1]=o else excluded_members[#excluded_members+1]=o end
+      if #(o.matched or {})>0 then matching_members[#matching_members+1]=o end
+      if o.state=="available" and #(o.matched or {})>0 then active_matching[#active_matching+1]=o end
     end
-    local members= #eligible_members>0 and eligible_members or g.members
+    local members=#active_matching>0 and active_members or g.members
     local gstate,greason="available","available"
-    if #eligible_members==0 then
+    if #active_matching==0 then
       gstate="unavailable"
-      for _,o in ipairs(g.members) do
+      for _,o in ipairs(matching_members) do
         if o.state=="unknown" then gstate="unknown";greason=o.reason;break end
         greason=o.reason
       end
     end
     local first=members[1].member
     local tuple=g.task and {"source","quest_reward_endpoint",first.qid,g.task.task_index,first.talk_event_id,first.end_no,#members} or nil
+    local status_tuple={"reward_status_endpoint",first.qid,first.talk_event_id,first.end_no,#members}
     for _,o in ipairs(members) do
       local m=o.member
       if tuple then tuple[#tuple+1]=m.action_ordinal;tuple[#tuple+1]=m.processor_id;tuple[#tuple+1]=m.predecessor_processor_id end
+      status_tuple[#status_tuple+1]=m.action_ordinal;status_tuple[#status_tuple+1]=m.processor_id
+      status_tuple[#status_tuple+1]=m.predecessor_processor_id
       for _,out in ipairs(o.outputs or {}) do
         g.outputs[out.item_id]=(g.outputs[out.item_id] or 0)+out.count
         if g.outputs[out.item_id]>MAX then snapshot.status="unknown";snapshot.complete=false
@@ -524,8 +604,15 @@ function M.classify(catalog_rows, observation, generation)
           pos=g.speaker and copy_pos(g.speaker.pos) or nil,capacity_kind="finite",available_acquisitions=1,certainty="guaranteed"}
         candidates[#candidates+1]=candidate
       end
+    elseif greason=="quest_not_progressing" then
+      local item_set={}; for _,o in ipairs(matching_members) do
+        for _,out in ipairs(o.matched or {}) do item_set[out.item_id]=true end
+      end
+      local item_ids={}; for item in pairs(item_set) do item_ids[#item_ids+1]=item end; table.sort(item_ids)
+      local status_identity=target_key(status_tuple)
+      statuses[#statuses+1]=status_row(snapshot,"source",status_identity,first.qid,nil,item_ids,gstate,greason)
     end
-    if #eligible_members>0 then
+    if #active_matching>0 then
       for _,o in ipairs(excluded_members) do
         local m=o.member
         local excluded_tuple={"source","quest_reward_endpoint",m.qid,g.task.task_index,m.talk_event_id,m.end_no,1,

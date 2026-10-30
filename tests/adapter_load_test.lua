@@ -514,6 +514,10 @@ do
     function object.get_type_definition()
       return { get_full_name = function() return name end }
     end
+    function object.get_address()
+      local address = object.calls.get_address
+      return type(address) == "function" and address() or address
+    end
     return object
   end
   local function managed_list(values, count)
@@ -521,16 +525,21 @@ do
       get_Item = function(index) return values[index + 1] end })
   end
   local function managed_array(values)
-    return { get_elements = function() return values end }
+    return { get_elements = function() return values end,
+      call = function(_, method)
+        if method == "get_size" then return #values end
+      end }
   end
   local function managed_dict(rows, expected, counter)
-    local entries = {}
+    local entries, by_key = {}, {}
     for index, row in ipairs(rows) do
       entries[index] = managed({ Next = -1, Key = row[1], Value = row[2] })
+      by_key[row[1]] = row[2]
     end
     local array = { get_elements = function() return entries end }
     return managed({ _count = #entries, _freeCount = 0, _entries = array },
-      { get_Count = function()
+      { get_Item = function(key) return by_key[key] end,
+        get_Count = function()
         if counter ~= nil then counter.reads = counter.reads + 1 end
         return expected or #entries
       end })
@@ -544,10 +553,27 @@ do
   local grant_node = managed({ _NodeId = "grant", _NodeNameHash = 11,
     _NextNodesCandidates = managed_array({}), _ChangeType = 0,
     _Items = managed_array({ grant }) }, nil, "app.ItemControlSegmentNode")
-  local event_data = managed({ _SegmentNodes = managed_array({ start, grant_node }) })
+  local reward_end = managed({ _NodeId = "reward-end", _NodeNameHash = 13,
+    _Result = 0, _IsKeepPreviousResult = false,
+    _NextNodesCandidates = managed_array({}) }, nil, "app.EndSegmentNode")
+  local reward_choice = managed({ _NextNodeId = "reward-end", _NextNodeNameHash = 13,
+    _Conditions = edge_conditions })
+  local reward_root = managed({ _NodeId = "reward-root", _NodeNameHash = 12,
+    _NextNodesCandidates = managed_array({}),
+    _Choices = managed_array({ reward_choice }) }, nil, "app.ChoiceSegmentNode")
+  local absent_root = managed({ _NodeId = "absent-root", _NodeNameHash = 14,
+    _NextNodesCandidates = managed_array({}) }, nil, "app.RootSegmentNode")
+  local event_data = managed({ _SegmentNodes = managed_array({ start, grant_node }) }, {
+    get_address = function() return 0x190000 end })
   local event_ref = managed({ _Item = event_data })
+  local reward_event_data = managed({ _SegmentNodes = managed_array({ reward_root, reward_end }) }, {
+    get_address = function() return 0x190100 end })
+  local reward_event_ref = managed({ _Item = reward_event_data })
+  local absent_event_ref = managed({ _Item = managed({
+    _SegmentNodes = managed_array({ absent_root }) }, { get_address = function() return 0x190200 end }) })
   local talk_reads, shop_reads, mapping_reads = { reads = 0 }, { reads = 0 }, { reads = 0 }
-  local talk_dict = managed_dict({ { 1900, event_ref } }, nil, talk_reads)
+  local talk_dict = managed_dict({ { 1900, event_ref }, { 1901, reward_event_ref },
+    { 1902, absent_event_ref }, { 1903, absent_event_ref }, { 1904, absent_event_ref } }, nil, talk_reads)
   local character_data = managed({}, {}, "app.CharacterData")
   local blackboard = managed({}, {}, "app.AIBlackBoardController")
   local speaker = managed({}, {
@@ -574,6 +600,7 @@ do
     end,
     isEventPlayable = function(event_id) return event_id == 1900 end,
     getHistory = function() return nil end,
+    canTalkEventInteract = function() return false end,
   })
   local service = managed({ _CharaID = 3472286413, _ShopID = 25 }, nil,
     "app.NpcShopForgeryParam")
@@ -593,10 +620,18 @@ do
     isFakeShopRemainingMinute = function() return 0 end,
   })
   talk_manager.calls.getTalkEventInitialSpeaker = function(event_id)
-    return (event_id == 1900 or event_id == 1919) and 3472286413 or nil
+    if event_id == 1904 then return -1 end
+    if event_id == 1903 then return 1 end
+    return (event_id == 1900 or event_id == 1901 or event_id == 1919)
+      and 3472286413 or nil
   end
   talk_manager.calls.isEventPlayable = function(event_id)
-    return event_id == 1900 or event_id == 1919
+    return event_id == 1900 or event_id == 1901 or event_id == 1902
+      or event_id == 1903 or event_id == 1904 or event_id == 1919
+  end
+  local reward_history = managed({ Played = false, ResultNum = 0 })
+  talk_manager.calls.getHistory = function(event_id)
+    return event_id == 1901 and reward_history or nil
   end
   talk_manager.calls.isTalkEventInteractDisabled = function(chara_id)
     return chara_id ~= 3472286413
@@ -630,6 +665,73 @@ do
     and talk_read.events[1].interaction_readable
     and talk_read.events[1].interaction_enabled,
     "talk reader scans the typed graph and current numeric-speaker gates")
+  local exact_reward_event = A.read_objective_talk_grant_observation({}, { 1901 })
+  assert(exact_reward_event.complete and #exact_reward_event.events == 1
+    and exact_reward_event.events[1].event_id == 1901
+    and exact_reward_event.events[1].root_node_id == "reward-root"
+    and exact_reward_event.events[1].reward_nodes[1].choices[1].to_node_id == "reward-end"
+    and exact_reward_event.events[1].reward_nodes[2].node_type == "End"
+    and exact_reward_event.events[1].reward_nodes[2].end_result == 0
+    and exact_reward_event.events[1].reward_nodes[2].keep_previous_result == false
+    and exact_reward_event.events[1].owner_token == "190100"
+    and exact_reward_event.events[1].speaker.interaction_disabled == false
+    and exact_reward_event.events[1].speaker.interaction_allowed == false
+    and exact_reward_event.events[1].history.played_readable
+    and exact_reward_event.events[1].history.played == false,
+    "exact event-ID mode reads graph choices, End fields, owner identity and false overlays")
+  local destination_number = { task_index = 1, destination_index = 2, kind = "place",
+    target = { key = 7, place = { kind = "key_location", key = 8, local_area = 0 } } }
+  local destination_string = { task_index = 1, destination_index = 2, kind = "place",
+    target = { key = "7", place = { kind = "key_location", key = 8, local_area = 0 } } }
+  assert(A.objective_destination_signature({ destination_number })
+      ~= A.objective_destination_signature({ destination_string }),
+    "destination identity encoding preserves numeric versus string place keys")
+  local many_destinations = {}
+  for i = 1, 30 do
+    many_destinations[i] = { task_index = 1, destination_index = i, kind = "place",
+      target = { key = i, place = { kind = "key_location", key = 100 + i, local_area = 0 } } }
+  end
+  local many_signature = A.objective_destination_signature(many_destinations)
+  local reordered_destinations = {}
+  for i = 1, #many_destinations do
+    reordered_destinations[i] = many_destinations[#many_destinations - i + 1]
+  end
+  assert(type(many_signature) == "string"
+      and many_signature == A.objective_destination_signature(reordered_destinations),
+    "destination identity remains canonical beyond the target tuple component cap")
+  many_destinations[30].target.place.key = 999
+  assert(many_signature ~= A.objective_destination_signature(many_destinations),
+    "length-prefixed destination identity detects a changed member beyond the tuple cap")
+  local sparse_destinations = { destination_number }
+  sparse_destinations[3] = destination_string
+  assert(A.objective_destination_signature(sparse_destinations) == nil,
+    "destination identity rejects sparse arrays instead of ignoring later rows")
+  local too_many_reward_events = {}
+  for i = 1, 65 do too_many_reward_events[i] = 1900 + i end
+  local over_cap_events = A.read_objective_talk_grant_observation({}, too_many_reward_events)
+  assert(not over_cap_events.complete and over_cap_events.reason == "talk_grant_event_ids_truncated"
+    and #over_cap_events.events == 0,
+    "talk reader rejects 65 requested event IDs before catalog preflight")
+  local absent_speaker_event = A.read_objective_talk_grant_observation({}, { 1902 })
+  assert(absent_speaker_event.complete and #absent_speaker_event.events == 1
+    and absent_speaker_event.events[1].initial_speaker_readable
+    and absent_speaker_event.events[1].initial_speaker_cid == nil
+    and absent_speaker_event.events[1].speaker_present_readable
+    and absent_speaker_event.events[1].speaker_present == false
+    and absent_speaker_event.events[1].speaker == nil,
+    "a successful absent initial-speaker read remains distinct from a failed call")
+  local missing_holder_event = A.read_objective_talk_grant_observation({}, { 1903 })
+  assert(missing_holder_event.complete and #missing_holder_event.events == 1
+    and missing_holder_event.events[1].initial_speaker_cid == 1
+    and missing_holder_event.events[1].speaker_present_readable
+    and missing_holder_event.events[1].speaker_present == false
+    and missing_holder_event.events[1].speaker == nil,
+    "a readable absent NPC holder remains false and keeps its speaker nil")
+  local malformed_speaker_event = A.read_objective_talk_grant_observation({}, { 1904 })
+  assert(malformed_speaker_event.complete and #malformed_speaker_event.events == 1
+    and malformed_speaker_event.events[1].initial_speaker_readable == false
+    and malformed_speaker_event.events[1].initial_speaker_cid == nil,
+    "a successful malformed speaker value is unreadable instead of native absence")
   local saved_interaction_disabled = talk_manager.calls.isTalkEventInteractDisabled
   talk_manager.calls.isTalkEventInteractDisabled = function() return true end
   local disabled_talk = A.read_objective_talk_grant_observation({ [29] = true })
@@ -4739,46 +4841,194 @@ do
       item_ids = { 9002 }, count = 1, is_all_item = true, is_infinite = false,
       ignore_restriction_items = {} } } } } }
   local reward_fixture = {}
-  reward_fixture.diagnostic = function(qid, proc_id, hash)
+  reward_fixture.diagnostic = function(qid, proc_id, hash, ordinal)
     return { family = "quest_reward", quest_id = qid,
-      source_identity = { quest_id = qid, processor_id = proc_id, action_ordinal = 0 },
+      action_type = "app.quest.action.QuestReward",
+      source_identity = { quest_id = qid, processor_id = proc_id, action_ordinal = ordinal or 0 },
       reward_rows = { { ordinal = 0, name_hash = hash } }, branch_status = "unverified",
+      endpoint_evidence = { kind = "single_talk_trigger", reward_root_count = 1,
+        reward_operator = "or", reward_operator_value = 1, reward_relation_count = 1,
+        reward_child_count = 0, relation_result_no = 0,
+        predecessor_processor_id = proc_id + 1000,
+        predecessor_action_type = "app.quest.action.Trigger", trigger_parameter_count = 1,
+        condition_operator = "and", condition_operator_value = 0, condition_count = 1,
+        condition_type = "app.quest.condition.CheckTalkEventEndNoParam",
+        talk_event_id = qid, end_no = 0, accept_minus_one = false },
       task_endpoint_join = { status = "unproven",
         reason = "journal_task_to_drawable_reward_endpoint_unverified" },
       unresolved_joins = { "journal_task_to_reward_endpoint", "reward_action_to_drawable_target",
         "current_branch_truth", "claim_state", "runtime_reward_hash_to_item_count" } }
   end
-  own_catalog.quests[888] = { reward_diagnostics = { reward_fixture.diagnostic(888, 40, 77) } }
-  own_catalog.quests[889] = { reward_diagnostics = { reward_fixture.diagnostic(889, 41, 78) } }
-  reward_fixture.scans = { entries = 0, processors = 0 }
+  own_catalog.quests[888] = { reward_diagnostics = { reward_fixture.diagnostic(888, 40, 90) } }
+  own_catalog.quests[889] = { reward_diagnostics = { reward_fixture.diagnostic(889, 41, 91) } }
+  reward_fixture.scans = { entries = 0, processors = 0, event_nodes = 0 }
   reward_fixture.sequence = function(rows, scan_name)
-    return { get_elements = function()
-      if scan_name then reward_fixture.scans[scan_name] = reward_fixture.scans[scan_name] + 1 end
-      return rows
-    end }
+    return { get_elements = function() return rows end,
+      call = function(_, method, index)
+        if method == "get_size" then
+          if scan_name then reward_fixture.scans[scan_name] = reward_fixture.scans[scan_name] + 1 end
+          return #rows
+        elseif method == "get_element" then
+          if scan_name then
+            local key = scan_name .. "_elements"
+            reward_fixture.scans[key] = (reward_fixture.scans[key] or 0) + 1
+          end
+          return rows[index + 1]
+        end
+      end }
   end
   reward_fixture.managed = function(fields, calls)
-    return { get_field = function(_, name) return fields[name] end,
-      call = function(_, name) return calls and calls[name] end }
+    local object = { fields = fields or {}, calls = calls or {} }
+    function object.get_field(_, name)
+      if object.fields.__graph == true then
+        reward_fixture.scans.graph = (reward_fixture.scans.graph or 0) + 1
+      end
+      return object.fields[name]
+    end
+    function object.call(_, name, ...)
+      local value = object.calls[name]
+      if type(value) == "function" then return value(...) end
+      return value
+    end
+    function object.get_address() return object.fields.__address end
+    function object.get_type_definition()
+      if object.fields.__type ~= nil then
+        reward_fixture.scans.type_defs = (reward_fixture.scans.type_defs or 0) + 1
+      end
+      return { get_full_name = function() return object.fields.__type end }
+    end
+    return object
   end
   reward_fixture.entries = reward_fixture.sequence({
     reward_fixture.managed({ key = 77, value = reward_fixture.managed({ _ItemList = reward_fixture.sequence({
       reward_fixture.managed({ _ItemId = 9001, _Num = 2 }) }) }), next = -1 }),
     reward_fixture.managed({ next = -2 }),
     reward_fixture.managed({ key = 78, value = reward_fixture.managed({ _ItemList = reward_fixture.sequence({
-      reward_fixture.managed({ _ItemId = 9999, _Num = 1 }) }) }), next = -1 }),
+      reward_fixture.managed({ _ItemId = 9001, _Num = 3 }) }) }), next = -1 }),
   }, "entries")
   reward_fixture.previous_singleton = sdk.get_managed_singleton
   reward_fixture.calls = { get_Count = 2 }
+  reward_fixture.reward_dict = reward_fixture.managed({ __address = 0x7700,
+    _entries = reward_fixture.entries, _count = 3, _freeCount = 1 }, reward_fixture.calls)
+  reward_fixture.manager_address = 0x7710
+  reward_fixture.destination = reward_fixture.managed({}, {
+    get_DestType = 3, get_CharaID = 101, get_KeyLocation = 2308, get_LocalArea = 0,
+    getDestination = function() return { x = 1, y = 2, z = 3 } end })
+  reward_fixture.current_task = reward_fixture.managed({
+    _Destinations = mcoll({ reward_fixture.destination }) }, {
+    getActiveDestinations = function() return mcoll({ reward_fixture.destination }) end })
+  reward_fixture.quest_log = reward_fixture.managed({ __address = 0x7740,
+    _QuestLogInfoDict = reward_fixture.managed({}, {
+      get_Item = function(qid)
+        return qid == 20040 and reward_fixture.managed({}, {
+          get_CurrentTaskIndex = function() return reward_fixture.current_task_index or 0 end }) or nil
+      end }) }, {
+    getProgressingQuestIds = function() return reward_fixture.progressing_collection
+      or mcoll(reward_fixture.progressing_qids or { 20040 }) end,
+    getCurrentTask = function(qid) return qid == 20040 and reward_fixture.current_task or nil end })
+  reward_fixture.overlay = {}
+  reward_fixture.trigger_action = reward_fixture.managed({}, {
+    get_CurrentPhase = function() return reward_fixture.overlay.trigger_action_phase or 1 end,
+    get_DoneAction = function() return reward_fixture.overlay.action_done == true end,
+    get_CanceledAction = function() return reward_fixture.overlay.action_canceled == true end,
+    get_ActionResultNo = function() return reward_fixture.overlay.action_result or 0 end })
+  reward_fixture.trigger_action.fields.__type = "app.quest.action.Trigger"
+  reward_fixture.reward_action = reward_fixture.managed({}, {
+    get_CurrentPhase = 2, get_DoneAction = false, get_CanceledAction = false,
+    get_ActionResultNo = 0 })
+  reward_fixture.reward_action.fields.__type = "app.quest.action.QuestReward"
+  reward_fixture.reward_action_two = reward_fixture.managed({}, {
+    get_CurrentPhase = 2, get_DoneAction = false, get_CanceledAction = false,
+    get_ActionResultNo = 0 })
+  reward_fixture.reward_action_two.fields.__type = "app.quest.action.QuestReward"
+  reward_fixture.trigger_process = reward_fixture.managed({ QuestAction = reward_fixture.trigger_action }, {
+    get_CurrentPhase = function() return reward_fixture.overlay.process_phase or 1 end,
+    get_Executed = function() return reward_fixture.overlay.process_executed == true end,
+    get_Canceled = function() return reward_fixture.overlay.process_canceled == true end })
+  reward_fixture.reward_process = reward_fixture.managed({ QuestAction = reward_fixture.reward_action }, {
+    get_CurrentPhase = 1, get_Executed = false, get_Canceled = false })
+  reward_fixture.trigger_process_two = reward_fixture.managed({ QuestAction = reward_fixture.trigger_action }, {
+    get_CurrentPhase = function() return reward_fixture.overlay.process_phase or 1 end,
+    get_Executed = function() return reward_fixture.overlay.process_executed == true end,
+    get_Canceled = function() return reward_fixture.overlay.process_canceled == true end })
+  reward_fixture.reward_process_two = reward_fixture.managed({ QuestAction = reward_fixture.reward_action_two }, {
+    get_CurrentPhase = 1, get_Executed = false, get_Canceled = false })
+  reward_fixture.trigger_processor = reward_fixture.managed({ ProcID = 1040,
+    Process = reward_fixture.trigger_process }, {
+    get_CurrentPhase = function() return reward_fixture.overlay.trigger_processor_phase or 3 end })
+  reward_fixture.reward_processor = reward_fixture.managed({ ProcID = 40,
+    Process = reward_fixture.reward_process }, {
+    get_CurrentPhase = function() return reward_fixture.overlay.reward_processor_phase or 1 end })
+  reward_fixture.trigger_processor_two = reward_fixture.managed({ ProcID = 1042,
+    Process = reward_fixture.trigger_process_two }, {
+    get_CurrentPhase = function() return reward_fixture.overlay.trigger_processor_phase or 3 end })
+  reward_fixture.reward_processor_two = reward_fixture.managed({ ProcID = 42,
+    Process = reward_fixture.reward_process_two }, {
+    get_CurrentPhase = function() return reward_fixture.overlay.reward_processor_phase or 1 end })
+  reward_fixture.processor_list = reward_fixture.sequence({
+    reward_fixture.reward_processor, reward_fixture.reward_processor_two,
+    reward_fixture.trigger_processor, reward_fixture.trigger_processor_two }, "processors")
+  reward_fixture.controller = reward_fixture.managed({ __address = 0x7780,
+    _ProcessorFolderController = reward_fixture.managed({ _ProcessorList = reward_fixture.processor_list }) })
+  reward_fixture.quest_entity = reward_fixture.managed({ Controller = reward_fixture.controller })
+  reward_fixture.entity_dict = reward_fixture.managed({}, {
+    get_Item = function(qid) return qid == 20040 and reward_fixture.quest_entity or nil end })
+  reward_fixture.reward_root_edge = reward_fixture.managed({ _NextNodeId = "reward-end",
+    _NextNodeNameHash = 202, _Conditions = reward_fixture.managed({
+      _ConditionList = reward_fixture.sequence({}) }) })
+  reward_fixture.reward_root = reward_fixture.managed({ __type = "app.RootSegmentNode",
+    __graph = true,
+    _NodeId = "reward-root", _NodeNameHash = 201,
+    _NextNodesCandidates = reward_fixture.sequence({ reward_fixture.reward_root_edge }) })
+  reward_fixture.reward_end = reward_fixture.managed({ __type = "app.EndSegmentNode",
+    __graph = true,
+    _NodeId = "reward-end", _NodeNameHash = 202, _Result = 0, _IsKeepPreviousResult = false,
+    _NextNodesCandidates = reward_fixture.sequence({}) })
+  reward_fixture.event_data = reward_fixture.managed({ __address = 0x200400,
+    _SegmentNodes = reward_fixture.sequence({ reward_fixture.reward_root, reward_fixture.reward_end }, "event_nodes") })
+  reward_fixture.talk_catalog = reward_fixture.managed({}, {
+    get_Item = function(event_id)
+      return event_id == 20040 and reward_fixture.managed({ _Item = reward_fixture.event_data }) or nil
+    end })
+  reward_fixture.talk_manager = reward_fixture.managed({
+    _ResourceCatalog = reward_fixture.managed({ ["<MergedCatalog>k__BackingField"] = reward_fixture.talk_catalog }),
+    _PlayingEventIDList = mcoll({}) }, {
+    getTalkEventInitialSpeaker = function()
+      if reward_fixture.overlay.initial_speaker_absent then return nil end
+      return reward_fixture.overlay.initial_speaker_cid or 101
+    end,
+    isEventPlayable = function() return reward_fixture.overlay.playable ~= false end,
+    getHistory = function()
+      if reward_fixture.history_claimed then return reward_fixture.managed({ Played = true, ResultNum = 0 }) end
+      if reward_fixture.overlay.history_played ~= nil then
+        return reward_fixture.managed({ Played = reward_fixture.overlay.history_played, ResultNum = 0 })
+      end
+      return nil
+    end,
+    isTalkEventInteractDisabled = function() return reward_fixture.overlay.interaction_disabled == true end,
+    canTalkEventInteract = function() return reward_fixture.overlay.interaction_allowed ~= false end })
+  reward_fixture.speaker = reward_fixture.managed({}, {
+    get_UniversalPosition = function()
+      if reward_fixture.overlay.position_unreadable then return nil end
+      return reward_fixture.overlay.position or { x = 1, y = 2, z = 3 }
+    end })
+  reward_fixture.speaker_holder = reward_fixture.managed({}, {
+    get_chara = function() return reward_fixture.speaker end })
+  reward_fixture.npc_manager = reward_fixture.managed({ NPCHolderDic = reward_fixture.managed({}, {
+    get_Item = function(cid)
+      if reward_fixture.overlay.speaker_present == false then return nil end
+      if reward_fixture.overlay.initial_speaker_absent then return nil end
+      return cid == (reward_fixture.overlay.initial_speaker_cid or 101)
+        and reward_fixture.speaker_holder or nil
+    end }) })
   reward_fixture.singleton = function(name)
-    if name == "app.QuestManager" then return reward_fixture.managed({
-      RewardDict = reward_fixture.managed({ _entries = reward_fixture.entries,
-        _count = 3, _freeCount = 1 }, reward_fixture.calls),
-      DistributedQuestProcessors = reward_fixture.sequence({
-        reward_fixture.managed({ ProcID = 40 }), reward_fixture.managed({ ProcID = 41 }) }, "processors") }) end
+    if name == "app.QuestManager" then return reward_fixture.managed({ __address = reward_fixture.manager_address,
+      RewardDict = reward_fixture.reward_dict, EntityDict = reward_fixture.entity_dict }) end
+    if name == "app.QuestLogManager" then return reward_fixture.quest_log end
+    if name == "app.TalkEventManager" then return reward_fixture.talk_manager end
+    if name == "app.NPCManager" then return reward_fixture.npc_manager end
     return reward_fixture.previous_singleton(name)
   end
-  sdk.get_managed_singleton = reward_fixture.singleton
   reward_fixture.previous_need_groups = ai.objective_need_groups
   own_catalog.quests[890] = { reward_diagnostics = { false } }
   local owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
@@ -4837,6 +5087,11 @@ do
   iclk = iclk + 10
   ai.refresh_items("needs")
   owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  own_catalog.quests[20040].reward_diagnostics = {
+    reward_fixture.diagnostic(20040, 40, 77),
+    reward_fixture.diagnostic(20040, 42, 78, 1) }
+  own_catalog.quests[888].reward_diagnostics = {}
+  own_catalog.quests[889].reward_diagnostics = {}
   og.test_process.calls.evaluate = false
   owned_snapshot._condition_case = ai.objective_task_snapshot({ 20040 }, own_catalog).quests[1]
   assert(owned_snapshot._condition_case.item_ownership[1].eligibility == "ineligible"
@@ -4903,79 +5158,431 @@ do
   owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   reward_fixture.original_need_generation = owned_snapshot.need_generation
   sdk.get_managed_singleton = reward_fixture.singleton
+  do (function()
+    local singleton_reads = 0
+    sdk.get_managed_singleton = function(name)
+      if name == "app.QuestLogManager" or name == "app.QuestManager" then
+        singleton_reads = singleton_reads + 1
+      end
+      return reward_fixture.singleton(name)
+    end
+    local empty_wanted = ai.read_objective_reward_observation({ false }, {}, nil, nil)
+    sdk.get_managed_singleton = reward_fixture.singleton
+    assert(empty_wanted.complete and empty_wanted.owner_token == "empty-wanted"
+      and singleton_reads == 0 and #empty_wanted.reward_outputs == 0
+      and #empty_wanted.progressing_qids == 0,
+      "empty reward wanted set returns before QuestLogManager or QuestManager reads")
+  end)() end
   ai.objective_need_groups = function()
-    return { status = "ok", complete = true, groups = { { options = { { item_id = 9001 } } } } }
+    return { status = "ok", complete = true, groups = { { options = {
+      { item_id = reward_fixture.wanted_id or 9001 } } } } }
   end
+  reward_fixture.managed_observation = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77),
+      reward_fixture.diagnostic(20040, 42, 78, 1) }, { [9001] = true },
+    owned_snapshot, own_catalog.quests)
+  assert(reward_fixture.managed_observation.complete
+    and reward_fixture.managed_observation.controllers[1].processors[3].process_completed == false
+    and reward_fixture.managed_observation.controllers[1].processors[3].process_canceled == false
+    and reward_fixture.managed_observation.controllers[1].processors[3].nested_action_completed == false
+    and reward_fixture.managed_observation.controllers[1].processors[3].nested_action_canceled == false,
+    "managed processor reads preserve all four readable false frontier flags: "
+      .. tostring(reward_fixture.managed_observation.complete) .. "/"
+      .. tostring(reward_fixture.managed_observation.reason) .. "/"
+      .. tostring(reward_fixture.managed_observation.controllers[1]
+        and #reward_fixture.managed_observation.controllers[1].processors) .. "/"
+      .. tostring(reward_fixture.managed_observation.controllers[1]
+        and reward_fixture.managed_observation.controllers[1].processors[3]
+        and reward_fixture.managed_observation.controllers[1].processors[3].process_completed))
   local source_snapshots = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
-  assert(source_snapshots[4].provider == "reward" and source_snapshots[4].status == "unknown"
-    and source_snapshots[4].reward_runtime_complete == true
-    and #source_snapshots[4].candidates == 0 and #source_snapshots[4].diagnostic_rows == 1
-    and source_snapshots[4].diagnostic_rows[1].qid == 888
-    and source_snapshots[4].diagnostic_rows[1].processor_present == true
-    and source_snapshots[4].diagnostic_rows[1].outputs[1].item_id == 9001
-    and source_snapshots[4].diagnostic_rows[1].outputs[1].count == 2,
-    "reward diagnostics join matching nonfocused reward output and runtime processor without eligibility")
+  assert(source_snapshots[4].provider == "reward" and source_snapshots[4].status == "ok"
+    and source_snapshots[4].complete == true
+    and source_snapshots[4].source_status.complete == true
+    and #source_snapshots[4].candidates == 1
+    and #source_snapshots[4].diagnostic_rows == 0
+    and source_snapshots[4].candidates[1].outputs[1].item_id == 9001
+    and source_snapshots[4].candidates[1].outputs[1].count == 5
+    and #source_snapshots[4].candidates[1].source_id == 13
+    and source_snapshots[4].candidates[1].target.cid == 101,
+    "managed co-granted rewards union outputs and one capacity through adapter policy: "
+      .. tostring(source_snapshots[4].status) .. "/" .. tostring(source_snapshots[4].reason)
+      .. "/" .. tostring(#source_snapshots[4].candidates) .. "/"
+      .. tostring(source_snapshots[4].candidates[1] and source_snapshots[4].candidates[1].outputs[1]
+        and source_snapshots[4].candidates[1].outputs[1].count))
+  owned_snapshot.objective_needs = { status = "ok", complete = true,
+    generation = owned_snapshot.need_generation, source_generation = owned_snapshot.need_generation,
+    groups = { { id = { "need", 20040, 0, 0 }, qid = 20040, task_index = 0,
+      remaining = 1, options = { { item_id = 9001, accepted_count = 1 } },
+      status = "eligible", complete = true, generation = owned_snapshot.need_generation } } }
+  reward_fixture.registry = require("Clairvoyance.core").target_registry_new()
+  reward_fixture.core_snapshot = require("Clairvoyance.core").objective_snapshot(
+    owned_snapshot, nil, source_snapshots, reward_fixture.registry)
+  reward_fixture.routes = require("Clairvoyance.core").objective_routes(
+    reward_fixture.core_snapshot, { x = 0, y = 0, z = 0 },
+    { objective_places = true, focus_order = { 20040 } })
+  reward_fixture.markers = require("Clairvoyance.core").objective_markers(
+    {}, {}, reward_fixture.core_snapshot, { objective_places = true, focus_order = { 20040 } })
+  reward_fixture.reward_marker_count = 0
+  for _, marker in ipairs(reward_fixture.markers) do
+    if marker.objective_kind == "source" then
+      reward_fixture.reward_marker_count = reward_fixture.reward_marker_count + 1
+    end
+  end
+  assert(#reward_fixture.core_snapshot.targets == 2 and #reward_fixture.routes.members == 1
+    and reward_fixture.reward_marker_count == 1,
+    "adapter reward output reaches one focused marker and route through the real core")
+  reward_fixture.history_claimed = true
+  reward_fixture.claimed = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  reward_fixture.claimed_core = require("Clairvoyance.core").objective_snapshot(
+    owned_snapshot, nil, { reward_fixture.claimed }, reward_fixture.registry)
+  reward_fixture.claimed_routes = require("Clairvoyance.core").objective_routes(
+    reward_fixture.claimed_core, { x = 0, y = 0, z = 0 },
+    { objective_places = true, focus_order = { 20040 } })
+  reward_fixture.claimed_markers = require("Clairvoyance.core").objective_markers(
+    {}, {}, reward_fixture.claimed_core, { objective_places = true, focus_order = { 20040 } })
+  reward_fixture.claimed_source_markers = 0
+  for _, marker in ipairs(reward_fixture.claimed_markers) do
+    if marker.objective_kind == "source" then
+      reward_fixture.claimed_source_markers = reward_fixture.claimed_source_markers + 1
+    end
+  end
+  assert(#reward_fixture.claimed.candidates == 1
+    and reward_fixture.claimed.candidates[1].eligibility == "ineligible"
+    and reward_fixture.claimed.candidates[1].outputs[1].count == 5
+    and #reward_fixture.claimed_core.targets == 1
+    and #reward_fixture.claimed_routes.members == 0
+    and reward_fixture.claimed_source_markers == 0,
+    "claim-state loss removes adapter reward marker and route atomically: "
+      .. tostring(reward_fixture.claimed.status) .. "/" .. tostring(reward_fixture.claimed.reason)
+      .. "/" .. tostring(#reward_fixture.claimed.candidates) .. "/"
+      .. tostring(reward_fixture.claimed.candidates[1] and reward_fixture.claimed.candidates[1].eligibility)
+      .. "/" .. tostring(#reward_fixture.claimed_core.targets) .. "/"
+      .. tostring(#reward_fixture.claimed_routes.members) .. "/"
+      .. tostring(reward_fixture.claimed_source_markers))
+  reward_fixture.history_claimed = false
+  source_snapshots[4] = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
   reward_fixture.first_generation = source_snapshots[4].generation
-  reward_fixture.reads_after_first = reward_fixture.scans.entries + reward_fixture.scans.processors
-  assert(#ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].diagnostic_rows == 1
-    and reward_fixture.scans.entries + reward_fixture.scans.processors == reward_fixture.reads_after_first
-    and ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].generation
-      == reward_fixture.first_generation,
-    "same-task reward snapshot reuses cached diagnostics inside the half-second window")
+  reward_fixture.entries_after_first = reward_fixture.scans.entries
+  reward_fixture.processors_after_first = reward_fixture.scans.processors
+  reward_fixture.graph_after_first = reward_fixture.scans.graph
+  reward_fixture.event_elements_after_first = reward_fixture.scans.event_nodes_elements
+  reward_fixture.type_defs_after_first = reward_fixture.scans.type_defs
+  reward_fixture.reused = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(#reward_fixture.reused.candidates == 1 and reward_fixture.reused.status == "ok"
+    and reward_fixture.scans.entries == reward_fixture.entries_after_first
+    and reward_fixture.scans.graph == reward_fixture.graph_after_first
+    and reward_fixture.scans.event_nodes_elements == reward_fixture.event_elements_after_first
+    and reward_fixture.scans.type_defs == reward_fixture.type_defs_after_first
+    and reward_fixture.reused.generation == reward_fixture.first_generation,
+    "live overlays reclassify without reopening reward mappings or event graphs: "
+      .. tostring(reward_fixture.reused.status) .. "/" .. tostring(reward_fixture.reused.reason)
+      .. "/" .. tostring(#reward_fixture.reused.candidates) .. "/"
+      .. tostring(reward_fixture.reused.generation) .. "/" .. tostring(reward_fixture.first_generation))
+  do (function()
+  local overlay_event = A.read_objective_talk_grant_observation({}, { 20040 }).events[1]
+  assert(overlay_event and overlay_event.playable == true
+    and overlay_event.speaker_present == true and overlay_event.history.present == false,
+    "reward event overlay baseline has readable playability and speaker presence")
+  local overlay_graph_before = reward_fixture.scans.graph
+  local overlay_entries_before = reward_fixture.scans.entries
+  local overlay_type_defs_before = reward_fixture.scans.type_defs
+  reward_fixture.overlay.playable = false
+  overlay_event = A.read_objective_talk_grant_observation({}, { 20040 }).events[1]
+  assert(overlay_event.playable_readable and overlay_event.playable == false,
+    "reward event playability is read fresh")
+  reward_fixture.overlay.playable = true
+  reward_fixture.overlay.history_played = true
+  overlay_event = A.read_objective_talk_grant_observation({}, { 20040 }).events[1]
+  assert(overlay_event.history.played_readable and overlay_event.history.played == true,
+    "reward event history is read fresh")
+  reward_fixture.overlay.history_played = nil
+  reward_fixture.overlay.initial_speaker_absent = true
+  overlay_event = A.read_objective_talk_grant_observation({}, { 20040 }).events[1]
+  assert(overlay_event.initial_speaker_readable and overlay_event.initial_speaker_cid == nil
+    and overlay_event.speaker_present_readable and overlay_event.speaker_present == false,
+    "reward event distinguishes an absent initial speaker from an unreadable lookup")
+  reward_fixture.overlay.initial_speaker_absent = nil
+  reward_fixture.overlay.position_unreadable = true
+  overlay_event = A.read_objective_talk_grant_observation({}, { 20040 }).events[1]
+  assert(overlay_event.speaker.position_readable == false,
+    "reward event speaker position is read fresh")
+  reward_fixture.overlay.position_unreadable = nil
+  reward_fixture.overlay.interaction_disabled = true
+  overlay_event = A.read_objective_talk_grant_observation({}, { 20040 }).events[1]
+  assert(overlay_event.speaker.interaction_disabled_readable
+    and overlay_event.speaker.interaction_disabled == true,
+    "reward event reads the disabled interaction gate")
+  reward_fixture.overlay.interaction_disabled = nil
+  reward_fixture.overlay.interaction_allowed = false
+  overlay_event = A.read_objective_talk_grant_observation({}, { 20040 }).events[1]
+  assert(overlay_event.speaker.interaction_allowed_readable
+    and overlay_event.speaker.interaction_allowed == false,
+    "reward event reads the allowed interaction gate")
+  reward_fixture.overlay.interaction_allowed = nil
+  reward_fixture.overlay.process_phase = 3
+  reward_fixture.overlay.trigger_processor_phase = 4
+  reward_fixture.overlay.action_result = 2
+  local overlay_controller = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    owned_snapshot, own_catalog.quests)
+  assert(overlay_controller.complete and overlay_controller.controllers[1].processors[3].process_phase == "Executed"
+    and overlay_controller.controllers[1].processors[3].processor_phase == "Completed"
+    and overlay_controller.controllers[1].processors[3].nested_action_result == 2,
+    "reward processor phases and result are read fresh")
+  reward_fixture.overlay = {}
+  assert(reward_fixture.scans.graph == overlay_graph_before
+    and reward_fixture.scans.entries == overlay_entries_before
+    and reward_fixture.scans.type_defs == overlay_type_defs_before,
+    "event and processor overlays do not rebuild reward mappings or event graphs: "
+      .. tostring(reward_fixture.scans.graph) .. "/" .. tostring(overlay_graph_before) .. "/"
+      .. tostring(reward_fixture.scans.entries) .. "/" .. tostring(overlay_entries_before))
+
+  local entries_before_manager = reward_fixture.scans.entries
+  reward_fixture.manager_address = 0x7711
+  local manager_replacement = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(manager_replacement.status == "ok" and #manager_replacement.candidates == 1
+    and reward_fixture.scans.entries == entries_before_manager + 1,
+    "QuestManager identity change rebuilds reward mappings once")
+  reward_fixture.manager_address = 0x7710
+  local manager_restored = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(manager_restored.status == "ok" and #manager_restored.candidates == 1,
+    "restoring QuestManager identity restores the current reward mapping")
+  local entries_before_dict = reward_fixture.scans.entries
+  reward_fixture.reward_dict = reward_fixture.managed({ __address = 0x7701,
+    _entries = reward_fixture.entries, _count = 3, _freeCount = 1 }, reward_fixture.calls)
+  local dict_replacement = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(dict_replacement.status == "ok" and #dict_replacement.candidates == 1
+    and reward_fixture.scans.entries == entries_before_dict + 1,
+    "RewardDict identity change rebuilds reward mappings once")
+  local processor_elements_before_controller = reward_fixture.scans.processors_elements or 0
+  local type_defs_before_controller = reward_fixture.scans.type_defs
+  reward_fixture.quest_entity.fields.Controller = reward_fixture.managed({ __address = 0x7781,
+    _ProcessorFolderController = reward_fixture.managed({ _ProcessorList = reward_fixture.processor_list }) })
+  local controller_replacement = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    owned_snapshot, own_catalog.quests)
+  assert(controller_replacement.complete
+    and (reward_fixture.scans.processors_elements or 0) > processor_elements_before_controller
+    and reward_fixture.scans.type_defs == type_defs_before_controller + 4
+    and reward_fixture.scans.graph == overlay_graph_before,
+    "quest controller identity change rebuilds processor structure without rebuilding event graph")
+  local original_controller_list = reward_fixture.processor_list
+  local processor_elements_before_count = reward_fixture.scans.processors_elements or 0
+  local type_defs_before_count = reward_fixture.scans.type_defs
+  local extra_action = reward_fixture.managed({}, { get_CurrentPhase = 2, get_DoneAction = false,
+    get_CanceledAction = false, get_ActionResultNo = 0 })
+  extra_action.fields.__type = "app.quest.action.Trigger"
+  local extra_process = reward_fixture.managed({ QuestAction = extra_action }, {
+    get_CurrentPhase = 1, get_Executed = false, get_Canceled = false })
+  local extra_processor = reward_fixture.managed({ ProcID = 1050, Process = extra_process }, {
+    get_CurrentPhase = 1 })
+  reward_fixture.processor_list = reward_fixture.sequence({
+    reward_fixture.reward_processor, reward_fixture.reward_processor_two,
+    reward_fixture.trigger_processor, reward_fixture.trigger_processor_two,
+    extra_processor }, "processors")
+  reward_fixture.quest_entity.fields.Controller.fields._ProcessorFolderController.fields._ProcessorList
+    = reward_fixture.processor_list
+  local processor_count_change = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    owned_snapshot, own_catalog.quests)
+  assert(processor_count_change.complete and #processor_count_change.controllers[1].processors == 5
+    and (reward_fixture.scans.processors_elements or 0) > processor_elements_before_count
+    and reward_fixture.scans.type_defs == type_defs_before_count + 5,
+    "processor count change rebuilds the structural processor snapshot")
+  reward_fixture.processor_list = original_controller_list
+  reward_fixture.quest_entity.fields.Controller.fields._ProcessorFolderController.fields._ProcessorList
+    = original_controller_list
+  local restored_processors = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    owned_snapshot, own_catalog.quests)
+  assert(restored_processors.complete and #restored_processors.controllers[1].processors == 4,
+    "restoring processor count returns the structural snapshot to four processors")
+  reward_fixture.progressing_qids = { 20040, 20041 }
+  local progressing_change = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    owned_snapshot, own_catalog.quests)
+  assert(progressing_change.complete and #progressing_change.progressing_qids == 2
+    and progressing_change.progressing_qids[2] == 20041,
+    "progressing quest ID changes are observed in the structural snapshot")
+  reward_fixture.progressing_qids = nil
+  do (function()
+    local progressing_rows = {}
+    for i = 1, 65 do progressing_rows[i] = 21000 + i end
+    reward_fixture.scans.progressing = 0
+    reward_fixture.progressing_collection = reward_fixture.sequence(progressing_rows, "progressing")
+    local progressing_bounded = ai.read_objective_reward_observation(
+      { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+      owned_snapshot, own_catalog.quests)
+    assert(not progressing_bounded.complete and progressing_bounded.reason == "progressing_set_truncated"
+      and (reward_fixture.scans.progressing_elements or 0) == 0,
+      "progressing managed IDs are capped before collection materialization: "
+        .. tostring(progressing_bounded.complete) .. "/" .. tostring(progressing_bounded.reason)
+        .. "/" .. tostring(reward_fixture.scans.progressing_elements))
+    reward_fixture.progressing_collection = nil
+  end)() end
+  do (function()
+    local many_rows, many_catalog = {}, {}
+    for i = 1, 65 do
+      local qid = 21000 + i
+      many_rows[i] = reward_fixture.diagnostic(qid, 40, 77)
+      many_catalog[qid] = own_catalog.quests[20040]
+    end
+    reward_fixture.progressing_qids = {}
+    local processor_reads = reward_fixture.scans.processors
+    local graph_reads = reward_fixture.scans.graph
+    local bounded = ai.read_objective_reward_observation(many_rows, { [9001] = true },
+      owned_snapshot, many_catalog)
+    assert(bounded.complete and #bounded.progressing_qids == 0 and #bounded.tasks == 0
+      and #bounded.controllers == 0 and #bounded.events == 0
+      and reward_fixture.scans.processors == processor_reads
+      and reward_fixture.scans.graph == graph_reads,
+      "nonprogressing relevant catalog rows exceed no live-read or 64-qid budget")
+    local classified = A.reward_sources.classify(many_rows, bounded, 4)
+    assert(classified.complete and #classified.candidates == 0
+      and #classified.source_status.rows == 65
+      and classified.source_status.rows[1].reason_code == "quest_not_progressing",
+      "nonprogressing reward members retain candidate-local status without live task reads")
+    reward_fixture.progressing_qids = nil
+  end)() end
+  do (function()
+  local task_target_before = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    owned_snapshot, own_catalog.quests)
+  own_catalog.quests[20040].tasks[1].destinations[1].cid = 102
+  reward_fixture.destination.calls.get_CharaID = 102
+  local changed_task_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  local task_target_changed = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    changed_task_snapshot, own_catalog.quests)
+  assert(task_target_before.complete and task_target_changed.complete
+    and task_target_changed.tasks[1].targets[1].cid == 102,
+    "task target mutation is read into a fresh reward structure")
+  local stale_target_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  stale_target_snapshot.quests[1].task_destinations[1].target.cid = 101
+  local mixed_target = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    stale_target_snapshot, own_catalog.quests)
+  assert(not mixed_target.complete and mixed_target.reason == "current_task_changed",
+    "same-index task target mismatch cannot mix reward and objective snapshots")
+  stale_target_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
+  local place_identity_changed = false
+  for _, destination in ipairs(stale_target_snapshot.quests[1].task_destinations) do
+    if destination.kind == "place" and type(destination.target.place) == "table" then
+      destination.target.place.key = destination.target.place.key + 1
+      place_identity_changed = true
+    end
+  end
+  local mixed_place = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    stale_target_snapshot, own_catalog.quests)
+  assert(place_identity_changed and not mixed_place.complete
+    and mixed_place.reason == "current_task_changed",
+    "same-index place key mismatch cannot mix reward and objective snapshots")
+  own_catalog.quests[20040].tasks[1].destinations[1].cid = 101
+  reward_fixture.destination.calls.get_CharaID = 101
+  local task_target_restored = ai.read_objective_reward_observation(
+    { reward_fixture.diagnostic(20040, 40, 77) }, { [9001] = true },
+    owned_snapshot, own_catalog.quests)
+  assert(task_target_restored.complete and task_target_restored.tasks[1].targets[1].cid == 101,
+    "restoring task target returns the original reward structure")
+  end)() end
+  local before_wanted_change = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  reward_fixture.wanted_id = 9002
+  local wanted_change = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(wanted_change.generation > before_wanted_change.generation
+    and #wanted_change.candidates == 0,
+    "wanted-set mutation invalidates the cached reward classification")
+  reward_fixture.wanted_id = nil
+  local wanted_restored = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(wanted_restored.status == "ok" and #wanted_restored.candidates == 1,
+    "restoring wanted IDs restores the verified reward candidate")
+  local before_catalog_change = wanted_restored
+  local catalog_join = own_catalog.quests[20040].reward_diagnostics[1].unresolved_joins
+  local old_join = catalog_join[1]
+  catalog_join[1] = old_join .. "_changed"
+  local catalog_changed = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(catalog_changed.generation > before_catalog_change.generation,
+    "catalog evidence signature mutation invalidates the cached reward classification")
+  catalog_join[1] = old_join
+  local catalog_restored = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(catalog_restored.status == "ok" and #catalog_restored.candidates == 1,
+    "restoring catalog evidence restores the verified reward candidate")
+  own_catalog.quests[20041] = { reward_diagnostics = {
+    reward_fixture.diagnostic(20041, 43, 99) } }
+  reward_fixture.missing_mapping = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(reward_fixture.missing_mapping.status == "unknown"
+    and #reward_fixture.missing_mapping.candidates == 0,
+    "nonfocused reward with a missing runtime mapping fails closed")
+  own_catalog.quests[20041] = nil
+  reward_fixture.entries_after_first = reward_fixture.scans.entries
+  reward_fixture.processors_after_first = reward_fixture.scans.processors
+  reward_fixture.graph_after_first = reward_fixture.scans.graph
+  reward_fixture.event_elements_after_first = reward_fixture.scans.event_nodes_elements
+  reward_fixture.type_defs_after_first = reward_fixture.scans.type_defs
+  end)() end
   owned_snapshot.quests[1].task_index = owned_snapshot.quests[1].task_index + 1
-  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
-      == "reward_snapshot_refresh_pending"
-    and #ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].diagnostic_rows == 0
-    and reward_fixture.scans.entries == 1 and reward_fixture.scans.processors == 1,
-    "task change invalidates old reward diagnostics and respects scan cadence")
-  iclk = iclk + 0.6
-  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].generation
-      > source_snapshots[4].generation
-    and reward_fixture.scans.entries == 2 and reward_fixture.scans.processors == 2,
-    "task change refreshes reward diagnostics after the cadence window")
+  reward_fixture.current_task_index = 1
+  reward_fixture.changed_task = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(reward_fixture.changed_task.status == "unknown" and #reward_fixture.changed_task.candidates == 0
+    and reward_fixture.changed_task.generation > reward_fixture.first_generation,
+    "task change invalidates the reward endpoint before publishing a stale target")
   owned_snapshot.quests[1].task_index = owned_snapshot.quests[1].task_index - 1
+  reward_fixture.current_task_index = 0
+  reward_fixture.restored_task = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(reward_fixture.restored_task.status == "ok" and #reward_fixture.restored_task.candidates == 1,
+    "restoring the live task restores its verified reward source")
+  reward_fixture.graph_before_replacement = reward_fixture.scans.graph
+  reward_fixture.event_data = reward_fixture.managed({ __address = 0x200401,
+    _SegmentNodes = reward_fixture.sequence({ reward_fixture.reward_root, reward_fixture.reward_end }, "event_nodes") })
+  local replaced_event = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  reward_fixture.graph_after_replacement = reward_fixture.scans.graph
+  reward_fixture.same_event = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(replaced_event.status == "ok" and #replaced_event.candidates == 1
+    and reward_fixture.graph_after_replacement > reward_fixture.graph_before_replacement
+    and reward_fixture.scans.graph == reward_fixture.graph_after_replacement
+    and reward_fixture.same_event.generation == replaced_event.generation,
+    "event resource replacement triggers one graph rebuild, then reuses the new graph")
+  local graph_before_overlay = reward_fixture.scans.graph
+  reward_fixture.overlay.process_executed = true
+  reward_fixture.overlay_changed = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(#reward_fixture.overlay_changed.candidates == 1
+    and reward_fixture.overlay_changed.candidates[1].eligibility == "unknown"
+    and reward_fixture.scans.graph == graph_before_overlay
+    and reward_fixture.scans.entries == reward_fixture.entries_after_first,
+    "processor live-state change reclassifies without a structural rescan")
+  reward_fixture.overlay.process_executed = nil
   owned_snapshot.need_generation = owned_snapshot.need_generation + 1
-  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
-      == "reward_snapshot_refresh_pending"
-    and #ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].diagnostic_rows == 0,
-    "need change does not reuse stale reward diagnostics")
-  iclk = iclk + 0.6
-  ai.objective_item_source_snapshots(own_catalog, owned_snapshot)
-  assert(reward_fixture.scans.entries == 3 and reward_fixture.scans.processors == 3,
-    "need change refreshes reward diagnostics after the cadence window")
+  reward_fixture.changed_need = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(reward_fixture.changed_need.status == "ok" and #reward_fixture.changed_need.candidates == 1,
+    "a fresh complete need generation is classified against the same live reward graph")
   reward_fixture.calls.get_Count = 1
   owned_snapshot.need_generation = owned_snapshot.need_generation + 1
-  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
-      == "reward_snapshot_refresh_pending",
-    "changed need set waits for the bounded runtime scan")
-  iclk = iclk + 0.6
-  assert(ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].reason
-      == "reward_runtime_scan_incomplete"
-    and #ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4].candidates == 0,
-    "inconsistent RewardDict count fails closed")
-  assert(reward_fixture.scans.entries == 4 and reward_fixture.scans.processors == 4,
-    "incomplete runtime observation is cached inside the half-second window")
+  reward_fixture.malformed = ai.objective_item_source_snapshots(own_catalog, owned_snapshot)[4]
+  assert(reward_fixture.malformed.status == "unknown" and #reward_fixture.malformed.candidates == 0
+    , "inconsistent RewardDict count fails closed during the immediate structural refresh")
   reward_fixture.calls.get_Count = 2
   own_catalog.quests[20040].reward_diagnostics = {
-    reward_fixture.diagnostic(20040, 40, 77) }
+    reward_fixture.diagnostic(20040, 40, 77),
+    reward_fixture.diagnostic(20040, 42, 78, 1) }
   ai.objective_need_groups = function()
     return { status = "ok", complete = true, groups = {} }
   end
   owned_snapshot.need_generation = owned_snapshot.need_generation + 1
   iclk = iclk + 0.6
-  local proven_empty_reward = ai.objective_item_source_snapshots(
+  reward_fixture.empty_reward = ai.objective_item_source_snapshots(
     own_catalog, owned_snapshot)[4]
-  assert(proven_empty_reward.reason == "reward_task_branch_and_claim_gates_unproven"
-    and #proven_empty_reward.diagnostic_rows == 1,
-    "a proven empty need set may retain focused reward diagnostics")
+  assert(reward_fixture.empty_reward.status == "ok" and reward_fixture.empty_reward.complete
+    and #reward_fixture.empty_reward.candidates == 0
+    and #reward_fixture.empty_reward.source_status.rows == 0,
+    "a complete empty need set publishes no stale reward candidate")
   ai.objective_need_groups = function()
     return { status = "unknown", complete = false, groups = {} }
   end
-  local unknown_need_reward = ai.objective_item_source_snapshots(
+  reward_fixture.unknown_need = ai.objective_item_source_snapshots(
     own_catalog, owned_snapshot)[4]
-  assert(unknown_need_reward.reason == "reward_snapshot_refresh_pending"
-    and #unknown_need_reward.diagnostic_rows == 0,
-    "loss of need-set completeness invalidates cached reward diagnostics")
+  assert(reward_fixture.unknown_need.reason == "reward_observation_incomplete"
+    and #reward_fixture.unknown_need.diagnostic_rows == 0,
+    "loss of need-set completeness invalidates cached reward classification")
   own_catalog.quests[20040].reward_diagnostics = nil
   owned_snapshot.need_generation = reward_fixture.original_need_generation
   ai.objective_need_groups = reward_fixture.previous_need_groups
@@ -4988,10 +5595,10 @@ do
     and source_snapshots[2].complete == false
     and source_snapshots[2].reason == "source_catalog_unavailable"
     and source_snapshots[4].provider == "reward"
-    and source_snapshots[4].status == "unknown"
-    and source_snapshots[4].complete == false
-    and source_snapshots[4].reason == "reward_task_branch_and_claim_gates_unproven"
-    and #source_snapshots[4].candidates == 0
+    and source_snapshots[4].status == "ok"
+    and source_snapshots[4].complete == true
+    and source_snapshots[4].reason == nil
+    and #source_snapshots[4].candidates == 1
     and source_snapshots[4].generation > 0
     and source_snapshots[5].provider == "talk_grant"
     and source_snapshots[5].status == "unknown"
@@ -5015,6 +5622,7 @@ do
     and #source_snapshots[1].signal_evidence > 0
     and #source_snapshots[1].guidance_delivery_refs > 0,
     "objective item source snapshots are generation-tagged unknown envelopes with evidence")
+  owned_snapshot = ai.objective_task_snapshot({ 20040 }, own_catalog)
   local owned_repeat = ai.objective_task_snapshot({ 20040 }, own_catalog)
   assert(owned_repeat.focus_epoch == owned_snapshot.focus_epoch
     and owned_repeat.journal_generation == owned_snapshot.journal_generation
