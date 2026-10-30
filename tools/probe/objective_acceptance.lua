@@ -19,7 +19,9 @@ end
 for _, route in ipairs(focus.routes or {}) do
   if route.objective == true then
     objective_route_count = objective_route_count + 1
-    if route.kind == "source" and source_target_keys[route.target_key] then
+    -- The final renderer presents direct source routes as kind="item"; stable
+    -- target ownership, not presentation kind, proves the route-source join.
+    if source_target_keys[route.target_key] then
       source_route_count = source_route_count + 1
     end
   end

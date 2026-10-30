@@ -90,9 +90,13 @@ the world tracker as the `wt` upvalue of `D.state`.
    boundary stays unknown. After a success line, the runner waits briefly and
    fails if the framework reports an engine exception or writes/changes a crash
    dump.
-4. Reset Scripts, after installing the harness and after each
-   `scripts/deploy.ps1`, is the only step that needs the operator. Everything
-   else (map, camera, menus, settings) you drive yourself.
+4. After installing the harness and after each `scripts/deploy.ps1`, invoke
+   Reset Scripts without Computer Use: run `focus.ps1`, capture the current
+   game window with `shot.ps1`, locate the visible ScriptRunner button, and
+   send one exact click with `input.ps1`. Verify the framework log advanced and
+   immediately run the prepared live probe. Ask the operator only if the game
+   window is unavailable or the button cannot be resolved safely from the
+   capture; never send guessed keys or coordinates.
 5. A probe that changes settings restores them before it ends, including on
    failure. Leave the game as you found it. Never edit the save file.
    `D.set(key, v)` writes the settings file `reframework/data/Clairvoyance.json`
