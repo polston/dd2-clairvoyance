@@ -8,6 +8,13 @@ local failures = 0
 local function check(name, cond)
   if not cond then failures = failures + 1; print("FAIL: " .. name) end
 end
+local function slice(name, first, last)
+  local a = src:find(first, 1, true)
+  local b = a and src:find(last, a + #first, true)
+  check(name .. " sentinels exist", a ~= nil and b ~= nil)
+  if a == nil or b == nil then return "" end
+  return src:sub(a, b - 1)
+end
 
 check("hook identity uses plain equality",
   src:find("local function same%(a, b%)%s+return a ~= nil and b ~= nil and a == b%s+end") ~= nil)
@@ -15,6 +22,24 @@ check("hook identity has no address fallback",
   src:find("a:get_address%(%) == b:get_address%(%)", 1, false) == nil)
 check("removed fallback counter is not exposed",
   src:find("same_fallback_n", 1, true) == nil)
+local objective_projection = slice("debug objective projection",
+  "local provider_generations = {}", "for _, r in ipairs((wt.q(\"input\"")
+local provider_projection = slice("debug provider projection",
+  "local provider_generations = {}", "local source_status = {}")
+local source_status_projection = slice("debug source status projection",
+  "local source_status = {}", "local need_groups = {}")
+check("debug focus copies bounded provider diagnostic rows",
+  provider_projection:find("diagnostic_rows = {}", 1, true) ~= nil
+    and provider_projection:find("math.min(#(type(provider.diagnostic_rows)", 1, true) ~= nil
+    and provider_projection:find("member_id = diagnostic.member_id, gate = diagnostic.gate", 1, true) ~= nil
+    and provider_projection:find("status = diagnostic.status", 1, true) ~= nil
+    and provider_projection:find("reason = diagnostic.reason", 1, true) == nil)
+check("debug focus copies bounded source status rows and item ids",
+  source_status_projection:find("math.min(#(objective_snapshot.source_status or {}), 16)", 1, true) ~= nil
+    and source_status_projection:find("math.min(#(type(observed.rows) == \"table\" and observed.rows or {}), 512)", 1, true) ~= nil
+    and source_status_projection:find("math.min(#(type(row.item_ids) == \"table\" and row.item_ids or {}), 256)", 1, true) ~= nil
+    and src:find("source_status = source_status", 1, true) ~= nil
+    and src:find("source_status = objective_snapshot.source_status", 1, true) == nil)
 
 check("catalog side count helper removed",
   src:find("local function catalog_side_count", 1, true) == nil)
@@ -30,14 +55,6 @@ check("catalog log and panel use the snapshot count",
   #catalog_reads == 2 and snapshot_count_reads == 2
     and catalog_reads[1]:find("(snapshot and snapshot.catalog_side_count) or 0", 1, true) ~= nil
     and catalog_reads[2]:find("(snapshot and snapshot.catalog_side_count) or 0", 1, true) ~= nil)
-
-local function slice(name, first, last)
-  local a = src:find(first, 1, true)
-  local b = a and src:find(last, a + #first, true)
-  check(name .. " sentinels exist", a ~= nil and b ~= nil)
-  if a == nil or b == nil then return "" end
-  return src:sub(a, b - 1)
-end
 
 local function ordered(name, body, tokens)
   local at = 1

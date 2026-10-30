@@ -7010,5 +7010,214 @@ do
   end)()
 end
 
+do
+  local reward_tuple = { "source", "quest_reward_endpoint", 20090, 0, 71, 0, 1, 0, 501, 502 }
+  local reward_provider = { provider = "reward", status = "ok", complete = true, generation = 12,
+    candidates = { { provider = "reward", generation = 12, eligibility = "eligible",
+      source_id = reward_tuple, capacity_pool_id = { "capacity", "quest_reward_endpoint", 20090, 71 },
+      outputs = { { item_id = 300, count = 1 }, { item_id = 301, count = 2 } },
+      target = { cid = 377, pos = { x = 1, y = 2, z = 3 } },
+      capacity_kind = "finite", available_acquisitions = 1,
+      certainty = "guaranteed" } },
+    diagnostic_rows = { { member_id = "m", gate = "history_played", status = "ineligible" } },
+    source_status = { generation = 12, complete = true, reason_code = nil,
+      rows = { { scope = "source", generation = 12, identity = core.target_key(reward_tuple),
+        provider = "reward", qid = 20090, task_index = 0, item_ids = { 300 },
+        state = "available", reason_code = "available" } } } }
+  local task = { focus_epoch = 1, journal_generation = 1, need_generation = 12,
+    objective_needs = { status = "ok", complete = true, generation = 12,
+      source_generation = 12, groups = { { id = { "need", 20090, 0, 1 }, qid = 20090,
+        task_index = 0, remaining = 1, options = { { item_id = 300, accepted_count = 1 } },
+        status = "eligible", complete = true, generation = 12 } } },
+    quests = { { qid = 20090, task_index = 0, read_status = "ok", item_ownership = {},
+      issued_npcs = {}, task_destinations = {}, guidance = {} } } }
+  local snapshot = core.objective_snapshot(task, nil, { reward_provider }, core.target_registry_new())
+  check("reward provider keeps diagnostics and observational source status",
+    snapshot and #snapshot.targets == 1 and snapshot.source_status
+      and snapshot.source_status[1].rows[1].identity == core.target_key(reward_tuple)
+      and snapshot.stamp.providers[1].diagnostic_rows[1].gate == "history_played")
+  check("reward source status matches the published aggregate identity and item set",
+    snapshot.source_status[1].rows[1].identity == core.target_key(reward_tuple)
+      and #snapshot.source_status[1].rows[1].item_ids == 1
+      and snapshot.source_status[1].rows[1].item_ids[1] == snapshot.targets[1].outputs[1].item_id)
+
+  local function source_status_snapshot(source_status, eligibility)
+    local provider = {}
+    for key, value in pairs(reward_provider) do provider[key] = value end
+    provider.candidates = {}
+    if eligibility ~= "none" then
+      for i, candidate in ipairs(reward_provider.candidates) do
+        provider.candidates[i] = {}
+        for key, value in pairs(candidate) do provider.candidates[i][key] = value end
+        if eligibility ~= nil then provider.candidates[i].eligibility = eligibility end
+      end
+    end
+    provider.source_status = source_status
+    return core.objective_snapshot(task, nil, { provider }, core.target_registry_new())
+  end
+  local function source_row(identity, scope, state, generation)
+    return { scope = scope or "source", generation = generation or 12,
+      identity = identity, provider = "reward", qid = 20090, task_index = 0,
+      item_ids = { 300 }, state = state or "available", reason_code = state or "available" }
+  end
+  for _, state in ipairs({ "available", "unavailable", "unknown" }) do
+    local status_row_value = source_row(state, "source", state)
+    if state == "available" then
+      status_row_value.identity = core.target_key(reward_tuple)
+      status_row_value.item_ids = { 300 }
+    end
+    local candidate_eligibility = state ~= "available" and "none" or nil
+    local observed = source_status_snapshot({ generation = 12, complete = true,
+      rows = { status_row_value } }, candidate_eligibility)
+    check("reward source status accepts state " .. state,
+      observed.source_status[1].reason_code == nil and observed.source_status[1].complete == true
+        and observed.source_status[1].rows[1].state == state)
+  end
+  local canonical_status = { generation = 12, complete = true, rows = {
+    source_row("zeta", "source", "unknown"), source_row("alpha", "source", "unknown"),
+    source_row("beta", "source", "unknown") } }
+  local canonical_snapshot = source_status_snapshot(canonical_status, "none")
+  canonical_status.rows[1].identity = "mutated"
+  canonical_snapshot.source_status[1].rows[1].identity = "mutated-copy"
+  local sorted_snapshot = source_status_snapshot({ generation = 12, complete = true, rows = {
+    source_row("zeta", "source", "unknown"), source_row("alpha", "source", "unknown"),
+    source_row("beta", "source", "unknown") } }, "none")
+  check("reward source status copies rows and orders scope ties canonically",
+    sorted_snapshot.source_status[1].rows[1].identity == "alpha"
+      and sorted_snapshot.source_status[1].rows[2].identity == "beta"
+      and sorted_snapshot.source_status[1].rows[3].identity == "zeta")
+  check("reward source status row copies do not mutate provider input",
+    canonical_status.rows[1].identity == "mutated"
+      and canonical_status.rows[2].identity == "alpha")
+  local function rejected_status(name, raw, reason)
+    local observed = source_status_snapshot(raw)
+    check("reward source status rejects " .. name,
+      observed.source_status[1].complete == false
+        and observed.source_status[1].reason_code == reason
+        and #observed.source_status[1].rows == 1
+        and observed.source_status[1].rows[1].scope == "provider"
+        and observed.source_status[1].rows[1].reason_code == reason)
+  end
+  rejected_status("sparse rows", { generation = 12, complete = true,
+    rows = { [1] = source_row("one"), [3] = source_row("three") } }, "status_malformed")
+  local extra_row = source_row("extra")
+  extra_row.extra = true
+  rejected_status("extra row fields", { generation = 12, complete = true,
+    rows = { extra_row } }, "status_malformed")
+  rejected_status("extra envelope fields", { generation = 12, complete = true,
+    rows = {}, extra = true }, "status_malformed")
+  rejected_status("duplicate scoped identity", { generation = 12, complete = true,
+    rows = { source_row("dup"), source_row("dup") } }, "status_duplicate_identity")
+  rejected_status("row generation mismatch", { generation = 12, complete = true,
+    rows = { source_row("stale", "source", "available", 11) } }, "status_generation_mismatch")
+  rejected_status("malformed row precedes stale envelope", { generation = 11, complete = true,
+    rows = { { scope = "source", generation = 12, identity = "bad", provider = "reward",
+      item_ids = {}, state = "invalid", reason_code = "bad" } } }, "status_malformed")
+  rejected_status("stale envelope generation", { generation = 11, complete = true,
+    rows = { source_row("stale", "source", "unknown") } }, "status_generation_mismatch")
+  rejected_status("generation mismatch precedes duplicate", { generation = 11, complete = true,
+    rows = { source_row("same", "source", "unknown", 12),
+      source_row("same", "source", "unknown", 12) } }, "status_generation_mismatch")
+  local invalid_reason_row = source_row("bad-reason")
+  invalid_reason_row.reason_code = "Bad reason"
+  rejected_status("invalid row reason", { generation = 12, complete = true,
+    rows = { invalid_reason_row } }, "status_reason_invalid")
+  local too_long_identity = source_row(string.rep("i", 1025), "source", "unknown")
+  rejected_status("identity length 1025", { generation = 12, complete = true,
+    rows = { too_long_identity } }, "status_identity_overflow")
+  local too_long_reason = source_row("long-reason", "source", "unknown")
+  too_long_reason.reason_code = string.rep("a", 65)
+  rejected_status("reason length 65", { generation = 12, complete = true,
+    rows = { too_long_reason } }, "status_reason_invalid")
+  local identity_and_reason = source_row(string.rep("i", 1025), "source", "unknown")
+  identity_and_reason.reason_code = string.rep("a", 65)
+  rejected_status("identity overflow precedes reason error", { generation = 12, complete = true,
+    rows = { identity_and_reason } }, "status_identity_overflow")
+  local too_many_items = source_row("many-items", "source", "unknown")
+  too_many_items.item_ids = {}
+  for i = 1, 257 do too_many_items.item_ids[i] = i end
+  rejected_status("257 item ids", { generation = 12, complete = true,
+    rows = { too_many_items } }, "status_items_overflow")
+  too_many_items.reason_code = string.rep("a", 65)
+  rejected_status("reason error precedes item overflow", { generation = 12, complete = true,
+    rows = { too_many_items } }, "status_reason_invalid")
+  rejected_status("513 rows", { generation = 12, complete = true, rows = (function()
+    local rows = {}
+    for i = 1, 513 do rows[i] = source_row("row-" .. tostring(i)) end
+    return rows
+  end)() }, "status_row_overflow")
+  rejected_status("duplicate precedes row overflow", { generation = 12, complete = true, rows = (function()
+    local rows = {}
+    for i = 1, 513 do rows[i] = source_row("unique-" .. tostring(i), "source", "unknown") end
+    rows[513] = source_row("unique-1", "source", "unknown")
+    return rows
+  end)() }, "status_duplicate_identity")
+  local rows_at_limit = { source_row(core.target_key(reward_tuple), "source", "available") }
+  rows_at_limit[1].item_ids = { 300 }
+  for i = 2, 512 do
+    rows_at_limit[i] = source_row("unknown-" .. tostring(i), "source", "unknown")
+  end
+  local at_limit = source_status_snapshot({ generation = 12, complete = true, rows = rows_at_limit })
+  check("reward source status accepts exactly 512 rows",
+    at_limit.source_status[1].complete == true and #at_limit.source_status[1].rows == 512)
+  local provider_fallback = source_status_snapshot({ generation = 12, complete = false,
+    reason_code = "source_unavailable", rows = { { scope = "provider", generation = 12,
+      identity = "provider:reward", provider = "reward", qid = nil, task_index = nil,
+      item_ids = {}, state = "unknown", reason_code = "source_unavailable" } } })
+  check("reward source status preserves exact incomplete provider fallback",
+    provider_fallback.source_status[1].complete == false
+      and provider_fallback.source_status[1].reason_code == "source_unavailable"
+      and provider_fallback.source_status[1].rows[1].scope == "provider")
+  rejected_status("incomplete source row", { generation = 12, complete = false,
+    reason_code = "source_unavailable", rows = { source_row("partial") } }, "status_malformed")
+  rejected_status("complete provider row", { generation = 12, complete = true,
+    rows = { { scope = "provider", generation = 12, identity = "provider:reward",
+      provider = "reward", item_ids = {}, state = "unknown", reason_code = "unknown" } } },
+    "status_malformed")
+  rejected_status("complete envelope with a reason", { generation = 12, complete = true,
+    reason_code = "unexpected", rows = {} }, "status_malformed")
+  rejected_status("available row without aggregate", { generation = 12, complete = true,
+    rows = { source_row("not-an-aggregate") } }, "status_aggregate_mismatch")
+  local diagnostic_input = { member_id = "reward-member", gate = "history_played",
+    status = "ineligible" }
+  local diagnostic_provider = {}
+  for key, value in pairs(reward_provider) do diagnostic_provider[key] = value end
+  diagnostic_provider.source_status = nil
+  diagnostic_provider.diagnostic_rows = { diagnostic_input }
+  local diagnostic_snapshot = core.objective_snapshot(task, nil, { diagnostic_provider },
+    core.target_registry_new())
+  diagnostic_input.gate = "mutated"
+  check("reward provider diagnostics validate, copy and keep exactly three fields",
+    diagnostic_snapshot.stamp.providers[1].diagnostic_rows[1].gate == "history_played"
+      and diagnostic_snapshot.stamp.providers[1].diagnostic_rows[1].reason == nil)
+  local invalid_diagnostic_provider = {}
+  for key, value in pairs(diagnostic_provider) do invalid_diagnostic_provider[key] = value end
+  invalid_diagnostic_provider.diagnostic_rows = { { member_id = "bad", gate = "gate",
+    status = "unknown", extra = true } }
+  local invalid_diagnostic_snapshot = core.objective_snapshot(task, nil,
+    { invalid_diagnostic_provider }, core.target_registry_new())
+  check("reward provider diagnostic rows reject extra fields",
+    invalid_diagnostic_snapshot.stamp.providers[1].diagnostic_rows == nil)
+  local baseline_targets = source_status_snapshot(nil).targets
+  local degraded_targets = source_status_snapshot({ generation = 12, complete = true,
+    rows = { [2] = source_row("gap") } }).targets
+  local baseline_snapshot = source_status_snapshot(nil)
+  local degraded_snapshot = source_status_snapshot({ generation = 12, complete = true,
+    rows = { [2] = source_row("gap") } })
+  local projection = { objective_places = true, focus_order = { 20090 }, marker_cap = 128,
+    origin = { x = 0, y = 0, z = 0 } }
+  local baseline_markers = core.objective_markers({}, nil, baseline_snapshot, projection)
+  local degraded_markers = core.objective_markers({}, nil, degraded_snapshot, projection)
+  local baseline_routes = core.objective_routes(baseline_snapshot, projection.origin, projection)
+  local degraded_routes = core.objective_routes(degraded_snapshot, projection.origin, projection)
+  check("reward source status errors leave candidate publication unchanged",
+    #baseline_targets == #degraded_targets and baseline_targets[1].key == degraded_targets[1].key
+      and baseline_targets[1].outputs[1].item_id == degraded_targets[1].outputs[1].item_id
+      and #baseline_markers == 1 and #baseline_markers == #degraded_markers
+      and baseline_markers[1].key == degraded_markers[1].key
+      and #baseline_routes.members == 1 and #baseline_routes.members == #degraded_routes.members
+      and baseline_routes.members[1].key == degraded_routes.members[1].key)
+end
+
 if failures > 0 then os.exit(1) end
 print("core_test: all OK")
