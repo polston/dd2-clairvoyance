@@ -4630,7 +4630,12 @@ do
     end)
     rdef("graph_block_count", function() return #cur end)
     rdef("graph_block", function(i, out, first, count, state)
+      if d.before_read then d.before_read(i, first, count) end
       if d.graph_fail_at == i then error("fake graph failure") end
+      if d.reject_stale_state and d.graph_state ~= nil
+          and state.index ~= d.graph_state.index then
+        error("fake selected graph disabled")
+      end
       local blk = cur[i + 1]
       local lo = first or 1
       local hi = count and math.min(#blk, lo + count - 1) or #blk
@@ -4948,6 +4953,44 @@ do
       and w:route_paths(true)[2001][1].pts ~= nil)
   end
 
+  -- An enabled-graph switch can occur between budgeted copy slices.  A read
+  -- against the now-disabled selection must restart from the fresh state; it
+  -- is not a permanent copy failure and must not consume a retry.
+  do
+    local f, d = gfix()
+    f.tick = 0.001
+    d.graph_state = { index = 0, signature = "0:", disabled = {} }
+    d.reject_stale_state = true
+    d.on_read = function()
+      if d.graph_state.index == 0 then
+        d.graph_state = { index = 1, signature = "1:", disabled = {} }
+      end
+    end
+    local w = with_route(f, { P(0, 0, 0), P(40, 0, 0) })
+    for _ = 1, 100 do w:path_step(0.5, 1, true) end
+    check("graph copy transition: enabled-index switch restarts without spending a retry",
+      w.graph ~= nil and w.graph.index == 1 and w.copy_tries == 0
+        and w:path_status(1, 2001) == "path ready")
+  end
+
+  -- The same transition can occur during the very first copy slice, after
+  -- graph_state supplied the selection but before the first block read.  That
+  -- state is already part of the live copy and must be available to recovery.
+  do
+    local f, d = gfix()
+    d.graph_state = { index = 0, signature = "0:", disabled = {} }
+    d.reject_stale_state = true
+    d.before_read = function()
+      d.before_read = nil
+      d.graph_state = { index = 1, signature = "1:", disabled = {} }
+    end
+    local w = with_route(f, { P(0, 0, 0), P(40, 0, 0) })
+    for _ = 1, 20 do w:path_step(1e6, 1, true) end
+    check("graph copy transition: first-slice switch restarts without spending a retry",
+      w.graph ~= nil and w.graph.index == 1 and w.copy_tries == 0
+        and w:path_status(1, 2001) == "path ready")
+  end
+
   -- A settled pair with no graph path is unavailable, never ready.  Its
   -- missing geometry must remain distinguishable from a completed path.
   do
@@ -4974,9 +5017,9 @@ do
       { 0, 0, 0, { { 0, 1 } } },
       { 100, 0, 0, { { 0, 0 } } },
     } }
-    local near_w = with_route(gfix(line), { P(0, 0, 0), P(109, 0, 0) })
+    local near_w = with_route(gfix(line), { P(0, 0, 0), P(110, 0, 0) })
     for _ = 1, 10 do near_w:path_step(1e6, 1, true) end
-    check("route endpoint: a 9 m connector remains a walking route",
+    check("route endpoint: the inclusive 10 m connector limit remains a walking route",
       near_w:path_status(1, 2001) == "path ready")
     local far_w = with_route(gfix(line), { P(0, 0, 0), P(111, 0, 0) })
     for _ = 1, 10 do far_w:path_step(1e6, 1, true) end

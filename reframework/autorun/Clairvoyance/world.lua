@@ -4047,8 +4047,20 @@ function M.new(a, reads, io)
     end
     if w.copy ~= nil then
       local t0 = clock()
-      local ok, err = pcall(copy_run, w.copy, (budget_ms or 0) / 1000)
-      if not ok then copy_fail(err) end
+      local active_copy = w.copy
+      local prior_state = active_copy.state
+      local ok, err = pcall(copy_run, active_copy, (budget_ms or 0) / 1000)
+      if not ok then
+        prior_state = prior_state or active_copy.state
+        local state_ok, fresh = pcall(reads.graph_state)
+        if state_ok and prior_state ~= nil
+            and (fresh.index ~= prior_state.index
+              or fresh.signature ~= prior_state.signature) then
+          w.copy, copy_failed, fail_gen = { state = fresh }, false, nil
+        else
+          copy_fail(err)
+        end
+      end
       local ms = (clock() - t0) * 1000
       if ms > w.copy_ms_max then w.copy_ms_max = ms end
     elseif want and w.graph ~= nil then
