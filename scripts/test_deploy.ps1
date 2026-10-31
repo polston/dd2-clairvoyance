@@ -78,7 +78,31 @@ try {
          (Test-Path (Join-Path $allowed.Root "check-ran.txt"))) `
         "code $($result.Code), installed '$($installed.Trim())', output $($result.Text)"
 
+    $freshPlaces = New-Case "fresh_places" 0
+    $sourceData = Join-Path $freshPlaces.Root "data"
+    $staleData = Join-Path $freshPlaces.Root "dist/stage/reframework/data"
+    New-Item -ItemType Directory -Force $sourceData, $staleData | Out-Null
+    Set-Content -Path (Join-Path $sourceData "Clairvoyance_places.json") `
+        -Value "current places" -Encoding ASCII
+    Set-Content -Path (Join-Path $staleData "Clairvoyance_places.json") `
+        -Value "stale places" -Encoding ASCII
+    $result = Invoke-Deploy $freshPlaces
+    $installedPlaces = Get-Content -Raw (Join-Path $freshPlaces.Game `
+        "reframework/data/Clairvoyance_places.json")
+    Assert-True "deploy_ignores_stale_stage_places" `
+        (($result.Code -eq 0) -and ($installedPlaces.Trim() -eq "current places")) `
+        "code $($result.Code), installed '$($installedPlaces.Trim())', output $($result.Text)"
+
     $devSource = Get-Content -Raw (Join-Path $repo "scripts/dev.ps1")
+    $verifyStart = $devSource.IndexOf("function Test-InstalledFiles")
+    $verifyEnd = $devSource.IndexOf("function Install-ProbeHarness", $verifyStart + 1)
+    $verifyBlock = if ($verifyStart -ge 0 -and $verifyEnd -gt $verifyStart) {
+        $devSource.Substring($verifyStart, $verifyEnd - $verifyStart)
+    } else { "" }
+    Assert-True "verify_install_ignores_stale_stage_places" `
+        ($verifyBlock.Contains('data\Clairvoyance_places.json') -and
+         -not $verifyBlock.Contains('dist\stage')) `
+        "verify-install still accepts a stale staged places file"
     $deployStart = $devSource.IndexOf('        "deploy" {')
     $probeStart = $devSource.IndexOf('        "probe" {', $deployStart + 1)
     $deployBlock = if ($deployStart -ge 0 -and $probeStart -gt $deployStart) {

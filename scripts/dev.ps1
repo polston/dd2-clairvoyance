@@ -102,10 +102,7 @@ function Test-InstalledFiles {
         Add-FilePair $pairs (Join-Path $root "data\$name") `
             (Join-Path $GameDir "reframework\data\$name")
     }
-    $places = Join-Path $root "dist\stage\reframework\data\Clairvoyance_places.json"
-    if (-not (Test-Path -LiteralPath $places -PathType Leaf)) {
-        $places = Join-Path $root "data\Clairvoyance_places.json"
-    }
+    $places = Join-Path $root "data\Clairvoyance_places.json"
     Add-FilePair $pairs $places `
         (Join-Path $GameDir "reframework\data\Clairvoyance_places.json")
 
