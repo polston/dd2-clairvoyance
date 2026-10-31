@@ -137,6 +137,19 @@ try {
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertRegex(result.stdout, r"reset target 103,(?:5\d|6[0-7])")
 
+    def test_reset_scripts_uses_thread_attached_foreground_activation(self):
+        source = (ROOT / "scripts" / "reset-scripts.ps1").read_text(
+            encoding="utf-8")
+        self.assertIn("AttachThreadInput", source)
+        self.assertIn("BringWindowToTop", source)
+        self.assertIn("ActivateWindow", source)
+        self.assertIn("Assert-Foreground", source)
+        self.assertNotIn(
+            "if (-not [QnmlResetNative]::SetForegroundWindow($window))",
+            source)
+        self.assertIn("PostWindowKey", source)
+        self.assertIn("PostWindowClick", source)
+
     def test_reset_scripts_fails_closed_on_ambiguous_button_rows(self):
         script = ROOT / "scripts" / "reset-scripts.ps1"
         scratch = ROOT / ".tmp-tests"

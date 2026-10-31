@@ -19,6 +19,10 @@ public static class QnmlResetNative {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr process);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint to, bool value);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int command);
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out Rect r);
@@ -34,6 +38,21 @@ public static class QnmlResetNative {
     return PostMessageW(window, 0x0200, UIntPtr.Zero, packed) &&
       PostMessageW(window, 0x0201, new UIntPtr(1), packed) &&
       PostMessageW(window, 0x0202, UIntPtr.Zero, packed);
+  }
+  public static bool ActivateWindow(IntPtr target) {
+    var foreground = GetForegroundWindow();
+    if (foreground == target) return true;
+    var foregroundThread = GetWindowThreadProcessId(foreground, IntPtr.Zero);
+    var currentThread = GetCurrentThreadId();
+    var attached = foregroundThread != 0 && foregroundThread != currentThread &&
+      AttachThreadInput(currentThread, foregroundThread, true);
+    try {
+      BringWindowToTop(target);
+      SetForegroundWindow(target);
+      return GetForegroundWindow() == target;
+    } finally {
+      if (attached) AttachThreadInput(currentThread, foregroundThread, false);
+    }
   }
 
   private struct Run { public int Start, End, Width; }
@@ -402,7 +421,7 @@ $window = $game.MainWindowHandle
 if (-not [QnmlResetNative]::IsWindowVisible($window)) {
     throw "could not show the DD2 game window"
 }
-if (-not [QnmlResetNative]::SetForegroundWindow($window)) {
+if (-not [QnmlResetNative]::ActivateWindow($window)) {
     throw "could not foreground the DD2 game window"
 }
 Start-Sleep -Milliseconds 350
