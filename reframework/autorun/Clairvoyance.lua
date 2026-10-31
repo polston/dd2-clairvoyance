@@ -2743,6 +2743,18 @@ wt.objective_path_text = function(entry)
   end
   return "Waiting"
 end
+wt.objective_provider_status = function()
+  local rows = snapshot ~= nil and snapshot.objective_ui ~= nil
+    and snapshot.objective_ui.provider_rows or nil
+  if type(rows) ~= "table" or #rows == 0 then return end
+  if imgui.tree_node("Source checks###objective_provider_status") then
+    for _, entry in ipairs(rows) do
+      imgui.text(entry.label .. " - " .. entry.status_text)
+      if entry.reason_code ~= "available" then imgui.text(entry.reason_text) end
+    end
+    imgui.tree_pop()
+  end
+end
 
 local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
   if not imgui.tree_node(label) then return false end
@@ -2814,28 +2826,33 @@ local function draw_detail(label, rec, qid, j, ja, spoilers, focus_kind)
             if imgui.tree_node(entry.label .. "###qoe_" .. entry.ui_id) then
               imgui.text(entry.kind_text .. " - " .. entry.status_text)
               if entry.reason_code ~= "available" then imgui.text(entry.reason_text) end
-              imgui.text("Path: " .. wt.objective_path_text(entry))
-              imgui.begin_disabled(entry.controls_enabled ~= true)
-              local mc, mv = imgui.checkbox("Show marker##qom_" .. entry.ui_id,
-                entry.marker_checked)
-              if mc then wt.objective_toggle("objective_marker_off", entry.persist_key, mv) end
-              if entry.controls_enabled ~= true and imgui.is_item_hovered() then
-                imgui.set_tooltip(entry.status_text .. ": " .. entry.reason_text)
-              end
-              imgui.end_disabled()
-              imgui.same_line()
-              imgui.begin_disabled(entry.controls_enabled ~= true or entry.marker_checked ~= true)
-              local rc, rv = imgui.checkbox("Draw route##qor_" .. entry.ui_id,
-                entry.route_checked)
-              if rc then wt.objective_toggle("objective_route_off", entry.persist_key, rv) end
-              if imgui.is_item_hovered() then
-                if entry.controls_enabled ~= true then
+              if entry.marker_supported == true then
+                imgui.text("Path: " .. wt.objective_path_text(entry))
+                imgui.begin_disabled(entry.controls_enabled ~= true)
+                local mc, mv = imgui.checkbox("Show marker##qom_" .. entry.ui_id,
+                  entry.marker_checked)
+                if mc then wt.objective_toggle("objective_marker_off", entry.persist_key, mv) end
+                if entry.controls_enabled ~= true and imgui.is_item_hovered() then
                   imgui.set_tooltip(entry.status_text .. ": " .. entry.reason_text)
-                elseif entry.marker_checked ~= true then
-                  imgui.set_tooltip("Show the marker to draw its route")
+                end
+                imgui.end_disabled()
+                if entry.route_supported == true then
+                  imgui.same_line()
+                  imgui.begin_disabled(entry.controls_enabled ~= true
+                    or entry.marker_checked ~= true)
+                  local rc, rv = imgui.checkbox("Draw route##qor_" .. entry.ui_id,
+                    entry.route_checked)
+                  if rc then wt.objective_toggle("objective_route_off", entry.persist_key, rv) end
+                  if imgui.is_item_hovered() then
+                    if entry.controls_enabled ~= true then
+                      imgui.set_tooltip(entry.status_text .. ": " .. entry.reason_text)
+                    elseif entry.marker_checked ~= true then
+                      imgui.set_tooltip("Show the marker to draw its route")
+                    end
+                  end
+                  imgui.end_disabled()
                 end
               end
-              imgui.end_disabled()
               imgui.tree_pop()
             end
           end
@@ -3379,6 +3396,7 @@ do
           local spoilers = settings.journal_spoilers
           local jt, jat = snapshot.journal or {}, snapshot.journal_all or {}
           snapshot.summary = snapshot.summary or core.summary_nodes(snapshot)
+          wt.objective_provider_status()
           for _, s in ipairs(snapshot.summary) do
             draw_detail(s.label, s.rec, s.qid, jt, jat, spoilers,
               s.qid == snapshot.tracked_qid and "tracked" or nil)

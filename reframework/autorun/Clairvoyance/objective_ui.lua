@@ -202,8 +202,8 @@ end
 function M.build(snapshot, options)
   options = type(options) == "table" and options or {}
   local marker_off, route_off = off_set(options.marker_off), off_set(options.route_off)
-  local model = { by_qid = {}, entries = {}, identities = {}, seen = {}, generation = 0,
-    complete = true, passthrough = false }
+  local model = { by_qid = {}, provider_rows = {}, entries = {}, identities = {},
+    seen = {}, generation = 0, complete = true, passthrough = false }
   if type(snapshot) ~= "table" then return model end
   model.generation = type(snapshot.generation) == "number" and snapshot.generation or 0
   local targets = dense(snapshot.targets, M.ENTRY_MAX)
@@ -264,6 +264,7 @@ function M.build(snapshot, options)
       end
     end
   end
+  local provider_seen = {}
   for _, envelope in ipairs(dense(snapshot.source_status, 16) or {}) do
     for _, row in ipairs(type(envelope) == "table" and dense(envelope.rows, M.ENTRY_MAX) or {}) do
       if type(row) == "table" and valid_identity(row.identity) then
@@ -284,19 +285,26 @@ function M.build(snapshot, options)
           model.entries[#model.entries + 1] = entry
           by_identity[entry.identity] = entry
         end
-        if row.scope ~= "provider" then model.identities[entry.persist_key] = true end
+        if row.scope == "provider" and not provider_seen[entry.identity] then
+          provider_seen[entry.identity] = true
+          model.provider_rows[#model.provider_rows + 1] = entry
+        elseif row.scope ~= "provider" then
+          model.identities[entry.persist_key] = true
+        end
         if target_entry then
           -- Normalized target ownership already placed this row on the exact quests.
-        elseif row.scope == "provider" then
-          for _, qid in ipairs(focus) do add_qid(model, qid, entry) end
-        elseif row.qid == nil then
-          local matched = {}
-          for _, item_id in ipairs(entry.item_ids) do
-            for qid in pairs(need_qids[item_id] or {}) do matched[qid] = true end
+        elseif row.scope ~= "provider" then
+          if row.qid == nil then
+            local matched = {}
+            for _, item_id in ipairs(entry.item_ids) do
+              for qid in pairs(need_qids[item_id] or {}) do matched[qid] = true end
+            end
+            for _, qid in ipairs(focus) do
+              if matched[qid] then add_qid(model, qid, entry) end
+            end
+          else
+            add_qid(model, row.qid, entry)
           end
-          for _, qid in ipairs(focus) do if matched[qid] then add_qid(model, qid, entry) end end
-        else
-          add_qid(model, row.qid, entry)
         end
       end
     end
@@ -308,6 +316,7 @@ function M.build(snapshot, options)
       return a.identity < b.identity
     end)
   end
+  table.sort(model.provider_rows, function(a, b) return a.identity < b.identity end)
   model.seen = nil
   return model
 end

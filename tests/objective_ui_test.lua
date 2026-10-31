@@ -65,12 +65,17 @@ local model = ui.build(snapshot, {
   marker_off = { source_token }, route_off = { npc_token },
 })
 local rows = model.by_qid[20090]
-check("focused quest gets objective and provider-status rows", type(rows) == "table" and #rows == 4)
-check("source status without explicit ownership attaches only to matching focused needs",
-  type(model.by_qid[20091]) == "table" and #model.by_qid[20091] == 1
-    and model.by_qid[20091][1].identity == "provider:monster")
+check("focused quest gets only objectives and sources related to its current needs",
+  type(rows) == "table" and #rows == 3)
+check("generic provider health never becomes a quest-specific option",
+  model.by_qid[20091] == nil)
+check("generic provider health remains available outside quest-specific rows",
+  type(model.provider_rows) == "table" and #model.provider_rows == 1
+    and model.provider_rows[1].identity == "provider:monster")
 local by_id = {}
 for _, row in ipairs(rows or {}) do by_id[row.identity] = row end
+local all_by_id = {}
+for _, row in ipairs(model.entries or {}) do all_by_id[row.identity] = row end
 check("labels name the actual NPC and item",
   by_id[npc_key].label:find("Trysha", 1, true) ~= nil
     and by_id[source_key].label:find("Fulminous Shield", 1, true) ~= nil
@@ -81,10 +86,12 @@ check("marker and route choices remain independent",
     and by_id[source_key].route_effective == false)
 check("unavailable and unknown rows have disabled controls and public reasons",
   by_id[unavailable_key].controls_enabled == false
+    and by_id[unavailable_key].marker_supported == false
     and by_id[unavailable_key].status_text == "Unavailable"
     and by_id[unavailable_key].reason_text == "Already claimed"
-    and by_id["provider:monster"].controls_enabled == false
-    and by_id["provider:monster"].status_text == "Cannot verify")
+    and all_by_id["provider:monster"].controls_enabled == false
+    and all_by_id["provider:monster"].marker_supported == false
+    and all_by_id["provider:monster"].status_text == "Cannot verify")
 
 local startable_model = ui.build({ generation = 9, targets = {
   { key = "target:startable-giver", generation = 9, ordinal = 1,
@@ -99,6 +106,17 @@ check("focused startable quest exposes its normalized giver with controls",
     and #startable_model.by_qid[20091] == 1
     and startable_model.by_qid[20091][1].label == "Brant - Quest giver"
     and startable_model.by_qid[20091][1].controls_enabled == true)
+
+local marker_only_model = ui.build({ generation = 10, targets = {
+  { key = "target:marker-only", generation = 10, ordinal = 1,
+    eligibility = "eligible", kind = "npc", target = { cid = 89 },
+    owners = { { qid = 20092 } } },
+} }, { focus_order = { 20092 } })
+check("a concrete marker without a position never advertises route support",
+  type(marker_only_model.by_qid[20092]) == "table"
+    and marker_only_model.by_qid[20092][1].marker_supported == true
+    and marker_only_model.by_qid[20092][1].route_supported == false
+    and marker_only_model.by_qid[20092][1].route_effective == false)
 
 local marker_keys, route_keys = ui.control_maps(model)
 check("effective maps separately suppress marker and route targets",

@@ -370,11 +370,16 @@ local objective_ui = slice("objective source UI wiring",
   "wt.objective_ui = require(\"Clairvoyance.objective_ui\")", "-- v14 (SPEC 22.11.2): the Hints node")
 check("focused quest detail exposes objectives and sources with independent controls",
   objective_ui:find("Objectives & sources###qos_", 1, true) ~= nil
+    and objective_ui:find("if entry.marker_supported == true then", 1, true) ~= nil
+    and objective_ui:find("if entry.route_supported == true then", 1, true) ~= nil
     and objective_ui:find("Show marker##qom_", 1, true) ~= nil
     and objective_ui:find("Draw route##qor_", 1, true) ~= nil
     and objective_ui:find("entry.status_text", 1, true) ~= nil
     and objective_ui:find("entry.reason_text", 1, true) ~= nil
     and objective_ui:find("Path:", 1, true) ~= nil)
+check("provider health is rendered once outside quest-specific option lists",
+  objective_ui:find("Source checks###objective_provider_status", 1, true) ~= nil
+    and objective_ui:find("snapshot.objective_ui.provider_rows", 1, true) ~= nil)
 check("source UI uses stable settings and never labels controls by transient ordinals",
   objective_ui:find("objective_marker_off", 1, true) ~= nil
     and objective_ui:find("objective_route_off", 1, true) ~= nil
