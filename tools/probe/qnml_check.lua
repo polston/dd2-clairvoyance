@@ -1,6 +1,6 @@
--- Developer-only in-game probe harness (never in the release zip). Copy it to
--- the game's reframework/autorun/ and press Reset Scripts. See the
--- clairvoyance-workflow skill, Part 1.
+-- Developer-only in-game probe harness (never in the release zip). Install and
+-- reload it with `just reset-scripts`; that command verifies the installed hash.
+-- See the clairvoyance-workflow skill, Part 1.
 -- Every 5 s logs QNML_DEBUG.state() as CHK lines, each prefixed "~ " so run.py
 -- can tell them from a chunk's own output (a chunk's dump() has no prefix); every 30 frames runs any
 -- Lua chunk written to reframework/data/qnml_cmd.txt with D = QNML_DEBUG.
@@ -255,6 +255,13 @@ local function unsafe_probe_call(source)
     if member_aliases[token] and tokens[i + 1] == "(" then
       return "indirect managed call"
     end
+    if token == "reviewed_array_elements" then
+      local direct = tokens[i + 1] == "(" and tokens[i - 1] ~= "." and tokens[i - 1] ~= ":"
+      local args = direct and call_arguments(tokens, i + 1) or nil
+      if args == nil or #args ~= 1 or #args[1] == 0 then
+        return "unreviewed array read"
+      end
+    end
     local method_index = reviewed_capabilities[token]
     if method_index ~= nil then
       if tokens[i - 1] == "." or tokens[i - 1] == ":" or tokens[i + 1] ~= "(" then
@@ -321,6 +328,7 @@ reviewed_methods = {
   ["getItemNumber"] = true,
   ["getItemShopTotalPay"] = true,
   ["getItemStockNum"] = true,
+  ["get__Golden"] = true,
   ["getNPCCharacterData"] = true,
   ["getProgressingQuestIds"] = true,
   ["getRegisterableDestinations"] = true,
@@ -406,6 +414,12 @@ end
 local function reviewed_try_call(o, name, ...)
   return reviewed_call_result(o, name, ...)
 end
+local function reviewed_array_elements(o)
+  if o == nil then return false, nil end
+  local ok, elements = pcall(function() return o:get_elements() end)
+  if ok then return true, elements end
+  return false, nil
+end
 local function reviewed_invoke(method, receiver, name)
   if method == nil or reviewed_methods[name] ~= true then
     error("unreviewed managed method: " .. tostring(name))
@@ -446,7 +460,9 @@ re.on_frame(function()
       else
         local env = setmetatable({ D = _G.QNML_DEBUG, L = L,
           dump = function() dump("") end, reviewed_call = reviewed_call,
-          reviewed_try_call = reviewed_try_call, reviewed_invoke = reviewed_invoke },
+          reviewed_try_call = reviewed_try_call,
+          reviewed_array_elements = reviewed_array_elements,
+          reviewed_invoke = reviewed_invoke },
           { __index = _G })
         local fn, err = load(v, "qnml_cmd", "t", env)
         local ok2, e2 = false, err

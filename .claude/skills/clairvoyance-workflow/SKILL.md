@@ -57,11 +57,9 @@ Reach internals with `debug.getupvalue` on those functions (the framework's
 Lua exposes the `debug` library; checked in game 2026-10-25), for example
 the world tracker as the `wt` upvalue of `D.state`.
 
-1. Install the dev harness: copy `tools/probe/qnml_check.lua` into the
-   game's `reframework/autorun/`, again whenever that file changes (run.py
-   warns when the installed copy is older). The operator then presses Reset
-   Scripts. It
-   is never in the release zip.
+1. `just deploy` installs the dev harness from `tools/probe/qnml_check.lua`
+   into the game's `reframework/autorun/` and verifies its hash, including
+   whenever that file changes. It is never in the release zip.
    1. `QNML_DEBUG` exists only while the mod's Debug setting is on. If the log
       shows `CHK QNML_DEBUG nil true`, Debug is off. Turn it on in the mod's
       settings window (driven with the input tools in section 3), then check
@@ -90,9 +88,13 @@ the world tracker as the `wt` upvalue of `D.state`.
    boundary stays unknown. After a success line, the runner waits briefly and
    fails if the framework reports an engine exception or writes/changes a crash
    dump.
-4. Reset Scripts, after installing the harness and after each
-   `scripts/deploy.ps1`, is the only step that needs the operator. Everything
-   else (map, camera, menus, settings) you drive yourself.
+4. After installing the harness and after each deployment, run
+   `just reset-scripts`. The command captures the foregrounded game client,
+   resolves the unique ScriptRunner button row, posts exact window messages
+   directly to DD2 without moving the physical cursor, and fails unless the
+   framework log proves a reload. Never use `input.ps1`, Computer Use, guessed
+   keys or guessed coordinates for Reset Scripts. Immediately run the prepared
+   live probe after the command succeeds.
 5. A probe that changes settings restores them before it ends, including on
    failure. Leave the game as you found it. Never edit the save file.
    `D.set(key, v)` writes the settings file `reframework/data/Clairvoyance.json`
@@ -107,6 +109,24 @@ the world tracker as the `wt` upvalue of `D.state`.
 6. One probe runs every variant and logs each result. Never ask the operator
    to repeat a test.
 
+### Live regression handoff gate
+
+1. A provider-specific positive or negative is never whole-product acceptance.
+   After every deployment and Reset Scripts, run `just accept-routes`. It checks
+   the complete focused-objective projection across every provider.
+2. A focused need with zero total targets, or published targets with zero total
+   objective routes, is a regression gate failure. Do not reinterpret it as an
+   expected negative for the provider currently being changed.
+3. Add the smallest RED regression before fixing any live failure. Keep that
+   regression plus this live gate green before asking the operator to evaluate
+   the game.
+4. Reset Scripts is an intermediate event. After the operator reports the reset,
+   immediately run the remaining probes and continue the active plan; never use
+   the reset response as a session boundary.
+5. When operator feedback exposes a repeatable process failure, add or strengthen
+   a durable test, command, workflow rule or skill in the same correction. A
+   promise about future behavior is not remediation.
+
 ### 3. Screens and input
 
 1. `powershell -File tools/probe/focus.ps1` brings the game window to the front.
@@ -117,6 +137,8 @@ the world tracker as the `wt` upvalue of `D.state`.
    screen (X+px, Y+py), using the X,Y that shot.ps1 prints (`saved WxH at X,Y`).
    Escape is sent as `key 27 1` (virtual key 27, scan code 1) to close the map;
    without the scan code the game ignores it (checked in game).
+   This general interaction helper is never used for Reset Scripts; use
+   `just reset-scripts` instead.
 4. World rounds are held while the full map is open or a pause menu is up.
    Close both before timing world rounds.
 

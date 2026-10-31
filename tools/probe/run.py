@@ -26,7 +26,7 @@ REVIEWED_METHODS = {
     "IsRelease", "ToString()", "evaluate", "evaluateHide",
     "evaluateRegisterCondition", "evaluateShow", "evaluateUpdateShow",
     "getActiveDestinations", "getCurrentTask", "getCurrentTaskConciergeData",
-    "getItemNumber", "getItemShopTotalPay", "getItemStockNum",
+    "getItemNumber", "getItemShopTotalPay", "getItemStockNum", "get__Golden",
     "getNPCCharacterData", "getProgressingQuestIds",
     "getRegisterableDestinations", "getStorageDict",
     "getHistory", "getTalkEventInitialSpeaker",
@@ -306,6 +306,12 @@ def unsafe_probe_call(source):
     for pos, token in enumerate(tokens):
         if token in member_aliases and pos + 1 < len(tokens) and tokens[pos + 1] == "(":
             return "indirect managed call"
+        if token == "reviewed_array_elements":
+            direct = (pos + 1 < len(tokens) and tokens[pos + 1] == "(" and
+                      (pos == 0 or tokens[pos - 1] not in (".", ":")))
+            args = _call_arguments(tokens, pos + 1) if direct else None
+            if args is None or len(args) != 1 or not args[0]:
+                return "unreviewed array read"
         if token in REVIEWED_CAPABILITIES:
             if (pos > 0 and tokens[pos - 1] in (".", ":")) or (
                     pos + 1 >= len(tokens) or tokens[pos + 1] != "("):
@@ -457,7 +463,7 @@ def main():
             if s.startswith("setup_icon_n") and not warned:
                 warned = True
                 print("WARN: the installed harness is older than tools/probe/qnml_check.lua;"
-                      " copy it into the game's reframework/autorun/ and press Reset Scripts")
+                      " run just reset-scripts")
             if not s.startswith(NOISE):
                 print(s)
         elif is_mod_error(line):

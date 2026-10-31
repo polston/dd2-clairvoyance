@@ -71,6 +71,10 @@ PROC_ELEMENT_TYPE = "app.QuestProcessor.ProcCondition.Element"
 PROC_ELEMENT_PARAM_TYPE = "app.QuestProcessor.ProcCondition.ElementParam"
 REWARD_OPERATOR_NAMES = {0: "and", 1: "or"}
 REWARD_RESULT_NUMBERS = {0, 1}
+TRIGGER_TYPE = "app.quest.action.Trigger"
+TRIGGER_PARAM_TYPE = "app.quest.action.TriggerParam"
+TRIGGER_CONDITION_TYPE = "app.QuestConditionParam"
+TALK_EVENT_END_CONDITION_TYPE = "app.quest.condition.CheckTalkEventEndNoParam"
 SUBSKILL_CONDITION_TYPE = "app.ConciergeConditionSubskill"
 DAYTIME_CONDITION_TYPE = "app.ConciergeConditionDayTime"
 TASK_CONDITION_TYPE = "app.QuestLogResource.QuestLogCondition"
@@ -404,6 +408,104 @@ def _reward_ref(insts, value, expected, label):
     return target
 
 
+def _required_reward_ref(insts, value, label, expected=None):
+    if not isinstance(value, qnml_rsz.Ref):
+        raise ew.ExtractError("invalid %s reference" % label)
+    try:
+        target = qnml_rsz.deref(insts, value)
+    except IndexError:
+        raise ew.ExtractError("invalid %s reference" % label)
+    if target is None or not isinstance(target, qnml_rsz.Inst):
+        raise ew.ExtractError("invalid %s reference" % label)
+    if expected is not None and target.type != expected:
+        raise ew.ExtractError("invalid %s type" % label)
+    return target
+
+
+def decode_reward_endpoint_evidence(insts, processors, reward_processor):
+    """Return structural evidence only for the closed single-talk Trigger shape."""
+    previous = qnml_rsz.deref(insts, reward_processor.fields.get("PrevProcCondition"))
+    if previous is None or previous.type != PROC_CONDITION_TYPE:
+        return None
+    roots = _required_array(_field(previous, "_ElementArray"), "reward endpoint roots")
+    root_rows = [_reward_ref(insts, ref, PROC_ELEMENT_TYPE, "reward endpoint root")
+                 for ref in roots]
+    if len(root_rows) != 1:
+        return None
+    root = root_rows[0]
+    operator_value = _integer(_field(root, "_Operator"), "reward endpoint operator")
+    operator = REWARD_OPERATOR_NAMES.get(operator_value)
+    relations = _required_array(_field(root, "_ParamArray"), "reward endpoint relations")
+    relation_rows = [_reward_ref(insts, ref, PROC_ELEMENT_PARAM_TYPE,
+                                 "reward endpoint relation") for ref in relations]
+    children = _required_array(_field(root, "_ElementArray"), "reward endpoint children")
+    if len(relation_rows) != 1:
+        return None
+    relation = relation_rows[0]
+    predecessor_id = _integer(_field(relation, "_ProcID"),
+                               "reward predecessor processor id", 0, U32_MAX)
+    result_no = _integer(_field(relation, "_ResultNo"), "reward predecessor result number")
+    predecessor_rows = processors.get(predecessor_id, [])
+    if len(predecessor_rows) != 1:
+        return None
+    predecessor = predecessor_rows[0]
+    process = qnml_rsz.deref(insts, predecessor.fields.get("Process"))
+    if process is None or process.type != PROCESSOR_ENTITY_TYPE:
+        return None
+    trigger = qnml_rsz.deref(insts, _field(process, "QuestAction"))
+    if trigger is None or trigger.type != TRIGGER_TYPE:
+        return None
+    parameters = _required_array(_field(trigger, "_Param"), "Trigger parameters")
+    parameter_rows = [_required_reward_ref(insts, ref, "Trigger parameter",
+                                           TRIGGER_PARAM_TYPE) for ref in parameters]
+    endpoint_rows = []
+    unsupported_condition = False
+    for parameter in parameter_rows:
+        group = _required_reward_ref(insts, _field(parameter, "_ConditionParam"),
+                                     "Trigger condition group", TRIGGER_CONDITION_TYPE)
+        condition_operator_value = _integer(_field(group, "_Operator"),
+                                            "Trigger condition operator")
+        condition_operator = REWARD_OPERATOR_NAMES.get(condition_operator_value)
+        condition_refs = _required_array(_field(group, "ConditionParamArray"),
+                                         "Trigger condition parameters")
+        conditions = []
+        for ref in condition_refs:
+            conditions.append(_required_reward_ref(insts, ref, "Trigger condition"))
+        if len(parameters) != 1 or len(conditions) != 1:
+            unsupported_condition = True
+        for condition in conditions:
+            if condition.type != TALK_EVENT_END_CONDITION_TYPE:
+                unsupported_condition = True
+                continue
+            talk_event_id = _integer(_field(condition, "_TalkEventID"),
+                                     "reward talk event id")
+            end_no = _integer(_field(condition, "_EndNo"), "reward talk event end number")
+            accept_minus_one = _boolean(_field(condition, "_AcceptMinusOne"),
+                                        "reward talk event accept-minus-one flag")
+            endpoint_rows.append((condition_operator, condition_operator_value,
+                                  len(conditions), talk_event_id, end_no,
+                                  accept_minus_one, condition.type))
+    if (unsupported_condition or len(endpoint_rows) != 1 or operator != "or" or
+            operator_value != 1 or result_no != 0 or children or
+            endpoint_rows[0][0] != "and" or endpoint_rows[0][1] != 0 or
+            endpoint_rows[0][3] <= 0):
+        return None
+    (condition_operator, condition_operator_value, condition_count,
+     talk_event_id, end_no, accept_minus_one, condition_type) = endpoint_rows[0]
+    return {"kind": "single_talk_trigger", "reward_root_count": len(roots),
+            "reward_operator": operator, "reward_operator_value": operator_value,
+            "reward_relation_count": len(relation_rows),
+            "reward_child_count": len(children), "relation_result_no": result_no,
+            "predecessor_processor_id": predecessor_id,
+            "predecessor_action_type": trigger.type,
+            "trigger_parameter_count": len(parameters),
+            "condition_operator": condition_operator,
+            "condition_operator_value": condition_operator_value,
+            "condition_count": condition_count, "condition_type": condition_type,
+            "talk_event_id": talk_event_id, "end_no": end_no,
+            "accept_minus_one": accept_minus_one}
+
+
 def decode_reward_diagnostics(insts, qid):
     """Decode exact reward relations, but never create production source candidates."""
     qid = _integer(qid, "reward quest id", 1, U32_MAX)
@@ -548,6 +650,8 @@ def decode_reward_diagnostics(insts, qid):
                        "ownership_status": ownership_status, "branch_status": branch_status,
                        "branch_diagnostics": sorted(branch_diagnostics),
                        "precondition": precondition, "reward_rows": reward_rows,
+                       "endpoint_evidence": (decode_reward_endpoint_evidence(
+                           insts, processors, processor) if ownership_status == "exact" else None),
                        "reward_payload_status": "complete" if reward_rows else "empty",
                        "task_endpoint_join": {"status": "unproven",
                          "reason": "journal_task_to_drawable_reward_endpoint_unverified"},
@@ -744,6 +848,8 @@ def extract(game, key_hex, layouts):
         sums["guidance_destinations"] += sum(len(g["destinations"]) for g in q["guidance"])
         sums["deliveries"] += len(q["deliveries"])
         sums["reward_diagnostics"] += len(q["reward_diagnostics"])
+        sums["closed_single_talk_trigger_members"] += sum(
+            row.get("endpoint_evidence") is not None for row in q["reward_diagnostics"])
         sums["delivery_refs"] += sum(len(d["delivery"]["refs"])
                                       for g in q["guidance"] for d in g["destinations"])
     lines = [
@@ -760,6 +866,8 @@ def extract(game, key_hex, layouts):
             extraction_diagnostics["delivery_records_without_item_data"],
             source_diagnostics["reward_records"], source_diagnostics["gift_records"],
             source_diagnostics["transform_records"], sums["reward_diagnostics"]),
+        "reward endpoints: closed single-talk Trigger members %d" %
+            sums["closed_single_talk_trigger_members"],
     ]
     lines += ["undecoded %d: %s" % (qid, undecoded[qid]) for qid in sorted(undecoded)]
     return out, lines

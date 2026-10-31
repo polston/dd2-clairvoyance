@@ -341,7 +341,17 @@ for i = 1, 100 do
     get_Transform = function() return managed_obj(nil, {
       get_UniversalPosition = function() return P(index + 1, 0, index + 2) end }) end,
   })
-  live_monsters[index] = managed_obj(nil, { get_Chara = function() return chara end })
+  local game_object = managed_obj(nil, {
+    get_Valid = function() return true end,
+    get_Update = function() return true end,
+  })
+  live_monsters[index] = managed_obj(nil, {
+    get_Chara = function() return chara end,
+    get_Enabled = function() return true end,
+    get_Started = function() return true end,
+    get_Valid = function() return true end,
+    get_GameObject = function() return game_object end,
+  })
 end
 local monster_singletons = {
   ["app.EnemyManager"] = managed_obj({ _EnemyList = managed_list(live_monsters) }),
@@ -352,18 +362,17 @@ local monster_singletons = {
 }
 local saved_sdk = sdk
 sdk = { get_managed_singleton = function(name) return monster_singletons[name] end }
-local production_monster_rows = world.game_reads().objective_monster_rows
+local production_monster_reads = world.game_reads()
+local production_monster_rows = production_monster_reads.objective_monster_source_rows
 local monster_reads, monster_raw_reason = 0, nil
-f.reads.objective_monster_rows = function(task, catalog, need)
+f.reads.objective_monster_source_rows = function(item_ids)
   monster_reads = monster_reads + 1
-  local ok, snapshot = pcall(production_monster_rows, task, catalog, need)
+  local ok, snapshot = pcall(production_monster_rows, item_ids)
   if not ok then monster_raw_reason = snapshot; error(snapshot) end
   monster_raw_reason = snapshot.reason
-  for _, row in ipairs(snapshot.rows or {}) do
-    row.chance, row.accessible = 0.25, true
-  end
   return snapshot
 end
+f.reads.objective_monster_freshness = production_monster_reads.objective_monster_freshness
 local function monster_bench(label, task)
   local samples, provider_samples, reads_before = {}, {}, monster_reads
   for i = 1, 20 do

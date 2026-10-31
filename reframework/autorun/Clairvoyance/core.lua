@@ -4120,6 +4120,29 @@ end
 
 local function valid_target_tuple(tuple, count)
   local family = tuple[1]
+  if family == "reward_status_endpoint" then
+    if count < 8 or count > 29 or (count - 5) % 3 ~= 0 then return false end
+    if not canonical_integer(tuple[2]) or tuple[2] < 1 or tuple[2] > 2147483647
+        or not canonical_integer(tuple[3]) or tuple[3] < 1 or tuple[3] > 2147483647
+        or not canonical_integer(tuple[4]) or math.abs(tuple[4]) > 2147483647
+        or not canonical_integer(tuple[5]) or tuple[5] < 1 or tuple[5] > 8
+        or count ~= 5 + tuple[5] * 3 then return false end
+    local previous_ordinal, previous_reward, previous_predecessor
+    for i = 6, count, 3 do
+      local ordinal, reward, predecessor = tuple[i], tuple[i + 1], tuple[i + 2]
+      if not canonical_integer(ordinal) or ordinal < 0 or ordinal > 2147483647
+          or not canonical_integer(reward) or reward < 0 or reward > 4294967295
+          or not canonical_integer(predecessor) or predecessor < 0 or predecessor > 4294967295 then
+        return false
+      end
+      if previous_ordinal ~= nil and (ordinal < previous_ordinal
+          or ordinal == previous_ordinal and reward < previous_reward
+          or ordinal == previous_ordinal and reward == previous_reward
+            and predecessor <= previous_predecessor) then return false end
+      previous_ordinal, previous_reward, previous_predecessor = ordinal, reward, predecessor
+    end
+    return true
+  end
   if family == "source" or family == "capacity" or family == "need" then
     if count < 2 or count > 32 then return false end
     if (family == "source" or family == "capacity")
@@ -4848,6 +4871,219 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
     targets, by_key = filtered, filtered_by_key
   end
   local provider_generations = {}
+  local source_status = {}
+  local function status_fallback(provider, generation, reason)
+    return { provider = provider, generation = generation, complete = false,
+      reason_code = reason, rows = { { scope = "provider", generation = generation,
+        identity = "provider:" .. tostring(provider), provider = provider, qid = nil,
+        task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
+  end
+  local function provider_status(provider, accepted_contracts, rejected_sources, rejected_pools)
+    local provider_name = type(provider) == "table" and provider.provider or nil
+    if type(provider_name) ~= "string" or not provider_name:match("^[a-z][a-z0-9_]*$")
+        or provider.source_status == nil then return end
+    local raw = provider.source_status
+    local reason
+    local function only_keys(value, allowed, cap)
+      local count = 0
+      for key in pairs(value) do
+        count = count + 1
+        if count > cap or not allowed[key] then return false end
+      end
+      return true
+    end
+    local function bounded_array(value, cap)
+      if type(value) ~= "table" then return nil end
+      local count, maximum = 0, 0
+      for key in pairs(value) do
+        count = count + 1
+        if count > cap then return nil, "overflow" end
+        if type(key) ~= "number" or math.type(key) ~= "integer" or key < 1 then return nil end
+        if key > maximum then maximum = key end
+      end
+      if count ~= maximum then return nil end
+      return maximum
+    end
+    local envelope_keys = { generation = true, complete = true, reason_code = true, rows = true }
+    local row_keys = { scope = true, generation = true, identity = true, provider = true,
+      qid = true, task_index = true, item_ids = true, state = true, reason_code = true }
+    if type(raw) ~= "table" or not only_keys(raw, envelope_keys, 4)
+        or type(raw.rows) ~= "table" or type(raw.complete) ~= "boolean"
+        or not objective_generation(raw.generation)
+        or (raw.reason_code ~= nil and type(raw.reason_code) ~= "string")
+        or raw.complete == true and raw.reason_code ~= nil then
+      reason = "status_malformed"
+    end
+    local rows, seen, item_counts = {}, {}, {}
+    if not reason then
+      local n = bounded_array(raw.rows, 4096)
+      if n == nil then reason = "status_malformed" end
+      for i = 1, (reason and 0 or n) do
+        local r = raw.rows[i]
+        if type(r) ~= "table" or not only_keys(r, row_keys, 9)
+            or (r.scope ~= "provider" and r.scope ~= "source")
+            or type(r.identity) ~= "string" or #r.identity == 0
+            or raw.complete == true and r.scope == "source" and not canonical_key_valid(r.identity)
+            or r.provider ~= provider_name or not objective_generation(r.generation)
+            or (r.qid ~= nil and not objective_uint(r.qid, 2147483647))
+            or (r.task_index ~= nil and not objective_index(r.task_index, 2147483647))
+            or type(r.item_ids) ~= "table" or (r.state ~= "available"
+              and r.state ~= "unavailable" and r.state ~= "unknown")
+            or type(r.reason_code) ~= "string" then reason = "status_malformed"; break end
+        local item_count = bounded_array(r.item_ids, 4096)
+        if item_count == nil then reason = "status_malformed"; break end
+        local previous = 0
+        for item_index = 1, item_count do
+          local id = r.item_ids[item_index]
+          if not objective_uint(id, 2147483647) or id <= previous then reason = "status_malformed"; break end
+          previous = id
+        end
+        if reason then break end
+        if raw.complete == true then
+          if raw.reason_code ~= nil or r.scope ~= "source" then reason = "status_malformed"; break end
+        elseif raw.complete == false and (#raw.rows ~= 1 or r.scope ~= "provider"
+            or r.identity ~= "provider:" .. provider_name or r.qid ~= nil or r.task_index ~= nil
+            or item_count ~= 0 or r.state ~= "unknown" or r.reason_code ~= raw.reason_code) then
+          reason = "status_malformed"; break
+        end
+        rows[#rows + 1] = r
+        item_counts[#item_counts + 1] = item_count
+      end
+    end
+    if not reason then
+      if raw.generation ~= provider.generation then reason = "status_generation_mismatch" end
+      for _, row in ipairs(rows) do
+        if row.generation ~= provider.generation then reason = "status_generation_mismatch"; break end
+      end
+    end
+    if not reason then
+      for _, row in ipairs(rows) do
+        local key = row.scope .. "\0" .. row.identity
+        if seen[key] then reason = "status_duplicate_identity"; break end
+        seen[key] = true
+      end
+    end
+    if not reason and #raw.rows > 512 then reason = "status_row_overflow" end
+    if not reason then
+      for _, row in ipairs(rows) do if #row.identity > 1024 then reason = "status_identity_overflow"; break end end
+    end
+    if not reason then
+      if raw.reason_code ~= nil and (#raw.reason_code > 64
+          or not raw.reason_code:match("^[a-z][a-z0-9_]*$")) then reason = "status_reason_invalid" end
+      for _, row in ipairs(rows) do
+        if #row.reason_code > 64 or not row.reason_code:match("^[a-z][a-z0-9_]*$") then
+          reason = "status_reason_invalid"; break
+        end
+      end
+    end
+    if not reason then
+      for _, count in ipairs(item_counts) do if count > 256 then reason = "status_items_overflow"; break end end
+    end
+    if not reason then
+      local copied = {}
+      for index, row in ipairs(rows) do
+        local item_ids = {}
+        for item_index = 1, item_counts[index] do item_ids[item_index] = row.item_ids[item_index] end
+        copied[index] = { scope = row.scope, generation = row.generation,
+          identity = row.identity, provider = provider_name, qid = row.qid,
+          task_index = row.task_index, item_ids = item_ids, state = row.state,
+          reason_code = row.reason_code }
+      end
+      rows = copied
+    end
+    if not reason and raw.complete == true then
+      local eligible_by_key, available_by_key = {}, {}
+      for _, candidate in ipairs(objective_array(provider.candidates) or {}) do
+        local contract = accepted_contracts[candidate]
+        local tuple = contract and contract.source_tuple or nil
+        local key = contract and contract.source_key or nil
+        if type(candidate) == "table"
+            and (candidate.provider == nil or candidate.provider == provider_name)
+            and candidate.eligibility == "eligible" and key ~= nil
+            and not rejected_sources[key] and not rejected_pools[contract.capacity_key] then
+          if eligible_by_key[key] ~= nil then reason = "status_duplicate_identity"; break end
+          eligible_by_key[key] = { tuple = tuple, outputs = contract.outputs }
+        end
+      end
+      if not reason then
+        for _, row in ipairs(rows) do
+          if row.scope == "source" and row.state == "available" then
+            local aggregate = eligible_by_key[row.identity]
+            if aggregate == nil or available_by_key[row.identity] ~= nil
+                or provider_name == "reward" and (row.qid ~= aggregate.tuple[3]
+                  or row.task_index ~= aggregate.tuple[4]) then
+              reason = "status_aggregate_mismatch"; break
+            end
+            local expected, outputs = {}, {}
+            for _, output in ipairs(aggregate.outputs or {}) do
+              local needed = not grouped_needs
+              if grouped_needs then
+                for _, quest_items in pairs(grouped_need_items) do
+                  for _, task_items in pairs(quest_items) do
+                    if task_items[output.item_id] then needed = true; break end
+                  end
+                  if needed then break end
+                end
+              end
+              if needed then expected[output.item_id] = true end
+            end
+            for item_id in pairs(expected) do outputs[#outputs + 1] = item_id end
+            table.sort(outputs)
+            if #outputs ~= #row.item_ids then reason = "status_aggregate_mismatch"; break end
+            for index, item_id in ipairs(outputs) do
+              if row.item_ids[index] ~= item_id then reason = "status_aggregate_mismatch"; break end
+            end
+            if reason then break end
+            available_by_key[row.identity] = true
+          end
+        end
+      end
+      if not reason then
+        for key in pairs(eligible_by_key) do
+          if not available_by_key[key] then reason = "status_aggregate_mismatch"; break end
+        end
+      end
+    end
+    if reason then
+      source_status[#source_status + 1] = status_fallback(provider_name, provider.generation, reason)
+    else
+      table.sort(rows, function(a, b)
+        if a.identity ~= b.identity then return M.byte_less(a.identity, b.identity) end
+        return a.scope < b.scope
+      end)
+      source_status[#source_status + 1] = { provider = provider_name, generation = provider.generation,
+        complete = raw.complete, reason_code = raw.reason_code, rows = rows }
+    end
+  end
+  local function copy_reward_diagnostics(value)
+    if type(value) ~= "table" then return nil end
+    local count, maximum = 0, 0
+    for key in pairs(value) do
+      count = count + 1
+      if count > 512 or type(key) ~= "number" or math.type(key) ~= "integer"
+          or key < 1 or key > 512 then return nil end
+      if key > maximum then maximum = key end
+    end
+    if count ~= maximum then return nil end
+    local copied = {}
+    for i = 1, count do
+      local row = value[i]
+      if type(row) ~= "table" then return nil end
+      local field_count = 0
+      for key in pairs(row) do
+        field_count = field_count + 1
+        if field_count > 3 or (key ~= "member_id" and key ~= "gate" and key ~= "status") then
+          return nil
+        end
+      end
+      if field_count ~= 3 or type(row.member_id) ~= "string" or #row.member_id == 0
+          or #row.member_id > 1024 or type(row.gate) ~= "string" or #row.gate > 64
+          or not row.gate:match("^[a-z][a-z0-9_]*$")
+          or (row.status ~= "ineligible" and row.status ~= "unknown") then return nil end
+      copied[i] = { member_id = row.member_id, gate = row.gate, status = row.status }
+    end
+    return copied
+  end
   local invalid_sources, invalid_pools, capacity_pools = {}, {}, {}
   local grouped_contracts, source_claims = {}, {}
   local capacity_claims, capacity_contracts = {}, {}
@@ -4902,18 +5138,26 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
       and candidate.available_acquisitions > 0
     local unlimited_capacity = candidate.capacity_kind == "unlimited"
       and candidate.available_acquisitions == nil
-    local certainty_ok = candidate.certainty == "guaranteed"
-      or candidate.certainty == "probabilistic"
-    local probability_ok = candidate.certainty ~= "probabilistic"
-      or (type(candidate.probability) == "number" and candidate.probability == candidate.probability
-        and candidate.probability > 0 and candidate.probability < math.huge)
+    local probabilistic = candidate.certainty == "probabilistic"
+    local probabilistic_capacity = probabilistic
+      and candidate.capacity_kind == "probabilistic"
+      and candidate.available_acquisitions == nil
+    local certainty_ok = candidate.certainty == "guaranteed" or probabilistic
+    local known_probability = type(candidate.probability) == "number"
+      and candidate.probability == candidate.probability
+      and candidate.probability > 0 and candidate.probability < math.huge
+    local probability_ok = candidate.certainty == "guaranteed"
+      and candidate.probability == nil
+      or probabilistic_capacity and (candidate.probability == nil or known_probability)
+      or probabilistic and not probabilistic_capacity and known_probability
     local target = type(candidate.target) == "table" and candidate.target or {}
     local candidate_pos = candidate.pos or target.pos
     local target_ok = (valid_pos(candidate_pos) or objective_uint(target.cid, 4294967295))
       and (target.cid == nil or (objective_uint(target.cid, 4294967295)
         and target.place == nil))
       and (target.place == nil or objective_place_key(target.place))
-    valid = valid and (finite_capacity or unlimited_capacity) and certainty_ok
+    valid = valid and (finite_capacity or unlimited_capacity or probabilistic_capacity)
+      and certainty_ok
       and probability_ok and target_ok
     if not valid then return nil end
     return { source_tuple = source_tuple, capacity_tuple = capacity_tuple,
@@ -5024,7 +5268,10 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
       provider_generations[#provider_generations + 1] = { provider = provider.provider,
         generation = provider.generation, status = provider.status,
         complete = provider.complete, reason = provider.reason,
-        candidate_count = provider_candidates and #provider_candidates or nil }
+        candidate_count = provider_candidates and #provider_candidates or nil,
+        diagnostic_rows = provider.provider == "reward" and copy_reward_diagnostics(provider.diagnostic_rows)
+          or nil }
+      provider_status(provider, grouped_contracts, invalid_sources, invalid_pools)
       if grouped_needs then
         if not grouped_needs_valid then
           diagnostic(provider.provider, "need_snapshot_invalid")
@@ -5133,7 +5380,7 @@ function M.objective_snapshot(task_snapshot, place_snapshot, provider_snapshots,
       need_generation = task_snapshot.need_generation,
       need_source_generation = type(task_snapshot.objective_needs) == "table"
         and task_snapshot.objective_needs.source_generation or nil,
-      providers = provider_generations }, targets = kept,
+      providers = provider_generations }, source_status = source_status, targets = kept,
       diagnostics = diagnostics, registry_diagnostics = registry.diagnostics }
 end
 
@@ -5279,10 +5526,13 @@ local function objective_record_valid(snapshot, obj)
     if snapshot.grouped_needs then
       if type(obj.source_id) ~= "string" or not canonical_key_valid(obj.source_id)
           or type(obj.capacity_key) ~= "string" or not canonical_key_valid(obj.capacity_key)
-          or (obj.capacity_kind ~= "finite" and obj.capacity_kind ~= "unlimited")
+          or (obj.capacity_kind ~= "finite" and obj.capacity_kind ~= "unlimited"
+            and obj.capacity_kind ~= "probabilistic")
           or (obj.capacity_kind == "finite" and (not objective_index(obj.available_acquisitions,
             2147483647) or obj.available_acquisitions == 0))
           or (obj.capacity_kind == "unlimited" and obj.available_acquisitions ~= nil)
+          or (obj.capacity_kind == "probabilistic"
+            and (obj.available_acquisitions ~= nil or obj.certainty ~= "probabilistic"))
           or (obj.certainty ~= "guaranteed" and obj.certainty ~= "probabilistic")
           or objective_array(obj.outputs) == nil or #obj.outputs == 0
           or objective_array(obj.groups) == nil or #obj.groups == 0 then return false end
@@ -5302,6 +5552,8 @@ end
 
 function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
   policy = type(policy) == "table" and policy or {}
+  local marker_keys = type(policy.marker_objective_keys) == "table"
+    and policy.marker_objective_keys or nil
   local out, full = {}, {}
   local want_full = fullmap_world ~= nil
   local operations = 0
@@ -5428,7 +5680,8 @@ function M.objective_markers(base_markers, fullmap_world, snapshot, policy)
     end
   end
   for _, obj in ipairs(type(snapshot) == "table" and objective_array(snapshot.targets) or {}) do
-    if objective_record_valid(snapshot, obj) then
+    if objective_record_valid(snapshot, obj)
+        and (marker_keys == nil or marker_keys[obj.key] == true) then
       attach_or_add(out, out_index, obj)
       if want_full then attach_or_add(full, full_index, obj) end
     end
@@ -5604,6 +5857,8 @@ local function objective_grouped_routes(snapshot, player_origin, policy)
   local generation = snapshot.generation
   local visible = type(policy.visible_objective_keys) == "table"
     and policy.visible_objective_keys or nil
+  local route_keys = type(policy.route_objective_keys) == "table"
+    and policy.route_objective_keys or nil
   local focus_rank, focus_order = {}, {}
   for i, qid in ipairs(objective_array(policy.focus_order) or {}) do
     if objective_uint(qid, 2147483647) and focus_rank[qid] == nil then
@@ -5621,7 +5876,9 @@ local function objective_grouped_routes(snapshot, player_origin, policy)
     return best, rank
   end
   local function shown(obj)
-    return objective_record_valid(snapshot, obj) and (visible == nil or visible[obj.key] == true)
+    return objective_record_valid(snapshot, obj)
+      and (visible == nil or visible[obj.key] == true)
+      and (route_keys == nil or route_keys[obj.key] == true)
   end
   local function add_obj(obj, source_group)
     if not shown(obj) then return end
@@ -5869,6 +6126,10 @@ function M.objective_routes(snapshot, player_origin, policy)
     return objective_grouped_routes(snapshot, player_origin, policy)
   end
   local generation = snapshot.generation
+  local visible = type(policy.visible_objective_keys) == "table"
+    and policy.visible_objective_keys or nil
+  local route_keys = type(policy.route_objective_keys) == "table"
+    and policy.route_objective_keys or nil
   local focus_rank = {}
   for i, qid in ipairs(objective_array(policy.focus_order) or {}) do focus_rank[qid] = i end
   local function owner_order(obj)
@@ -5915,6 +6176,8 @@ function M.objective_routes(snapshot, player_origin, policy)
   end)
   local function add(obj)
     if not objective_record_valid(snapshot, obj) then return end
+    if visible ~= nil and visible[obj.key] ~= true then return end
+    if route_keys ~= nil and route_keys[obj.key] ~= true then return end
     if obj.kind == "source" and policy.objective_places ~= true then return end
     local direct = obj.kind ~= "npc"
     if direct and policy.objective_places ~= true then return end

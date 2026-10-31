@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("doctor", "check", "deploy", "probe", "shot", "verify-install")]
+    [ValidateSet("doctor", "check", "deploy", "reset-scripts", "probe", "shot", "verify-install")]
     [string]$Action = "doctor",
     [string]$Chunk,
     [int]$Timeout = 12,
@@ -130,6 +130,21 @@ function Test-InstalledFiles {
     Write-Host "verify-install: all $($pairs.Count) files match"
 }
 
+function Install-ProbeHarness {
+    $source = Join-Path $root "tools\probe\qnml_check.lua"
+    $destination = Join-Path $GameDir "reframework\autorun\qnml_check.lua"
+    $destinationRoot = Split-Path $destination -Parent
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "probe harness source missing: $source"
+    }
+    New-Item -ItemType Directory -Path $destinationRoot -Force | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+    if ((Get-Sha256 $source) -ne (Get-Sha256 $destination)) {
+        throw "probe harness hash mismatch after install"
+    }
+    Write-Host "probe harness installed"
+}
+
 $tempRoot = [System.IO.Path]::GetFullPath((Join-Path $root ".tmp-tests\dev"))
 $runTemp = [System.IO.Path]::GetFullPath((Join-Path $tempRoot `
     ("{0}-{1}" -f $PID, [guid]::NewGuid().ToString("N"))))
@@ -175,6 +190,12 @@ try {
             Invoke-ProjectPowerShell (Join-Path $PSScriptRoot "deploy.ps1") `
                 @("-GameDir", $GameDir, "-Lua", $lua, "-Luac", $luac)
             Test-InstalledFiles
+            Install-ProbeHarness
+        }
+        "reset-scripts" {
+            Install-ProbeHarness
+            Invoke-ProjectPowerShell (Join-Path $PSScriptRoot "reset-scripts.ps1") `
+                @("-GameDir", $GameDir)
         }
         "probe" {
             if (-not $Chunk) { throw "probe requires -Chunk <file>" }

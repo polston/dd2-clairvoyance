@@ -157,6 +157,7 @@ end
 function M.wants_round(tg, members)
   return (tg.chests or tg.treasure or tg.tokens or tg.beetles or tg.monsters
     or tg.small_monsters or tg.sellers or tg.search or tg.shops
+    or tg.source_browser
     or tg.first_token or type(tg.focus) == "table" or (members or 0) > 0) and true or false
 end
 
@@ -291,6 +292,7 @@ function M.new(a, reads, io)
       target_member = nil, members = {}, member_of = {}, objective_generation = nil,
       objective_publication = nil, objective_place_observation = nil,
       objective_source_observations = {}, objective_live_source_cache = {}, route_cache = {},
+      source_browser_open = false, source_browser_cache = nil, source_browser_generation = 0,
       route_fail = {}, fail_seq = 0,
       -- SPEC 32.14: sticky route colour slots; slot_of (cid -> slot) and
       -- slot_cid (slot -> cid) together are the spec's S.slots
@@ -2038,8 +2040,8 @@ function M.new(a, reads, io)
     for k in pairs(ACCUM) do stats.ms[k] = nil end
     for _, k in ipairs(CONDITIONAL_READS) do stats.ms[k] = nil end
     res_reused = false
-    local any_rec = tg.chests or tg.tokens or tg.beetles or fq
-    local need_shops = tg.search or tg.shops
+    local any_rec = tg.chests or tg.tokens or tg.beetles or fq or tg.source_browser
+    local need_shops = tg.search or tg.shops or tg.source_browser
     local t = clock()
     local cast_ok = ensure_cast()
     lap("cast", t)
@@ -2047,7 +2049,7 @@ function M.new(a, reads, io)
     ensure_boss()
     lap("boss", t)
     local boss_ok = S.boss ~= nil
-    local any_monsters = tg.monsters or tg.small_monsters
+    local any_monsters = tg.monsters or tg.small_monsters or tg.source_browser
     if any_monsters then
       t = clock()
       read_loaded_boss()
@@ -2198,7 +2200,7 @@ function M.new(a, reads, io)
           end
           if has then state = picked and "opened" or "unopened" end
         end
-        local wanted = tg.chests and true or false
+        local wanted = (tg.chests or tg.source_browser) and true or false
         if not wanted and fq then
           for _, q in ipairs(gate_qids or EMPTY) do
             if fq[q] then wanted = true; break end
@@ -2318,7 +2320,7 @@ function M.new(a, reads, io)
     end
 
     -- sellers
-    if tg.sellers or fq then
+    if tg.sellers or fq or tg.source_browser then
       t = clock()
       local list, fresh = guarded("sellers", compute_sellers)
       lap("sellers", t)
@@ -2345,7 +2347,8 @@ function M.new(a, reads, io)
       local monsters_t0 = clock()
       -- each class is skipped before clustering when its own toggle is off
       -- (SPEC 28.7.1, 28.12.2)
-      local want_large, want_small = tg.monsters == true, tg.small_monsters == true
+      local want_large = tg.monsters == true or tg.source_browser == true
+      local want_small = tg.small_monsters == true or tg.source_browser == true
       local units = guarded("respawn", function() return need_table("respawn_units") end)
       local items = {}
       local function add_monster(uid, e)
@@ -2407,7 +2410,7 @@ function M.new(a, reads, io)
     end
 
     -- drops: deferred past the round whose shop index first succeeds (19.12.3.3)
-    if tg.search and any_monsters then
+    if (tg.search or tg.source_browser) and any_monsters then
       local drops_t0 = clock()
       if first_shops and stats.search_first_ms ~= nil and S.drop_ids == nil then
         again = true
@@ -2507,6 +2510,20 @@ function M.new(a, reads, io)
   -- merely due; a round whose throttle was cleared (a poke, the run-again
   -- flag, set_route) or whose NPC list changed still runs (SPEC 28.8.1)
   function w:refresh(now, gate, toggles, hold)
+    if type(toggles) == "table" then
+      local next_browser_open = toggles.source_browser == true
+      if S.source_browser_open and not next_browser_open then
+        S.source_browser_cache = nil
+        S.objective_live_source_cache["browser-shop"] = nil
+        S.objective_live_source_cache["browser-monster"] = nil
+        S.objective_source_observations["world-browser-shop"] = nil
+        S.objective_source_observations["world-browser-monster"] = nil
+        if type(a.objective_source_browser_close) == "function" then
+          pcall(a.objective_source_browser_close)
+        end
+      end
+      S.source_browser_open = next_browser_open
+    end
     if not gate or type(toggles) ~= "table" then return false end
     local tg = toggles
     if not M.wants_round(tg, #S.members) then return false end
@@ -2906,36 +2923,290 @@ function M.new(a, reads, io)
     return providers
   end
 
+  -- Explicit item-search source browser (SPEC 40.16 / ROADMAP 97). This is a
+  -- separate observational lifecycle: it can read providers only while the
+  -- view is open, and its rows are never fed into objective_snapshot/routes.
+  function w:objective_source_browser(query, quest_catalog, task_snapshot, focused_providers)
+    if S.source_browser_open ~= true or type(query) ~= "string" or query == "" then return nil end
+    query = query:sub(1, 64)
+    local cache_key = table.concat({ query, tostring(last_round),
+      tostring(type(task_snapshot) == "table" and task_snapshot.need_generation or 0),
+      tostring(quest_catalog), tostring(focused_providers) }, "|")
+    local cached = S.source_browser_cache
+    if cached ~= nil and cached.key == cache_key then return objective_clone(cached.value) end
+    local providers = {}
+    for _, provider in ipairs(type(focused_providers) == "table" and focused_providers or {}) do
+      providers[#providers + 1] = provider
+    end
+    local input = input_tbl or {}
+    local needle = query:lower()
+    local overflow_reason = nil
+    local matched_ids, matched_seen = {}, {}
+    local function add_matched_item(item_id)
+      item_id = to_int(item_id)
+      if item_id ~= nil and item_id > 0 and not matched_seen[item_id] then
+        matched_seen[item_id] = true
+        matched_ids[#matched_ids + 1] = item_id
+        if #matched_ids > 64 then overflow_reason = "source_browser_item_overflow" end
+      end
+    end
+    local static_catalog = w:objective_static_source_catalog()
+    local registry_ids, registry_seen = {}, {}
+    local function add_registry_item(item_id)
+      item_id = to_int(item_id)
+      if item_id ~= nil and item_id > 0 and not registry_seen[item_id] then
+        local name = a.item_name(item_id)
+        if type(name) == "string" and name:lower():find(needle, 1, true) then
+          registry_seen[item_id] = true
+          registry_ids[#registry_ids + 1] = item_id
+          add_matched_item(item_id)
+        end
+      end
+    end
+    for _, family in ipairs({ "placements", "chests" }) do
+      for _, source in ipairs(type(static_catalog) == "table"
+          and type(static_catalog[family]) == "table" and static_catalog[family] or {}) do
+        for _, output in ipairs(type(source) == "table" and type(source.outputs) == "table"
+            and source.outputs or {}) do
+          add_registry_item(output.item_id)
+        end
+      end
+    end
+    table.sort(registry_ids)
+    local shop_ids, shop_seen = {}, {}
+    local function add_shop_item(item_id)
+      item_id = to_int(item_id)
+      if item_id ~= nil and item_id > 0 and not shop_seen[item_id] then
+        shop_seen[item_id] = true; shop_ids[#shop_ids + 1] = item_id
+        add_matched_item(item_id)
+      end
+    end
+    for _, shop in ipairs(type(input.shops) == "table" and input.shops or {}) do
+      for _, item in ipairs(type(shop.items) == "table" and shop.items or {}) do
+        if type(item.name) == "string" and item.name:lower():find(needle, 1, true) then
+          add_shop_item(item.id)
+        end
+      end
+    end
+    for _, seller in ipairs(type(input.sellers) == "table" and input.sellers or {}) do
+      if type(seller.item_name) == "string" and seller.item_name:lower():find(needle, 1, true) then
+        add_shop_item(seller.item)
+      end
+    end
+    table.sort(shop_ids)
+    local monster_ids, monster_seen = {}, {}
+    for _, drop_ids in pairs(type(S.drop_ids) == "table" and S.drop_ids or {}) do
+      for _, item_id in ipairs(type(drop_ids) == "table" and drop_ids or {}) do
+        local name = a.item_name(item_id)
+        if type(name) == "string" and name:lower():find(needle, 1, true)
+            and not monster_seen[item_id] then
+          monster_seen[item_id] = true; monster_ids[#monster_ids + 1] = item_id
+          add_matched_item(item_id)
+        end
+      end
+    end
+    table.sort(monster_ids)
+    table.sort(matched_ids)
+    if overflow_reason == nil and type(a.objective_source_registry) == "function" then
+      local ok, observed = pcall(a.objective_source_registry,
+        static_catalog, quest_catalog, matched_ids, query)
+      if ok and type(observed) == "table" then
+        for _, provider in ipairs(observed) do providers[#providers + 1] = provider end
+      end
+    end
+    local rows, seen = {}, {}
+    local function item_ids_of(candidate)
+      local ids, used = {}, {}
+      for _, output in ipairs(type(candidate) == "table" and type(candidate.outputs) == "table"
+          and candidate.outputs or {}) do
+        local item_id = type(output) == "table" and to_int(output.item_id) or nil
+        if item_id ~= nil and item_id > 0 and not used[item_id] then
+          used[item_id] = true; ids[#ids + 1] = item_id
+        end
+      end
+      table.sort(ids)
+      return ids
+    end
+    local function label_of(provider, item_ids)
+      local names = {}
+      for _, item_id in ipairs(item_ids) do
+        local name = a.item_name(item_id)
+        if type(name) == "string" and name ~= "" then names[#names + 1] = name end
+      end
+      local kinds = { placed = "Placed item", chest = "Chest", loot = "Loot",
+        talk_grant = "NPC grant", reward = "Quest reward", forgery = "Forgery",
+        shop = "Shop", seller = "Seller", monster = "Monster drop" }
+      return (#names > 0 and table.concat(names, " / ") or "Item source")
+        .. " - " .. (kinds[provider] or tostring(provider or "Source"))
+    end
+    local function add(row)
+      if #rows >= 512 then overflow_reason = "source_browser_status_overflow"; return end
+      if type(row) ~= "table" or type(row.identity) ~= "string"
+          or row.identity == "" or #row.identity > 1024 or seen[row.identity] then return end
+      seen[row.identity] = true
+      row.item_ids = type(row.item_ids) == "table" and row.item_ids or {}
+      row.label = type(row.label) == "string" and row.label
+        or label_of(row.provider, row.item_ids)
+      rows[#rows + 1] = row
+    end
+    local function add_provider(provider, include_provider_status)
+      local status = type(provider) == "table" and provider.source_status or nil
+      if type(status) == "table" and type(status.rows) == "table" then
+        for _, source in ipairs(status.rows) do
+          local copied = objective_clone(source)
+          if type(copied) == "table"
+              and (copied.scope ~= "provider" or include_provider_status) then
+            local matched = copied.scope == "provider"
+            for _, item_id in ipairs(type(copied.item_ids) == "table" and copied.item_ids or {}) do
+              local name = a.item_name(item_id)
+              if type(name) == "string" and name:lower():find(needle, 1, true) then
+                matched = true; add_matched_item(item_id)
+              end
+            end
+            if matched then add(copied) end
+          end
+        end
+      elseif type(provider) == "table" then
+        for _, candidate in ipairs(type(provider.candidates) == "table" and provider.candidates or {}) do
+          local identity = type(candidate) == "table" and core.target_key(candidate.source_id) or nil
+          if identity ~= nil then
+            local ids = item_ids_of(candidate)
+            local matched = false
+            for _, item_id in ipairs(ids) do
+              local name = a.item_name(item_id)
+              if type(name) == "string" and name:lower():find(needle, 1, true) then
+                matched = true; add_matched_item(item_id)
+              end
+            end
+            if matched then
+              add({ scope = "source", generation = provider.generation, identity = identity,
+                provider = provider.provider, qid = candidate.qid, task_index = candidate.task_index,
+                state = candidate.eligibility == "eligible" and "available" or "unknown",
+                reason_code = candidate.reason or (candidate.eligibility == "eligible"
+                  and "available" or "source_state_unreadable"), item_ids = ids })
+            end
+          end
+        end
+      end
+    end
+    for _, provider in ipairs(providers) do
+      if provider.reason == "source_browser_item_overflow" then
+        overflow_reason = "source_browser_item_overflow"
+      end
+      local include_provider_status = provider.provider == "reward"
+        or ((provider.provider == "placed" or provider.provider == "chest")
+          and #registry_ids > 0)
+        or (type(provider.reason) == "string"
+          and provider.reason:find("overflow", 1, true) ~= nil)
+      if include_provider_status and provider.complete == false
+          and type(provider.reason) == "string"
+          and provider.reason:find("overflow", 1, true) ~= nil then
+        overflow_reason = "source_browser_status_overflow"
+      end
+      add_provider(provider, include_provider_status)
+    end
+    if overflow_reason == nil and #shop_ids > 0
+        and type(w.objective_shop_source_snapshot) == "function" then
+      local ok, provider = pcall(w.objective_shop_source_snapshot, w, shop_ids,
+        "browser-shop")
+      if ok and type(provider) == "table" then
+        if provider.complete == false and type(provider.reason) == "string"
+            and provider.reason:find("overflow", 1, true) ~= nil then
+          overflow_reason = "source_browser_status_overflow"
+        end
+        add_provider(provider, true)
+      end
+    end
+    if overflow_reason == nil and #monster_ids > 0
+        and type(w.objective_monster_source_snapshot) == "function" then
+      local ok, provider = pcall(w.objective_monster_source_snapshot, w, monster_ids,
+        "browser-monster")
+      if ok and type(provider) == "table" then
+        if provider.complete == false and type(provider.reason) == "string"
+            and provider.reason:find("overflow", 1, true) ~= nil then
+          overflow_reason = "source_browser_status_overflow"
+        end
+        add_provider(provider, true)
+      end
+    end
+    if overflow_reason ~= nil then
+      rows = { { scope = "provider", generation = 1,
+        identity = "provider:source_browser", provider = "source_browser",
+        qid = nil, task_index = nil, item_ids = {}, state = "unknown",
+        reason_code = overflow_reason,
+        label = "Acquisition sources" } }
+    end
+    table.sort(rows, function(left, right) return left.identity < right.identity end)
+    local evidence = { query = query, rows = rows, reason_code = overflow_reason }
+    if cached == nil or not objective_same(cached.evidence, evidence) then
+      S.source_browser_generation = math.min(2147483647, S.source_browser_generation + 1)
+    end
+    local result = { generation = math.max(1, S.source_browser_generation),
+      complete = overflow_reason == nil, reason_code = overflow_reason, rows = rows }
+    S.source_browser_cache = { key = cache_key, evidence = objective_clone(evidence),
+      value = objective_clone(result) }
+    return result
+  end
+
   -- World-owned live source readers are optional until their managed gates are
   -- proven. Missing or partial reads publish unknown and never retain rows.
-  local function objective_live_sources(provider, read_name, normalize, task_snapshot, need_snapshot)
-    local need_generation = type(task_snapshot) == "table"
-      and to_int(task_snapshot.need_generation) or nil
+  local function objective_provider_unknown(provider, cache_scope, reason)
+    cache_scope = cache_scope or provider
+    S.objective_live_source_cache[cache_scope] = nil
+    local evidence = { status = "unknown", reason = reason }
+    local key = "world-" .. cache_scope
+    local state = S.objective_source_observations[key]
+    local generation = state and state.generation or 1
+    if state ~= nil and not objective_same(state.value, evidence) then
+      generation = math.min(2147483647, generation + 1)
+    end
+    S.objective_source_observations[key] = { generation = generation,
+      value = objective_clone(evidence) }
+    return { provider = provider, status = "unknown", complete = false,
+      generation = generation, reason = reason, candidates = {},
+      source_status = { generation = generation, complete = false,
+        reason_code = reason, rows = { { scope = "provider", generation = generation,
+          identity = "provider:" .. provider, provider = provider, qid = nil,
+          task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } } }
+  end
+
+  local function objective_live_sources(provider, read_name, normalize, task_snapshot, need_snapshot,
+      publish_status, freshness_read_name, allow_unowned, cache_scope,
+      source_query, source_query_signature)
+    cache_scope = cache_scope or provider
+    local function unknown_status(generation, reason)
+      return { generation = generation, complete = false, reason_code = reason,
+        rows = { { scope = "provider", generation = generation,
+          identity = "provider:" .. provider, provider = provider, qid = nil,
+          task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
+    end
+    local need_generation = allow_unowned and 1 or (type(task_snapshot) == "table"
+      and to_int(task_snapshot.need_generation) or nil)
     local current_tasks = objective_task_rows(task_snapshot)
     local owns_current_work = objective_need_proves_current_work(task_snapshot,
       need_snapshot, current_tasks)
-    if not owns_current_work then
-      S.objective_live_source_cache[provider] = nil
-      local evidence = { status = "unknown", reason = "current_work_unavailable" }
-      local key = "world-" .. provider
-      local state = S.objective_source_observations[key]
-      local generation = state and state.generation or 1
-      if state ~= nil and not objective_same(state.value, evidence) then
-        generation = math.min(2147483647, generation + 1)
-      end
-      S.objective_source_observations[key] = { generation = generation,
-        value = objective_clone(evidence) }
-      return { provider = provider, status = "unknown", complete = false,
-        generation = generation, reason = evidence.reason, candidates = {} }
+    if not allow_unowned and not owns_current_work then
+      return objective_provider_unknown(provider, cache_scope, "current_work_unavailable")
     end
-    local source_generation = need_snapshot.source_generation
-    local need_signature = objective_need_signature(need_snapshot)
-    local cached = S.objective_live_source_cache[provider]
-    if cached ~= nil and cached.round == last_round
+    local source_generation = allow_unowned and 1 or need_snapshot.source_generation
+    local need_signature = allow_unowned and source_query_signature
+      or objective_need_signature(need_snapshot)
+    local cached = S.objective_live_source_cache[cache_scope]
+    local cache_matches = cached ~= nil and cached.round == last_round
       and cached.need_generation == need_generation
       and cached.source_generation == source_generation
-      and cached.need_signature == need_signature then return objective_clone(cached.value) end
-    local ok, raw = call(read_name, task_snapshot, objective_catalog, need_snapshot)
+      and cached.need_signature == need_signature
+    if cache_matches and freshness_read_name ~= nil then
+      local fresh_ok, freshness = call(freshness_read_name)
+      cache_matches = fresh_ok and type(freshness) == "table"
+        and freshness.complete == true and type(cached.freshness) == "table"
+        and cached.freshness.complete == true
+        and objective_same(freshness, cached.freshness)
+    end
+    if cache_matches then return objective_clone(cached.value) end
+    local ok, raw
+    if allow_unowned then ok, raw = call(read_name, source_query)
+    else ok, raw = call(read_name, task_snapshot, objective_catalog, need_snapshot) end
     local rows = type(raw) == "table" and raw.rows or nil
     local dense, n = type(rows) == "table", type(rows) == "table" and #rows or 0
     if dense then
@@ -2948,7 +3219,7 @@ function M.new(a, reads, io)
       end
       dense = dense and count == n
     end
-    local candidates, reason, status = {}, nil, "unknown"
+    local candidates, status_rows, reason, status = {}, {}, nil, "unknown"
     if not ok or type(raw) ~= "table" then
       reason = provider .. "_live_state_unavailable"
     elseif raw.complete ~= true or not dense then
@@ -2972,19 +3243,37 @@ function M.new(a, reads, io)
       end
       local valid = true
       for _, row in ipairs(rows) do
-        local candidate, row_reason = normalize(row)
+        local candidate, row_reason, status_row = normalize(row)
         if row_reason ~= nil then reason, valid = row_reason, false; break end
-        if candidate ~= nil and candidate ~= false then
-          if already_seen(candidate.source_id) then
-            reason, valid = "duplicate_source_identity", false; break
+        local identity = status_row and status_row.source_id
+          or candidate and candidate ~= false and candidate.source_id or nil
+        if identity ~= nil and already_seen(identity) then
+          reason, valid = "duplicate_source_identity", false; break
+        end
+        if publish_status then
+          local status_key = type(status_row) == "table"
+            and core.target_key(status_row.source_id) or nil
+          local item_ids = type(status_row) == "table" and status_row.item_ids or nil
+          if #status_rows >= 512 then
+            reason, valid = provider .. "_status_overflow", false; break
+          elseif status_key == nil or type(item_ids) ~= "table" or #item_ids ~= 1
+              or to_int(item_ids[1]) == nil or item_ids[1] <= 0
+              or (status_row.state ~= "available" and status_row.state ~= "unavailable")
+              or type(status_row.reason_code) ~= "string" then
+            reason, valid = provider .. "_status_malformed", false; break
           end
+          status_rows[#status_rows + 1] = { identity = status_key,
+            item_ids = { item_ids[1] }, state = status_row.state,
+            reason_code = status_row.reason_code }
+        end
+        if candidate ~= nil and candidate ~= false then
           candidates[#candidates + 1] = candidate
         end
       end
       if valid then status = "ok" else candidates = {} end
     end
     local evidence = { status = status, reason = reason, raw = raw }
-    local key = "world-" .. provider
+    local key = "world-" .. cache_scope
     local state = S.objective_source_observations[key]
     local generation = state and state.generation or 1
     if state ~= nil and not objective_same(state.value, evidence) then
@@ -2995,14 +3284,28 @@ function M.new(a, reads, io)
     for _, candidate in ipairs(candidates) do candidate.generation = generation end
     local result = { provider = provider, status = status, complete = status == "ok",
       generation = generation, reason = reason, candidates = candidates }
-    S.objective_live_source_cache[provider] = { round = last_round,
+    if publish_status then
+      if status == "ok" then
+        table.sort(status_rows, function(a, b) return core.byte_less(a.identity, b.identity) end)
+        for _, row in ipairs(status_rows) do
+          row.scope, row.generation, row.provider = "source", generation, provider
+          row.qid, row.task_index = nil, nil
+        end
+        result.source_status = { generation = generation, complete = true,
+          reason_code = nil, rows = status_rows }
+      else
+        result.source_status = unknown_status(generation, reason)
+      end
+    end
+    S.objective_live_source_cache[cache_scope] = { round = last_round,
       need_generation = need_generation, source_generation = source_generation,
       need_signature = need_signature,
+      freshness = type(raw) == "table" and objective_clone(raw.freshness) or nil,
       value = objective_clone(result) }
     return result
   end
 
-  function w:objective_shop_observations(task_snapshot, need_snapshot)
+  function w:objective_shop_source_snapshot(item_ids, cache_scope)
     local offers = {}
     return objective_live_sources("shop", "objective_shop_rows", function(row)
       if type(row) ~= "table" then return nil, "shop_row_malformed" end
@@ -3039,9 +3342,18 @@ function M.new(a, reads, io)
       else
         by_ordinal[ordinal] = signature
       end
-      if not row.released or not row.talk_available or not row.interactable
-        or (capacity_kind == "finite" and available == 0) then return false end
       local source_id = { "source", "shop_offer", sid, ordinal, cid }
+      local unavailable_reason
+      if not row.released then unavailable_reason = "shop_unreleased"
+      elseif not row.talk_available or not row.interactable then
+        unavailable_reason = "source_inaccessible"
+      elseif capacity_kind == "finite" and available == 0 then
+        unavailable_reason = "stock_exhausted"
+      end
+      local status_row = { source_id = source_id, item_ids = { item_id },
+        state = unavailable_reason and "unavailable" or "available",
+        reason_code = unavailable_reason or "available" }
+      if unavailable_reason then return false, nil, status_row end
       local pool_id = { "capacity", "shop_offer", sid, ordinal }
       return { source_id = source_id, provider = "shop",
         target = { kind = "seller", shop_id = sid, offer_ordinal = ordinal,
@@ -3050,37 +3362,126 @@ function M.new(a, reads, io)
         capacity_pool_id = pool_id, capacity_kind = capacity_kind,
         available_acquisitions = available, certainty = "guaranteed",
         eligibility = "eligible", evidence = { released = true, talk_available = true,
-          interactable = true, restock_readable = row.restock_readable } }
-    end, task_snapshot, need_snapshot)
+          interactable = true, restock_readable = row.restock_readable } }, nil, status_row
+    end, nil, nil, true, nil, true, cache_scope or "shop", item_ids,
+      #item_ids == 0 and "empty" or table.concat(item_ids, ","))
+  end
+
+  function w:objective_shop_observations(task_snapshot, need_snapshot)
+    local current_tasks = objective_task_rows(task_snapshot)
+    if not objective_need_proves_current_work(task_snapshot, need_snapshot, current_tasks) then
+      return objective_provider_unknown("shop", "shop", "current_work_unavailable")
+    end
+    local ids, seen = {}, {}
+    for _, group in ipairs(need_snapshot.groups) do
+      for _, option in ipairs(group.options) do
+        local item_id = to_int(option.item_id)
+        if item_id ~= nil and item_id > 0 and not seen[item_id] then
+          seen[item_id] = true; ids[#ids + 1] = item_id
+        end
+      end
+    end
+    table.sort(ids)
+    return w:objective_shop_source_snapshot(ids)
+  end
+
+  local function objective_monster_normalize(row)
+    if type(row) ~= "table" then return nil, "monster_row_malformed" end
+    local drop_id = row.drop_row_id
+    local valid_drop_id = (type(drop_id) == "string" and drop_id ~= "")
+      or (to_int(drop_id) ~= nil and drop_id > 0)
+    if type(row.uid) ~= "string" or row.uid == "" or not valid_drop_id
+        or type(row.alive) ~= "boolean" or type(row.enabled) ~= "boolean"
+        or type(row.started) ~= "boolean" or type(row.valid) ~= "boolean"
+        or type(row.updating) ~= "boolean" then
+      return nil, "monster_identity_or_gate_unreadable"
+    end
+    if row.drop_table_readable ~= true then return nil, "monster_drop_table_unreadable" end
+    local item_id, count, raw_rate = to_int(row.item_id), to_int(row.count),
+      to_int(row.raw_rate)
+    if item_id == nil or item_id <= 0 or count == nil or count < 0
+      or not valid_pos(row.pos) or near_zero(row.pos)
+      or raw_rate == nil or raw_rate < 0 then
+      return nil, "monster_drop_evidence_invalid"
+    end
+    local source_id = { "source", "monster_drop", row.uid, drop_id }
+    local unavailable_reason
+    if count == 0 then unavailable_reason = "monster_zero_count"
+    elseif raw_rate == 0 then unavailable_reason = "monster_zero_chance"
+    elseif not row.alive then unavailable_reason = "monster_dead"
+    elseif not row.enabled then unavailable_reason = "monster_disabled"
+    elseif not row.started then unavailable_reason = "monster_not_started"
+    elseif not row.valid then unavailable_reason = "monster_invalid"
+    elseif not row.updating then unavailable_reason = "monster_not_updating" end
+    local status_row = { source_id = source_id, item_ids = { item_id },
+      state = unavailable_reason and "unavailable" or "available",
+      reason_code = unavailable_reason or "available" }
+    if unavailable_reason then return false, nil, status_row end
+    return { source_id = source_id, provider = "monster",
+      target = { kind = "monster", uid = row.uid, drop_row_id = drop_id,
+        pos = { x = row.pos.x, y = row.pos.y, z = row.pos.z } },
+      outputs = { { item_id = item_id, count = count } },
+      capacity_pool_id = { "capacity", "monster_drop", row.uid, drop_id },
+      capacity_kind = "probabilistic", available_acquisitions = nil,
+      certainty = "probabilistic", probability = nil,
+      eligibility = "eligible", evidence = { raw_rate = raw_rate, alive = true,
+        enabled = true, started = true, valid = true, updating = true,
+        drop_table_readable = true } }, nil, status_row
+  end
+
+  local function objective_monster_unknown(reason, cache_scope)
+    return objective_provider_unknown("monster", cache_scope or "monster", reason)
+  end
+
+  local function objective_monster_query(item_ids)
+    local ids, seen, valid = {}, {}, type(item_ids) == "table"
+    local n = valid and #item_ids or 0
+    if n > 64 then valid = false end
+    if valid then
+      local count = 0
+      for key, value in pairs(item_ids) do
+        count = count + 1
+        local id = to_int(value)
+        if type(key) ~= "number" or math.type(key) ~= "integer" or key < 1 or key > n
+            or id == nil or id <= 0 or id > 2147483647 or seen[id] then
+          valid = false; break
+        end
+        seen[id] = true; ids[#ids + 1] = id
+      end
+      if count ~= n then valid = false end
+    end
+    table.sort(ids)
+    return valid and ids or nil
+  end
+
+  -- One normalized live monster provider snapshot serves both item search and
+  -- focused routing. Callers own view/focus policy; discovery owns only evidence.
+  function w:objective_monster_source_snapshot(item_ids, cache_scope)
+    local ids = objective_monster_query(item_ids)
+    if ids == nil then
+      return objective_monster_unknown("monster_source_query_invalid", cache_scope)
+    end
+    local signature = #ids == 0 and "empty" or table.concat(ids, ",")
+    return objective_live_sources("monster", "objective_monster_source_rows",
+      objective_monster_normalize, nil, nil, true, "objective_monster_freshness",
+      true, cache_scope or "monster", ids, signature)
   end
 
   function w:objective_monster_observations(task_snapshot, need_snapshot)
-    return objective_live_sources("monster", "objective_monster_rows", function(row)
-      if type(row) ~= "table" then return nil, "monster_row_malformed" end
-      local drop_id = row.drop_row_id
-      local valid_drop_id = (type(drop_id) == "string" and drop_id ~= "")
-        or (to_int(drop_id) ~= nil and drop_id > 0)
-      if type(row.uid) ~= "string" or row.uid == "" or not valid_drop_id
-          or type(row.alive) ~= "boolean" then
-        return nil, "monster_identity_or_gate_unreadable"
+    local current_tasks = objective_task_rows(task_snapshot)
+    if not objective_need_proves_current_work(task_snapshot, need_snapshot, current_tasks) then
+      return objective_monster_unknown("current_work_unavailable")
+    end
+    local ids, seen = {}, {}
+    for _, group in ipairs(need_snapshot.groups or {}) do
+      for _, option in ipairs(group.options or {}) do
+        if not seen[option.item_id] then
+          seen[option.item_id] = true; ids[#ids + 1] = option.item_id
+        end
       end
-      if row.chance == nil and to_int(row.raw_rate) ~= nil and row.raw_rate >= 0 then
-        return nil, "monster_probability_unproven"
-      end
-      if type(row.accessible) ~= "boolean" then
-        return nil, "monster_identity_or_gate_unreadable"
-      end
-      if not row.alive or not row.accessible then return false end
-      if row.drop_table_readable ~= true then return nil, "monster_drop_table_unreadable" end
-      local item_id, count = to_int(row.item_id), to_int(row.count)
-      if item_id == nil or item_id <= 0 or count == nil or count <= 0
-        or not valid_pos(row.pos) or near_zero(row.pos)
-        or not finite(row.chance) or row.chance < 0 then
-        return nil, "monster_drop_evidence_invalid"
-      end
-      if row.chance == 0 then return false end
-      return nil, "monster_catalog_drop_not_current"
-    end, task_snapshot, need_snapshot)
+    end
+    table.sort(ids)
+    return w:objective_monster_source_snapshot(ids)
   end
 
   -- the next refresh runs a round even inside the throttle window
@@ -3234,14 +3635,20 @@ function M.new(a, reads, io)
       and e.capacity_kind == nil and e.group_keys == nil
     if legacy then return #e.item_ids > 0 end
     local probabilistic = e.certainty == "probabilistic"
+    local known_probability = type(e.probability) == "number"
+      and e.probability == e.probability and e.probability > 0
+      and e.probability < math.huge
+    local capacity_ok = probabilistic and e.capacity_kind == "probabilistic"
+      or (e.capacity_kind == "finite" or e.capacity_kind == "unlimited")
+    local probability_ok = probabilistic and e.capacity_kind == "probabilistic"
+      and (e.probability == nil or known_probability)
+      or probabilistic and e.capacity_kind ~= "probabilistic" and known_probability
+      or not probabilistic and e.probability == nil
     return #e.item_ids > 0 and (e.certainty == "guaranteed" or probabilistic)
       and route_family_key_valid(e.capacity_key, "capacity")
-      and (e.capacity_kind == "finite" or e.capacity_kind == "unlimited")
+      and capacity_ok
       and route_keys_valid(e.group_keys, "need")
-      and ((probabilistic and type(e.probability) == "number"
-          and e.probability == e.probability and e.probability > 0
-          and e.probability < math.huge)
-        or (not probabilistic and e.probability == nil))
+      and probability_ok
   end
   local function route_count_metadata_valid(publication, member_count)
     local total, omitted = rawget(publication, "total"), rawget(publication, "omitted")
@@ -5030,7 +5437,7 @@ function M.game_reads()
   -- Bounded, two-pass shop observation. The first pass collects plain rows;
   -- a second full pass must reproduce its holder fingerprint before any rows
   -- are called complete. No managed holder or BuyParam survives this call.
-  function R.objective_shop_rows(task_snapshot, _, need_snapshot)
+  function R.objective_shop_rows(task_snapshot, _, need_snapshot, explicit_item_ids)
     local function integer(value, minimum)
       return type(value) == "number" and math.type(value) == "integer" and value >= minimum
     end
@@ -5057,37 +5464,61 @@ function M.game_reads()
       for i = 1, #value do hash = ((hash ~ value:byte(i)) * 16777619) & 0xFFFFFFFF end
       return ((hash ~ 255) * 16777619) & 0xFFFFFFFF
     end
-    if type(task_snapshot) ~= "table" or not integer(task_snapshot.need_generation, 1)
-        or type(need_snapshot) ~= "table" or need_snapshot.status ~= "ok"
-        or need_snapshot.complete ~= true
-        or need_snapshot.generation ~= task_snapshot.need_generation
-        or not integer(need_snapshot.source_generation, 1) then
-      shop_scan_state = nil
-      return complete_empty("current_need_unavailable")
+    if explicit_item_ids == nil and need_snapshot == nil and type(task_snapshot) == "table"
+        and task_snapshot.need_generation == nil then
+      explicit_item_ids, task_snapshot = task_snapshot, nil
     end
     local wanted, need_parts = {}, {}
-    for _, group in ipairs(need_snapshot.groups or {}) do
-      if type(group) ~= "table" or not integer(group.qid, 1)
-          or not integer(group.task_index, 0) or group.status ~= "eligible"
-          or group.complete ~= true or group.generation ~= need_snapshot.source_generation
-          or not integer(group.remaining, 1) or type(group.options) ~= "table"
-          or #group.options == 0 then
+    if explicit_item_ids ~= nil then
+      local count = 0
+      if type(explicit_item_ids) ~= "table" then
         shop_scan_state = nil
-        return complete_empty("current_need_malformed")
+        return complete_empty("source_item_query_malformed")
       end
-      local options = {}
-      for _, option in ipairs(group.options) do
-        if type(option) ~= "table" or not integer(option.item_id, 1)
-            or not integer(option.accepted_count, 1) then
+      for key, item_id in pairs(explicit_item_ids) do
+        if not integer(key, 1) or key > 64 or not integer(item_id, 1)
+            or wanted[item_id] then
+          shop_scan_state = nil
+          return complete_empty("source_item_query_malformed")
+        end
+        count = count + 1; wanted[item_id] = true; need_parts[#need_parts + 1] = tostring(item_id)
+      end
+      if count ~= #explicit_item_ids then
+        shop_scan_state = nil
+        return complete_empty("source_item_query_malformed")
+      end
+    else
+      if type(task_snapshot) ~= "table" or not integer(task_snapshot.need_generation, 1)
+          or type(need_snapshot) ~= "table" or need_snapshot.status ~= "ok"
+          or need_snapshot.complete ~= true
+          or need_snapshot.generation ~= task_snapshot.need_generation
+          or not integer(need_snapshot.source_generation, 1) then
+        shop_scan_state = nil
+        return complete_empty("current_need_unavailable")
+      end
+      for _, group in ipairs(need_snapshot.groups or {}) do
+        if type(group) ~= "table" or not integer(group.qid, 1)
+            or not integer(group.task_index, 0) or group.status ~= "eligible"
+            or group.complete ~= true or group.generation ~= need_snapshot.source_generation
+            or not integer(group.remaining, 1) or type(group.options) ~= "table"
+            or #group.options == 0 then
           shop_scan_state = nil
           return complete_empty("current_need_malformed")
         end
-        wanted[option.item_id] = true
-        options[#options + 1] = tostring(option.item_id) .. ":" .. tostring(option.accepted_count)
+        local options = {}
+        for _, option in ipairs(group.options) do
+          if type(option) ~= "table" or not integer(option.item_id, 1)
+              or not integer(option.accepted_count, 1) then
+            shop_scan_state = nil
+            return complete_empty("current_need_malformed")
+          end
+          wanted[option.item_id] = true
+          options[#options + 1] = tostring(option.item_id) .. ":" .. tostring(option.accepted_count)
+        end
+        table.sort(options)
+        need_parts[#need_parts + 1] = table.concat({ tostring(group.qid),
+          tostring(group.task_index), tostring(group.remaining), table.concat(options, ",") }, ":")
       end
-      table.sort(options)
-      need_parts[#need_parts + 1] = table.concat({ tostring(group.qid),
-        tostring(group.task_index), tostring(group.remaining), table.concat(options, ",") }, ":")
     end
     if next(wanted) == nil then
       shop_scan_state = nil
@@ -5439,72 +5870,112 @@ function M.game_reads()
     return out
   end
 
+  local MONSTER_ENEMY_MAX, MONSTER_SOURCE_MAX = 512, 8192
+  local MONSTER_TABLE_MAX, MONSTER_ITEM_MAX = 64, 256
+  local function monster_integer(value, minimum)
+    return type(value) == "number" and math.type(value) == "integer" and value >= minimum
+  end
+  local function monster_bounded(value, cap)
+    local array = elems(value)
+    if array ~= nil then
+      if #array > cap then return nil end
+      return array
+    end
+    local count = int_value(C(value, "get_Count"))
+    if not monster_integer(count, 0) or count > cap then return nil end
+    local out = {}
+    for i = 0, count - 1 do
+      local row = C(value, "get_Item", i)
+      if row == nil then return nil end
+      out[#out + 1] = row
+    end
+    return out
+  end
+  local function objective_monster_live_state()
+    local enemies = monster_bounded(G(single("app.EnemyManager"), "_EnemyList"),
+      MONSTER_ENEMY_MAX)
+    if enemies == nil then return { complete = false, rows = {}, reason = "enemy_list_unreadable" } end
+    local rows, seen_uids = {}, {}
+    for _, enemy in ipairs(enemies) do
+      if enemy == nil then
+        return { complete = false, rows = {}, reason = "enemy_identity_unreadable" }
+      end
+      local chara = C(enemy, "get_Chara")
+      local game_object = C(enemy, "get_GameObject")
+      local uid = C(C(chara, "get_UniqId"), "ToString()")
+      local cid = u32(int_value(C(chara, "get_CharaID")))
+      local dead = C(chara, "get_IsDead")
+      local enabled, started = C(enemy, "get_Enabled"), C(enemy, "get_Started")
+      local component_valid = C(enemy, "get_Valid")
+      local game_valid, updating = C(game_object, "get_Valid"),
+        C(game_object, "get_Update")
+      local transform = C(chara, "get_Transform")
+      local pos = xyz(C(transform, "get_UniversalPosition"))
+      if chara == nil or type(uid) ~= "string" or uid == "" or seen_uids[uid]
+          or not monster_integer(cid, 1)
+          or type(dead) ~= "boolean" or type(enabled) ~= "boolean"
+          or type(started) ~= "boolean" or type(component_valid) ~= "boolean"
+          or type(game_valid) ~= "boolean" or type(updating) ~= "boolean"
+          or pos == nil or near_zero(pos) then
+        return { complete = false, rows = {}, reason = "enemy_state_unreadable" }
+      end
+      seen_uids[uid] = true
+      rows[#rows + 1] = { uid = uid, cid = cid, alive = not dead,
+        enabled = enabled, started = started, valid = component_valid and game_valid,
+        updating = updating, pos = { x = pos.x, y = pos.y, z = pos.z } }
+    end
+    table.sort(rows, function(a, b) return core.byte_less(a.uid, b.uid) end)
+    local freshness = { complete = true, rows = {} }
+    for i, row in ipairs(rows) do
+      freshness.rows[i] = { uid = row.uid, cid = row.cid, alive = row.alive,
+        enabled = row.enabled, started = row.started, valid = row.valid,
+        updating = row.updating }
+    end
+    return { complete = true, rows = rows, freshness = freshness }
+  end
+
+  function R.objective_monster_freshness()
+    local live = objective_monster_live_state()
+    if live.complete ~= true then
+      return { complete = false, rows = {}, reason = live.reason }
+    end
+    return live.freshness
+  end
+
   -- Live objective observations retain each spawned Character identity and
-  -- one row per positive structured drop entry. The game rate is preserved
-  -- as raw_rate: without a scale it is neither an availability proof nor a
-  -- probability. Access proof is likewise left absent until a live gate exists.
-  function R.objective_monster_rows(task_snapshot, _, need_snapshot)
-    local ENEMY_MAX, SOURCE_MAX, TABLE_MAX, ITEM_MAX = 512, 8192, 64, 256
-    local function integer(value, minimum)
-      return type(value) == "number" and math.type(value) == "integer" and value >= minimum
-    end
-    local function bounded(value, cap)
-      local array = elems(value)
-      if array ~= nil then
-        if #array > cap then return nil end
-        return array
-      end
-      local count = int_value(C(value, "get_Count"))
-      if not integer(count, 0) or count > cap then return nil end
-      local out = {}
-      for i = 0, count - 1 do
-        local row = C(value, "get_Item", i)
-        if row == nil then return nil end
-        out[#out + 1] = row
-      end
-      return out
-    end
+  -- one row per positive structured drop entry. The raw lottery weight is
+  -- preserved without converting it into a percentage. Behavior and game-
+  -- object state prove that the current instance is enabled, started, valid
+  -- and participating in world updates. Walkability is not inferred from
+  -- get_Update; the route engine separately requires a drawable path.
+  function R.objective_monster_source_rows(item_ids)
     local function fail(reason)
       return { complete = false, rows = {}, reason = reason }
     end
-    if type(task_snapshot) ~= "table" or not integer(task_snapshot.need_generation, 1)
-        or type(need_snapshot) ~= "table" or need_snapshot.status ~= "ok"
-        or need_snapshot.complete ~= true
-        or need_snapshot.generation ~= task_snapshot.need_generation
-        or not integer(need_snapshot.source_generation, 1) then
-      return fail("current_need_unavailable")
-    end
-    local wanted = {}
-    for _, group in ipairs(need_snapshot.groups or {}) do
-      if type(group) ~= "table" or not integer(group.qid, 1)
-          or not integer(group.task_index, 0) or group.status ~= "eligible"
-          or group.complete ~= true or group.generation ~= need_snapshot.source_generation
-          or not integer(group.remaining, 1) or type(group.options) ~= "table"
-          or #group.options == 0 then
-        return fail("current_need_malformed")
+    local wanted, n, count = {}, type(item_ids) == "table" and #item_ids or -1, 0
+    if n < 0 or n > 64 then return fail("source_query_invalid") end
+    for key, item_id in pairs(item_ids) do
+      count = count + 1
+      if not monster_integer(key, 1) or key > n or not monster_integer(item_id, 1)
+          or item_id > 2147483647 or wanted[item_id] then
+        return fail("source_query_invalid")
       end
-      for _, option in ipairs(group.options) do
-        if type(option) ~= "table" or not integer(option.item_id, 1)
-            or not integer(option.accepted_count, 1) then
-          return fail("current_need_malformed")
-        end
-        wanted[option.item_id] = true
-      end
+      wanted[item_id] = true
     end
+    if count ~= n then return fail("source_query_invalid") end
     if next(wanted) == nil then
-      return { complete = true, rows = {}, reason = "no_focused_items" }
+      return { complete = true, rows = {}, reason = "no_requested_items" }
     end
-    local enemy_list = G(single("app.EnemyManager"), "_EnemyList")
-    local enemies = bounded(enemy_list, ENEMY_MAX)
-    if enemies == nil then return fail("enemy_list_unreadable") end
+    local live = objective_monster_live_state()
+    if live.complete ~= true then return fail(live.reason) end
     local item_manager = single("app.ItemManager")
     local default_dict = G(item_manager, "EnemyDefaultItemDropDataDict")
     local param_dict = G(item_manager, "EnemyItemDropDataDict")
-    local defaults, params = bounded(G(default_dict, "_entries"), SOURCE_MAX),
-      bounded(G(param_dict, "_entries"), SOURCE_MAX)
+    local defaults = monster_bounded(G(default_dict, "_entries"), MONSTER_SOURCE_MAX)
+    local params = monster_bounded(G(param_dict, "_entries"), MONSTER_SOURCE_MAX)
     local function dict_complete(dict, slots)
       local count = int_value(C(dict, "get_Count"))
-      if slots == nil or not integer(count, 0) then return false end
+      if slots == nil or not monster_integer(count, 0) then return false end
       local filled = 0
       for _, entry in ipairs(slots) do
         if hs_value(entry) ~= nil then filled = filled + 1 end
@@ -5523,8 +5994,8 @@ function M.game_reads()
           local source_key = u32(int_value(G(entry, "key")))
           local cid = u32(int_value(G(value, "_CharaId")))
           if (cid == nil or cid == 0) and is_default then cid = source_key end
-          if not integer(source_key, 1) or source_keys[family][source_key]
-              or not integer(cid, 1) then return false end
+          if not monster_integer(source_key, 1) or source_keys[family][source_key]
+              or not monster_integer(cid, 1) then return false end
           source_keys[family][source_key] = true
           if is_default then default_cids[cid] = true end
           if is_default or not default_cids[cid] then
@@ -5541,21 +6012,22 @@ function M.game_reads()
     end
     local function drops_for(cid)
       local sources = by_cid[cid] or {}
-      if #sources > TABLE_MAX then return nil end
+      if #sources > MONSTER_TABLE_MAX then return nil end
       local rows = {}
       for _, source in ipairs(sources) do
-        local tables = bounded(G(source.value, "_TableList"), TABLE_MAX)
+        local tables = monster_bounded(G(source.value, "_TableList"), MONSTER_TABLE_MAX)
         if tables == nil then return nil end
         for table_index, table_row in ipairs(tables) do
-          local items = bounded(G(table_row, "_ItemList"), ITEM_MAX)
+          local items = monster_bounded(G(table_row, "_ItemList"), MONSTER_ITEM_MAX)
           if items == nil then return nil end
           for item_index, item in ipairs(items) do
             local item_id, count, rate = int_value(G(item, "_Id")),
               int_value(G(item, "_Num")), int_value(G(item, "_Rate"))
-            if not integer(item_id, 1) or not integer(count, 1) or not integer(rate, 0) then
+            if not monster_integer(item_id, 1) or not monster_integer(count, 0)
+                or not monster_integer(rate, 0) then
               return nil
             end
-            if rate > 0 and wanted[item_id] then
+            if wanted[item_id] then
               rows[#rows + 1] = { item_id = item_id, count = count, raw_rate = rate,
                 drop_row_id = core.target_key({ "source", "monster_drop_row", source.family,
                   source.key, table_index, item_index }) }
@@ -5565,33 +6037,19 @@ function M.game_reads()
       end
       return rows
     end
-    local out, seen_uids = {}, {}
-    for _, enemy in ipairs(enemies) do
-      if enemy == nil then return fail("enemy_identity_unreadable") end
-      local chara = C(enemy, "get_Chara")
-      local uid = C(C(chara, "get_UniqId"), "ToString()")
-      local cid = u32(int_value(C(chara, "get_CharaID")))
-      local dead = C(chara, "get_IsDead")
-      local transform = C(chara, "get_Transform")
-      local pos = xyz(C(transform, "get_UniversalPosition"))
-      if chara == nil or type(uid) ~= "string" or uid == "" or seen_uids[uid]
-          or not integer(cid, 1)
-          or type(dead) ~= "boolean" or pos == nil or near_zero(pos) then
-        return fail("enemy_state_unreadable")
-      end
-      seen_uids[uid] = true
-      if not dead then
-        local drops = drops_for(cid)
-        if drops == nil then return fail("drop_rows_unreadable") end
-        for _, drop in ipairs(drops) do
-          out[#out + 1] = { uid = uid, drop_row_id = drop.drop_row_id,
-            item_id = drop.item_id, count = drop.count, raw_rate = drop.raw_rate,
-            alive = true, drop_table_readable = true,
-            pos = { x = pos.x, y = pos.y, z = pos.z } }
-        end
+    local out = {}
+    for _, state in ipairs(live.rows) do
+      local drops = drops_for(state.cid)
+      if drops == nil then return fail("drop_rows_unreadable") end
+      for _, drop in ipairs(drops) do
+        out[#out + 1] = { uid = state.uid, drop_row_id = drop.drop_row_id,
+          item_id = drop.item_id, count = drop.count, raw_rate = drop.raw_rate,
+          alive = state.alive, enabled = state.enabled, started = state.started,
+          valid = state.valid, updating = state.updating, drop_table_readable = true,
+          pos = { x = state.pos.x, y = state.pos.y, z = state.pos.z } }
       end
     end
-    return { complete = true, rows = out }
+    return { complete = true, rows = out, freshness = live.freshness }
   end
 
   -- _RegisteredTimeInfos is a List<RegisterInfo> with _UniqID (UniqueID) and

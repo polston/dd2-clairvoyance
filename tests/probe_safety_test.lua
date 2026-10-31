@@ -150,10 +150,28 @@ local forgery_methods_ok = run_case('', [[
 local im = { call = function(_, name) return name end }
 local kept = reviewed_call(im, "isFakeShopKeeped")
 local remaining = reviewed_call(im, "isFakeShopRemainingMinute")
-return kept .. "|" .. remaining
+local golden = reviewed_call(im, "get__Golden")
+return kept .. "|" .. remaining .. "|" .. golden
 ]], 150)
 check("forgery probe state reads accept only literal allowlist entries",
-  forgery_methods_ok:find("cmd ok=true isFakeShopKeeped|isFakeShopRemainingMinute", 1, true) ~= nil)
+  forgery_methods_ok:find(
+    "cmd ok=true isFakeShopKeeped|isFakeShopRemainingMinute|get__Golden",
+    1, true) ~= nil)
+
+local array_elements_ok = run_case('', [[
+local ok, elements = reviewed_array_elements({
+  get_elements = function() return { 1, 2 } end })
+return tostring(ok) .. ":" .. tostring(#elements)
+]], 150)
+check("array element reads use the dedicated zero-argument capability",
+  array_elements_ok:find("cmd ok=true true:2", 1, true) ~= nil)
+
+local array_elements_alias = run_case('', [[
+local f = reviewed_array_elements
+return f({})
+]], 150)
+check("array element capability aliases stay rejected",
+  array_elements_alias:find("cmd ok=false unsafe probe call: unreviewed array read", 1, true) ~= nil)
 
 local forgery_method_near_miss = run_case('', [[
 return reviewed_call({}, "isFakeShopKeepedExtra")

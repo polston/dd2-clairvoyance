@@ -8,6 +8,13 @@ local failures = 0
 local function check(name, cond)
   if not cond then failures = failures + 1; print("FAIL: " .. name) end
 end
+local function slice(name, first, last)
+  local a = src:find(first, 1, true)
+  local b = a and src:find(last, a + #first, true)
+  check(name .. " sentinels exist", a ~= nil and b ~= nil)
+  if a == nil or b == nil then return "" end
+  return src:sub(a, b - 1)
+end
 
 check("hook identity uses plain equality",
   src:find("local function same%(a, b%)%s+return a ~= nil and b ~= nil and a == b%s+end") ~= nil)
@@ -15,6 +22,24 @@ check("hook identity has no address fallback",
   src:find("a:get_address%(%) == b:get_address%(%)", 1, false) == nil)
 check("removed fallback counter is not exposed",
   src:find("same_fallback_n", 1, true) == nil)
+local objective_projection = slice("debug objective projection",
+  "local provider_generations = {}", "for _, r in ipairs((wt.q(\"input\"")
+local provider_projection = slice("debug provider projection",
+  "local provider_generations = {}", "local source_status = {}")
+local source_status_projection = slice("debug source status projection",
+  "local source_status = {}", "local need_groups = {}")
+check("debug focus copies bounded provider diagnostic rows",
+  provider_projection:find("diagnostic_rows = {}", 1, true) ~= nil
+    and provider_projection:find("math.min(#(type(provider.diagnostic_rows)", 1, true) ~= nil
+    and provider_projection:find("member_id = diagnostic.member_id, gate = diagnostic.gate", 1, true) ~= nil
+    and provider_projection:find("status = diagnostic.status", 1, true) ~= nil
+    and provider_projection:find("reason = diagnostic.reason", 1, true) == nil)
+check("debug focus copies bounded source status rows and item ids",
+  source_status_projection:find("math.min(#(objective_snapshot.source_status or {}), 16)", 1, true) ~= nil
+    and source_status_projection:find("math.min(#(type(observed.rows) == \"table\" and observed.rows or {}), 512)", 1, true) ~= nil
+    and source_status_projection:find("math.min(#(type(row.item_ids) == \"table\" and row.item_ids or {}), 256)", 1, true) ~= nil
+    and src:find("source_status = source_status", 1, true) ~= nil
+    and src:find("source_status = objective_snapshot.source_status", 1, true) == nil)
 
 check("catalog side count helper removed",
   src:find("local function catalog_side_count", 1, true) == nil)
@@ -30,14 +55,6 @@ check("catalog log and panel use the snapshot count",
   #catalog_reads == 2 and snapshot_count_reads == 2
     and catalog_reads[1]:find("(snapshot and snapshot.catalog_side_count) or 0", 1, true) ~= nil
     and catalog_reads[2]:find("(snapshot and snapshot.catalog_side_count) or 0", 1, true) ~= nil)
-
-local function slice(name, first, last)
-  local a = src:find(first, 1, true)
-  local b = a and src:find(last, a + #first, true)
-  check(name .. " sentinels exist", a ~= nil and b ~= nil)
-  if a == nil or b == nil then return "" end
-  return src:sub(a, b - 1)
-end
 
 local function ordered(name, body, tokens)
   local at = 1
@@ -325,6 +342,9 @@ check("focus debug exposes grouped need and source capacity evidence",
     and debug_focus:find("certainty = target.certainty", 1, true) ~= nil
     and debug_focus:find("probability = target.probability", 1, true) ~= nil
     and debug_focus:find("groups = {}", 1, true) ~= nil)
+check("focus debug preserves route ownership for live acceptance",
+  debug_focus:find("target_key = r.target_key", 1, true) ~= nil
+    and debug_focus:find("objective_generation = r.objective_generation", 1, true) ~= nil)
 check("focus debug exposes provider status and cap omissions",
   debug_focus:find("status = provider.status", 1, true) ~= nil
     and debug_focus:find("complete = provider.complete", 1, true) ~= nil
@@ -345,6 +365,56 @@ check("README describes objective and related-NPC focus behavior",
     and readme_words:find("Routes to objective places/items", 1, true) ~= nil
     and readme_words:find("current objective", 1, true) ~= nil
     and readme_words:find("unresolved", 1, true) ~= nil)
+
+local objective_ui = slice("objective source UI wiring",
+  "wt.objective_ui = require(\"Clairvoyance.objective_ui\")", "-- v14 (SPEC 22.11.2): the Hints node")
+check("focused quest detail exposes objectives and sources with independent controls",
+  objective_ui:find("Objectives & sources###qos_", 1, true) ~= nil
+    and objective_ui:find("Show marker##qom_", 1, true) ~= nil
+    and objective_ui:find("Draw route##qor_", 1, true) ~= nil
+    and objective_ui:find("entry.status_text", 1, true) ~= nil
+    and objective_ui:find("entry.reason_text", 1, true) ~= nil
+    and objective_ui:find("Path:", 1, true) ~= nil)
+check("source UI uses stable settings and never labels controls by transient ordinals",
+  objective_ui:find("objective_marker_off", 1, true) ~= nil
+    and objective_ui:find("objective_route_off", 1, true) ~= nil
+    and objective_ui:find("entry.identity", 1, true) ~= nil
+    and objective_ui:find("entry.ordinal", 1, true) == nil)
+check("item search has an explicit non-routing source browser lifecycle",
+  src:find("Sources for this search###qnml_source_browser", 1, true) ~= nil
+    and src:find("wt.objective_ui.browser_step", 1, true) ~= nil
+    and src:find("source_browser_open", 1, true) ~= nil
+    and src:find("source_browser_frame", 1, true) ~= nil
+    and src:find("browser_is_live", 1, true) ~= nil
+    and src:find('wt.q("objective_source_browser", nil,', 1, true) ~= nil)
+local wf = assert(io.open("reframework/autorun/Clairvoyance/world.lua", "rb"))
+local world_src = wf:read("*a"):gsub("\r\n", "\n"); wf:close()
+local af = assert(io.open("reframework/autorun/Clairvoyance/adapter.lua", "rb"))
+local adapter_src = af:read("*a"):gsub("\r\n", "\n"); af:close()
+check("source browser is backed by an open-only bounded provider query",
+  world_src:find("function w:objective_source_browser", 1, true) ~= nil
+    and world_src:find("S.source_browser_open ~= true", 1, true) ~= nil
+    and world_src:find("#rows >= 512", 1, true) ~= nil
+    and world_src:find("source_browser_generation", 1, true) ~= nil
+    and adapter_src:find("function a.objective_source_registry", 1, true) ~= nil
+    and adapter_src:find("objective_browser_state", 1, true) ~= nil)
+check("source registry query filtering remains browser-local and never swaps focused task state",
+  adapter_src:find("objective_task_state = objective_browser_state", 1, true) == nil
+    and adapter_src:find("function a.objective_source_registry(source_catalog, objective_catalog, wanted_item_ids, query)", 1, true) ~= nil
+    and adapter_src:find("local matcher = nil", 1, true) ~= nil
+    and adapter_src:find("read_objective_forgery_observation(registry_wanted", 1, true) ~= nil
+    and adapter_src:find("read_objective_forgery_observation({}, true)", 1, true) == nil)
+check("source browser rows never enter the focused snapshot or route publication",
+  tick_body:find("wt.source_browser_observation =", 1, true) ~= nil
+    and src:find("core.objective_snapshot%(task_snapshot, place_snapshot,%s*source_snapshots",
+      1, false) ~= nil
+    and src:find("source_browser_observation, wt.objective_registry", 1, true) == nil)
+check("source browser never invents alternate shop or monster identities",
+  world_src:find('"monster_drop_browser"', 1, true) == nil
+    and world_src:find('{ "source", "shop", shop.shop, item.id }', 1, true) == nil
+    and world_src:find('{ "source", "seller", seller.shop, seller.item }', 1, true) == nil
+    and world_src:find("objective_shop_source_snapshot", 1, true) ~= nil
+    and world_src:find("objective_monster_source_snapshot", 1, true) ~= nil)
 
 if failures > 0 then os.exit(1) end
 print("main_source_test: all OK")
