@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "probe"))
@@ -152,6 +153,15 @@ return D, qlm, td, world
                 'return reviewed_invoke(method, o, "getContext")'):
             with self.subTest(source=source):
                 self.assertIsNone(probe_run.unsafe_probe_call(source))
+        self.assertIsNone(
+            probe_run.unsafe_probe_call("return reviewed_array_elements(entries)"))
+        for source in (
+                "local f = reviewed_array_elements; return f(entries)",
+                "return reviewed_array_elements(entries, extra)"):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    probe_run.unsafe_probe_call(source),
+                    "unreviewed array read")
 
     def test_talk_event_methods_are_reviewed_literals(self):
         methods = (
@@ -216,6 +226,13 @@ return D, qlm, td, world
                 self.assertEqual(
                     probe_run.unsafe_probe_call(source),
                     "unreviewed managed method")
+        probe = Path(__file__).parent / "probe" / "forgery_money.lua"
+        source = probe.read_text(encoding="utf-8")
+        self.assertIn("reviewed_array_elements(entries)", source)
+        self.assertNotIn(":get_elements()", source)
+        self.assertNotIn("golden=%s", source)
+        self.assertNotIn("talk_gold=%s", source)
+        self.assertIn("golden_readable=%s", source)
 
     def test_comments_preserve_token_boundaries(self):
         source = 'return--[[ gap ]]sdk.create_resource("x")'

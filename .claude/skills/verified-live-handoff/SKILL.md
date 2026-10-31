@@ -13,12 +13,12 @@ whole-product verification.
 2. Add or strengthen the durable layer that would have prevented the handoff:
    an executable acceptance command, workflow rule, test, or narrow skill. A
    promise about future behavior is not remediation.
-3. Prepare the post-reset acceptance command, then invoke Reset Scripts through
-   the reviewed `focus.ps1` / `shot.ps1` / `input.ps1` path. A ban on Computer
-   Use does not prohibit this narrow project automation. Ask the operator only
-   when the game window or exact button cannot be resolved safely. If operator
-   action is genuinely required, their `done` is an intermediate event: run the
-   acceptance command immediately and continue the active plan.
+3. Prepare the post-reset acceptance command, then run `just reset-scripts`.
+   It installs and hash-checks the probe harness, resolves the unique semantic
+   ScriptRunner target without moving the physical cursor, and requires ordered
+   reload/readiness evidence. Never use `focus.ps1`, `shot.ps1`, `input.ps1`,
+   Computer Use, guessed keys, or guessed coordinates for Reset Scripts. If the
+   exact target cannot be proved, fail closed instead of asking for a click.
 4. Validate the complete focused-objective projection, not only the provider
    being changed. Unit tests, deployment, or a provider-local negative never
    substitute for the whole-product live gate.

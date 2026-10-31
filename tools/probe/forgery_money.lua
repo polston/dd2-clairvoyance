@@ -24,7 +24,7 @@ local talk_spend = integer(F(talk_player, "_BoughtItemMoney"))
 local prices, price_count, min_price, max_price = {}, 0, nil, nil
 local dictionary = F(item_manager, "_ItemDataDict")
 local entries = F(dictionary, "_entries")
-local elements_ok, elements = pcall(function() return entries:get_elements() end)
+local elements_ok, elements = reviewed_array_elements(entries)
 if elements_ok and type(elements) == "table" then
   for index = 1, math.min(#elements, 8192) do
     local entry = elements[index]
@@ -51,7 +51,8 @@ if golden ~= nil then
   end
 end
 L(string.format(
-  "forgery money golden_ok=%s golden=%s talk_gold=%s talk_spend=%s prices=%d min=%s max=%s affordable_controls=%d unaffordable_controls=%d",
-  tostring(golden_ok), tostring(golden), tostring(talk_gold), tostring(talk_spend),
+  "forgery money golden_ok=%s golden_readable=%s talk_gold_readable=%s talk_spend_readable=%s prices=%d min=%s max=%s affordable_controls=%d unaffordable_controls=%d",
+  tostring(golden_ok), tostring(golden ~= nil), tostring(talk_gold ~= nil),
+  tostring(talk_spend ~= nil),
   price_count, tostring(min_price), tostring(max_price), below, above))
 return golden ~= nil and "gold_candidate_read" or "gold_candidate_unreadable"

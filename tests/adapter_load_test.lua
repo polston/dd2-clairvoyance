@@ -1156,9 +1156,13 @@ do
     family = "placed", table_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     generated = true, disabled = false, freebit = 0, broken = false, used = false }
   placed = classify(base_catalog(), wrong_join)
+  assert(placed.status == "ok" and #placed.candidates == 1,
+    "exact loaded UID/index remains authoritative when the runtime generator table differs")
+  wrong_join.loaded["11111111-1111-1111-1111-111111111111:0"].table_id = "malformed"
+  placed = classify(base_catalog(), wrong_join)
   assert(placed.status == "unknown" and #placed.candidates == 0
     and placed.reason == "placed_loaded_identity_unreadable",
-    "a negative loaded UID/table join invalidates the placed observation")
+    "a malformed runtime generator table identity invalidates the loaded observation")
   local wrong_persisted = base_observation()
   wrong_persisted.persisted["11111111-1111-1111-1111-111111111111:0"] = {
     family = "chest", pick = false, keep = false, unlock = false }

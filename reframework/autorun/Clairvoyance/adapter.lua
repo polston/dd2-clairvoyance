@@ -4591,7 +4591,7 @@ function A.objective_source_provider_snapshots(catalog, observation, generation,
       local loaded = observation.loaded[identity]
       if loaded ~= nil then
         if type(loaded) ~= "table" or loaded.family ~= provider
-            or guid(loaded.table_id) ~= table_id
+            or guid(loaded.table_id) == nil
             or type(loaded.generated) ~= "boolean" or type(loaded.disabled) ~= "boolean" then
           return envelope(provider, "unknown", provider .. "_loaded_identity_unreadable")
         elseif not loaded.generated or loaded.disabled then

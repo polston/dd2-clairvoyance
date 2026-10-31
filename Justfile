@@ -15,6 +15,10 @@ check:
 deploy:
     & './scripts/dev.ps1' deploy
 
+# Reload REFramework scripts without moving the physical mouse.
+reset-scripts:
+    & './scripts/dev.ps1' reset-scripts
+
 # Run one guarded live probe. Example: just probe tools/probe/objective_phase0.lua 30
 probe chunk timeout="12":
     & './scripts/dev.ps1' probe -Chunk {{ quote(chunk) }} -Timeout {{ timeout }}
