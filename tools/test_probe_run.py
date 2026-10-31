@@ -233,6 +233,11 @@ return D, qlm, td, world
         self.assertNotIn("golden=%s", source)
         self.assertNotIn("talk_gold=%s", source)
         self.assertIn("golden_readable=%s", source)
+        self.assertIn("price_array_ok=%s", source)
+        self.assertIn("price_array_capped=%s", source)
+        self.assertIn("#elements", source)
+        self.assertNotIn("affordable_controls", source)
+        self.assertIn("affordable_price_points", source)
 
     def test_comments_preserve_token_boundaries(self):
         source = 'return--[[ gap ]]sdk.create_resource("x")'
