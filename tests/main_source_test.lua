@@ -398,11 +398,12 @@ check("source browser is backed by an open-only bounded provider query",
     and world_src:find("source_browser_generation", 1, true) ~= nil
     and adapter_src:find("function a.objective_source_registry", 1, true) ~= nil
     and adapter_src:find("objective_browser_state", 1, true) ~= nil)
-check("source registry evidence is query-independent and never swaps focused task state",
+check("source registry query filtering remains browser-local and never swaps focused task state",
   adapter_src:find("objective_task_state = objective_browser_state", 1, true) == nil
-    and adapter_src:find("browser_query", 1, true) == nil
-    and adapter_src:find("browser_wanted", 1, true) == nil
-    and adapter_src:find("read_objective_forgery_observation({}, true)", 1, true) ~= nil)
+    and adapter_src:find("function a.objective_source_registry(source_catalog, objective_catalog, wanted_item_ids, query)", 1, true) ~= nil
+    and adapter_src:find("local matcher = nil", 1, true) ~= nil
+    and adapter_src:find("read_objective_forgery_observation(registry_wanted", 1, true) ~= nil
+    and adapter_src:find("read_objective_forgery_observation({}, true)", 1, true) == nil)
 check("source browser rows never enter the focused snapshot or route publication",
   tick_body:find("wt.source_browser_observation =", 1, true) ~= nil
     and src:find("core.objective_snapshot%(task_snapshot, place_snapshot,%s*source_snapshots",

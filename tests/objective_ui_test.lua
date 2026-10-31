@@ -150,6 +150,18 @@ check("objective UI overflow is explicit passthrough instead of hiding every tar
   overflow_model.complete == false and overflow_model.reason_code == "objective_ui_target_overflow"
     and overflow_markers == nil and overflow_routes == nil)
 
+local malformed_model = ui.build({ generation = 10, targets = {
+  overflow_targets[1],
+  { key = "target:malformed", generation = 10, ordinal = 2,
+    eligibility = "eligible", kind = "source", provider = "placed",
+    item_ids = { 501 }, owners = { { qid = 20090, task_index = 4 } } },
+} }, {})
+local malformed_markers, malformed_routes = ui.control_maps(malformed_model)
+check("one malformed objective target makes the whole UI filter pass through",
+  malformed_model.complete == false
+    and malformed_model.reason_code == "objective_ui_target_invalid"
+    and malformed_markers == nil and malformed_routes == nil)
+
 local overflow_rows = {}
 for i = 1, ui.ENTRY_MAX + 1 do
   overflow_rows[i] = { identity = "source:overflow:" .. tostring(i), provider = "placed",

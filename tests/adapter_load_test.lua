@@ -335,7 +335,9 @@ do
     and talk.candidates[1].target.cid == 101
     and talk.candidates[1].outputs[1].item_id == 29
     and talk.candidates[1].eligibility == "eligible"
-    and talk.diagnostics[1].eligibility == "eligible",
+    and talk.diagnostics[1].eligibility == "eligible"
+    and talk.source_status.complete == true and #talk.source_status.rows == 1
+    and talk.source_status.rows[1].state == "available",
     "complete reachable direct grant publishes one stable positioned source")
   local function talk_variant(fields, edge_conditions, middle_kind, mismatched_hash)
     local event = {
@@ -367,7 +369,10 @@ do
   assert(conditional_talk.status == "ok" and conditional_talk.complete
     and #conditional_talk.candidates == 0
     and conditional_talk.diagnostics[1].eligibility == "unknown"
-    and conditional_talk.diagnostics[1].reason == "talk_grant_branch_condition_unmodeled",
+    and conditional_talk.diagnostics[1].reason == "talk_grant_branch_condition_unmodeled"
+    and conditional_talk.source_status.rows[1].state == "unknown"
+    and conditional_talk.source_status.rows[1].reason_code
+      == "talk_grant_branch_condition_unmodeled",
     "unsupported branch conditions remain unknown without hiding supported events")
   local gated_talk = talk_variant(nil, 0, "app.ItemDeliverySegmentNode")
   assert(#gated_talk.candidates == 0
@@ -382,7 +387,8 @@ do
   local unavailable_talk = talk_variant({ playable = false })
   assert(#unavailable_talk.candidates == 0
     and unavailable_talk.diagnostics[1].eligibility == "ineligible"
-    and unavailable_talk.diagnostics[1].reason == "talk_grant_event_unavailable",
+    and unavailable_talk.diagnostics[1].reason == "talk_grant_event_unavailable"
+    and unavailable_talk.source_status.rows[1].state == "unavailable",
     "a complete negative playability read rejects the grant")
   local claimed_talk = talk_variant({ history_present = true,
     history_played = false, history_result = 60 })
@@ -420,7 +426,9 @@ do
   local partial_talk = A.objective_talk_grant_provider_snapshot(
     { complete = false, reason = "talk_grant_nodes_truncated", wanted = { 29 }, events = {} }, 10)
   assert(partial_talk.status == "unknown" and not partial_talk.complete
-    and partial_talk.reason == "talk_grant_nodes_truncated" and #partial_talk.candidates == 0,
+    and partial_talk.reason == "talk_grant_nodes_truncated" and #partial_talk.candidates == 0
+    and partial_talk.source_status.complete == false
+    and partial_talk.source_status.rows[1].identity == "provider:talk_grant",
     "a partial talk catalog scan clears all candidates")
 
   local forgery_observation = { complete = true, wanted = { 29 },
@@ -741,7 +749,11 @@ do
   local mapping = managed({ _Id = 11, _FakeItemId = 29, _FakePrice = 6 }, {
       get_IsEnableFake = function() return true end },
     "app.ItemDataParam")
-  local item_manager = managed({ _ItemDataDict = managed_dict({ { 11, mapping } }, nil,
+  local mapping_other = managed({ _Id = 12, _FakeItemId = 30, _FakePrice = 7 }, {
+      get_IsEnableFake = function() return true end },
+    "app.ItemDataParam")
+  local item_manager = managed({ _ItemDataDict = managed_dict({ { 11, mapping },
+      { 12, mapping_other } }, nil,
       mapping_reads) }, {
     get__Golden = function() return 10 end,
     get_FakeShopKeepedItem = function() return managed({ _ItemId = 0, _Num = 0 }) end,
@@ -783,11 +795,29 @@ do
     and talk_reads.reads == 0 and shop_reads.reads == 0 and mapping_reads.reads == 0,
     "no focused item need performs no provider catalog or live scan")
   local forgery_registry_read = A.read_objective_forgery_observation({}, true)
-  assert(forgery_registry_read.complete and #forgery_registry_read.wanted == 1
+  assert(forgery_registry_read.complete and #forgery_registry_read.wanted == 2
       and forgery_registry_read.wanted[1] == 29
-      and #forgery_registry_read.mappings == 1
+      and forgery_registry_read.wanted[2] == 30
+      and #forgery_registry_read.mappings == 2
       and forgery_registry_read.mappings[1].output_item_id == 29,
     "shared source registry discovers all bounded forgery outputs independent of query")
+  ;(function()
+    local registry_adapter = A.make()
+    registry_adapter.item_name = function(item_id)
+      return item_id == 29 and "Needle Forgery Output" or "Unrelated Forgery Output"
+    end
+    local providers = registry_adapter.objective_source_registry({ status = "ok",
+      complete = true, placements = {}, chests = {} }, { version = 2, quests = {} },
+      {}, "needle forgery")
+    local forgery
+    for _, provider in ipairs(providers) do
+      if provider.provider == "forgery" then forgery = provider; break end
+    end
+    assert(forgery and forgery.status == "ok" and forgery.complete
+        and #forgery.source_status.rows == 1
+        and forgery.source_status.rows[1].item_ids[1] == 29,
+      "source registry filters forgery mappings by the explicit item query before live classification")
+  end)()
   ;(function()
     local registry_read = A.read_objective_talk_grant_observation({}, nil, true)
     assert(registry_read.complete and #registry_read.wanted == 1
@@ -912,6 +942,14 @@ do
     and forgery_read.order.remaining_minutes_readable
     and forgery_read.order.remaining_minutes == 0,
     "forgery reader joins typed service, live affordability, mapping and exact raw order getters")
+  local saved_gold = item_manager.calls.get__Golden
+  item_manager.calls.get__Golden = function() return math.huge end
+  local nonfinite_gold = A.read_objective_forgery_observation({ [29] = true })
+  assert(nonfinite_gold.complete and nonfinite_gold.mappings[1].price_readable == false
+      and nonfinite_gold.mappings[1].affordable == nil
+      and nonfinite_gold.mappings[1].available_gold == nil,
+    "non-finite currency evidence remains unreadable and cannot grant eligibility")
+  item_manager.calls.get__Golden = saved_gold
   local saved_kept = item_manager.calls.get_FakeShopKeepedItem
   local saved_time = item_manager.calls.get_FakeShopCompleteTime
   local saved_kept_state = item_manager.calls.isFakeShopKeeped
@@ -1229,11 +1267,13 @@ do
   end
   local broad = A.objective_source_provider_snapshots(broad_catalog,
     broad_observation, 11, { 501 })[1]
-  assert(broad.status == "unknown" and broad.complete == false
-      and broad.reason == "placed_status_overflow"
-      and #broad.candidates == 0 and #broad.source_status.rows == 1
+  assert(broad.status == "ok" and broad.complete == true
+      and broad.reason == nil and #broad.candidates == 513
+      and broad.source_status.complete == false
+      and broad.source_status.reason_code == "placed_status_overflow"
+      and #broad.source_status.rows == 1
       and broad.source_status.rows[1].identity == "provider:placed",
-    "a 513-row placed browser projection degrades to one provider unknown row")
+    "a 513-row status overflow preserves candidates and degrades only its envelope")
 
   local world_mod = require("Clairvoyance.world")
   local integrated_rows = {
@@ -5358,6 +5398,14 @@ do
         and snapshot.registry_entries[1].outputs[1].item_id == 9001
         and snapshot.registry_entries[1].outputs[1].count == 5,
       "inactive reward catalog publishes searchable unknown rows without route candidates")
+    local unmatched = ai.objective_reward_catalog_snapshot(own_catalog, 1, {},
+      function(item_id) return item_id == 9999 end)
+    local matched = ai.objective_reward_catalog_snapshot(own_catalog, 1, {},
+      function(item_id) return item_id == 9001 end)
+    assert(unmatched.complete and #unmatched.source_status.rows == 0
+        and matched.complete and #matched.source_status.rows == 1
+        and #matched.matched_item_ids == 1 and matched.matched_item_ids[1] == 9001,
+      "reward registry filters off-focus catalog rows by the explicit item query")
   end)()
   ;(function()
     local snapshot = ai.objective_reward_catalog_snapshot(nil, 2)

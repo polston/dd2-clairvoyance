@@ -119,7 +119,7 @@ return D, qlm, td, world
             "getTalkEventInitialSpeaker", "isEventPlayable",
             "canTalkEventInteract", "getHistory"}
         forgery_methods = {
-            "get_IsEnableFake", "isFakeShopKeeped",
+            "get_IsEnableFake", "get__Golden", "isFakeShopKeeped",
             "isFakeShopRemainingMinute"}
         monster_methods = {
             "get_Transform", "get_UniversalPosition", "get_IsDead"}

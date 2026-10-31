@@ -4428,6 +4428,16 @@ function A.objective_source_provider_snapshots(catalog, observation, generation,
       complete = status == "ok", reason = reason, candidates = candidates or {},
       source_status = source_status }
   end
+  local function status_overflow(provider, candidates)
+    local code = provider .. "_status_overflow"
+    local out = envelope(provider, "ok", nil, candidates, {})
+    out.source_status = { generation = generation, complete = false,
+      reason_code = code, rows = { { scope = "provider", generation = generation,
+        identity = "provider:" .. provider, provider = provider,
+        qid = nil, task_index = nil, item_ids = {}, state = "unknown",
+        reason_code = code } } }
+    return out
+  end
   local function unknown_pair(reason)
     return { envelope("placed", "unknown", reason), envelope("chest", "unknown", reason) }
   end
@@ -4636,7 +4646,7 @@ function A.objective_source_provider_snapshots(catalog, observation, generation,
       end
       table.sort(item_ids)
       if #status_rows >= 512 then
-        return envelope(provider, "unknown", provider .. "_status_overflow")
+        return status_overflow(provider, candidates)
       end
       status_rows[#status_rows + 1] = { scope = "source", generation = generation,
         identity = qnml_core.target_key({ "source", provider, uid, index }),
@@ -4674,6 +4684,7 @@ end
 
 function A.read_objective_talk_grant_observation(wanted, requested_event_ids, include_all)
   local out = { complete = false, wanted = {}, event_ids = {}, events = {} }
+  local match_item = type(include_all) == "function" and include_all or nil
   local wanted_set = {}
   for item_id, enabled in pairs(type(wanted) == "table" and wanted or {}) do
     if enabled and type(item_id) == "number" and item_id == math.floor(item_id)
@@ -4711,7 +4722,8 @@ function A.read_objective_talk_grant_observation(wanted, requested_event_ids, in
     out.event_ids[#out.event_ids + 1] = event_id
   end
   table.sort(out.event_ids)
-  if #out.wanted == 0 and #out.event_ids == 0 and include_all ~= true then
+  if #out.wanted == 0 and #out.event_ids == 0
+      and include_all ~= true and match_item == nil then
     out.complete = true; return out
   end
   local requested_signature = table.concat(out.event_ids, ",")
@@ -4968,12 +4980,21 @@ function A.read_objective_talk_grant_observation(wanted, requested_event_ids, in
       preflight_signature = preflight_signature, events = static_events }
     A.objective_provider_catalog_cache[cache_slot] = cached
   end
-  if include_all == true then
+  if include_all == true or match_item ~= nil then
     for _, event in ipairs(cached.events) do
       for _, node in ipairs(event.nodes) do
         for _, grant in ipairs(node.grants) do
-          if not wanted_set[grant.item_id] then
-            if #out.wanted >= 256 then return fail("talk_grant_items_truncated") end
+          local matched = include_all == true
+          if match_item ~= nil then
+            local ok, value = pcall(match_item, grant.item_id)
+            matched = ok and value == true
+          end
+          if matched and not wanted_set[grant.item_id] then
+            local cap = match_item ~= nil and 64 or 256
+            if #out.wanted >= cap then
+              return fail(match_item ~= nil and "source_browser_item_overflow"
+                or "talk_grant_items_truncated")
+            end
             wanted_set[grant.item_id] = true
             out.wanted[#out.wanted + 1] = grant.item_id
           end
@@ -5151,6 +5172,7 @@ end
 -- missing gates because their guarded live controls have not been proved.
 function A.read_objective_forgery_observation(wanted, include_all)
   local out = { complete = false, wanted = {}, services = {}, mappings = {}, order = {} }
+  local match_item = type(include_all) == "function" and include_all or nil
   local wanted_set = {}
   for item_id, enabled in pairs(type(wanted) == "table" and wanted or {}) do
     if enabled and type(item_id) == "number" and item_id == math.floor(item_id)
@@ -5159,7 +5181,9 @@ function A.read_objective_forgery_observation(wanted, include_all)
     end
   end
   table.sort(out.wanted)
-  if #out.wanted == 0 and include_all ~= true then out.complete = true; return out end
+  if #out.wanted == 0 and include_all ~= true and match_item == nil then
+    out.complete = true; return out
+  end
   local function fail(reason)
     out.reason, out.services, out.mappings, out.order = reason, {}, {}, {}
     return out
@@ -5336,12 +5360,21 @@ function A.read_objective_forgery_observation(wanted, include_all)
       services = static_services, mappings = static_mappings }
     A.objective_provider_catalog_cache.forgery = cached
   end
-  if include_all == true then
+  if include_all == true or match_item ~= nil then
     local discovered = #out.wanted
     for _, mapping in ipairs(cached.mappings) do
-      if not wanted_set[mapping.output_item_id] then
+      local matched = include_all == true
+      if match_item ~= nil then
+        local ok, value = pcall(match_item, mapping.output_item_id)
+        matched = ok and value == true
+      end
+      if matched and not wanted_set[mapping.output_item_id] then
         discovered = discovered + 1
-        if discovered > 256 then return fail("forgery_registry_matches_truncated") end
+        local cap = match_item ~= nil and 64 or 256
+        if discovered > cap then
+          return fail(match_item ~= nil and "source_browser_item_overflow"
+            or "forgery_registry_matches_truncated")
+        end
         wanted_set[mapping.output_item_id] = true
         out.wanted[#out.wanted + 1] = mapping.output_item_id
       end
@@ -5423,7 +5456,8 @@ function A.read_objective_forgery_observation(wanted, include_all)
     local _, _, held_complete, carried = items.read_held(input_ids)
     local gold_ok, gold = call(item_manager, "get__Golden")
     local gold_readable = gold_ok and type(gold) == "number"
-      and gold >= 0 and gold == math.floor(gold)
+      and gold >= 0 and gold > -math.huge and gold < math.huge
+      and gold == math.floor(gold)
     for _, mapping in ipairs(mappings) do
       mapping.held_readable = carried ~= nil and held_complete == true
       mapping.held_count = mapping.held_readable and (carried[mapping.input_item_id] or 0) or nil
@@ -5588,66 +5622,90 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
   end
   local out = { provider = "talk_grant", generation = generation,
     status = "unknown", complete = false, candidates = {}, diagnostics = {} }
+  local status_rows, status_overflow = {}, false
+  local function fallback(reason)
+    out.status, out.complete, out.reason, out.candidates = "unknown", false, reason, {}
+    out.source_status = { generation = out.generation, complete = false,
+      reason_code = reason, rows = { { scope = "provider", generation = out.generation,
+        identity = "provider:talk_grant", provider = "talk_grant", qid = nil,
+        task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
+    return out
+  end
+  local function finish()
+    table.sort(status_rows, function(left, right)
+      return qnml_core.byte_less(left.identity, right.identity)
+    end)
+    out.status, out.complete, out.reason = "ok", true, nil
+    if status_overflow then
+      local reason = "talk_grant_status_overflow"
+      out.source_status = { generation = out.generation, complete = false,
+        reason_code = reason, rows = { { scope = "provider", generation = out.generation,
+          identity = "provider:talk_grant", provider = "talk_grant", qid = nil,
+          task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
+    else
+      out.source_status = { generation = out.generation, complete = true,
+        reason_code = nil, rows = status_rows }
+    end
+    return out
+  end
   if not finite_integer(generation, 1) then
-    out.reason = "talk_grant_generation_invalid"; return out
+    return fallback("talk_grant_generation_invalid")
   end
   if type(observation) ~= "table" then
-    out.reason = "talk_grant_observation_unavailable"; return out
+    return fallback("talk_grant_observation_unavailable")
   end
   if observation.complete ~= true then
-    out.reason = type(observation.reason) == "string" and observation.reason
-      or "talk_grant_observation_incomplete"
-    return out
+    return fallback(type(observation.reason) == "string" and observation.reason
+      or "talk_grant_observation_incomplete")
   end
   local wanted, events = dense(observation.wanted), dense(observation.events)
   if wanted == nil or events == nil then
-    out.reason = "talk_grant_observation_malformed"; return out
+    return fallback("talk_grant_observation_malformed")
   end
   local wanted_set = {}
   for _, item_id in ipairs(wanted) do
     if not finite_integer(item_id, 1) then
-      out.reason = "talk_grant_observation_malformed"; return out
+      return fallback("talk_grant_observation_malformed")
     end
     wanted_set[item_id] = true
   end
   for _, event in ipairs(events) do
     if type(event) ~= "table" or not finite_integer(event.event_id, 1)
         or dense(event.nodes) == nil then
-      out.reason = "talk_grant_observation_malformed"; return out
+      return fallback("talk_grant_observation_malformed")
     end
     for _, node in ipairs(event.nodes) do
       if type(node) ~= "table" or not finite_integer(node.index, 0)
           or type(node.kind) ~= "string" or dense(node.edges) == nil
           or (node.grants ~= nil and dense(node.grants) == nil) then
-        out.reason = "talk_grant_observation_malformed"; return out
+        return fallback("talk_grant_observation_malformed")
       end
       if node.node_id == nil and not finite_integer(node.node_name_hash, 0) then
-        out.reason = "talk_grant_observation_malformed"; return out
+        return fallback("talk_grant_observation_malformed")
       end
       if node.node_id ~= nil and type(node.node_id) ~= "string"
           and not finite_integer(node.node_id, 0) then
-        out.reason = "talk_grant_observation_malformed"; return out
+        return fallback("talk_grant_observation_malformed")
       end
       for _, edge in ipairs(node.edges) do
         if type(edge) ~= "table" or not finite_integer(edge.index, 0)
             or not finite_integer(edge.condition_count, 0)
             or (edge.next_node_id == nil
               and not finite_integer(edge.next_node_name_hash, 0)) then
-          out.reason = "talk_grant_observation_malformed"; return out
+          return fallback("talk_grant_observation_malformed")
         end
       end
       for _, grant in ipairs(node.grants or {}) do
         if type(grant) ~= "table" or not finite_integer(grant.item_index, 0)
             or not finite_integer(grant.item_id, 1)
             or not finite_integer(grant.count, 1) then
-          out.reason = "talk_grant_observation_malformed"; return out
+          return fallback("talk_grant_observation_malformed")
         end
       end
     end
   end
   if #wanted == 0 or #events == 0 then
-    out.status, out.complete, out.reason = "ok", true, nil
-    return out
+    return finish()
   end
   local function node_identity(node)
     if node.node_id ~= nil then return node.node_id end
@@ -5796,9 +5854,31 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
           history_played = event.history_played,
           history_result = event.history_result }
         out.diagnostics[#out.diagnostics + 1] = diagnostic
+        local source_id = { "source", "talk_grant", event.event_id, identity }
+        local source_key = qnml_core.target_key(source_id)
+        if source_key == nil then return fallback("talk_grant_observation_malformed") end
+        local item_ids, item_seen = {}, {}
+        for _, output in ipairs(outputs) do
+          if not item_seen[output.item_id] then
+            item_seen[output.item_id] = true
+            item_ids[#item_ids + 1] = output.item_id
+          end
+        end
+        table.sort(item_ids)
+        if #status_rows >= 512 then
+          status_overflow = true
+        else
+          status_rows[#status_rows + 1] = { scope = "source", generation = generation,
+            identity = source_key, provider = "talk_grant", qid = nil, task_index = nil,
+            item_ids = item_ids,
+            state = eligibility == "eligible" and "available"
+              or eligibility == "ineligible" and "unavailable" or "unknown",
+            reason_code = eligibility == "eligible" and "available"
+              or (reason or "talk_grant_state_unreadable") }
+        end
         if eligibility == "eligible" then
           out.candidates[#out.candidates + 1] = {
-            source_id = { "source", "talk_grant", event.event_id, identity },
+            source_id = source_id,
             provider = "talk_grant",
             target = { kind = "npc", cid = event.speaker_cid,
               pos = copy(event.speaker_position) },
@@ -5814,8 +5894,7 @@ function A.objective_talk_grant_provider_snapshot(observation, generation)
       end
     end
   end
-  out.status, out.complete, out.reason = "ok", true, nil
-  return out
+  return finish()
 end
 
 function A.objective_forgery_provider_snapshot(observation, generation)
@@ -7203,10 +7282,11 @@ function A.make()
   -- Catalog-only reward rows are searchable while no quest is focused, but
   -- deliberately have no route-capable source identity or candidate.  Live
   -- task ownership is joined only by the focused reward classifier below.
-  a.objective_reward_catalog_snapshot = function(objective_catalog, generation)
+  a.objective_reward_catalog_snapshot = function(objective_catalog, generation,
+      initial_matched_item_ids, match_item)
     local snapshot = { provider = "reward", status = "unknown", complete = false,
       reason = "reward_catalog_unavailable", generation = generation,
-      candidates = {}, registry_entries = {} }
+      candidates = {}, registry_entries = {}, matched_item_ids = {} }
     local function fallback(reason)
       snapshot.status, snapshot.complete, snapshot.reason = "unknown", false, reason
       snapshot.source_status = { generation = generation, complete = false,
@@ -7215,6 +7295,17 @@ function A.make()
           task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
       return snapshot
     end
+    local matched_set, matched_count = {}, 0
+    for _, item_id in ipairs(type(initial_matched_item_ids) == "table"
+        and initial_matched_item_ids or {}) do
+      if type(item_id) ~= "number" or item_id <= 0 or item_id ~= math.floor(item_id)
+          or matched_set[item_id] then
+        return fallback("source_query_invalid")
+      end
+      matched_set[item_id] = true
+      matched_count = matched_count + 1
+    end
+    if matched_count > 64 then return fallback("source_browser_item_overflow") end
     if type(generation) ~= "number" or generation < 1
         or generation ~= math.floor(generation) then
       return fallback("reward_generation_invalid")
@@ -7312,6 +7403,27 @@ function A.make()
     end
     local group_list = {}
     for _, group in pairs(groups) do group_list[#group_list + 1] = group end
+    if type(match_item) == "function" then
+      local filtered = {}
+      for _, group in ipairs(group_list) do
+        local include = false
+        for item_id in pairs(group.output_counts) do
+          local ok, matched = pcall(match_item, item_id)
+          if ok and matched == true then
+            include = true
+            if not matched_set[item_id] then
+              matched_set[item_id] = true
+              matched_count = matched_count + 1
+              if matched_count > 64 then
+                return fallback("source_browser_item_overflow")
+              end
+            end
+          end
+        end
+        if include then filtered[#filtered + 1] = group end
+      end
+      group_list = filtered
+    end
     table.sort(group_list, function(left, right)
       if left.qid ~= right.qid then return left.qid < right.qid end
       if left.talk_event_id ~= right.talk_event_id then
@@ -7367,6 +7479,10 @@ function A.make()
       return qnml_core.byte_less(left.identity, right.identity)
     end)
     snapshot.status, snapshot.complete, snapshot.reason = "ok", true, nil
+    for item_id in pairs(matched_set) do
+      snapshot.matched_item_ids[#snapshot.matched_item_ids + 1] = item_id
+    end
+    table.sort(snapshot.matched_item_ids)
     snapshot.source_status = { generation = generation, complete = true,
       reason_code = nil, rows = status_rows }
     return snapshot
@@ -8118,7 +8234,7 @@ function A.make()
     providers[1] = items.filter_placed_provider_snapshot(providers[1])
     return providers
   end
-  function a.objective_source_registry(source_catalog, objective_catalog, wanted_item_ids)
+  function a.objective_source_registry(source_catalog, objective_catalog, wanted_item_ids, query)
     local function copy(value)
       if type(value) ~= "table" then return value end
       local out = {}; for key, child in pairs(value) do out[key] = copy(child) end
@@ -8130,6 +8246,33 @@ function A.make()
       for key, value in pairs(left) do if not same(value, right[key]) then return false end end
       for key in pairs(right) do if left[key] == nil then return false end end
       return true
+    end
+    local matcher = nil
+    if type(query) == "string" and query ~= "" then
+      local needle = query:lower():sub(1, 64)
+      matcher = function(item_id)
+        local name = a.item_name(item_id)
+        return type(name) == "string" and name:lower():find(needle, 1, true) ~= nil
+      end
+    end
+    local registry_wanted = {}
+    for _, item_id in ipairs(type(wanted_item_ids) == "table" and wanted_item_ids or {}) do
+      if type(item_id) == "number" and item_id > 0 and item_id == math.floor(item_id) then
+        registry_wanted[item_id] = true
+      end
+    end
+    local function merge_wanted(observation)
+      if type(observation) ~= "table" or observation.complete ~= true then return false end
+      for _, item_id in ipairs(type(observation.wanted) == "table" and observation.wanted or {}) do
+        registry_wanted[item_id] = true
+      end
+      return true
+    end
+    local function wanted_list()
+      local out = {}
+      for item_id in pairs(registry_wanted) do out[#out + 1] = item_id end
+      table.sort(out)
+      return out
     end
     local observation = A.read_objective_source_observation(source_catalog)
     if objective_browser_state.source_catalog ~= source_catalog
@@ -8145,7 +8288,8 @@ function A.make()
     local providers = A.objective_source_provider_snapshots(source_catalog, observation,
       objective_browser_state.source_generation, wanted_item_ids)
     providers[1] = items.filter_placed_provider_snapshot(providers[1])
-    local forgery_observation = A.read_objective_forgery_observation({}, true)
+    local forgery_observation = A.read_objective_forgery_observation(registry_wanted,
+      matcher or true)
     if not same(objective_browser_state.forgery_observation, forgery_observation) then
       if objective_browser_state.forgery_observation ~= nil then
         objective_browser_state.forgery_generation = math.min(2147483647,
@@ -8155,7 +8299,15 @@ function A.make()
     end
     providers[#providers + 1] = A.objective_forgery_provider_snapshot(
       forgery_observation, objective_browser_state.forgery_generation)
-    local talk_observation = A.read_objective_talk_grant_observation({}, nil, true)
+    merge_wanted(forgery_observation)
+    local talk_observation
+    if forgery_observation.reason == "source_browser_item_overflow" then
+      talk_observation = { complete = false, reason = "source_browser_item_overflow",
+        wanted = {}, events = {} }
+    else
+      talk_observation = A.read_objective_talk_grant_observation(registry_wanted, nil,
+        matcher or true)
+    end
     if not same(objective_browser_state.talk_observation, talk_observation) then
       if objective_browser_state.talk_observation ~= nil then
         objective_browser_state.talk_generation = math.min(2147483647,
@@ -8165,14 +8317,37 @@ function A.make()
     end
     providers[#providers + 1] = A.objective_talk_grant_provider_snapshot(
       talk_observation, objective_browser_state.talk_generation)
-    local reward = a.objective_reward_catalog_snapshot(objective_catalog,
-      objective_browser_state.reward_catalog_generation)
+    merge_wanted(talk_observation)
+    local item_overflow = forgery_observation.reason == "source_browser_item_overflow"
+      or talk_observation.reason == "source_browser_item_overflow"
+    local reward
+    if item_overflow then
+      local reward_generation = objective_browser_state.reward_catalog_generation
+      reward = { provider = "reward", generation = reward_generation,
+        status = "unknown", complete = false, reason = "source_browser_item_overflow",
+        candidates = {}, registry_entries = {}, source_status = {
+          generation = reward_generation, complete = false,
+          reason_code = "source_browser_item_overflow", rows = { {
+            scope = "provider", generation = reward_generation,
+            identity = "provider:reward", provider = "reward", qid = nil,
+            task_index = nil, item_ids = {}, state = "unknown",
+            reason_code = "source_browser_item_overflow" } } } }
+    else
+      reward = a.objective_reward_catalog_snapshot(objective_catalog,
+        objective_browser_state.reward_catalog_generation, wanted_list(), matcher)
+    end
     if not same(objective_browser_state.reward_catalog_snapshot, reward) then
       if objective_browser_state.reward_catalog_snapshot ~= nil then
         objective_browser_state.reward_catalog_generation = math.min(2147483647,
           objective_browser_state.reward_catalog_generation + 1)
-        reward = a.objective_reward_catalog_snapshot(objective_catalog,
-          objective_browser_state.reward_catalog_generation)
+        if item_overflow then
+          reward.generation = objective_browser_state.reward_catalog_generation
+          reward.source_status.generation = reward.generation
+          reward.source_status.rows[1].generation = reward.generation
+        else
+          reward = a.objective_reward_catalog_snapshot(objective_catalog,
+            objective_browser_state.reward_catalog_generation, wanted_list(), matcher)
+        end
       end
       objective_browser_state.reward_catalog_snapshot = copy(reward)
     end

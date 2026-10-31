@@ -150,10 +150,12 @@ local forgery_methods_ok = run_case('', [[
 local im = { call = function(_, name) return name end }
 local kept = reviewed_call(im, "isFakeShopKeeped")
 local remaining = reviewed_call(im, "isFakeShopRemainingMinute")
-return kept .. "|" .. remaining
+local golden = reviewed_call(im, "get__Golden")
+return kept .. "|" .. remaining .. "|" .. golden
 ]], 150)
 check("forgery probe state reads accept only literal allowlist entries",
-  forgery_methods_ok:find("cmd ok=true isFakeShopKeeped|isFakeShopRemainingMinute", 1, true) ~= nil)
+  forgery_methods_ok:find(
+    "cmd ok=true isFakeShopKeeped|isFakeShopRemainingMinute|get__Golden", 1, true) ~= nil)
 
 local forgery_method_near_miss = run_case('', [[
 return reviewed_call({}, "isFakeShopKeepedExtra")

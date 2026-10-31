@@ -26,7 +26,7 @@ REVIEWED_METHODS = {
     "IsRelease", "ToString()", "evaluate", "evaluateHide",
     "evaluateRegisterCondition", "evaluateShow", "evaluateUpdateShow",
     "getActiveDestinations", "getCurrentTask", "getCurrentTaskConciergeData",
-    "getItemNumber", "getItemShopTotalPay", "getItemStockNum",
+    "getItemNumber", "getItemShopTotalPay", "getItemStockNum", "get__Golden",
     "getNPCCharacterData", "getProgressingQuestIds",
     "getRegisterableDestinations", "getStorageDict",
     "getHistory", "getTalkEventInitialSpeaker",

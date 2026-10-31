@@ -2514,6 +2514,10 @@ function M.new(a, reads, io)
       local next_browser_open = toggles.source_browser == true
       if S.source_browser_open and not next_browser_open then
         S.source_browser_cache = nil
+        S.objective_live_source_cache["browser-shop"] = nil
+        S.objective_live_source_cache["browser-monster"] = nil
+        S.objective_source_observations["world-browser-shop"] = nil
+        S.objective_source_observations["world-browser-monster"] = nil
         if type(a.objective_source_browser_close) == "function" then
           pcall(a.objective_source_browser_close)
         end
@@ -2937,6 +2941,15 @@ function M.new(a, reads, io)
     local input = input_tbl or {}
     local needle = query:lower()
     local overflow_reason = nil
+    local matched_ids, matched_seen = {}, {}
+    local function add_matched_item(item_id)
+      item_id = to_int(item_id)
+      if item_id ~= nil and item_id > 0 and not matched_seen[item_id] then
+        matched_seen[item_id] = true
+        matched_ids[#matched_ids + 1] = item_id
+        if #matched_ids > 64 then overflow_reason = "source_browser_item_overflow" end
+      end
+    end
     local static_catalog = w:objective_static_source_catalog()
     local registry_ids, registry_seen = {}, {}
     local function add_registry_item(item_id)
@@ -2946,7 +2959,7 @@ function M.new(a, reads, io)
         if type(name) == "string" and name:lower():find(needle, 1, true) then
           registry_seen[item_id] = true
           registry_ids[#registry_ids + 1] = item_id
-          if #registry_ids > 64 then overflow_reason = "source_browser_item_overflow" end
+          add_matched_item(item_id)
         end
       end
     end
@@ -2960,9 +2973,43 @@ function M.new(a, reads, io)
       end
     end
     table.sort(registry_ids)
+    local shop_ids, shop_seen = {}, {}
+    local function add_shop_item(item_id)
+      item_id = to_int(item_id)
+      if item_id ~= nil and item_id > 0 and not shop_seen[item_id] then
+        shop_seen[item_id] = true; shop_ids[#shop_ids + 1] = item_id
+        add_matched_item(item_id)
+      end
+    end
+    for _, shop in ipairs(type(input.shops) == "table" and input.shops or {}) do
+      for _, item in ipairs(type(shop.items) == "table" and shop.items or {}) do
+        if type(item.name) == "string" and item.name:lower():find(needle, 1, true) then
+          add_shop_item(item.id)
+        end
+      end
+    end
+    for _, seller in ipairs(type(input.sellers) == "table" and input.sellers or {}) do
+      if type(seller.item_name) == "string" and seller.item_name:lower():find(needle, 1, true) then
+        add_shop_item(seller.item)
+      end
+    end
+    table.sort(shop_ids)
+    local monster_ids, monster_seen = {}, {}
+    for _, drop_ids in pairs(type(S.drop_ids) == "table" and S.drop_ids or {}) do
+      for _, item_id in ipairs(type(drop_ids) == "table" and drop_ids or {}) do
+        local name = a.item_name(item_id)
+        if type(name) == "string" and name:lower():find(needle, 1, true)
+            and not monster_seen[item_id] then
+          monster_seen[item_id] = true; monster_ids[#monster_ids + 1] = item_id
+          add_matched_item(item_id)
+        end
+      end
+    end
+    table.sort(monster_ids)
+    table.sort(matched_ids)
     if overflow_reason == nil and type(a.objective_source_registry) == "function" then
       local ok, observed = pcall(a.objective_source_registry,
-        static_catalog, quest_catalog, registry_ids)
+        static_catalog, quest_catalog, matched_ids, query)
       if ok and type(observed) == "table" then
         for _, provider in ipairs(observed) do providers[#providers + 1] = provider end
       end
@@ -3013,7 +3060,7 @@ function M.new(a, reads, io)
             for _, item_id in ipairs(type(copied.item_ids) == "table" and copied.item_ids or {}) do
               local name = a.item_name(item_id)
               if type(name) == "string" and name:lower():find(needle, 1, true) then
-                matched = true; break
+                matched = true; add_matched_item(item_id)
               end
             end
             if matched then add(copied) end
@@ -3028,7 +3075,7 @@ function M.new(a, reads, io)
             for _, item_id in ipairs(ids) do
               local name = a.item_name(item_id)
               if type(name) == "string" and name:lower():find(needle, 1, true) then
-                matched = true; break
+                matched = true; add_matched_item(item_id)
               end
             end
             if matched then
@@ -3043,6 +3090,9 @@ function M.new(a, reads, io)
       end
     end
     for _, provider in ipairs(providers) do
+      if provider.reason == "source_browser_item_overflow" then
+        overflow_reason = "source_browser_item_overflow"
+      end
       local include_provider_status = provider.provider == "reward"
         or ((provider.provider == "placed" or provider.provider == "chest")
           and #registry_ids > 0)
@@ -3055,48 +3105,29 @@ function M.new(a, reads, io)
       end
       add_provider(provider, include_provider_status)
     end
-    local shop_ids, shop_seen = {}, {}
-    local function add_shop_item(item_id)
-      item_id = to_int(item_id)
-      if item_id ~= nil and item_id > 0 and not shop_seen[item_id] then
-        shop_seen[item_id] = true; shop_ids[#shop_ids + 1] = item_id
-      end
-    end
-    for _, shop in ipairs(type(input.shops) == "table" and input.shops or {}) do
-      for _, item in ipairs(type(shop.items) == "table" and shop.items or {}) do
-        if type(item.name) == "string" and item.name:lower():find(needle, 1, true) then
-          add_shop_item(item.id)
-        end
-      end
-    end
-    for _, seller in ipairs(type(input.sellers) == "table" and input.sellers or {}) do
-      if type(seller.item_name) == "string" and seller.item_name:lower():find(needle, 1, true) then
-        add_shop_item(seller.item)
-      end
-    end
-    table.sort(shop_ids)
-    if #shop_ids > 64 then overflow_reason = "source_browser_item_overflow" end
     if overflow_reason == nil and #shop_ids > 0
         and type(w.objective_shop_source_snapshot) == "function" then
-      local ok, provider = pcall(w.objective_shop_source_snapshot, w, shop_ids)
-      if ok and type(provider) == "table" then add_provider(provider, true) end
-    end
-    local monster_ids, monster_seen = {}, {}
-    for _, drop_ids in pairs(type(S.drop_ids) == "table" and S.drop_ids or {}) do
-      for _, item_id in ipairs(type(drop_ids) == "table" and drop_ids or {}) do
-        local name = a.item_name(item_id)
-        if type(name) == "string" and name:lower():find(needle, 1, true)
-            and not monster_seen[item_id] then
-          monster_seen[item_id] = true; monster_ids[#monster_ids + 1] = item_id
+      local ok, provider = pcall(w.objective_shop_source_snapshot, w, shop_ids,
+        "browser-shop")
+      if ok and type(provider) == "table" then
+        if provider.complete == false and type(provider.reason) == "string"
+            and provider.reason:find("overflow", 1, true) ~= nil then
+          overflow_reason = "source_browser_status_overflow"
         end
+        add_provider(provider, true)
       end
     end
-    table.sort(monster_ids)
-    if #monster_ids > 64 then overflow_reason = "source_browser_item_overflow" end
     if overflow_reason == nil and #monster_ids > 0
         and type(w.objective_monster_source_snapshot) == "function" then
-      local ok, provider = pcall(w.objective_monster_source_snapshot, w, monster_ids)
-      if ok and type(provider) == "table" then add_provider(provider, true) end
+      local ok, provider = pcall(w.objective_monster_source_snapshot, w, monster_ids,
+        "browser-monster")
+      if ok and type(provider) == "table" then
+        if provider.complete == false and type(provider.reason) == "string"
+            and provider.reason:find("overflow", 1, true) ~= nil then
+          overflow_reason = "source_browser_status_overflow"
+        end
+        add_provider(provider, true)
+      end
     end
     if overflow_reason ~= nil then
       rows = { { scope = "provider", generation = 1,
@@ -3274,7 +3305,7 @@ function M.new(a, reads, io)
     return result
   end
 
-  function w:objective_shop_source_snapshot(item_ids)
+  function w:objective_shop_source_snapshot(item_ids, cache_scope)
     local offers = {}
     return objective_live_sources("shop", "objective_shop_rows", function(row)
       if type(row) ~= "table" then return nil, "shop_row_malformed" end
@@ -3332,7 +3363,7 @@ function M.new(a, reads, io)
         available_acquisitions = available, certainty = "guaranteed",
         eligibility = "eligible", evidence = { released = true, talk_available = true,
           interactable = true, restock_readable = row.restock_readable } }, nil, status_row
-    end, nil, nil, true, nil, true, "shop", item_ids,
+    end, nil, nil, true, nil, true, cache_scope or "shop", item_ids,
       #item_ids == 0 and "empty" or table.concat(item_ids, ","))
   end
 
@@ -3398,8 +3429,8 @@ function M.new(a, reads, io)
         drop_table_readable = true } }, nil, status_row
   end
 
-  local function objective_monster_unknown(reason)
-    return objective_provider_unknown("monster", "monster", reason)
+  local function objective_monster_unknown(reason, cache_scope)
+    return objective_provider_unknown("monster", cache_scope or "monster", reason)
   end
 
   local function objective_monster_query(item_ids)
@@ -3425,13 +3456,15 @@ function M.new(a, reads, io)
 
   -- One normalized live monster provider snapshot serves both item search and
   -- focused routing. Callers own view/focus policy; discovery owns only evidence.
-  function w:objective_monster_source_snapshot(item_ids)
+  function w:objective_monster_source_snapshot(item_ids, cache_scope)
     local ids = objective_monster_query(item_ids)
-    if ids == nil then return objective_monster_unknown("monster_source_query_invalid") end
+    if ids == nil then
+      return objective_monster_unknown("monster_source_query_invalid", cache_scope)
+    end
     local signature = #ids == 0 and "empty" or table.concat(ids, ",")
     return objective_live_sources("monster", "objective_monster_source_rows",
       objective_monster_normalize, nil, nil, true, "objective_monster_freshness",
-      true, "monster", ids, signature)
+      true, cache_scope or "monster", ids, signature)
   end
 
   function w:objective_monster_observations(task_snapshot, need_snapshot)

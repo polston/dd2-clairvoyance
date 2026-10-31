@@ -8099,5 +8099,92 @@ do
       and calls == 0)
 end
 
+do
+  local f = fixture()
+  f.data.sched_ids = { 2058 }
+  f.data.shop[2058] = 41
+  f.data.sched[2058] = P(100, 0, 100)
+  f.data.shops[41] = { { item = 502, release_qid = 0 } }
+  f.data.iname[502] = "Browser Cache Item"
+  local queries = {}
+  f.reads.objective_shop_rows = function(item_ids)
+    queries[#queries + 1] = table.concat(item_ids, ",")
+    return { complete = true, rows = {} }
+  end
+  local w = f.new()
+  w:refresh(0, true, { source_browser = true }, false)
+  w:objective_shop_source_snapshot({ 501 })
+  w:objective_source_browser("browser cache item", {}, { need_generation = 1, quests = {} })
+  w:objective_shop_source_snapshot({ 501 })
+  check("source browser shop reads use a cache scope separate from focused routing",
+    #queries == 2 and queries[1] == "501" and queries[2] == "502")
+end
+
+do
+  local f = fixture()
+  f.data.sched_ids = { 2058 }
+  f.data.shop[2058] = 41
+  f.data.sched[2058] = P(100, 0, 100)
+  f.data.shops[41] = { { item = 501, release_qid = 0 } }
+  f.data.iname[501] = "Browser Status Overflow Item"
+  local w = f.new()
+  w.objective_shop_source_snapshot = function()
+    return { provider = "shop", generation = 4, status = "unknown", complete = false,
+      reason = "shop_status_overflow", candidates = {}, source_status = {
+        generation = 4, complete = false, reason_code = "shop_status_overflow", rows = {
+          { scope = "provider", generation = 4, identity = "provider:shop",
+            provider = "shop", item_ids = {}, state = "unknown",
+            reason_code = "shop_status_overflow" },
+        } } }
+  end
+  w:refresh(0, true, { source_browser = true }, false)
+  local browser = w:objective_source_browser("browser status overflow item", {},
+    { need_generation = 1, quests = {} })
+  check("downstream provider status overflow makes the browser explicitly incomplete",
+    browser and browser.complete == false
+      and browser.reason_code == "source_browser_status_overflow"
+      and #browser.rows == 1 and browser.rows[1].identity == "provider:source_browser")
+end
+
+do
+  local static_rows = {}
+  for i = 1, 40 do
+    local item_id = 2000 + i
+    static_rows[i] = { k = "item", uid = "browser-global-cap-" .. tostring(i),
+      id = item_id, n = 1, x = i, y = 0, z = i, index = 0,
+      table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0, src = "normal" }
+  end
+  local f = fixture({ files = { [K.PLACES] = places(static_rows) } })
+  f.data.sched_ids = { 2058 }
+  f.data.shop[2058] = 41
+  f.data.sched[2058] = P(100, 0, 100)
+  f.data.shops[41] = {}
+  for i = 1, 40 do
+    local item_id = 3000 + i
+    f.data.iname[2000 + i] = "Combined Browser Cap Item " .. tostring(i)
+    f.data.iname[item_id] = "Combined Browser Cap Item " .. tostring(40 + i)
+    f.data.shops[41][i] = { item = item_id, release_qid = 0 }
+  end
+  local registry_calls, shop_calls = 0, 0
+  f.adapter.objective_source_registry = function()
+    registry_calls = registry_calls + 1
+    return {}
+  end
+  local w = f.new()
+  w.objective_shop_source_snapshot = function()
+    shop_calls = shop_calls + 1
+    return { provider = "shop", generation = 1, status = "ok", complete = true,
+      candidates = {}, source_status = { generation = 1, complete = true, rows = {} } }
+  end
+  w:refresh(0, true, { source_browser = true }, false)
+  local browser = w:objective_source_browser("combined browser cap item", {},
+    { need_generation = 1, quests = {} })
+  check("source browser enforces its 64-item cap across provider families before live reads",
+    browser and browser.complete == false
+      and browser.reason_code == "source_browser_item_overflow"
+      and #browser.rows == 1 and browser.rows[1].identity == "provider:source_browser"
+      and registry_calls == 0 and shop_calls == 0)
+end
+
 if failures > 0 then os.exit(1) end
 print("world_test: all OK")

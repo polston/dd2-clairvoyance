@@ -214,21 +214,39 @@ function M.build(snapshot, options)
     model.seen = nil
     return model
   end
+  for _, target in ipairs(targets or {}) do
+    local owners = type(target) == "table" and dense(target.owners, 256) or nil
+    local item_ids = type(target) == "table" and target.item_ids or nil
+    local valid = type(target) == "table" and valid_identity(target.key)
+      and type(target.target) == "table" and owners ~= nil
+      and (item_ids == nil or dense(item_ids, 256) ~= nil)
+    if valid then
+      for _, owner in ipairs(owners) do
+        if type(owner) ~= "table" or type(owner.qid) ~= "number"
+            or math.type(owner.qid) ~= "integer" or owner.qid <= 0 then
+          valid = false; break
+        end
+      end
+    end
+    if not valid then
+      model.complete, model.passthrough = false, true
+      model.reason_code = "objective_ui_target_invalid"
+      model.seen = nil
+      return model
+    end
+  end
   local by_identity = {}
   for _, target in ipairs(targets or {}) do
-    if type(target) == "table" and valid_identity(target.key)
-        and type(target.owners) == "table" and type(target.target) == "table" then
-      local entry = finish_entry({ identity = target.key, target = target,
-        kind = target.kind, provider = target.provider, state = "available",
-        reason_code = "available", label = target_label(target, options),
-        item_ids = copy_ids(target.item_ids), ordinal = target.ordinal,
-        marker_supported = true, route_supported = route_supported(target) }, marker_off, route_off)
-      by_identity[entry.identity] = entry
-      model.identities[entry.persist_key] = true
-      model.entries[#model.entries + 1] = entry
-      for _, owner in ipairs(dense(target.owners, 256) or {}) do
-        if type(owner) == "table" then add_qid(model, owner.qid, entry) end
-      end
+    local entry = finish_entry({ identity = target.key, target = target,
+      kind = target.kind, provider = target.provider, state = "available",
+      reason_code = "available", label = target_label(target, options),
+      item_ids = copy_ids(target.item_ids), ordinal = target.ordinal,
+      marker_supported = true, route_supported = route_supported(target) }, marker_off, route_off)
+    by_identity[entry.identity] = entry
+    model.identities[entry.persist_key] = true
+    model.entries[#model.entries + 1] = entry
+    for _, owner in ipairs(target.owners) do
+      add_qid(model, owner.qid, entry)
     end
   end
   local focus = dense(options.focus_order, 16) or {}

@@ -321,6 +321,7 @@ reviewed_methods = {
   ["getItemNumber"] = true,
   ["getItemShopTotalPay"] = true,
   ["getItemStockNum"] = true,
+  ["get__Golden"] = true,
   ["getNPCCharacterData"] = true,
   ["getProgressingQuestIds"] = true,
   ["getRegisterableDestinations"] = true,
