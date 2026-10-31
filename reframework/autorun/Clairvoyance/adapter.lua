@@ -4410,7 +4410,7 @@ end
 -- owns the static output/position catalog, while the adapter owns the native
 -- observation.  A partial shared scan makes both providers unknown and a
 -- family-local inconsistency clears that family's candidates.
-function A.objective_source_provider_snapshots(catalog, observation, generation)
+function A.objective_source_provider_snapshots(catalog, observation, generation, wanted_item_ids)
   local function envelope(provider, status, reason, candidates, status_rows)
     local source_status
     if status == "ok" then
@@ -4458,6 +4458,18 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
     local out = {}
     for k, v in pairs(value) do out[k] = copy(v) end
     return out
+  end
+  local wanted_set = nil
+  if wanted_item_ids ~= nil then
+    local wanted = dense(wanted_item_ids)
+    if wanted == nil or #wanted > 64 then return unknown_pair("source_query_invalid") end
+    wanted_set = {}
+    for _, item_id in ipairs(wanted) do
+      if not integer(item_id, 1) or wanted_set[item_id] then
+        return unknown_pair("source_query_invalid")
+      end
+      wanted_set[item_id] = true
+    end
   end
   if not integer(generation, 1) then return unknown_pair("source_generation_invalid") end
   if type(catalog) ~= "table" or catalog.status ~= "ok" or catalog.complete ~= true
@@ -4623,6 +4635,9 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
         end
       end
       table.sort(item_ids)
+      if #status_rows >= 512 then
+        return envelope(provider, "unknown", provider .. "_status_overflow")
+      end
       status_rows[#status_rows + 1] = { scope = "source", generation = generation,
         identity = qnml_core.target_key({ "source", provider, uid, index }),
         provider = provider, qid = nil, task_index = nil, item_ids = item_ids,
@@ -4631,7 +4646,22 @@ function A.objective_source_provider_snapshots(catalog, observation, generation)
     end
     return envelope(provider, "ok", nil, candidates, status_rows)
   end
-  return { classify("placed", catalog.placements), classify("chest", catalog.chests) }
+  local function filtered(rows)
+    if wanted_set == nil then return rows end
+    local out = {}
+    for _, row in ipairs(rows) do
+      local matched, outputs = false, type(row) == "table" and row.outputs or nil
+      for _, output in ipairs(type(outputs) == "table" and outputs or {}) do
+        if type(output) == "table" and wanted_set[output.item_id] then
+          matched = true; break
+        end
+      end
+      if matched then out[#out + 1] = row end
+    end
+    return out
+  end
+  return { classify("placed", filtered(catalog.placements)),
+    classify("chest", filtered(catalog.chests)) }
 end
 
 -- Bounded atomic scan of TalkEventManager's merged catalog.  Every matching
@@ -5391,13 +5421,18 @@ function A.read_objective_forgery_observation(wanted, include_all)
     local input_ids = {}
     for _, mapping in ipairs(mappings) do input_ids[mapping.input_item_id] = true end
     local _, _, held_complete, carried = items.read_held(input_ids)
+    local gold_ok, gold = call(item_manager, "get__Golden")
+    local gold_readable = gold_ok and type(gold) == "number"
+      and gold >= 0 and gold == math.floor(gold)
     for _, mapping in ipairs(mappings) do
       mapping.held_readable = carried ~= nil and held_complete == true
       mapping.held_count = mapping.held_readable and (carried[mapping.input_item_id] or 0) or nil
       mapping.held_reason = mapping.held_readable and nil
         or "forgery_input_inventory_read_incomplete"
-      mapping.price_readable = false
-      mapping.price_reason = "forgery_currency_reader_unproved"
+      mapping.price_readable = gold_readable
+      mapping.available_gold = gold_readable and gold or nil
+      mapping.affordable = gold_readable and gold >= mapping.price or nil
+      mapping.price_reason = gold_readable and nil or "forgery_currency_read_failed"
     end
   end
   local order = {}
@@ -5449,14 +5484,18 @@ function A.objective_forgery_evidence(evidence, generation)
   end
   if type(evidence) ~= "table" then return out end
   local id, pos = evidence.identity, evidence.service_position
-  local service, output = evidence.service_id, evidence.output_item_id
+  local talk_event, service_index = evidence.service_talk_event_id, evidence.service_index
+  local chara_id, shop_id, output = evidence.service_chara_id,
+    evidence.service_shop_id, evidence.output_item_id
   if type(id) ~= "table" or id[1] ~= "source" or id[2] ~= "forgery"
-    or not integer(service, 1) or not integer(output, 1)
+    or not integer(talk_event, 1) or not integer(service_index, 0)
+    or not integer(chara_id, 1) or not integer(shop_id, 1) or not integer(output, 1)
     or not integer(evidence.mapping_input_item_id, 1)
     or not integer(evidence.mapping_output_item_id, 1)
     or evidence.mapping_output_item_id ~= output
-    or id[3] ~= service or id[4] ~= evidence.mapping_input_item_id
-    or id[5] ~= output or id[6] ~= nil
+    or id[3] ~= talk_event or id[4] ~= service_index or id[5] ~= chara_id
+    or id[6] ~= shop_id or id[7] ~= evidence.mapping_input_item_id
+    or id[8] ~= output or id[9] ~= nil
     or evidence.service_type ~= "NpcShopForgeryParam"
     or type(pos) ~= "table" or not finite(pos.x) or not finite(pos.y) or not finite(pos.z)
     or not integer(evidence.kept_item_id, 0) or not integer(evidence.kept_item_count, 0)
@@ -5488,6 +5527,9 @@ function A.objective_forgery_evidence(evidence, generation)
     if evidence.kept_item_count <= 0 then
       return result("ineligible", "forgery_order_not_ready")
     elseif evidence.kept_item_id == output then
+      if evidence.order_owner_readable ~= true then
+        return result("unknown", "forgery_order_service_unreadable")
+      end
       return result("eligible", "matching_forgery_output_ready")
     end
     return result("ineligible", "forgery_order_unrelated")
@@ -5496,6 +5538,9 @@ function A.objective_forgery_evidence(evidence, generation)
       return result("unknown", "forgery_pending_order_identity_unproven")
     elseif evidence.kept_item_id ~= evidence.mapping_input_item_id then
       return result("ineligible", "forgery_order_unrelated")
+    end
+    if evidence.order_owner_readable ~= true then
+      return result("unknown", "forgery_order_service_unreadable")
     end
     return result("ineligible", "forgery_order_pending")
   elseif evidence.idle ~= true or evidence.kept_item_id ~= 0
@@ -5873,12 +5918,36 @@ function A.objective_forgery_provider_snapshot(observation, generation)
   end
   local wanted_set = {}
   for _, item_id in ipairs(wanted) do wanted_set[item_id] = true end
+  local order_match_count = 0
+  local order_match_id = nil
+  if observation.order.completed_readable == true and observation.order.completed == true
+      and observation.order.kept_readable == true then
+    order_match_id = observation.order.kept_item_id
+    for _ in ipairs(services) do
+      for _, mapping in ipairs(mappings) do
+        if mapping.output_item_id == order_match_id then
+          order_match_count = order_match_count + 1
+        end
+      end
+    end
+  elseif observation.order.kept_state_readable == true
+      and observation.order.kept_active == true and observation.order.kept_readable == true then
+    order_match_id = observation.order.kept_item_id
+    for _ in ipairs(services) do
+      for _, mapping in ipairs(mappings) do
+        if mapping.input_item_id == order_match_id then
+          order_match_count = order_match_count + 1
+        end
+      end
+    end
+  end
   local rows = {}
   for _, service in ipairs(services) do
     for _, mapping in ipairs(mappings) do
       if wanted_set[mapping.output_item_id] then
         if #rows >= 512 then return fallback("forgery_status_row_overflow") end
-        local source_id = { "source", "forgery", service.shop_id,
+        local source_id = { "source", "forgery", service.talk_event_id,
+          service.service_index, service.chara_id, service.shop_id,
           mapping.input_item_id, mapping.output_item_id }
         local identity = tuple_key(source_id)
         if identity == nil then return fallback("forgery_observation_malformed") end
@@ -5921,7 +5990,9 @@ function A.objective_forgery_provider_snapshot(observation, generation)
             idle = not observation.order.kept_active and not observation.order.completed
           end
           local classified = A.objective_forgery_evidence({ identity = source_id,
-            service_id = service.shop_id, output_item_id = mapping.output_item_id,
+            service_talk_event_id = service.talk_event_id,
+            service_index = service.service_index, service_chara_id = service.chara_id,
+            service_shop_id = service.shop_id, output_item_id = mapping.output_item_id,
             mapping_input_item_id = mapping.input_item_id,
             mapping_output_item_id = mapping.output_item_id,
             mapping_price = mapping.price,
@@ -5938,14 +6009,18 @@ function A.objective_forgery_provider_snapshot(observation, generation)
             completion_time_readable = observation.order.completion_time_readable,
             completion_time = observation.order.completion_time,
             completion_readable = observation.order.completed_readable,
-            completed = observation.order.completed }, out.generation)
+            completed = observation.order.completed,
+            order_owner_readable = order_match_id == nil or order_match_count == 1 },
+            out.generation)
           state = classified.eligibility == "eligible" and "available"
             or classified.eligibility == "ineligible" and "unavailable" or "unknown"
           reason = classified.reason
           if classified.eligibility == "eligible" then
             out.candidates[#out.candidates + 1] = { provider = "forgery",
               generation = out.generation, source_id = source_id,
-              capacity_pool_id = { "capacity", "forgery", service.shop_id },
+              capacity_pool_id = { "capacity", "forgery", service.talk_event_id,
+                service.service_index, service.chara_id, service.shop_id,
+                mapping.input_item_id, mapping.output_item_id },
               target = { kind = "npc", cid = service.chara_id,
                 pos = { x = position.x, y = position.y, z = position.z } },
               outputs = { { item_id = mapping.output_item_id, count = 1 } },
@@ -7135,7 +7210,9 @@ function A.make()
     local function fallback(reason)
       snapshot.status, snapshot.complete, snapshot.reason = "unknown", false, reason
       snapshot.source_status = { generation = generation, complete = false,
-        reason_code = reason, rows = {} }
+        reason_code = reason, rows = { { scope = "provider", generation = generation,
+          identity = "provider:reward", provider = "reward", qid = nil,
+          task_index = nil, item_ids = {}, state = "unknown", reason_code = reason } } }
       return snapshot
     end
     if type(generation) ~= "number" or generation < 1
@@ -8041,7 +8118,7 @@ function A.make()
     providers[1] = items.filter_placed_provider_snapshot(providers[1])
     return providers
   end
-  function a.objective_source_registry(source_catalog, objective_catalog)
+  function a.objective_source_registry(source_catalog, objective_catalog, wanted_item_ids)
     local function copy(value)
       if type(value) ~= "table" then return value end
       local out = {}; for key, child in pairs(value) do out[key] = copy(child) end
@@ -8066,7 +8143,7 @@ function A.make()
       objective_browser_state.source_observation = copy(observation)
     end
     local providers = A.objective_source_provider_snapshots(source_catalog, observation,
-      objective_browser_state.source_generation)
+      objective_browser_state.source_generation, wanted_item_ids)
     providers[1] = items.filter_placed_provider_snapshot(providers[1])
     local forgery_observation = A.read_objective_forgery_observation({}, true)
     if not same(objective_browser_state.forgery_observation, forgery_observation) then

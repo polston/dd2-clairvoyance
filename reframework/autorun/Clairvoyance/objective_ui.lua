@@ -29,6 +29,7 @@ local REASON_TEXT = {
   source_inaccessible = "Source is inaccessible",
   shop_unreleased = "Shop offer is not available",
   monster_inaccessible = "Monster is inaccessible",
+  monster_not_updating = "Monster is not active",
   dead = "Source is dead", source_dead = "Source is dead", monster_dead = "Source is dead",
   zero_chance = "Drop chance is zero", monster_zero_chance = "Drop chance is zero",
   monster_zero_count = "Drop count is zero",
@@ -201,11 +202,20 @@ end
 function M.build(snapshot, options)
   options = type(options) == "table" and options or {}
   local marker_off, route_off = off_set(options.marker_off), off_set(options.route_off)
-  local model = { by_qid = {}, entries = {}, identities = {}, seen = {}, generation = 0 }
+  local model = { by_qid = {}, entries = {}, identities = {}, seen = {}, generation = 0,
+    complete = true, passthrough = false }
   if type(snapshot) ~= "table" then return model end
   model.generation = type(snapshot.generation) == "number" and snapshot.generation or 0
+  local targets = dense(snapshot.targets, M.ENTRY_MAX)
+  if targets == nil and snapshot.targets ~= nil then
+    model.complete, model.passthrough = false, true
+    model.reason_code = type(snapshot.targets) == "table" and #snapshot.targets > M.ENTRY_MAX
+      and "objective_ui_target_overflow" or "objective_ui_target_invalid"
+    model.seen = nil
+    return model
+  end
   local by_identity = {}
-  for _, target in ipairs(dense(snapshot.targets, M.ENTRY_MAX) or {}) do
+  for _, target in ipairs(targets or {}) do
     if type(target) == "table" and valid_identity(target.key)
         and type(target.owners) == "table" and type(target.target) == "table" then
       local entry = finish_entry({ identity = target.key, target = target,
@@ -285,6 +295,7 @@ function M.build(snapshot, options)
 end
 
 function M.control_maps(model)
+  if type(model) ~= "table" or model.passthrough == true then return nil, nil end
   local markers, routes = {}, {}
   for _, entry in ipairs(type(model) == "table" and model.entries or {}) do
     if entry.target ~= nil and entry.controls_enabled then
@@ -295,10 +306,10 @@ function M.control_maps(model)
   return markers, routes
 end
 
-local function sorted_current(values, identities)
+local function sorted_saved(values)
   local out, seen = {}, {}
   for _, identity in ipairs(dense(values, M.ENTRY_MAX) or {}) do
-    if valid_token(identity) and identities[identity] and not seen[identity] then
+    if valid_token(identity) and not seen[identity] then
       seen[identity] = true; out[#out + 1] = identity
     end
   end
@@ -313,10 +324,8 @@ local function same_list(a, b)
 end
 
 function M.prune_overrides(marker_off, route_off, model)
-  local identities = type(model) == "table" and type(model.identities) == "table"
-    and model.identities or {}
-  local markers = sorted_current(marker_off, identities)
-  local routes = sorted_current(route_off, identities)
+  local markers = sorted_saved(marker_off)
+  local routes = sorted_saved(route_off)
   return markers, routes, not same_list(marker_off, markers) or not same_list(route_off, routes)
 end
 
@@ -375,7 +384,9 @@ end
 
 local function browser_rows(rows)
   local out = {}
-  for _, row in ipairs(dense(rows, M.ENTRY_MAX) or {}) do
+  local bounded = dense(rows, M.ENTRY_MAX)
+  if bounded == nil then return nil end
+  for _, row in ipairs(bounded) do
     if type(row) == "table" and valid_identity(row.identity) then
       local state = row.state == "available" and "available"
         or row.state == "unavailable" and "unavailable" or "unknown"
@@ -388,6 +399,13 @@ local function browser_rows(rows)
   end
   table.sort(out, function(a, b) return a.identity < b.identity end)
   return out
+end
+
+local function browser_unknown(reason)
+  return { { identity = "provider:source_browser", provider = "source_browser",
+    state = "unknown", reason_code = reason, item_ids = {},
+    label = "Acquisition sources", status_text = M.status_text("unknown"),
+    reason_text = M.reason_text(reason) } }
 end
 
 local function browser_signature(query, rows)
@@ -406,14 +424,33 @@ function M.browser_step(previous, open, query, observed_rows)
   if open ~= true then
     return { open = false, query = query, generation = prior_generation, rows = {} }
   end
-  local rows = browser_rows(observed_rows)
-  local signature = browser_signature(query, rows)
+  local envelope = type(observed_rows) == "table" and type(observed_rows.rows) == "table"
+    and observed_rows or nil
+  local source_rows = envelope ~= nil and envelope.rows or observed_rows
+  local rows = browser_rows(source_rows)
+  local complete, reason_code = envelope == nil or envelope.complete == true,
+    envelope ~= nil and envelope.reason_code or nil
+  if rows == nil then
+    complete, reason_code = false, "source_browser_status_overflow"
+    rows = browser_unknown(reason_code)
+  elseif not complete and #rows == 0 then
+    reason_code = type(reason_code) == "string" and reason_code
+      or "source_browser_incomplete"
+    rows = browser_unknown(reason_code)
+  end
+  local signature = browser_signature(query, rows) .. "\2"
+    .. tostring(complete) .. "\2" .. tostring(reason_code)
   local generation = prior_generation
   if type(previous) ~= "table" or previous.open ~= true or previous.signature ~= signature then
     generation = math.min(2147483647, math.max(1, prior_generation + 1))
   end
   return { open = true, query = query, generation = generation,
-    signature = signature, rows = rows, complete = true }
+    signature = signature, rows = rows, complete = complete, reason_code = reason_code }
+end
+
+function M.browser_is_live(open, seen_frame, current_frame)
+  return open == true and type(seen_frame) == "number" and type(current_frame) == "number"
+    and current_frame >= seen_frame and current_frame - seen_frame <= 2
 end
 
 return M

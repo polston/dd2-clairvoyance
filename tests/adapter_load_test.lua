@@ -222,15 +222,17 @@ assert(grouped_complete and #grouped == 1 and grouped[1].remaining == 1
 local empty_need_snapshot = a.objective_need_groups()
 assert(empty_need_snapshot.status == "unknown" and not empty_need_snapshot.complete
   and #empty_need_snapshot.groups == 0, "unrefreshed objective group snapshot is unknown")
-local forgery_identity = { "source", "forgery", 17, 11, 29 }
+local forgery_identity = { "source", "forgery", 1919, 0, 17, 25, 11, 29 }
 local function forgery_evidence(overrides)
-  local e = { identity = forgery_identity, service_id = 17, output_item_id = 29,
+  local e = { identity = forgery_identity, service_talk_event_id = 1919,
+    service_index = 0, service_chara_id = 17, service_shop_id = 25, output_item_id = 29,
     mapping_input_item_id = 11, mapping_output_item_id = 29, price = 6, mapping_price = 6,
     service_type = "NpcShopForgeryParam", service_position = { x = 1, y = 2, z = 3 },
     interactable = true, row_enabled = true, input_held = true, price_held = true,
     idle = true, busy = false, kept_item_id = 0, kept_item_count = 0,
     completed = false, completion_readable = true, busy_readable = true,
-    kept_readable = true, completion_time_readable = true, completion_time = 0 }
+    kept_readable = true, completion_time_readable = true, completion_time = 0,
+    order_owner_readable = true }
   for k, v in pairs(overrides or {}) do e[k] = v end
   return e
 end
@@ -276,12 +278,12 @@ assert(blocked.eligibility == "ineligible"
   and blocked.reason == "forgery_service_not_interactable",
   "exact non-interactable service is ineligible, not unknown")
 for _, bad in ipairs({
-    { "false service id", { service_id = false } },
+    { "false service id", { service_shop_id = false } },
     { "false input id", { mapping_input_item_id = false } },
     { "false output id", { output_item_id = false } },
     { "false mapped output id", { mapping_output_item_id = false } },
     { "false kept item id", { kept_item_id = false } },
-    { "fractional service id", { service_id = 17.5 } },
+    { "fractional service id", { service_shop_id = 17.5 } },
     { "fractional output id", { output_item_id = 29.5 } },
     { "fractional mapped output id", { mapping_output_item_id = 29.5 } },
     { "fractional kept item id", { kept_item_id = 0.5 } },
@@ -503,9 +505,12 @@ do
     and preorder.candidates[1].generation == 21
     and preorder.candidates[1].source_id[1] == "source"
     and preorder.candidates[1].source_id[2] == "forgery"
-    and preorder.candidates[1].source_id[3] == 25
-    and preorder.candidates[1].source_id[4] == 11
-    and preorder.candidates[1].source_id[5] == 29
+    and preorder.candidates[1].source_id[3] == 1919
+    and preorder.candidates[1].source_id[4] == 0
+    and preorder.candidates[1].source_id[5] == 3472286413
+    and preorder.candidates[1].source_id[6] == 25
+    and preorder.candidates[1].source_id[7] == 11
+    and preorder.candidates[1].source_id[8] == 29
     and preorder.candidates[1].target.cid == 3472286413
     and preorder.candidates[1].outputs[1].item_id == 29
     and preorder.source_status.complete == true
@@ -534,10 +539,34 @@ do
   local ready_forgery = A.objective_forgery_provider_snapshot(ready_observation, 23)
   assert(ready_forgery.status == "ok" and ready_forgery.complete
     and #ready_forgery.candidates == 1
-    and ready_forgery.candidates[1].source_id[3] == 25
+    and ready_forgery.candidates[1].source_id[3] == 1919
     and ready_forgery.source_status.rows[1].state == "available"
     and ready_forgery.source_status.rows[1].reason_code == "matching_forgery_output_ready",
     "matching completed forgery routes to collection without input or payment")
+  local ambiguous_ready = production_forgery()
+  ambiguous_ready.services[2] = { job = 95, talk_event_id = 1920, service_index = 1,
+    chara_id = 3472286414, shop_id = 25,
+    service_type = "app.NpcShopForgeryParam", playable = true,
+    speaker_present = true, speaker_matches_service = true,
+    availability_readable = true, available = true,
+    speaker_position = { x = 40, y = 20, z = 30 },
+    interactable = true, interaction_disabled = false }
+  ambiguous_ready.order.kept_item_id = 29
+  ambiguous_ready.order.kept_item_count = 1
+  ambiguous_ready.order.completed = true
+  local ambiguous_forgery = A.objective_forgery_provider_snapshot(ambiguous_ready, 24)
+  assert(ambiguous_forgery.status == "ok" and ambiguous_forgery.complete
+      and #ambiguous_forgery.candidates == 0
+      and #ambiguous_forgery.source_status.rows == 2
+      and ambiguous_forgery.source_status.rows[1].identity
+        ~= ambiguous_forgery.source_status.rows[2].identity
+      and ambiguous_forgery.source_status.rows[1].state == "unknown"
+      and ambiguous_forgery.source_status.rows[2].state == "unknown"
+      and ambiguous_forgery.source_status.rows[1].reason_code
+        == "forgery_order_service_unreadable"
+      and ambiguous_forgery.source_status.rows[2].reason_code
+        == "forgery_order_service_unreadable",
+    "a global completed order cannot be routed when service ownership is ambiguous")
   local unrelated_observation = production_forgery()
   unrelated_observation.order.kept_item_id = 30
   unrelated_observation.order.kept_item_count = 1
@@ -714,6 +743,7 @@ do
     "app.ItemDataParam")
   local item_manager = managed({ _ItemDataDict = managed_dict({ { 11, mapping } }, nil,
       mapping_reads) }, {
+    get__Golden = function() return 10 end,
     get_FakeShopKeepedItem = function() return managed({ _ItemId = 0, _Num = 0 }) end,
     get_FakeShopCompleteTime = function() return 0 end,
     isFakeShopKeeped = function() return false end,
@@ -871,7 +901,9 @@ do
     and forgery_read.mappings[1].enabled_readable
     and forgery_read.mappings[1].enabled == true
     and forgery_read.mappings[1].held_readable == false
-    and forgery_read.mappings[1].price_readable == false
+    and forgery_read.mappings[1].price_readable == true
+    and forgery_read.mappings[1].affordable == true
+    and forgery_read.mappings[1].available_gold == 10
     and forgery_read.order.kept_readable and forgery_read.order.kept_item_id == 0
     and forgery_read.order.kept_state_readable
     and forgery_read.order.kept_active == false
@@ -879,7 +911,7 @@ do
     and forgery_read.order.completed_readable
     and forgery_read.order.remaining_minutes_readable
     and forgery_read.order.remaining_minutes == 0,
-    "forgery reader joins typed service, mapping and exact raw order getters")
+    "forgery reader joins typed service, live affordability, mapping and exact raw order getters")
   local saved_kept = item_manager.calls.get_FakeShopKeepedItem
   local saved_time = item_manager.calls.get_FakeShopCompleteTime
   local saved_kept_state = item_manager.calls.isFakeShopKeeped
@@ -1184,6 +1216,24 @@ do
   assert(chest.status == "unknown" and #chest.candidates == 0
     and chest.reason == "chest_access_domain_unmodeled",
     "future keyed chest access stays unknown")
+
+  local broad_catalog, broad_observation = base_catalog(), base_observation()
+  broad_catalog.placements = {}
+  broad_catalog.chests = {}
+  for i = 1, 513 do
+    local uid = string.format("%08x-0000-0000-0000-%012x", i, i)
+    broad_catalog.placements[i] = { uid = uid, index = 0,
+      table_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", layer = 0,
+      outputs = { { item_id = 501, count = 1 } }, pos = { x = i, y = 2, z = 3 } }
+    broad_observation.persisted[uid .. ":0"] = { family = "placed", freebit = 0 }
+  end
+  local broad = A.objective_source_provider_snapshots(broad_catalog,
+    broad_observation, 11, { 501 })[1]
+  assert(broad.status == "unknown" and broad.complete == false
+      and broad.reason == "placed_status_overflow"
+      and #broad.candidates == 0 and #broad.source_status.rows == 1
+      and broad.source_status.rows[1].identity == "provider:placed",
+    "a 513-row placed browser projection degrades to one provider unknown row")
 
   local world_mod = require("Clairvoyance.world")
   local integrated_rows = {
@@ -5308,6 +5358,18 @@ do
         and snapshot.registry_entries[1].outputs[1].item_id == 9001
         and snapshot.registry_entries[1].outputs[1].count == 5,
       "inactive reward catalog publishes searchable unknown rows without route candidates")
+  end)()
+  ;(function()
+    local snapshot = ai.objective_reward_catalog_snapshot(nil, 2)
+    assert(snapshot.provider == "reward" and snapshot.status == "unknown"
+        and snapshot.complete == false and #snapshot.candidates == 0
+        and snapshot.source_status.complete == false
+        and #snapshot.source_status.rows == 1
+        and snapshot.source_status.rows[1].scope == "provider"
+        and snapshot.source_status.rows[1].identity == "provider:reward"
+        and snapshot.source_status.rows[1].state == "unknown"
+        and snapshot.source_status.rows[1].reason_code == "reward_catalog_unavailable",
+      "incomplete reward catalog emits the required provider-scoped unknown row")
   end)()
   do (function()
     local singleton_reads = 0

@@ -1246,6 +1246,13 @@ re.on_frame(function()
       for _, k in ipairs(su.WORLD_BOOLS) do tg[k:sub(7)] = settings[k] end
       tg.reveal_gate_names = settings.reveal_gate_names   -- chest quest names (SPEC 27.4.2)
       tg.search = show.search ~= nil
+      if wt.source_browser_open == true and not wt.objective_ui.browser_is_live(
+          true, wt.source_browser_frame, jump_frame) then
+        wt.source_browser_open, wt.source_browser_frame = false, nil
+        wt.source_browser = wt.objective_ui.browser_step(wt.source_browser, false,
+          settings.search_text, {})
+        wt.q("poke", nil)
+      end
       tg.source_browser = wt.source_browser_open == true
       tg.npc_cids = snapshot ~= nil and snapshot.npc_match_cids or nil   -- Ruling 10
       -- quest focus (SPEC 32.7): previous snapshot's focus, route members, poke on a set change
@@ -2976,14 +2983,18 @@ do
         wt.source_browser_open = imgui.tree_node(
           "Sources for this search###qnml_source_browser")
         if wt.source_browser_open then
-          local observed = {}
+          wt.source_browser_frame = jump_frame
+          local observed = { complete = true, rows = {} }
           local live = wt.source_browser_observation
           if type(live) == "table" and type(live.rows) == "table" then
-            observed = live.rows
+            observed = live
           end
           wt.source_browser = wt.objective_ui.browser_step(wt.source_browser, true,
             settings.search_text, observed)
           imgui.text("Source evidence generation " .. tostring(wt.source_browser.generation))
+          if wt.source_browser.complete == false then
+            imgui.text(wt.objective_ui.reason_text(wt.source_browser.reason_code))
+          end
           if #wt.source_browser.rows == 0 then
             imgui.text("No known source evidence for this search")
           else
@@ -3071,6 +3082,7 @@ do
       end
     end
     if not wt.source_browser_open then
+      wt.source_browser_frame = nil
       wt.source_browser = wt.objective_ui.browser_step(wt.source_browser, false,
         settings.search_text, {})
     end
@@ -3799,6 +3811,11 @@ do
       local ok, e = pcall(draw_body)
       imgui.tree_pop()
       if not ok then logerr(tostring(e)) end
+    elseif wt.source_browser_open == true then
+      wt.source_browser_open, wt.source_browser_frame = false, nil
+      wt.source_browser = wt.objective_ui.browser_step(wt.source_browser, false,
+        settings.search_text, {})
+      want_update = true; last_tick = 0.0; wt.q("poke", nil)
     end
   end)
 end

@@ -108,10 +108,11 @@ check("effective maps separately suppress marker and route targets",
 local marker_off, route_off, changed = ui.prune_overrides(
   { source_token, unavailable_token, "k:7374616c65" },
   { npc_token, "k:7374616c6532" }, model)
-check("override pruning uses current stable identities",
-  changed == true and #marker_off == 2 and marker_off[1] == unavailable_token
-    and marker_off[2] == source_token
-    and #route_off == 1 and route_off[1] == npc_token)
+check("temporarily absent objectives retain valid persisted overrides",
+  changed == true and #marker_off == 3 and marker_off[1] == "k:7374616c65"
+    and marker_off[2] == unavailable_token and marker_off[3] == source_token
+    and #route_off == 2 and route_off[1] == "k:7374616c6532"
+    and route_off[2] == npc_token)
 local toggled = ui.set_enabled({ source_token }, source_token, true)
 check("enabling removes the stable identity from the off list", #toggled == 0)
 toggled = ui.set_enabled(toggled, npc_token, false)
@@ -130,6 +131,39 @@ local next_query = ui.browser_step(same, true, "death knell", {})
 check("source browser query change advances its own generation", next_query.generation == 2)
 local closed = ui.browser_step(next_query, false, "death knell", {})
 check("closed source browser retains no source rows", closed.open == false and #closed.rows == 0)
+check("source browser lease expires when its UI is no longer drawn",
+  ui.browser_is_live(true, 100, 101) == true
+    and ui.browser_is_live(true, 100, 103) == false
+    and ui.browser_is_live(true, nil, 100) == false
+    and ui.browser_is_live(false, 100, 100) == false)
+
+local overflow_targets = {}
+for i = 1, ui.ENTRY_MAX + 1 do
+  overflow_targets[i] = { key = "target:overflow:" .. tostring(i), generation = 10,
+    ordinal = i, eligibility = "eligible", kind = "source", provider = "placed",
+    target = { pos = { x = i, y = 0, z = i } }, item_ids = { 501 },
+    owners = { { qid = 20090, task_index = 4 } } }
+end
+local overflow_model = ui.build({ generation = 10, targets = overflow_targets }, {})
+local overflow_markers, overflow_routes = ui.control_maps(overflow_model)
+check("objective UI overflow is explicit passthrough instead of hiding every target",
+  overflow_model.complete == false and overflow_model.reason_code == "objective_ui_target_overflow"
+    and overflow_markers == nil and overflow_routes == nil)
+
+local overflow_rows = {}
+for i = 1, ui.ENTRY_MAX + 1 do
+  overflow_rows[i] = { identity = "source:overflow:" .. tostring(i), provider = "placed",
+    state = "available", reason_code = "available", item_ids = { 501 },
+    label = "Fulminous Shield - Placed item" }
+end
+local overflow_browser = ui.browser_step(nil, true, "shield", {
+  complete = true, rows = overflow_rows,
+})
+check("source browser row overflow is incomplete instead of silently empty",
+  overflow_browser.open == true and overflow_browser.complete == false
+    and overflow_browser.reason_code == "source_browser_status_overflow"
+    and #overflow_browser.rows == 1
+    and overflow_browser.rows[1].identity == "provider:source_browser")
 
 if failures > 0 then os.exit(1) end
 print("objective_ui_test: all OK")

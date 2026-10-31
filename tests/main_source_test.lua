@@ -384,6 +384,8 @@ check("item search has an explicit non-routing source browser lifecycle",
   src:find("Sources for this search###qnml_source_browser", 1, true) ~= nil
     and src:find("wt.objective_ui.browser_step", 1, true) ~= nil
     and src:find("source_browser_open", 1, true) ~= nil
+    and src:find("source_browser_frame", 1, true) ~= nil
+    and src:find("browser_is_live", 1, true) ~= nil
     and src:find('wt.q("objective_source_browser", nil,', 1, true) ~= nil)
 local wf = assert(io.open("reframework/autorun/Clairvoyance/world.lua", "rb"))
 local world_src = wf:read("*a"):gsub("\r\n", "\n"); wf:close()
