@@ -149,6 +149,12 @@ try {
             source)
         self.assertIn("PostWindowKey", source)
         self.assertIn("PostWindowClick", source)
+        self.assertIn("Find-ResetTargetAfterScroll", source)
+        self.assertIn("Find-ScriptRunnerHeader", source)
+        self.assertIn("$scrollbarX", source)
+        self.assertIn("Get-ReframeworkMenuKey", source)
+        self.assertIn("REFrameworkConfig_MenuKey_V2", source)
+        self.assertNotIn("Send-WindowKey $window 0x2D", source)
 
     def test_reset_scripts_fails_closed_on_ambiguous_button_rows(self):
         script = ROOT / "scripts" / "reset-scripts.ps1"

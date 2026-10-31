@@ -275,6 +275,34 @@ function Test-ScriptRunnerTarget([System.Drawing.Bitmap]$Bitmap,
     return $headerBound -and $buttonBound
 }
 
+function Test-ReframeworkVisible([System.Drawing.Bitmap]$Bitmap,
+        [System.Drawing.Rectangle]$Search) {
+    $titlePoint = [System.Drawing.Point]::new($Search.Left + 50, $Search.Top + 20)
+    $ocr = Get-OcrResult $Bitmap $Search $titlePoint
+    return $ocr.Result.Text.ToLowerInvariant().Contains("reframework")
+}
+
+function Find-ScriptRunnerHeader([System.Drawing.Bitmap]$Bitmap,
+        [System.Drawing.Rectangle]$Search) {
+    for ($probeY = $Search.Top + 50; $probeY -lt $Search.Bottom - 20;
+            $probeY += 40) {
+        $point = [System.Drawing.Point]::new($Search.Left + 50, $probeY)
+        $ocr = Get-OcrResult $Bitmap $Search $point
+        foreach ($line in $ocr.Result.Lines) {
+            foreach ($word in $line.Words) {
+                $text = $word.Text.ToLowerInvariant() -replace '[^a-z]', ''
+                if ($text -eq "scriptrunner") {
+                    $rect = $word.BoundingRect
+                    return [System.Drawing.Point]::new(
+                        $ocr.Left + [int](($rect.X + $rect.Width / 2) / $ocr.Scale),
+                        $ocr.Top + [int](($rect.Y + $rect.Height / 2) / $ocr.Scale))
+                }
+            }
+        }
+    }
+    return $null
+}
+
 function Get-ReframeworkBounds([string]$Directory, [int]$ClientWidth,
         [int]$ClientHeight) {
     $uiPath = Join-Path $Directory "ref_ui.ini"
@@ -322,6 +350,23 @@ function Get-ReframeworkBounds([string]$Directory, [int]$ClientWidth,
     return $bounds
 }
 
+function Get-ReframeworkMenuKey([string]$Directory) {
+    $configPath = Join-Path $Directory "re2_fw_config.txt"
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        throw "REFramework config not found: $configPath"
+    }
+    $matches = @(Select-String -LiteralPath $configPath `
+        -Pattern '^REFrameworkConfig_MenuKey_V2=(-?\d+)$')
+    if ($matches.Count -ne 1) {
+        throw "REFramework menu key is ambiguous: $($matches.Count) matches"
+    }
+    $key = [int]$matches[0].Matches[0].Groups[1].Value
+    if ($key -lt 1 -or $key -gt 255) {
+        throw "REFramework menu key is disabled or invalid: $key"
+    }
+    return [uint32]$key
+}
+
 function Assert-Foreground([IntPtr]$Window, [string]$Operation) {
     if ([QnmlResetNative]::GetForegroundWindow() -ne $Window) {
         throw "game window lost foreground $Operation"
@@ -366,6 +411,37 @@ function Send-WindowClick([IntPtr]$Window, [int]$X, [int]$Y) {
         throw "could not post the reset click to the game window"
     }
     Assert-Foreground $Window "after reset click"
+}
+
+function Find-ResetTargetAfterScroll([IntPtr]$Window, [string]$Directory) {
+    $scriptRunnerOpened = $false
+    for ($attempt = 0; $attempt -lt 12; $attempt++) {
+        $header = $null
+        $bitmap = New-ClientCapture $Window
+        try {
+            $bounds = Get-ReframeworkBounds $Directory $bitmap.Width $bitmap.Height
+            try { return Find-ResetTarget $bitmap $bounds } catch {
+                if ($_.Exception.Message -ne "reset target not found") { throw }
+            }
+            if (-not $scriptRunnerOpened) {
+                $header = Find-ScriptRunnerHeader $bitmap $bounds
+            }
+        } finally { $bitmap.Dispose() }
+        if ($null -ne $header) {
+            Send-WindowClick $Window $header.X $header.Y
+            $scriptRunnerOpened = $true
+            Start-Sleep -Milliseconds 200
+            continue
+        }
+        # Page upward by clicking the main window's scrollbar track above its
+        # thumb. Window messages update ImGui without moving the physical cursor.
+        $scrollbarX = $bounds.Right - 6
+        # Page from the main track below the title bar and above the thumb.
+        $scrollbarTop = $bounds.Top + [Math]::Min(60, $bounds.Height - 20)
+        Send-WindowClick $Window $scrollbarX $scrollbarTop
+        Start-Sleep -Milliseconds 120
+    }
+    throw "reset target not found after scrolling the REFramework window"
 }
 
 function Wait-ForResetLog([string]$Path, [long]$Offset, [int]$Seconds) {
@@ -426,26 +502,26 @@ if (-not [QnmlResetNative]::ActivateWindow($window)) {
 }
 Start-Sleep -Milliseconds 350
 Assert-Foreground $window "before reset discovery"
+$menuKey = Get-ReframeworkMenuKey $GameDir
 
 $openedOverlay = $false
 try {
     $bitmap = New-ClientCapture $window
     try {
         $bounds = Get-ReframeworkBounds $GameDir $bitmap.Width $bitmap.Height
+        $overlayVisible = Test-ReframeworkVisible $bitmap $bounds
         try { $target = Find-ResetTarget $bitmap $bounds } catch {
             if ($_.Exception.Message -ne "reset target not found") { throw }
             $target = $null
         }
     } finally { $bitmap.Dispose() }
     if (-not $target) {
-        Send-WindowKey $window 0x2D
-        $openedOverlay = $true
-        Start-Sleep -Milliseconds 500
-        $bitmap = New-ClientCapture $window
-        try {
-            $bounds = Get-ReframeworkBounds $GameDir $bitmap.Width $bitmap.Height
-            $target = Find-ResetTarget $bitmap $bounds
-        } finally { $bitmap.Dispose() }
+        if (-not $overlayVisible) {
+            Send-WindowKey $window $menuKey
+            $openedOverlay = $true
+            Start-Sleep -Milliseconds 500
+        }
+        $target = Find-ResetTargetAfterScroll $window $GameDir
     }
 
     $logPath = Join-Path $GameDir "re2_framework_log.txt"
@@ -458,7 +534,7 @@ try {
 } finally {
     if ($openedOverlay) {
         Start-Sleep -Milliseconds 200
-        Send-WindowKey $window 0x2D
+        Send-WindowKey $window $menuKey
     }
 }
 Write-Output "reset-scripts: reset confirmed (framework log +$growth bytes)"
